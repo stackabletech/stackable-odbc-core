@@ -9,7 +9,10 @@ use std::collections::HashMap;
 ///
 /// # Safety
 /// `ptr` must be either null or point to a valid double-null-terminated `u16` sequence.
-#[allow(dead_code)]
+// Only `config_dsn_w` (Windows-only) calls this outside of tests, so the lint is
+// suppressed on non-Windows targets only, on Windows a genuinely unused parser
+// still warns.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) unsafe fn parse_attributes_w(ptr: *const u16) -> HashMap<String, String> {
     let mut map = HashMap::new();
     if ptr.is_null() {
