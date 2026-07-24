@@ -1,0 +1,37 @@
+# Cargo deny configuration for stackable-odbc-core
+# Based on operator-rs conventions.
+# Run: cargo deny check
+
+[graph]
+targets = [
+    { triple = "x86_64-unknown-linux-gnu" },
+    { triple = "aarch64-unknown-linux-gnu" },
+]
+
+[advisories]
+yanked = "deny"
+
+[bans]
+multiple-versions = "allow"
+
+[licenses]
+unused-allowed-license = "allow"
+confidence-threshold = 1.0
+allow = [
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "CC0-1.0",
+    "ISC",
+    "MIT",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "Unlicense",
+]
+private = { ignore = true }
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

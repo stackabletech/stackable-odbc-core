@@ -1,0 +1,12 @@
+debug/
+target/
+**/*.rs.bk
+.worktrees/
+
+.idea/
+*.iws
+*.iml
+.vscode/
+
+# Local agent working notes (SDD reports); never part of the shipped tree
+.superpowers/

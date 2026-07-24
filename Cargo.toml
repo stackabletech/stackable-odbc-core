@@ -1,0 +1,32 @@
+[package]
+name = "stackable-odbc-core"
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.95.0"
+authors = ["Stackable GmbH <info@stackable.de>"]
+license = "Apache-2.0"
+description = "Database-independent framework for building ODBC drivers in Rust: protocol logic, handle management, UTF-16 marshalling, diagnostics, and the generic ODBC FFI entry points."
+repository = "https://github.com/stackabletech/stackable-odbc-core"
+readme = "README.md"
+keywords = ["odbc", "database", "driver", "ffi", "sql"]
+categories = ["database", "external-ffi-bindings", "api-bindings"]
+
+[dependencies]
+odbc-sys = "0.31"
+snafu = "0.9"
+tracing = "0.1"
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+criterion = { version = "0.8", features = ["html_reports"] }
+proptest = "1"
+
+[lints.clippy]
+unwrap_in_result = "deny"
+unwrap_used = "deny"
+panic = "deny"
+
+[[bench]]
+name = "fetch_throughput"
+harness = false

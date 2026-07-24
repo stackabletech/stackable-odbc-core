@@ -1,0 +1,31 @@
+[package]
+name = "stackable-odbc-core-fuzz"
+version = "0.0.1"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Own workspace: keeps `cargo fuzz` from resolving against the parent workspace
+# (which pins a stable toolchain; libFuzzer needs nightly).
+[workspace]
+
+[[bin]]
+name = "utf16"
+path = "fuzz_targets/utf16.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "column_value"
+path = "fuzz_targets/column_value.rs"
+test = false
+doc = false
+bench = false
+
+[dependencies]
+arbitrary = { version = "1", features = ["derive"] }
+libfuzzer-sys = "0.4"
+stackable-odbc-core = { path = ".." }
