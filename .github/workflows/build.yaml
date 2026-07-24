@@ -122,10 +122,16 @@ jobs:
 
       # A short smoke run per target: long enough to shake out an ASAN overrun
       # in the pointer-marshalling paths, short enough for per-PR CI.
+      #
+      # --target is pinned to the gnu triple explicitly: newer cargo-fuzz
+      # defaults to x86_64-unknown-linux-musl, whose statically linked libc is
+      # incompatible with AddressSanitizer ("sanitizer is incompatible with
+      # statically linked libc"). gnu uses a dynamic libc and ships with the
+      # nightly toolchain.
       - name: Fuzz utf16
-        run: cargo +nightly fuzz run utf16 -- -max_total_time=30
+        run: cargo +nightly fuzz run utf16 --target x86_64-unknown-linux-gnu -- -max_total_time=30
       - name: Fuzz column_value
-        run: cargo +nightly fuzz run column_value -- -max_total_time=30
+        run: cargo +nightly fuzz run column_value --target x86_64-unknown-linux-gnu -- -max_total_time=30
 
   # Single required check for branch protection rules.
   finished:

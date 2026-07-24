@@ -26,6 +26,14 @@ cargo +nightly fuzz run utf16
 cargo +nightly fuzz run column_value
 ```
 
+If cargo-fuzz fails with "sanitizer is incompatible with statically linked
+libc", it defaulted to a musl target; pin the gnu triple explicitly (this is
+what CI does):
+
+```bash
+cargo +nightly fuzz run utf16 --target x86_64-unknown-linux-gnu
+```
+
 `cargo fuzz run` runs **indefinitely** until it finds a crash or you stop it. To
 bound a run, pass a libFuzzer flag after `--`:
 
