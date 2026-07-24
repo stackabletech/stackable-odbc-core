@@ -27,6 +27,10 @@ framework itself and, where relevant, how a downstream driver crate consumes it.
 - `tracing` for logging (not `println!` or `log`)
 - `#[repr(C)]` on all handle structs (required for tag-based validation)
 - `extern "system"` on all FFI exports (resolves to correct ABI on both Windows and Linux)
+- `odbc-sys` links against `libodbc`/`libodbcinst`, so building or testing needs
+  the unixODBC dev libraries installed (`unixodbc-dev` on Debian/Ubuntu). No DSN
+  or running Driver Manager is required. Miri is the exception — it interprets
+  rather than links, so it needs no system libraries.
 
 ### Changelog
 

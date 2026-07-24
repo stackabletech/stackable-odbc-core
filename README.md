@@ -55,8 +55,16 @@ When adding a new ODBC function to the framework later, add one entry to
 ## Testing
 
 ```bash
-cargo test           # unit tests (pure Rust, no Driver Manager needed)
+cargo test           # unit tests (no running Driver Manager needed)
 cargo bench          # Criterion fetch-throughput benchmark
+```
+
+`stackable-odbc-core` links against unixODBC through
+[odbc-sys](https://github.com/pacman82/odbc-sys), so the dev libraries must be
+installed to build and test (no DSN or running Driver Manager is required):
+
+```bash
+sudo apt-get install unixodbc-dev   # Debian/Ubuntu
 ```
 
 `stackable-odbc-core` holds all the raw-pointer marshalling, so it is checked by
