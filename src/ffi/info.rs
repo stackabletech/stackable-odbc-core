@@ -118,6 +118,25 @@ use crate::utf16::write_utf16;
 /// Backends that rely on this must guard it: assert the exact expected value
 /// for each affected info type through the full `sql_get_info_w` path, not by
 /// calling `get_info_raw` directly, which would not exercise this ordering.
+///
+/// # The cursor-behaviour info types never take the generic default
+///
+/// `SQL_CURSOR_COMMIT_BEHAVIOR` (23) and `SQL_CURSOR_ROLLBACK_BEHAVIOR` (24)
+/// are answered here from [`Backend::cursor_commit_behavior`] /
+/// [`Backend::cursor_rollback_behavior`], the same hooks
+/// [`crate::ffi::tran::sql_end_tran`] applies. Without that, a backend that
+/// answers neither info type anywhere would fall through to the shape-aware
+/// default and report `U16(0)` for 23 and `U32(0)` for 24 — both
+/// `SQL_CB_DELETE`, the second in the wrong shape — while `sql_end_tran`
+/// applied whatever the hooks actually declare. That mismatch is the exact
+/// defect the hooks exist to prevent: an application that believes
+/// `SQL_CB_DELETE` discards its statements' state per the `SQLEndTran`
+/// transition table.
+///
+/// A backend can still deliberately override both, from its own typed
+/// `get_info` match (for 23) or from [`Backend::get_info_raw`] (for either) —
+/// `get_info_raw` is consulted above, before this special case — but it must
+/// then keep the reported value and its hooks in sync itself.
 fn info_type_default_response<B: Backend>(
     conn: Option<&B::Connection>,
     info_type: u16,
@@ -127,6 +146,20 @@ fn info_type_default_response<B: Backend>(
     {
         return result.map_err(Into::into);
     }
+
+    // Derived from the backend hooks so that a backend which answers these
+    // info types nowhere still reports what `sql_end_tran` actually does.
+    // See "The cursor-behaviour info types never take the generic default".
+    match info_type {
+        crate::types::SQL_CURSOR_COMMIT_BEHAVIOR => {
+            return Ok(InfoValue::U16(B::cursor_commit_behavior().as_u16()));
+        }
+        crate::types::SQL_CURSOR_ROLLBACK_BEHAVIOR => {
+            return Ok(InfoValue::U16(B::cursor_rollback_behavior().as_u16()));
+        }
+        _ => {}
+    }
+
     use crate::types::{
         InfoValueKind, SQL_CONVERT_FUNCTIONS_FIRST, SQL_CONVERT_FUNCTIONS_LAST, SQL_CONVERT_GUID,
         SQL_CONVERT_WCHAR, SQL_CONVERT_WVARCHAR, expected_kind, info_type_from_raw,
@@ -656,8 +689,11 @@ pub unsafe fn sql_get_functions<B: Backend>(
 mod tests {
     use super::*;
     use crate::ffi::handle::{sql_alloc_handle, sql_free_handle};
-    use crate::test_utils::MockBackend;
-    use crate::types::InfoType;
+    use crate::test_utils::{MockBackend, MockTxnDeleteCloseBackend};
+    use crate::types::{
+        InfoType, SQL_CB_CLOSE, SQL_CB_DELETE, SQL_CURSOR_COMMIT_BEHAVIOR,
+        SQL_CURSOR_ROLLBACK_BEHAVIOR,
+    };
     use odbc_sys::HandleType;
 
     /// Helper: allocate env + connection handles.
@@ -707,6 +743,120 @@ mod tests {
             let _ = crate::ffi::connect::sql_disconnect::<MockBackend>(conn);
             let _ = sql_free_handle::<MockBackend>(HandleType::Dbc as i16, conn);
             let _ = sql_free_handle::<MockBackend>(HandleType::Env as i16, env);
+        }
+    }
+
+    /// Reads a `SQLUSMALLINT`-shaped info type through the full
+    /// `sql_get_info_w` path, asserting that exactly 2 bytes were written and
+    /// that `StringLengthPtr` reports 2. A sentinel-filled buffer makes a
+    /// wrong-shape answer (4 bytes for a `U32`) fail loudly instead of being
+    /// silently truncated by the read.
+    unsafe fn read_u16_info<B: Backend>(conn: *mut c_void, info_type: u16, what: &str) -> u16 {
+        const SENTINEL: u8 = 0xEE;
+        let mut buf = [SENTINEL; 8];
+        let mut str_len: i16 = -1;
+        let ret = unsafe {
+            sql_get_info_w::<B>(
+                conn,
+                info_type,
+                buf.as_mut_ptr() as *mut c_void,
+                8,
+                &mut str_len,
+            )
+        };
+        assert_eq!(ret, SqlReturn::SUCCESS, "{what}");
+        assert_eq!(
+            str_len, 2,
+            "{what} must be SQLUSMALLINT-shaped (2 bytes) per the SQLGetInfo spec"
+        );
+        assert_eq!(buf[2..], [SENTINEL; 6], "{what} wrote past 2 bytes");
+        u16::from_ne_bytes([buf[0], buf[1]])
+    }
+
+    #[test]
+    fn cursor_behavior_info_types_follow_the_hooks_when_no_backend_answers_them() {
+        // `MockTxnDeleteCloseBackend::get_info` returns an error for every info
+        // type and the backend does not override `get_info_raw`, so it answers
+        // SQL_CURSOR_COMMIT_BEHAVIOR (23) and SQL_CURSOR_ROLLBACK_BEHAVIOR (24)
+        // *nowhere* — the state a driver is in when it adds transaction support
+        // and follows core's defaults. Without the special case in
+        // `info_type_default_response` these fall through to U16(0) and U32(0),
+        // both SQL_CB_DELETE (and the second in the wrong shape), while
+        // `sql_end_tran` applies whatever the hooks declare. That is the
+        // original defect: an application told SQL_CB_DELETE discards its
+        // statements' state per the SQLEndTran transition table.
+        //
+        // This backend declares Delete for commit and Close for rollback, so a
+        // regression to a hardcoded 0 is distinguishable on the rollback leg.
+        unsafe {
+            let mut env: *mut c_void = std::ptr::null_mut();
+            let _ = sql_alloc_handle::<MockTxnDeleteCloseBackend>(
+                HandleType::Env as i16,
+                std::ptr::null_mut(),
+                &mut env,
+            );
+            let mut conn: *mut c_void = std::ptr::null_mut();
+            let _ = sql_alloc_handle::<MockTxnDeleteCloseBackend>(
+                HandleType::Dbc as i16,
+                env,
+                &mut conn,
+            );
+
+            // Pre-connect: the Windows DM queries info types before
+            // SQLDriverConnectW, and `get_info_raw` is not consulted at all
+            // there, so the fallback is the only thing that can answer.
+            assert_eq!(
+                read_u16_info::<MockTxnDeleteCloseBackend>(
+                    conn,
+                    SQL_CURSOR_COMMIT_BEHAVIOR,
+                    "SQL_CURSOR_COMMIT_BEHAVIOR (pre-connect)"
+                ),
+                SQL_CB_DELETE
+            );
+            assert_eq!(
+                read_u16_info::<MockTxnDeleteCloseBackend>(
+                    conn,
+                    SQL_CURSOR_ROLLBACK_BEHAVIOR,
+                    "SQL_CURSOR_ROLLBACK_BEHAVIOR (pre-connect)"
+                ),
+                SQL_CB_CLOSE
+            );
+
+            let wide: Vec<u16> = "DRIVER=mock;".encode_utf16().collect();
+            let ret = crate::ffi::connect::sql_driver_connect_w::<MockTxnDeleteCloseBackend>(
+                conn,
+                std::ptr::null_mut(),
+                wide.as_ptr(),
+                wide.len() as i16,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                0,
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+
+            assert_eq!(
+                read_u16_info::<MockTxnDeleteCloseBackend>(
+                    conn,
+                    SQL_CURSOR_COMMIT_BEHAVIOR,
+                    "SQL_CURSOR_COMMIT_BEHAVIOR (connected)"
+                ),
+                SQL_CB_DELETE,
+                "SQL_CURSOR_COMMIT_BEHAVIOR ignored Backend::cursor_commit_behavior"
+            );
+            assert_eq!(
+                read_u16_info::<MockTxnDeleteCloseBackend>(
+                    conn,
+                    SQL_CURSOR_ROLLBACK_BEHAVIOR,
+                    "SQL_CURSOR_ROLLBACK_BEHAVIOR (connected)"
+                ),
+                SQL_CB_CLOSE,
+                "SQL_CURSOR_ROLLBACK_BEHAVIOR ignored Backend::cursor_rollback_behavior"
+            );
+
+            let _ = crate::ffi::connect::sql_disconnect::<MockTxnDeleteCloseBackend>(conn);
+            let _ = sql_free_handle::<MockTxnDeleteCloseBackend>(HandleType::Dbc as i16, conn);
+            let _ = sql_free_handle::<MockTxnDeleteCloseBackend>(HandleType::Env as i16, env);
         }
     }
 

@@ -376,10 +376,6 @@ pub const SQL_NAMED: isize = 0;
 pub const SQL_UNNAMED: isize = 1;
 
 // ---------------------------------------------------------------------------
-// SQLGetInfo info types (sql.h / sqlext.h)
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
 // SQL_CURSOR_COMMIT_BEHAVIOR / SQL_CURSOR_ROLLBACK_BEHAVIOR values (sql.h)
 // ---------------------------------------------------------------------------
 
@@ -398,6 +394,18 @@ pub const SQL_CB_CLOSE: u16 = 1;
 /// `SQL_CB_PRESERVE` (2) — `SQLEndTran` leaves open cursors untouched. Cursors
 /// remain positioned on the row they pointed at before the call.
 pub const SQL_CB_PRESERVE: u16 = 2;
+
+// ---------------------------------------------------------------------------
+// SQLGetInfo info types (sql.h / sqlext.h)
+// ---------------------------------------------------------------------------
+
+/// `SQL_CURSOR_COMMIT_BEHAVIOR` (23) — `SQLGetInfo` type describing what
+/// happens to open cursors when a transaction is committed.
+///
+/// Derived from `odbc_sys::InfoType` rather than restating the number; see
+/// [`SQL_FILE_USAGE`]. Needed as a raw `u16` because
+/// `info_type_default_response` matches on the raw value.
+pub const SQL_CURSOR_COMMIT_BEHAVIOR: u16 = InfoType::CursorCommitBehaviour as u16;
 
 /// `SQL_CURSOR_ROLLBACK_BEHAVIOR` (24) — `SQLGetInfo` type describing what
 /// happens to open cursors when a transaction is rolled back. Not modelled by
@@ -773,6 +781,10 @@ mod tests {
     /// odbc-sys ever renumbers one of these variants.
     #[test]
     fn info_type_constants_match_sqlext_h() {
+        assert_eq!(
+            SQL_CURSOR_COMMIT_BEHAVIOR, 23,
+            "SQL_CURSOR_COMMIT_BEHAVIOR (sqlext.h)"
+        );
         assert_eq!(
             SQL_CURSOR_ROLLBACK_BEHAVIOR, 24,
             "SQL_CURSOR_ROLLBACK_BEHAVIOR (sqlext.h)"

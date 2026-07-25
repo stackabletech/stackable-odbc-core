@@ -272,19 +272,37 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// What `SQLEndTran(SQL_COMMIT)` does to the open cursors on a connection.
     ///
     /// This value is authoritative in two places at once: `sql_end_tran`
-    /// applies it to the connection's statements, and [`default_get_info`]
-    /// reports it for `SQL_CURSOR_COMMIT_BEHAVIOR`. Overriding this method
-    /// therefore changes both together, which is the point — before this hook
-    /// existed, core advertised `SQL_CB_DELETE` and implemented nothing.
+    /// applies it to the connection's statements, and `SQLGetInfoW` reports it
+    /// for `SQL_CURSOR_COMMIT_BEHAVIOR`. Overriding this method therefore
+    /// changes both together, which is the point — before this hook existed,
+    /// core advertised `SQL_CB_DELETE` and implemented nothing.
     ///
     /// The default is [`crate::types::CursorBehavior::Preserve`]: the least destructive
     /// value, and the one both psqlODBC and MySQL Connector/ODBC report for
     /// commit. A backend whose data source drops cursors on commit **must**
     /// override this.
     ///
-    /// A backend that answers `SQL_CURSOR_COMMIT_BEHAVIOR` from its own
-    /// `get_info` match instead of delegating to [`default_get_info`] bypasses
-    /// this hook and must keep the two in sync itself.
+    /// # Reporting path
+    ///
+    /// [`default_get_info`] derives `SQL_CURSOR_COMMIT_BEHAVIOR` from this
+    /// hook, and so does core's own DM-safe fallback
+    /// (`info_type_default_response` in `src/ffi/info.rs`), so a backend that
+    /// answers the info type *nowhere* still reports the declared value. The
+    /// one remaining way to bypass the hook is to answer
+    /// `SQL_CURSOR_COMMIT_BEHAVIOR` deliberately — from the backend's own
+    /// typed `get_info` match, or from [`Backend::get_info_raw`], which is
+    /// consulted before the fallback. A backend that does either must keep the
+    /// reported value and this hook in sync itself.
+    ///
+    /// # `SQL_CB_CLOSE` requires `close_cursor`
+    ///
+    /// Under [`crate::types::CursorBehavior::Close`], `sql_end_tran` closes each
+    /// statement's cursor through [`StatementBackend::close_cursor`] and leaves
+    /// the statement itself prepared (the transition table's footnote `[2]`).
+    /// `close_cursor` defaults to a no-op, so a backend declaring `Close`
+    /// **must** implement it or no cursor is actually closed.
+    /// [`crate::types::CursorBehavior::Delete`] needs no such implementation:
+    /// core drops the backend statement outright.
     fn cursor_commit_behavior() -> crate::types::CursorBehavior {
         crate::types::CursorBehavior::Preserve
     }
@@ -295,9 +313,12 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// legitimately differ: psqlODBC reports `SQL_CB_PRESERVE` for commit but
     /// `SQL_CB_CLOSE` for rollback when `use_declarefetch` is enabled.
     ///
-    /// Reported for `SQL_CURSOR_ROLLBACK_BEHAVIOR` by
-    /// [`common_get_info_raw`]; see [`Backend::cursor_commit_behavior`] for the
-    /// rest of the contract.
+    /// Reported for `SQL_CURSOR_ROLLBACK_BEHAVIOR` by [`common_get_info_raw`]
+    /// and, for a backend that answers the info type nowhere, by core's own
+    /// DM-safe fallback; see [`Backend::cursor_commit_behavior`] for the rest
+    /// of the contract, including the requirement that a backend declaring
+    /// [`crate::types::CursorBehavior::Close`] implement
+    /// [`StatementBackend::close_cursor`].
     fn cursor_rollback_behavior() -> crate::types::CursorBehavior {
         crate::types::CursorBehavior::Preserve
     }
@@ -399,8 +420,16 @@ pub trait StatementBackend: Send + Sync {
 
     /// Closes the cursor and discards any pending results.
     ///
-    /// Called by `SQLCloseCursorW`. The statement handle remains valid and may be
-    /// re-executed.
+    /// Called by `SQLCloseCursorW`, and by `SQLEndTran` for a backend that
+    /// declares [`crate::types::CursorBehavior::Close`] from
+    /// [`Backend::cursor_commit_behavior`] / [`Backend::cursor_rollback_behavior`].
+    /// The statement handle remains valid and may be re-executed.
+    ///
+    /// The default is a no-op, which is why a backend declaring `Close`
+    /// **must** override it: `SQLEndTran` deliberately keeps the backend
+    /// statement alive under `SQL_CB_CLOSE` (the transition table leaves a
+    /// prepared-but-unexecuted statement unchanged), so this method is the only
+    /// thing that actually closes the cursor.
     fn close_cursor(&mut self) {}
 }
 
