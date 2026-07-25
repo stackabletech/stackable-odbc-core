@@ -22,6 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   value drives both `SQLGetInfoW` and what `SQLEndTran` does to statements.
 - `SQL_CURSOR_COMMIT_BEHAVIOR` constant (23), derived from
   `odbc_sys::InfoType::CursorCommitBehaviour`.
+- `StatementHandle::cursor_open`, plus the `set_result_set`,
+  `set_prepared_statement` and `discard_result_set` helpers that maintain it.
+  `StatementHandle::statement` no longer doubles as the answer to "is a cursor
+  open?" — see the `Fixed` entry below.
 
 ### Changed
 
@@ -55,6 +59,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Cursor state is now tracked explicitly, by `StatementHandle::cursor_open`,
+  instead of being inferred from `StatementHandle::statement`. Every `24000`
+  check reads it: `SQLExecDirect`, `SQLGetData`, `SQLCloseCursor`, all ten
+  catalog functions and `SQLSetStmtAttr` for
+  `SQL_ATTR_CURSOR_TYPE` / `SQL_ATTR_CONCURRENCY` / `SQL_ATTR_SIMULATE_CURSOR` /
+  `SQL_ATTR_USE_BOOKMARKS` / `SQL_ATTR_ROW_NUMBER`. Three behaviour changes
+  follow:
+  - After `SQLEndTran` under `SQL_CB_CLOSE`, `SQLExecDirect`, the catalog
+    functions and those `SQLSetStmtAttr` attributes are accepted instead of
+    returning `24000`. The statement transition table makes them legal
+    (S4→S2, S5-S7→S3), but the statement is kept under `SQL_CB_CLOSE` and the
+    old `statement.is_some()` guard read that as an open cursor.
+  - `SQLCloseCursor` and `SQLGetData` now return `24000` on a statement that is
+    only prepared, that executed without producing a result set, or whose
+    cursor `SQLEndTran` closed under `SQL_CB_CLOSE`. They previously accepted
+    all three, `SQLCloseCursor` reporting success with no cursor to close.
+  - An execution that produces no result set (an `UPDATE`, say) no longer
+    counts as an open cursor. A backend must report
+    `StatementBackend::column_count` accurately as soon as
+    `execute`/`exec_direct` returns — the same point `SQLNumResultCols` already
+    reads it.
 - `SQLEndTran` now applies the cursor behaviour the driver advertises. It
   previously reported `SQL_CB_DELETE` and left every cursor and prepared
   statement untouched, so an application that trusted the reported value
