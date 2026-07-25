@@ -196,16 +196,67 @@ pub unsafe fn sql_end_tran<B: Backend>(
             match handle_type_from_raw(handle_type) {
                 Some(HandleType::Env) => {
                     let env = as_handle_ref::<EnvironmentHandle<B>>(handle)?;
-                    // Apply to every connection registered on this environment.
-                    for &conn_ptr in &env.connections {
-                        // SAFETY: conn_ptr was registered by sql_alloc_handle and remains
-                        // valid while the environment handle is alive.
-                        let conn = as_handle_ref::<ConnectionHandle<B>>(conn_ptr as *mut c_void)?;
-                        if let Some(ref connection) = conn.connection {
-                            B::end_tran(connection, commit)?;
+                    let behavior = if commit {
+                        B::cursor_commit_behavior()
+                    } else {
+                        B::cursor_rollback_behavior()
+                    };
+
+                    // Snapshot the pointer list so no borrow of `env` is held
+                    // across the `&mut ConnectionHandle` borrows below.
+                    let conn_ptrs: Vec<_> = env.connections.clone();
+
+                    // Spec: "the driver will attempt to commit or roll back
+                    // transactions ... on all connections that are in a
+                    // connected state on that environment." Every connection is
+                    // attempted; the first error is returned once the loop
+                    // finishes. Stopping early would leave later connections
+                    // holding open transactions the application asked to end.
+                    let mut first_err: Option<OdbcError> = None;
+
+                    for conn_ptr in conn_ptrs {
+                        // SAFETY: conn_ptr was registered by sql_alloc_handle and
+                        // remains valid while the environment handle is alive.
+                        let conn =
+                            match as_handle_ref::<ConnectionHandle<B>>(conn_ptr as *mut c_void) {
+                                Ok(conn) => conn,
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "SQLEndTran: connection {:?} failed tag validation",
+                                        conn_ptr
+                                    );
+                                    first_err.get_or_insert(e);
+                                    continue;
+                                }
+                            };
+
+                        let Some(ref connection) = conn.connection else {
+                            // Not connected: "Connections that are not active do
+                            // not affect the transaction."
+                            continue;
+                        };
+
+                        match B::end_tran(connection, commit) {
+                            Ok(()) => {
+                                // SAFETY: conn.statements holds live StatementHandle<B>
+                                // allocations; tags are validated inside. This call is
+                                // within the outer `unsafe { panic_safe(...) }` closure.
+                                apply_cursor_behavior::<B>(conn, behavior);
+                            }
+                            Err(e) => {
+                                // Spec: "To determine which connection or
+                                // connections failed ... the application can call
+                                // SQLGetDiagRec for each connection."
+                                conn.diagnostics.push(&e);
+                                first_err.get_or_insert(e);
+                            }
                         }
                     }
-                    Ok(SqlReturn::SUCCESS)
+
+                    match first_err {
+                        Some(e) => Err(e),
+                        None => Ok(SqlReturn::SUCCESS),
+                    }
                 }
                 Some(HandleType::Dbc) => {
                     let conn = as_handle_ref::<ConnectionHandle<B>>(handle)?;
@@ -543,6 +594,130 @@ mod tests {
             );
 
             cleanup_connected::<MockTxnDeleteBackend>(env, conn, stmt);
+        }
+    }
+
+    /// Allocates one environment with two connected connections. The first is
+    /// opened with `ENDTRANFAIL=1` so its `end_tran` fails; the second
+    /// succeeds. Each gets a statement with an open cursor.
+    unsafe fn alloc_env_two_conns<B: crate::backend::Backend>() -> (
+        *mut c_void,
+        *mut c_void,
+        *mut c_void,
+        *mut c_void,
+        *mut c_void,
+    ) {
+        let mut env: *mut c_void = std::ptr::null_mut();
+        let _ = unsafe {
+            sql_alloc_handle::<B>(HandleType::Env as i16, std::ptr::null_mut(), &mut env)
+        };
+
+        let make = |conn_str: &str| -> (*mut c_void, *mut c_void) {
+            let mut conn: *mut c_void = std::ptr::null_mut();
+            let _ = unsafe { sql_alloc_handle::<B>(HandleType::Dbc as i16, env, &mut conn) };
+            let mut wide: Vec<u16> = conn_str.encode_utf16().collect();
+            wide.push(0);
+            let _ = unsafe {
+                crate::ffi::connect::sql_driver_connect_w::<B>(
+                    conn,
+                    std::ptr::null_mut(),
+                    wide.as_ptr(),
+                    crate::types::SQL_NTS as i16,
+                    std::ptr::null_mut(),
+                    0,
+                    std::ptr::null_mut(),
+                    0,
+                )
+            };
+            let mut stmt: *mut c_void = std::ptr::null_mut();
+            let _ = unsafe { sql_alloc_handle::<B>(HandleType::Stmt as i16, conn, &mut stmt) };
+            let handle = unsafe { as_handle_ref::<crate::handles::StatementHandle<B>>(stmt) }
+                .expect("valid");
+            handle.statement = Some(crate::handles::StatementData::Synthetic(
+                crate::synthetic::SyntheticStatement::new(vec![], vec![]),
+            ));
+            (conn, stmt)
+        };
+
+        let (conn_fail, stmt_fail) = make("DRIVER=mock;ENDTRANFAIL=1;");
+        let (conn_ok, stmt_ok) = make("DRIVER=mock;");
+
+        (env, conn_fail, stmt_fail, conn_ok, stmt_ok)
+    }
+
+    #[test]
+    fn end_tran_env_attempts_every_connection_after_a_failure() {
+        // Spec: "the driver will attempt to commit or roll back transactions
+        // ... on all connections that are in a connected state on that
+        // environment." A failure on one connection must not skip the rest.
+        unsafe {
+            let (env, conn_fail, stmt_fail, conn_ok, stmt_ok) =
+                alloc_env_two_conns::<MockTxnCloseBackend>();
+
+            let ret = sql_end_tran::<MockTxnCloseBackend>(
+                HandleType::Env as i16,
+                env,
+                CompletionType::Rollback as i16,
+            );
+            assert_eq!(ret, SqlReturn::ERROR, "a failing connection must surface");
+
+            // The second connection was still processed: SQL_CB_CLOSE means its
+            // cursor is gone.
+            let ok_stmt =
+                as_handle_ref::<crate::handles::StatementHandle<MockTxnCloseBackend>>(stmt_ok)
+                    .expect("valid");
+            assert!(
+                ok_stmt.statement.is_none(),
+                "the loop stopped at the first failing connection"
+            );
+
+            // The failing connection carries its own diagnostic, so the
+            // application can find out which connection failed.
+            let failed =
+                as_handle_ref::<ConnectionHandle<MockTxnCloseBackend>>(conn_fail).expect("valid");
+            assert_eq!(
+                failed.diagnostics.len(),
+                1,
+                "no per-connection diagnostic on the failing connection"
+            );
+
+            let _ = sql_free_handle::<MockTxnCloseBackend>(HandleType::Stmt as i16, stmt_fail);
+            let _ = sql_free_handle::<MockTxnCloseBackend>(HandleType::Stmt as i16, stmt_ok);
+            let _ = crate::ffi::connect::sql_disconnect::<MockTxnCloseBackend>(conn_fail);
+            let _ = crate::ffi::connect::sql_disconnect::<MockTxnCloseBackend>(conn_ok);
+            let _ = sql_free_handle::<MockTxnCloseBackend>(HandleType::Dbc as i16, conn_fail);
+            let _ = sql_free_handle::<MockTxnCloseBackend>(HandleType::Dbc as i16, conn_ok);
+            let _ = sql_free_handle::<MockTxnCloseBackend>(HandleType::Env as i16, env);
+        }
+    }
+
+    #[test]
+    fn end_tran_env_applies_cursor_behavior_only_where_it_succeeded() {
+        unsafe {
+            let (env, conn_fail, stmt_fail, conn_ok, stmt_ok) =
+                alloc_env_two_conns::<MockTxnCloseBackend>();
+
+            let _ = sql_end_tran::<MockTxnCloseBackend>(
+                HandleType::Env as i16,
+                env,
+                CompletionType::Commit as i16,
+            );
+
+            let failed_stmt =
+                as_handle_ref::<crate::handles::StatementHandle<MockTxnCloseBackend>>(stmt_fail)
+                    .expect("valid");
+            assert!(
+                failed_stmt.statement.is_some(),
+                "cursor state destroyed on a connection whose end_tran failed"
+            );
+
+            let _ = sql_free_handle::<MockTxnCloseBackend>(HandleType::Stmt as i16, stmt_fail);
+            let _ = sql_free_handle::<MockTxnCloseBackend>(HandleType::Stmt as i16, stmt_ok);
+            let _ = crate::ffi::connect::sql_disconnect::<MockTxnCloseBackend>(conn_fail);
+            let _ = crate::ffi::connect::sql_disconnect::<MockTxnCloseBackend>(conn_ok);
+            let _ = sql_free_handle::<MockTxnCloseBackend>(HandleType::Dbc as i16, conn_fail);
+            let _ = sql_free_handle::<MockTxnCloseBackend>(HandleType::Dbc as i16, conn_ok);
+            let _ = sql_free_handle::<MockTxnCloseBackend>(HandleType::Env as i16, env);
         }
     }
 }

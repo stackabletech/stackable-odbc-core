@@ -38,3 +38,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   previously reported `SQL_CB_DELETE` and left every cursor and prepared
   statement untouched, so an application that trusted the reported value
   operated on cursors it had been told were gone.
+- `SQLEndTran` with `SQL_HANDLE_ENV` now attempts every connected connection
+  on the environment instead of stopping at the first failure, and records a
+  diagnostic on each failing connection so `SQLGetDiagRec` can identify it.
+  A failure on one connection previously left every later connection holding
+  an open transaction the application had asked to commit or roll back.
