@@ -62,6 +62,9 @@ pub use connect_params::ConnectParams;
 mod redacted;
 pub use redacted::Redacted;
 
+mod cursor_behavior;
+pub use cursor_behavior::CursorBehavior;
+
 pub mod col_attr;
 
 pub mod sql_state;

@@ -379,6 +379,26 @@ pub const SQL_UNNAMED: isize = 1;
 // SQLGetInfo info types (sql.h / sqlext.h)
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// SQL_CURSOR_COMMIT_BEHAVIOR / SQL_CURSOR_ROLLBACK_BEHAVIOR values (sql.h)
+// ---------------------------------------------------------------------------
+
+/// `SQL_CB_DELETE` (0) — `SQLEndTran` closes and deletes all open cursors on
+/// the connection and discards the access plans of all prepared statements,
+/// leaving each statement in the allocated (unprepared) state.
+///
+/// Not modelled by `odbc-sys`, which has no cursor-behaviour enum.
+pub const SQL_CB_DELETE: u16 = 0;
+
+/// `SQL_CB_CLOSE` (1) — `SQLEndTran` closes all open cursors on the connection
+/// but leaves prepared statements prepared, so `SQLExecute` can be called
+/// again without re-preparing.
+pub const SQL_CB_CLOSE: u16 = 1;
+
+/// `SQL_CB_PRESERVE` (2) — `SQLEndTran` leaves open cursors untouched. Cursors
+/// remain positioned on the row they pointed at before the call.
+pub const SQL_CB_PRESERVE: u16 = 2;
+
 /// `SQL_CURSOR_ROLLBACK_BEHAVIOR` (24) — `SQLGetInfo` type describing what
 /// happens to open cursors when a transaction is rolled back. Not modelled by
 /// `odbc_sys::InfoType`, which has `CursorCommitBehaviour` but no rollback

@@ -269,6 +269,39 @@ pub trait Backend: Sized + Send + Sync + 'static {
         })
     }
 
+    /// What `SQLEndTran(SQL_COMMIT)` does to the open cursors on a connection.
+    ///
+    /// This value is authoritative in two places at once: `sql_end_tran`
+    /// applies it to the connection's statements, and [`default_get_info`]
+    /// reports it for `SQL_CURSOR_COMMIT_BEHAVIOR`. Overriding this method
+    /// therefore changes both together, which is the point — before this hook
+    /// existed, core advertised `SQL_CB_DELETE` and implemented nothing.
+    ///
+    /// The default is [`CursorBehavior::Preserve`]: the least destructive
+    /// value, and the one both psqlODBC and MySQL Connector/ODBC report for
+    /// commit. A backend whose data source drops cursors on commit **must**
+    /// override this.
+    ///
+    /// A backend that answers `SQL_CURSOR_COMMIT_BEHAVIOR` from its own
+    /// `get_info` match instead of delegating to [`default_get_info`] bypasses
+    /// this hook and must keep the two in sync itself.
+    fn cursor_commit_behavior() -> crate::types::CursorBehavior {
+        crate::types::CursorBehavior::Preserve
+    }
+
+    /// What `SQLEndTran(SQL_ROLLBACK)` does to the open cursors on a connection.
+    ///
+    /// Separate from [`Backend::cursor_commit_behavior`] because the two
+    /// legitimately differ: psqlODBC reports `SQL_CB_PRESERVE` for commit but
+    /// `SQL_CB_CLOSE` for rollback when `use_declarefetch` is enabled.
+    ///
+    /// Reported for `SQL_CURSOR_ROLLBACK_BEHAVIOR` by
+    /// [`common_get_info_raw`]; see [`Backend::cursor_commit_behavior`] for the
+    /// rest of the contract.
+    fn cursor_rollback_behavior() -> crate::types::CursorBehavior {
+        crate::types::CursorBehavior::Preserve
+    }
+
     /// Returns the connection string attribute names required by this driver.
     ///
     /// Used by `SQLBrowseConnectW` to determine which attributes are still
@@ -600,6 +633,21 @@ mod tests {
                 _ => panic!("type mismatch for {info_type:?}"),
             }
         }
+    }
+
+    #[test]
+    fn cursor_behavior_hooks_default_to_preserve() {
+        use crate::test_utils::MockBackend;
+        use crate::types::CursorBehavior;
+
+        assert_eq!(
+            MockBackend::cursor_commit_behavior(),
+            CursorBehavior::Preserve
+        );
+        assert_eq!(
+            MockBackend::cursor_rollback_behavior(),
+            CursorBehavior::Preserve
+        );
     }
 
     /// The five identifier-length info types must follow the supplied widths,
