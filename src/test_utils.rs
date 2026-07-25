@@ -42,6 +42,28 @@ impl From<MockError> for OdbcError {
 // Uses trait defaults (all return NotImplemented).
 impl StatementBackend for MockStatement {}
 
+/// A one-column synthetic result set carrying `rows`.
+///
+/// Tests that need a statement with a genuinely open cursor must go through
+/// [`crate::handles::StatementHandle::set_result_set`], which derives
+/// `cursor_open` from the column count — a zero-column result set opens no
+/// cursor, because that is what an `UPDATE` produces.
+pub fn synthetic_result_set(
+    rows: Vec<Vec<crate::types::ColumnValue>>,
+) -> crate::synthetic::SyntheticStatement {
+    crate::synthetic::SyntheticStatement::new(
+        vec![crate::types::ColumnDescriptor {
+            name: "val".to_string(),
+            type_name: String::new(),
+            sql_type: crate::types::SqlDataType::INTEGER,
+            precision: 10,
+            scale: 0,
+            nullable: true,
+        }],
+        rows,
+    )
+}
+
 // ---------------------------------------------------------------------------
 // MockBackend — connect and disconnect succeed
 // ---------------------------------------------------------------------------
@@ -137,8 +159,12 @@ macro_rules! mock_txn_backend {
             fn disconnect(_: &mut MockTxnConnection) -> Result<(), MockError> {
                 Ok(())
             }
+            // Succeeds, unlike `MockBackend::exec_direct`, so a test can tell
+            // "SQLExecDirect was allowed" from "SQLExecDirect was rejected".
+            // `MockStatement` reports zero columns, so it stands for a
+            // non-result-set statement and opens no cursor.
             fn exec_direct(_: &MockTxnConnection, _: &str) -> Result<MockStatement, MockError> {
-                Err(MockError)
+                Ok(MockStatement)
             }
             fn prepare(_: &MockTxnConnection, _: &str) -> Result<MockStatement, MockError> {
                 Ok(MockStatement)
