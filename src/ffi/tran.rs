@@ -10,6 +10,60 @@ use crate::handles::{ConnectionHandle, EnvironmentHandle, as_handle_ref};
 use crate::panic::panic_safe;
 use crate::types::{SqlReturn, completion_type_from_raw, handle_type_from_raw};
 
+/// Apply the backend's declared cursor behaviour to every statement on a
+/// connection, after a successful `B::end_tran`.
+///
+/// Mirrors the `SQLEndTran` statement transition table: `SQL_CB_DELETE`
+/// returns prepared statements to the allocated state S1 (dropping the access
+/// plan), `SQL_CB_CLOSE` returns them to their prepared state S2/S3, and
+/// `SQL_CB_PRESERVE` changes nothing.
+///
+/// Binding state, parameter bindings and the cursor name are deliberately
+/// untouched: the spec keeps them orthogonal to prepare state, which is what
+/// `SQLFreeStmt(SQL_UNBIND)` and `SQL_RESET_PARAMS` are for. `data_at_exec` is
+/// likewise untouched — the transition table marks the need-data states
+/// S8-S10 as `(HY010)`, a Driver-Manager-detected error, so `SQLEndTran`
+/// cannot reach the driver while a data-at-execution sequence is pending.
+///
+/// # Safety
+///
+/// The raw pointers in `conn.statements` must be valid `StatementHandle<B>`
+/// allocations registered by `sql_alloc_handle` and still alive.
+unsafe fn apply_cursor_behavior<B: Backend>(
+    conn: &mut ConnectionHandle<B>,
+    behavior: crate::types::CursorBehavior,
+) {
+    use crate::types::CursorBehavior;
+
+    if behavior == CursorBehavior::Preserve {
+        return;
+    }
+
+    tracing::debug!(
+        "SQLEndTran: applying {:?} to {} statement(s)",
+        behavior,
+        conn.statements.len()
+    );
+
+    for &stmt_ptr in &conn.statements {
+        // SAFETY: stmt_ptr was registered by sql_alloc_handle and remains valid
+        // while the connection handle is alive; the tag is validated here.
+        let Ok(stmt) = (unsafe {
+            as_handle_ref::<crate::handles::StatementHandle<B>>(stmt_ptr as *mut c_void)
+        }) else {
+            tracing::warn!("SQLEndTran: skipping statement with an invalid tag");
+            continue;
+        };
+
+        stmt.statement = None;
+
+        if behavior == CursorBehavior::Delete {
+            stmt.prepared_sql = None;
+            stmt.param_count = None;
+        }
+    }
+}
+
 /// Generic implementation of SQLEndTran.
 ///
 /// Spec: <https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlendtran-function>
@@ -160,6 +214,17 @@ pub unsafe fn sql_end_tran<B: Backend>(
                         return Err(OdbcError::NotConnected);
                     };
                     B::end_tran(connection, commit)?;
+                    // Only on success: on failure core cannot tell whether the
+                    // transaction ended, and guessing wrong destroys cursor
+                    // state the application may still need.
+                    let behavior = if commit {
+                        B::cursor_commit_behavior()
+                    } else {
+                        B::cursor_rollback_behavior()
+                    };
+                    // SAFETY: conn.statements holds live StatementHandle<B>
+                    // allocations; tags are validated inside.
+                    apply_cursor_behavior::<B>(conn, behavior);
                     Ok(SqlReturn::SUCCESS)
                 }
                 _ => Err(OdbcError::InvalidHandle),
@@ -174,7 +239,10 @@ pub unsafe fn sql_end_tran<B: Backend>(
 mod tests {
     use super::*;
     use crate::ffi::handle::{sql_alloc_handle, sql_free_handle};
-    use crate::test_utils::MockBackend;
+    use crate::handles::StatementHandle;
+    use crate::test_utils::{
+        MockBackend, MockTxnCloseBackend, MockTxnDeleteBackend, MockTxnPreserveBackend,
+    };
     use crate::types::CompletionType;
 
     unsafe fn alloc_env_conn() -> (*mut c_void, *mut c_void) {
@@ -264,6 +332,217 @@ mod tests {
         unsafe {
             let ret = sql_end_tran::<MockBackend>(HandleType::Dbc as i16, std::ptr::null_mut(), 0);
             assert_eq!(ret, SqlReturn::INVALID_HANDLE);
+        }
+    }
+
+    /// Allocates env + connection + statement for a transaction-capable
+    /// backend, connects, and puts the statement into a state that has both an
+    /// open cursor and prepared SQL, so a test can tell `Close` from `Delete`.
+    ///
+    /// `conn_str` is passed through to `SQLDriverConnectW`; pass
+    /// `"ENDTRANFAIL=1;"` to make `end_tran` fail for this connection.
+    unsafe fn alloc_connected_stmt<B: crate::backend::Backend>(
+        conn_str: &str,
+    ) -> (*mut c_void, *mut c_void, *mut c_void) {
+        let mut env: *mut c_void = std::ptr::null_mut();
+        let _ = unsafe {
+            sql_alloc_handle::<B>(HandleType::Env as i16, std::ptr::null_mut(), &mut env)
+        };
+        let mut conn: *mut c_void = std::ptr::null_mut();
+        let _ = unsafe { sql_alloc_handle::<B>(HandleType::Dbc as i16, env, &mut conn) };
+
+        let mut wide: Vec<u16> = conn_str.encode_utf16().collect();
+        wide.push(0);
+        let _ = unsafe {
+            crate::ffi::connect::sql_driver_connect_w::<B>(
+                conn,
+                std::ptr::null_mut(),
+                wide.as_ptr(),
+                crate::types::SQL_NTS as i16,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+
+        let mut stmt: *mut c_void = std::ptr::null_mut();
+        let _ = unsafe { sql_alloc_handle::<B>(HandleType::Stmt as i16, conn, &mut stmt) };
+
+        let handle = unsafe { as_handle_ref::<StatementHandle<B>>(stmt) }.expect("valid stmt");
+        handle.statement = Some(crate::handles::StatementData::Synthetic(
+            crate::synthetic::SyntheticStatement::new(vec![], vec![]),
+        ));
+        handle.prepared_sql = Some("SELECT 1".to_string());
+        handle.param_count = Some(0);
+
+        (env, conn, stmt)
+    }
+
+    unsafe fn cleanup_connected<B: crate::backend::Backend>(
+        env: *mut c_void,
+        conn: *mut c_void,
+        stmt: *mut c_void,
+    ) {
+        unsafe {
+            let _ = sql_free_handle::<B>(HandleType::Stmt as i16, stmt);
+            let _ = crate::ffi::connect::sql_disconnect::<B>(conn);
+            let _ = sql_free_handle::<B>(HandleType::Dbc as i16, conn);
+            let _ = sql_free_handle::<B>(HandleType::Env as i16, env);
+        }
+    }
+
+    #[test]
+    fn end_tran_close_clears_the_cursor_and_keeps_the_access_plan() {
+        // SQL_CB_CLOSE: cursors closed, prepared statements stay prepared.
+        unsafe {
+            let (env, conn, stmt) = alloc_connected_stmt::<MockTxnCloseBackend>("DRIVER=mock;");
+            let ret = sql_end_tran::<MockTxnCloseBackend>(
+                HandleType::Dbc as i16,
+                conn,
+                CompletionType::Commit as i16,
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+
+            let handle =
+                as_handle_ref::<StatementHandle<MockTxnCloseBackend>>(stmt).expect("valid");
+            assert!(
+                handle.statement.is_none(),
+                "SQL_CB_CLOSE left the cursor open"
+            );
+            assert_eq!(
+                handle.prepared_sql.as_deref(),
+                Some("SELECT 1"),
+                "SQL_CB_CLOSE discarded the access plan"
+            );
+            assert_eq!(handle.param_count, Some(0));
+
+            cleanup_connected::<MockTxnCloseBackend>(env, conn, stmt);
+        }
+    }
+
+    #[test]
+    fn end_tran_delete_clears_the_cursor_and_the_access_plan() {
+        // SQL_CB_DELETE: statement returns to the allocated (unprepared) state S1.
+        unsafe {
+            let (env, conn, stmt) = alloc_connected_stmt::<MockTxnDeleteBackend>("DRIVER=mock;");
+            let ret = sql_end_tran::<MockTxnDeleteBackend>(
+                HandleType::Dbc as i16,
+                conn,
+                CompletionType::Commit as i16,
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+
+            let handle =
+                as_handle_ref::<StatementHandle<MockTxnDeleteBackend>>(stmt).expect("valid");
+            assert!(handle.statement.is_none());
+            assert!(
+                handle.prepared_sql.is_none(),
+                "SQL_CB_DELETE kept the access plan"
+            );
+            assert!(handle.param_count.is_none());
+
+            cleanup_connected::<MockTxnDeleteBackend>(env, conn, stmt);
+        }
+    }
+
+    #[test]
+    fn end_tran_preserve_leaves_the_statement_untouched() {
+        unsafe {
+            let (env, conn, stmt) = alloc_connected_stmt::<MockTxnPreserveBackend>("DRIVER=mock;");
+            let ret = sql_end_tran::<MockTxnPreserveBackend>(
+                HandleType::Dbc as i16,
+                conn,
+                CompletionType::Commit as i16,
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+
+            let handle =
+                as_handle_ref::<StatementHandle<MockTxnPreserveBackend>>(stmt).expect("valid");
+            assert!(
+                handle.statement.is_some(),
+                "SQL_CB_PRESERVE closed the cursor"
+            );
+            assert_eq!(handle.prepared_sql.as_deref(), Some("SELECT 1"));
+
+            cleanup_connected::<MockTxnPreserveBackend>(env, conn, stmt);
+        }
+    }
+
+    #[test]
+    fn end_tran_rollback_uses_the_rollback_behavior() {
+        unsafe {
+            let (env, conn, stmt) = alloc_connected_stmt::<MockTxnDeleteBackend>("DRIVER=mock;");
+            let ret = sql_end_tran::<MockTxnDeleteBackend>(
+                HandleType::Dbc as i16,
+                conn,
+                CompletionType::Rollback as i16,
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+
+            let handle =
+                as_handle_ref::<StatementHandle<MockTxnDeleteBackend>>(stmt).expect("valid");
+            assert!(handle.statement.is_none());
+            assert!(handle.prepared_sql.is_none());
+
+            cleanup_connected::<MockTxnDeleteBackend>(env, conn, stmt);
+        }
+    }
+
+    #[test]
+    fn end_tran_failure_leaves_cursor_state_untouched() {
+        // On error core cannot tell whether the transaction ended, so it must
+        // not destroy cursor state the application may still need.
+        unsafe {
+            let (env, conn, stmt) =
+                alloc_connected_stmt::<MockTxnDeleteBackend>("DRIVER=mock;ENDTRANFAIL=1;");
+            let ret = sql_end_tran::<MockTxnDeleteBackend>(
+                HandleType::Dbc as i16,
+                conn,
+                CompletionType::Commit as i16,
+            );
+            assert_eq!(ret, SqlReturn::ERROR);
+
+            let handle =
+                as_handle_ref::<StatementHandle<MockTxnDeleteBackend>>(stmt).expect("valid");
+            assert!(
+                handle.statement.is_some(),
+                "cursor state destroyed on a failed SQLEndTran"
+            );
+            assert_eq!(handle.prepared_sql.as_deref(), Some("SELECT 1"));
+
+            cleanup_connected::<MockTxnDeleteBackend>(env, conn, stmt);
+        }
+    }
+
+    #[test]
+    fn end_tran_delete_keeps_bindings_and_cursor_name() {
+        // The spec says nothing about binding state here, and ODBC keeps it
+        // orthogonal to prepare state (SQLFreeStmt(SQL_UNBIND) exists for it).
+        unsafe {
+            let (env, conn, stmt) = alloc_connected_stmt::<MockTxnDeleteBackend>("DRIVER=mock;");
+            {
+                let handle =
+                    as_handle_ref::<StatementHandle<MockTxnDeleteBackend>>(stmt).expect("valid");
+                handle.cursor_name = Some("C1".to_string());
+            }
+
+            let ret = sql_end_tran::<MockTxnDeleteBackend>(
+                HandleType::Dbc as i16,
+                conn,
+                CompletionType::Commit as i16,
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+
+            let handle =
+                as_handle_ref::<StatementHandle<MockTxnDeleteBackend>>(stmt).expect("valid");
+            assert_eq!(
+                handle.cursor_name.as_deref(),
+                Some("C1"),
+                "SQL_CB_DELETE cleared the cursor name"
+            );
+
+            cleanup_connected::<MockTxnDeleteBackend>(env, conn, stmt);
         }
     }
 }

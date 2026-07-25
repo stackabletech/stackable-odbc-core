@@ -31,3 +31,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking:** `default_get_info` and `common_get_info_raw` are now generic
   over the backend. Call them as `default_get_info::<Self>(info_type, widths)`
   and `common_get_info_raw::<Self>(info_type)` from a `Backend` impl.
+
+### Fixed
+
+- `SQLEndTran` now applies the cursor behaviour the driver advertises. It
+  previously reported `SQL_CB_DELETE` and left every cursor and prepared
+  statement untouched, so an application that trusted the reported value
+  operated on cursors it had been told were gone.
