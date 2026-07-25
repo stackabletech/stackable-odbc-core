@@ -7,10 +7,15 @@ entry points. A concrete driver crate implements the `Backend` and
 `StatementBackend` traits, then calls the `forward_ffi!` macro to export all 73
 C ABI entry points.
 
-This is a library crate, not a loadable ODBC driver on its own. Drivers built on
-it are published as separate crates, for example `stackable-odbc-trino` (an ODBC
-driver for [Trino](https://trino.io/)) and `stackable-odbc-sqlite` (a SQLite
-driver used for development and testing).
+This is a library crate, not a loadable ODBC driver on its own.
+
+Both Linux and Windows are first-class targets. `extern "system"` resolves to the
+correct ABI on each, the Windows-only ODBC installer entry point (`ConfigDSNW`)
+is exported behind `#[cfg(windows)]`, and the Windows Driver Manager's stricter
+requirements — the pre-connect `SQL_DRIVER_ODBC_VER` query, the 3.x function
+bitmap, `SQL_DROP` passthrough — are handled explicitly rather than left to
+chance. See the [Windows Driver Manager compatibility
+checklist](AGENTS.md#windows-driver-manager-compatibility-checklist).
 
 For architecture, the call-flow walkthrough, and the spec-compliance rules, see
 [AGENTS.md](AGENTS.md).
@@ -80,6 +85,19 @@ cargo +nightly fuzz run column_value
 ```
 
 See [AGENTS.md](AGENTS.md#testing) and [`fuzz/README.md`](fuzz/README.md) for details.
+
+Every pull request runs the unit tests, Miri and the fuzz smoke targets.
+
+## Drivers built on this crate
+
+Drivers are published as separate crates, each supplying only its
+`Backend`/`StatementBackend` implementation:
+
+- [stackable-odbc-trino](https://github.com/stackabletech/stackable-odbc-trino)
+  — an ODBC driver for [Trino](https://trino.io/).
+- [stackable-odbc-sqlite](https://github.com/stackabletech/stackable-odbc-sqlite)
+  — a SQLite driver, used as a worked example and as the test driver for the
+  framework itself.
 
 ## Resources
 
