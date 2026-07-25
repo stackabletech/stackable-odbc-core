@@ -277,7 +277,7 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// therefore changes both together, which is the point — before this hook
     /// existed, core advertised `SQL_CB_DELETE` and implemented nothing.
     ///
-    /// The default is [`CursorBehavior::Preserve`]: the least destructive
+    /// The default is [`crate::types::CursorBehavior::Preserve`]: the least destructive
     /// value, and the one both psqlODBC and MySQL Connector/ODBC report for
     /// commit. A backend whose data source drops cursors on commit **must**
     /// override this.
