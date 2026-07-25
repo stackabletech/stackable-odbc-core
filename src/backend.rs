@@ -420,9 +420,12 @@ pub trait StatementBackend: Send + Sync {
 
     /// Closes the cursor and discards any pending results.
     ///
-    /// Called by `SQLCloseCursorW`, and by `SQLEndTran` for a backend that
-    /// declares [`crate::types::CursorBehavior::Close`] from
+    /// Called by `SQLEndTran` for a backend that declares
+    /// [`crate::types::CursorBehavior::Close`] from
     /// [`Backend::cursor_commit_behavior`] / [`Backend::cursor_rollback_behavior`].
+    /// That is its only caller: `SQLCloseCursorW` and `SQLFreeStmt(SQL_CLOSE)`
+    /// discard the whole backend statement instead, so there is nothing left
+    /// for this method to close.
     /// The statement handle remains valid and may be re-executed.
     ///
     /// The default is a no-op, which is why a backend declaring `Close`
