@@ -408,7 +408,11 @@ pub trait StatementBackend: Send + Sync {
 ///
 /// Backends should call this at the end of their `get_info` match, before the `_ =>` arm,
 /// to avoid duplicating these ~60 arms. Returns `None` for anything driver-specific.
-pub fn default_get_info(
+///
+/// Generic over the calling backend so that `SQL_CURSOR_COMMIT_BEHAVIOR` can be
+/// derived from [`Backend::cursor_commit_behavior`] -- call it as
+/// `default_get_info::<Self>(info_type, widths)`.
+pub fn default_get_info<B: Backend>(
     info_type: crate::types::InfoType,
     widths: &CatalogResultColumnWidths,
 ) -> Option<InfoValue> {
@@ -453,7 +457,11 @@ pub fn default_get_info(
         InfoType::MaxDriverConnections => Some(InfoValue::U16(0)),
         InfoType::MaxConcurrentActivities => Some(InfoValue::U16(0)),
         InfoType::ConcatNullBehavior => Some(InfoValue::U16(0)),
-        InfoType::CursorCommitBehaviour => Some(InfoValue::U16(0)),
+        // Derived from the backend hook so the value reported here and the
+        // behaviour `sql_end_tran` applies cannot disagree.
+        InfoType::CursorCommitBehaviour => {
+            Some(InfoValue::U16(B::cursor_commit_behavior().as_u16()))
+        }
         InfoType::MaxColumnNameLen => Some(InfoValue::U16(widths.identifier_len)),
         // Deliberately not `widths.identifier_len` -- a cursor name is an
         // ODBC-level convention the application invents, not a data-source
@@ -516,14 +524,21 @@ pub fn default_get_info(
 ///
 /// Backends should call this from `get_info_raw` before checking driver-specific values.
 /// Returns `None` if the info type is not handled here.
-pub fn common_get_info_raw(info_type: u16) -> Option<InfoValue> {
+///
+/// Generic over the calling backend so that `SQL_CURSOR_ROLLBACK_BEHAVIOR` can be
+/// derived from [`Backend::cursor_rollback_behavior`] -- call it as
+/// `common_get_info_raw::<Self>(info_type)`.
+pub fn common_get_info_raw<B: Backend>(info_type: u16) -> Option<InfoValue> {
     use crate::types::{
         InfoValue, SQL_CURSOR_ROLLBACK_BEHAVIOR, SQL_FILE_USAGE, SQL_IC_SENSITIVE,
         SQL_QUOTED_IDENTIFIER_CASE,
     };
     match info_type {
         SQL_FILE_USAGE => Some(InfoValue::U16(0)),
-        SQL_CURSOR_ROLLBACK_BEHAVIOR => Some(InfoValue::U16(0)),
+        // See the matching arm in `default_get_info`.
+        SQL_CURSOR_ROLLBACK_BEHAVIOR => {
+            Some(InfoValue::U16(B::cursor_rollback_behavior().as_u16()))
+        }
         SQL_QUOTED_IDENTIFIER_CASE => Some(InfoValue::U16(SQL_IC_SENSITIVE)),
         _ => None,
     }
@@ -532,8 +547,9 @@ pub fn common_get_info_raw(info_type: u16) -> Option<InfoValue> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::{MockBackend, MockTxnDeleteCloseBackend};
     use crate::types::{
-        DEFAULT_IDENTIFIER_LEN, InfoType, InfoValue, SQL_AM_NONE, SQL_CA1_NEXT,
+        DEFAULT_IDENTIFIER_LEN, InfoType, InfoValue, SQL_AM_NONE, SQL_CA1_NEXT, SQL_CB_PRESERVE,
         SQL_DRIVER_ODBC_VER_STRING, SQL_FN_CVT_CAST, SQL_GB_NO_RELATION, SQL_INSENSITIVE,
         SQL_MAX_CURSOR_NAME_LEN, SQL_OIC_CORE, SQL_SC_SQL92_ENTRY, SQL_SO_FORWARD_ONLY,
         SQL_SQ_COMPARISON, SQL_SQ_CORRELATED_SUBQUERIES, SQL_SQ_EXISTS, SQL_SQ_IN,
@@ -573,7 +589,7 @@ mod tests {
         (InfoType::MaxDriverConnections,          Expected::U16(0)),
         (InfoType::MaxConcurrentActivities,       Expected::U16(0)),
         (InfoType::ConcatNullBehavior,            Expected::U16(0)),
-        (InfoType::CursorCommitBehaviour,         Expected::U16(0)),
+        (InfoType::CursorCommitBehaviour,         Expected::U16(SQL_CB_PRESERVE)),
         (InfoType::MaxColumnNameLen,              Expected::U16(DEFAULT_IDENTIFIER_LEN)),
         (InfoType::MaxCursorNameLen,              Expected::U16(SQL_MAX_CURSOR_NAME_LEN)),
         (InfoType::MaxSchemaNameLen,              Expected::U16(DEFAULT_IDENTIFIER_LEN)),
@@ -618,8 +634,9 @@ mod tests {
     #[test]
     fn default_get_info_snapshot() {
         for (info_type, expected) in EXPECTED {
-            let actual = default_get_info(*info_type, &CatalogResultColumnWidths::default())
-                .unwrap_or_else(|| panic!("default_get_info returned None for {info_type:?}"));
+            let actual =
+                default_get_info::<MockBackend>(*info_type, &CatalogResultColumnWidths::default())
+                    .unwrap_or_else(|| panic!("default_get_info returned None for {info_type:?}"));
             match (expected, &actual) {
                 (Expected::Str(s), InfoValue::String(v)) => {
                     assert_eq!(v.as_str(), *s, "wrong value for {info_type:?}")
@@ -650,6 +667,43 @@ mod tests {
         );
     }
 
+    #[test]
+    fn advertised_cursor_behavior_tracks_the_backend_hooks() {
+        use crate::types::{SQL_CB_CLOSE, SQL_CB_DELETE, SQL_CURSOR_ROLLBACK_BEHAVIOR};
+
+        assert_eq!(
+            default_get_info::<MockTxnDeleteCloseBackend>(
+                InfoType::CursorCommitBehaviour,
+                &CatalogResultColumnWidths::default(),
+            ),
+            Some(InfoValue::U16(SQL_CB_DELETE)),
+            "SQL_CURSOR_COMMIT_BEHAVIOR ignored Backend::cursor_commit_behavior"
+        );
+        assert_eq!(
+            common_get_info_raw::<MockTxnDeleteCloseBackend>(SQL_CURSOR_ROLLBACK_BEHAVIOR),
+            Some(InfoValue::U16(SQL_CB_CLOSE)),
+            "SQL_CURSOR_ROLLBACK_BEHAVIOR ignored Backend::cursor_rollback_behavior"
+        );
+    }
+
+    #[test]
+    fn advertised_cursor_behavior_defaults_to_preserve() {
+        use crate::test_utils::MockBackend;
+        use crate::types::{SQL_CB_PRESERVE, SQL_CURSOR_ROLLBACK_BEHAVIOR};
+
+        assert_eq!(
+            default_get_info::<MockBackend>(
+                InfoType::CursorCommitBehaviour,
+                &CatalogResultColumnWidths::default(),
+            ),
+            Some(InfoValue::U16(SQL_CB_PRESERVE))
+        );
+        assert_eq!(
+            common_get_info_raw::<MockBackend>(SQL_CURSOR_ROLLBACK_BEHAVIOR),
+            Some(InfoValue::U16(SQL_CB_PRESERVE))
+        );
+    }
+
     /// The five identifier-length info types must follow the supplied widths,
     /// not a baked-in 128. Before this was plumbed, a driver could report 63
     /// in its catalog result sets and 128 here, telling an application two
@@ -668,7 +722,7 @@ mod tests {
             InfoType::MaxIdentifierLen,
         ] {
             assert_eq!(
-                default_get_info(info_type, &widths),
+                default_get_info::<MockBackend>(info_type, &widths),
                 Some(InfoValue::U16(63)),
                 "{info_type:?} ignored the supplied identifier_len"
             );

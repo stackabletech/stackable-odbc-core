@@ -102,3 +102,129 @@ impl Backend for MockBackend {
         Err(MockError)
     }
 }
+
+// ---------------------------------------------------------------------------
+// Transaction-capable mocks
+// ---------------------------------------------------------------------------
+
+/// A connection that remembers whether its `end_tran` should fail.
+///
+/// The flag is read from the connection string (`ENDTRANFAIL=1`) rather than
+/// from a static, so one environment can hold both failing and succeeding
+/// connections and the tests stay parallel-safe.
+pub struct MockTxnConnection {
+    pub end_tran_fails: bool,
+}
+
+/// Generates a transaction-capable `Backend` with the given declared cursor
+/// behaviours. `end_tran` succeeds unless the connection was opened with
+/// `ENDTRANFAIL=1`.
+macro_rules! mock_txn_backend {
+    ($name:ident, commit = $commit:expr, rollback = $rollback:expr) => {
+        #[allow(dead_code)]
+        pub struct $name;
+
+        impl Backend for $name {
+            type Connection = MockTxnConnection;
+            type Statement = MockStatement;
+            type Error = MockError;
+
+            fn connect(params: &ConnectParams) -> Result<MockTxnConnection, MockError> {
+                Ok(MockTxnConnection {
+                    end_tran_fails: params.get("endtranfail") == Some("1"),
+                })
+            }
+            fn disconnect(_: &mut MockTxnConnection) -> Result<(), MockError> {
+                Ok(())
+            }
+            fn exec_direct(_: &MockTxnConnection, _: &str) -> Result<MockStatement, MockError> {
+                Err(MockError)
+            }
+            fn prepare(_: &MockTxnConnection, _: &str) -> Result<MockStatement, MockError> {
+                Ok(MockStatement)
+            }
+            fn execute(
+                _: &MockTxnConnection,
+                _: &mut MockStatement,
+                _: &[crate::types::ColumnValue],
+            ) -> Result<crate::types::ExecuteOutcome, MockError> {
+                Ok(crate::types::ExecuteOutcome::default())
+            }
+            fn get_info(
+                _: &MockTxnConnection,
+                _: crate::types::InfoType,
+            ) -> Result<InfoValue, MockError> {
+                Err(MockError)
+            }
+            fn get_functions() -> &'static [crate::function_id::FunctionId] {
+                &[]
+            }
+            fn get_type_info() -> &'static [TypeInfoRow] {
+                &[]
+            }
+            fn tables(
+                _: &MockTxnConnection,
+                _: Option<&str>,
+                _: Option<&str>,
+                _: Option<&str>,
+                _: Option<&str>,
+            ) -> Result<MockStatement, MockError> {
+                Err(MockError)
+            }
+            fn columns(
+                _: &MockTxnConnection,
+                _: Option<&str>,
+                _: Option<&str>,
+                _: Option<&str>,
+                _: Option<&str>,
+            ) -> Result<MockStatement, MockError> {
+                Err(MockError)
+            }
+
+            fn set_autocommit(_: &MockTxnConnection, _: bool) -> Result<(), OdbcError> {
+                Ok(())
+            }
+
+            fn end_tran(conn: &MockTxnConnection, _commit: bool) -> Result<(), OdbcError> {
+                if conn.end_tran_fails {
+                    Err(OdbcError::general(
+                        "mock end_tran failure",
+                        crate::types::SqlState::general_error(),
+                    ))
+                } else {
+                    Ok(())
+                }
+            }
+
+            fn cursor_commit_behavior() -> crate::types::CursorBehavior {
+                $commit
+            }
+            fn cursor_rollback_behavior() -> crate::types::CursorBehavior {
+                $rollback
+            }
+        }
+    };
+}
+
+mock_txn_backend!(
+    MockTxnCloseBackend,
+    commit = crate::types::CursorBehavior::Close,
+    rollback = crate::types::CursorBehavior::Close
+);
+mock_txn_backend!(
+    MockTxnDeleteBackend,
+    commit = crate::types::CursorBehavior::Delete,
+    rollback = crate::types::CursorBehavior::Delete
+);
+mock_txn_backend!(
+    MockTxnPreserveBackend,
+    commit = crate::types::CursorBehavior::Preserve,
+    rollback = crate::types::CursorBehavior::Preserve
+);
+// Deliberately mismatched, to prove the commit and rollback values are read
+// from separate hooks and not from one shared value.
+mock_txn_backend!(
+    MockTxnDeleteCloseBackend,
+    commit = crate::types::CursorBehavior::Delete,
+    rollback = crate::types::CursorBehavior::Close
+);

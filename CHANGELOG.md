@@ -20,3 +20,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Both default to `CursorBehavior::Preserve`. A backend that supports
   transactions should declare its data source's actual behaviour here; the
   value drives both `SQLGetInfoW` and what `SQLEndTran` does to statements.
+
+### Changed
+
+- `SQL_CURSOR_COMMIT_BEHAVIOR` and `SQL_CURSOR_ROLLBACK_BEHAVIOR` now report
+  `SQL_CB_PRESERVE` instead of `SQL_CB_DELETE`, and are derived from
+  `Backend::cursor_commit_behavior` / `Backend::cursor_rollback_behavior`
+  rather than hard-coded. Core previously advertised `SQL_CB_DELETE` while
+  `SQLEndTran` did nothing to cursors at all.
+- **Breaking:** `default_get_info` and `common_get_info_raw` are now generic
+  over the backend. Call them as `default_get_info::<Self>(info_type, widths)`
+  and `common_get_info_raw::<Self>(info_type)` from a `Backend` impl.
