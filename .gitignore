@@ -8,5 +8,8 @@ target/
 *.iml
 .vscode/
 
+# Generated via ctags -R.
+tags
+
 # Local agent working notes (SDD reports); never part of the shipped tree
 .superpowers/
