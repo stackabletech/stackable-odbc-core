@@ -71,7 +71,30 @@ unsafe fn apply_cursor_behavior<B: Backend>(
 /// Commits or rolls back the active transaction on the given connection or on
 /// all connections of the given environment.
 ///
+/// With `SQL_HANDLE_ENV`, every connected connection is attempted even if an
+/// earlier one fails, per the spec's "the driver will attempt to commit or roll
+/// back transactions ... on all connections that are in a connected state on
+/// that environment". The first error is returned and each failing connection
+/// receives its own diagnostic record. Note that unixODBC never takes this
+/// path — it loops over connections itself and calls the driver with
+/// `SQL_HANDLE_DBC` — but the Windows Driver Manager does pass the driver's
+/// environment handle straight through.
+///
 /// If the connection is in autocommit mode (no open transaction), this is a no-op.
+///
+/// # Cursor behaviour
+///
+/// On success this applies the backend's declared cursor behaviour to every
+/// statement on each affected connection:
+/// [`Backend::cursor_commit_behavior`] for `SQL_COMMIT`,
+/// [`Backend::cursor_rollback_behavior`] for `SQL_ROLLBACK`. The same values
+/// are what `SQLGetInfoW` reports for `SQL_CURSOR_COMMIT_BEHAVIOR` and
+/// `SQL_CURSOR_ROLLBACK_BEHAVIOR`, so an application is never told one thing
+/// and given another.
+///
+/// Nothing is applied when `B::end_tran` fails: core cannot tell from an error
+/// whether the transaction ended, and discarding cursor state on a false
+/// negative loses results the application may still need.
 ///
 /// # Parameters
 ///
@@ -97,20 +120,28 @@ unsafe fn apply_cursor_behavior<B: Backend>(
 ///   connection fails during COMMIT/ROLLBACK and it is unknown whether the operation
 ///   succeeded. Backends can surface this via `OdbcError`.
 ///
-/// - **25S01** — Transaction state unknown. One or more connections failed to complete the
-///   transaction and the outcome is unknown. Only relevant when `HandleType=SQL_HANDLE_ENV`
-///   and multiple connections are present.
-///   Env-level aggregation is not implemented. The loop currently stops on the first error.
-///   Full 25S01 support would require collecting all per-connection outcomes before deciding
-///   the final SQLSTATE. Deferred.
+/// - **25S01** — Transaction state unknown. Not applicable. This is a
+///   *distributed* transaction code: it reports that the driver could not
+///   guarantee the outcome of a global transaction. The spec is explicit that
+///   no such guarantee is expected across an environment's connections —
+///   "The Driver Manager does not simulate a global transaction across all
+///   connections and therefore does not use two-phase commit protocols" — and
+///   core has no distributed-transaction support to originate it from. A
+///   backend enrolled in a real distributed transaction can surface it via
+///   `OdbcError`.
 ///
-/// - **25S02** — Transaction is still active. The driver could not guarantee atomic
-///   completion of the global transaction; the transaction remains active.
-///   Returned by the backend via `OdbcError` if applicable.
+///   Note this is *not* about the environment-level loop below, which attempts
+///   every connected connection and reports the first failure while recording
+///   a diagnostic on each failing connection.
 ///
-/// - **25S03** — Transaction is rolled back. The driver could not guarantee atomic
-///   completion; all work was rolled back.
-///   Returned by the backend via `OdbcError` if applicable.
+/// - **25S02** — Transaction is still active. Like 25S01, a distributed
+///   transaction code. Core never originates it; a backend enrolled in a
+///   global transaction can surface it via `OdbcError`.
+///
+/// - **25S03** — Transaction is rolled back. Distributed transaction code; see
+///   25S02. Core never originates it. Note that a backend returning this does
+///   mean the transaction ended, but core still skips the cursor-behaviour
+///   step on any error — see the cursor behaviour section below.
 ///
 /// - **40001** — Serialization failure (deadlock). Transaction was rolled back.
 ///   Returned by the backend via `OdbcError` if applicable.
