@@ -2,7 +2,7 @@
 
 use std::ffi::c_void;
 
-use crate::backend::Backend;
+use crate::backend::{Backend, StatementBackend};
 use crate::errors::OdbcError;
 use crate::handles::{ConnectionHandle, StatementHandle, as_handle_ref};
 use crate::panic::panic_safe;
@@ -131,8 +131,10 @@ pub unsafe fn sql_exec_direct_w<B: Backend>(
                 ));
             }
 
-            // Spec 24000: Cursor already open.
-            if stmt.statement.is_some() {
+            // Spec 24000: Cursor already open. A prepared-but-unexecuted
+            // statement (S2) has a `statement` but no cursor, so this reads
+            // `cursor_open` rather than `statement.is_some()`.
+            if stmt.cursor_open {
                 return Err(OdbcError::general(
                     "A cursor is already open on this statement",
                     SqlState::invalid_cursor_state(),
@@ -201,7 +203,8 @@ pub unsafe fn sql_exec_direct_w<B: Backend>(
             } else {
                 B::exec_direct(connection, &sql).map_err(Into::into)?
             };
-            stmt.statement = Some(crate::handles::StatementData::Backend(result));
+            // Opens a cursor only if the statement actually returned columns.
+            stmt.set_result_set(crate::handles::StatementData::Backend(result));
 
             Ok(SqlReturn::SUCCESS)
         })
@@ -336,7 +339,9 @@ pub unsafe fn sql_prepare_w<B: Backend>(
 
             // Re-acquire stmt after conn borrow ends, then store state.
             let stmt = as_handle_ref::<StatementHandle<B>>(statement_handle)?;
-            stmt.statement = Some(crate::handles::StatementData::Backend(prepared));
+            // Prepared, not executed (S2/S3): no cursor is open, and a
+            // re-prepare closes any cursor the previous execution left open.
+            stmt.set_prepared_statement(crate::handles::StatementData::Backend(prepared));
             stmt.prepared_sql = Some(sql);
             stmt.param_count = Some(param_count);
             // Clear previous parameter bindings; a re-prepare resets everything.
@@ -488,7 +493,7 @@ pub unsafe fn sql_execute<B: Backend>(statement_handle: *mut c_void) -> SqlRetur
                 })?;
                 let prepared = B::prepare(connection, sql).map_err(Into::into)?;
                 let stmt = as_handle_ref::<StatementHandle<B>>(statement_handle)?;
-                stmt.statement = Some(crate::handles::StatementData::Backend(prepared));
+                stmt.set_prepared_statement(crate::handles::StatementData::Backend(prepared));
             }
 
             let stmt = as_handle_ref::<StatementHandle<B>>(statement_handle)?;
@@ -515,6 +520,12 @@ pub unsafe fn sql_execute<B: Backend>(statement_handle: *mut c_void) -> SqlRetur
             // to write any OUTPUT / INOUT parameter values back into the bound
             // buffers, the symmetric counterpart of collecting the input params.
             let stmt = as_handle_ref::<StatementHandle<B>>(statement_handle)?;
+            // A cursor is open only if the execution produced columns; an
+            // `UPDATE` leaves the statement in S4, not S5.
+            stmt.cursor_open = stmt
+                .statement
+                .as_ref()
+                .is_some_and(|s| s.column_count() > 0);
             // SAFETY: the application's bound output buffer pointers remain valid
             // per the caller contract (same guarantee collect_params relies on).
             // Already inside the enclosing `unsafe` context, like collect_params above.
@@ -777,6 +788,68 @@ mod tests {
                 as_handle_ref::<crate::handles::StatementHandle<MockBackend>>(stmt).unwrap();
             assert!(stmt_handle.param_bindings.is_empty());
             assert_eq!(stmt_handle.param_count, Some(0));
+
+            cleanup(env, conn, stmt);
+        }
+    }
+    #[test]
+    fn execute_without_a_result_set_leaves_the_cursor_closed() {
+        // `MockStatement` reports zero columns, so this stands for an UPDATE:
+        // ODBC state S4 (executed, no cursor), not S5. The statement survives
+        // for SQLRowCount, but no cursor is open, so SQLCloseCursor must say so
+        // with 24000 rather than reporting success.
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            assert_eq!(connect_handle(conn), SqlReturn::SUCCESS);
+
+            let sql = "UPDATE t SET a = 1";
+            let wide: Vec<u16> = sql.encode_utf16().collect();
+            assert_eq!(
+                sql_prepare_w::<MockBackend>(stmt, wide.as_ptr(), wide.len() as i32),
+                SqlReturn::SUCCESS
+            );
+            assert_eq!(sql_execute::<MockBackend>(stmt), SqlReturn::SUCCESS);
+
+            let handle =
+                as_handle_ref::<crate::handles::StatementHandle<MockBackend>>(stmt).expect("valid");
+            assert!(
+                handle.statement.is_some(),
+                "the executed statement was dropped"
+            );
+            assert!(
+                !handle.cursor_open,
+                "an execution that produced no result set opened a cursor"
+            );
+
+            assert_eq!(
+                crate::ffi::cursor::sql_close_cursor::<MockBackend>(stmt),
+                SqlReturn::ERROR,
+                "SQLCloseCursor reported success with no cursor open"
+            );
+
+            cleanup(env, conn, stmt);
+        }
+    }
+
+    #[test]
+    fn prepare_does_not_open_a_cursor() {
+        // SQLPrepare stores a backend statement (state S2) but opens no cursor,
+        // so SQLExecDirect on the same handle must not be refused with 24000.
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            assert_eq!(connect_handle(conn), SqlReturn::SUCCESS);
+
+            let sql = "SELECT 1";
+            let wide: Vec<u16> = sql.encode_utf16().collect();
+            assert_eq!(
+                sql_prepare_w::<MockBackend>(stmt, wide.as_ptr(), wide.len() as i32),
+                SqlReturn::SUCCESS
+            );
+
+            let handle =
+                as_handle_ref::<crate::handles::StatementHandle<MockBackend>>(stmt).expect("valid");
+            assert!(handle.statement.is_some());
+            assert!(!handle.cursor_open, "SQLPrepare opened a cursor");
 
             cleanup(env, conn, stmt);
         }

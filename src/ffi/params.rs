@@ -7,7 +7,7 @@ use std::ffi::c_void;
 use odbc_sys::SqlDataType;
 
 use crate::{
-    backend::Backend,
+    backend::{Backend, StatementBackend},
     errors::OdbcError,
     handles::{ConnectionHandle, ParameterBinding, StatementHandle, as_handle_ref},
     panic::panic_safe,
@@ -1083,7 +1083,7 @@ pub unsafe fn sql_param_data<B: Backend>(
             if stmt.statement.is_none() {
                 let prepared = B::prepare(connection, &sql).map_err(Into::into)?;
                 let stmt = as_handle_ref::<StatementHandle<B>>(statement_handle)?;
-                stmt.statement = Some(crate::handles::StatementData::Backend(prepared));
+                stmt.set_prepared_statement(crate::handles::StatementData::Backend(prepared));
             }
 
             let stmt = as_handle_ref::<StatementHandle<B>>(statement_handle)?;
@@ -1102,6 +1102,13 @@ pub unsafe fn sql_param_data<B: Backend>(
                     ));
                 }
             }
+
+            // A cursor is open only if the execution produced columns.
+            let stmt = as_handle_ref::<StatementHandle<B>>(statement_handle)?;
+            stmt.cursor_open = stmt
+                .statement
+                .as_ref()
+                .is_some_and(|s| s.column_count() > 0);
 
             Ok(SqlReturn::SUCCESS)
         })

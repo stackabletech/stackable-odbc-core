@@ -60,8 +60,10 @@ const SQL_PARAMSET_SIZE_DEFAULT: usize = 1;
 ///   attribute. Deferred.
 /// - 24000 Invalid cursor state: returned when setting `SQL_ATTR_CONCURRENCY`,
 ///   `SQL_ATTR_CURSOR_TYPE`, `SQL_ATTR_SIMULATE_CURSOR`, or
-///   `SQL_ATTR_USE_BOOKMARKS` while a cursor is open (`stmt.statement` is
-///   `Some`).
+///   `SQL_ATTR_USE_BOOKMARKS` while a cursor is open (`stmt.cursor_open`). A
+///   statement that is only prepared, or whose cursor `SQLEndTran` closed under
+///   `SQL_CB_CLOSE`, has no open cursor and is not rejected here (a prepared one
+///   is rejected by the HY011 check below instead).
 /// - HY000 General error: returned for unexpected internal errors.
 /// - HY001 Memory allocation error: not returned; Rust panics on allocation
 ///   failure, which is caught by `panic_safe` and converted to `SQL_ERROR`/HY000.
@@ -133,7 +135,7 @@ pub unsafe fn sql_set_stmt_attr_w<B: Backend>(
                     | StatementAttribute::UseBookmarks,
                 ) => {
                     // Spec 24000: cursor is open.
-                    if stmt.statement.is_some() {
+                    if stmt.cursor_open {
                         return Err(OdbcError::general(
                             format!("Cannot set {attr:?} while a cursor is open"),
                             SqlState::invalid_cursor_state(),
@@ -289,7 +291,9 @@ pub unsafe fn sql_set_stmt_attr_w<B: Backend>(
 ///   statement attributes are returned (all returned values are integer or
 ///   pointer types).
 /// - 24000 Invalid cursor state: returned when `SQL_ATTR_ROW_NUMBER` is
-///   requested and no cursor is open (`stmt.statement` is `None`).
+///   requested and no cursor is open (`stmt.cursor_open` is `false`), which
+///   includes a statement that is only prepared and one whose cursor
+///   `SQLEndTran` closed under `SQL_CB_CLOSE`.
 /// - HY000 General error: returned for unexpected internal errors.
 /// - HY001 Memory allocation error: not returned; Rust panics on allocation
 ///   failure, which is caught by `panic_safe` and converted to `SQL_ERROR`/HY000.
@@ -450,7 +454,7 @@ pub unsafe fn sql_get_stmt_attr_w<B: Backend>(
                 }
                 Some(StatementAttribute::RowNumber) => {
                     // Spec 24000: no cursor is open.
-                    if stmt.statement.is_none() {
+                    if !stmt.cursor_open {
                         return Err(OdbcError::general(
                             "SQL_ATTR_ROW_NUMBER requires an open cursor",
                             SqlState::invalid_cursor_state(),
@@ -872,15 +876,13 @@ mod tests {
         // 24000: cannot set SQL_ATTR_CURSOR_TYPE when a cursor is open.
         unsafe {
             use crate::handles::StatementData;
-            use crate::synthetic::SyntheticStatement;
 
             let (env, conn, stmt) = alloc_env_conn_stmt();
             // Inject a synthetic cursor to simulate "cursor open".
             let handle = as_handle_ref::<StatementHandle<MockBackend>>(stmt).unwrap();
-            handle.statement = Some(StatementData::Synthetic(SyntheticStatement::new(
-                vec![],
-                vec![],
-            )));
+            handle.set_result_set(StatementData::Synthetic(
+                crate::test_utils::synthetic_result_set(vec![]),
+            ));
             let ret = sql_set_stmt_attr_w::<MockBackend>(
                 stmt,
                 StatementAttribute::CursorType as i32,

@@ -488,7 +488,7 @@ pub unsafe fn sql_get_type_info<B: Backend>(
 
             let columns = type_info_columns(&B::catalog_result_column_widths());
             let synthetic = SyntheticStatement::new(columns, rows);
-            handle.statement = Some(StatementData::Synthetic(synthetic));
+            handle.set_result_set(StatementData::Synthetic(synthetic));
 
             Ok(SqlReturn::SUCCESS)
         })

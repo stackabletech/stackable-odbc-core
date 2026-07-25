@@ -117,7 +117,7 @@ pub unsafe fn sql_tables_w<B: Backend>(
             );
 
             // Spec 24000: Cursor already open.
-            if stmt.statement.is_some() {
+            if stmt.cursor_open {
                 return Err(OdbcError::general(
                     "A cursor is already open on this statement",
                     SqlState::invalid_cursor_state(),
@@ -144,7 +144,7 @@ pub unsafe fn sql_tables_w<B: Backend>(
             )
             .map_err(Into::into)?;
 
-            stmt.statement = Some(StatementData::Backend(result));
+            stmt.set_result_set(StatementData::Backend(result));
             Ok(SqlReturn::SUCCESS)
         })
     };
@@ -232,7 +232,7 @@ pub unsafe fn sql_columns_w<B: Backend>(
             );
 
             // Spec 24000: Cursor already open.
-            if stmt.statement.is_some() {
+            if stmt.cursor_open {
                 return Err(OdbcError::general(
                     "A cursor is already open on this statement",
                     SqlState::invalid_cursor_state(),
@@ -259,7 +259,7 @@ pub unsafe fn sql_columns_w<B: Backend>(
             )
             .map_err(Into::into)?;
 
-            stmt.statement = Some(StatementData::Backend(result));
+            stmt.set_result_set(StatementData::Backend(result));
             Ok(SqlReturn::SUCCESS)
         })
     };
@@ -328,7 +328,7 @@ pub unsafe fn sql_primary_keys_w<B: Backend>(
             let stmt = as_handle_ref::<StatementHandle<B>>(statement_handle)?;
             stmt.diagnostics.clear();
 
-            if stmt.statement.is_some() {
+            if stmt.cursor_open {
                 return Err(OdbcError::general(
                     "A cursor is already open on this statement",
                     SqlState::invalid_cursor_state(),
@@ -355,7 +355,7 @@ pub unsafe fn sql_primary_keys_w<B: Backend>(
                 table.as_deref(),
             )?;
 
-            stmt.statement = Some(StatementData::Backend(result));
+            stmt.set_result_set(StatementData::Backend(result));
             Ok(SqlReturn::SUCCESS)
         })
     };
@@ -442,7 +442,7 @@ pub unsafe fn sql_foreign_keys_w<B: Backend>(
             let stmt = as_handle_ref::<StatementHandle<B>>(statement_handle)?;
             stmt.diagnostics.clear();
 
-            if stmt.statement.is_some() {
+            if stmt.cursor_open {
                 return Err(OdbcError::general(
                     "A cursor is already open on this statement",
                     SqlState::invalid_cursor_state(),
@@ -475,7 +475,7 @@ pub unsafe fn sql_foreign_keys_w<B: Backend>(
                 fk_table.as_deref(),
             )?;
 
-            stmt.statement = Some(StatementData::Backend(result));
+            stmt.set_result_set(StatementData::Backend(result));
             Ok(SqlReturn::SUCCESS)
         })
     };
@@ -497,7 +497,7 @@ unsafe fn set_empty_result<B: Backend>(
     let stmt = unsafe { as_handle_ref::<StatementHandle<B>>(statement_handle)? };
     stmt.diagnostics.clear();
 
-    if stmt.statement.is_some() {
+    if stmt.cursor_open {
         return Err(OdbcError::general(
             "A cursor is already open on this statement",
             SqlState::invalid_cursor_state(),
@@ -514,7 +514,7 @@ unsafe fn set_empty_result<B: Backend>(
         ));
     }
 
-    stmt.statement = Some(StatementData::Synthetic(SyntheticStatement::new(
+    stmt.set_result_set(StatementData::Synthetic(SyntheticStatement::new(
         columns,
         vec![],
     )));
@@ -598,7 +598,7 @@ pub unsafe fn sql_statistics_w<B: Backend>(
             let stmt = as_handle_ref::<StatementHandle<B>>(statement_handle)?;
             stmt.diagnostics.clear();
 
-            if stmt.statement.is_some() {
+            if stmt.cursor_open {
                 return Err(OdbcError::general(
                     "A cursor is already open on this statement",
                     SqlState::invalid_cursor_state(),
@@ -625,11 +625,11 @@ pub unsafe fn sql_statistics_w<B: Backend>(
                 unique_only,
             ) {
                 Ok(result) => {
-                    stmt.statement = Some(StatementData::Backend(result));
+                    stmt.set_result_set(StatementData::Backend(result));
                     Ok(SqlReturn::SUCCESS)
                 }
                 Err(OdbcError::NotImplemented { .. }) => {
-                    stmt.statement = Some(StatementData::Synthetic(SyntheticStatement::new(
+                    stmt.set_result_set(StatementData::Synthetic(SyntheticStatement::new(
                         statistics_columns(&B::catalog_result_column_widths()),
                         vec![],
                     )));
@@ -730,7 +730,7 @@ pub unsafe fn sql_special_columns_w<B: Backend>(
             let stmt = as_handle_ref::<StatementHandle<B>>(statement_handle)?;
             stmt.diagnostics.clear();
 
-            if stmt.statement.is_some() {
+            if stmt.cursor_open {
                 return Err(OdbcError::general(
                     "A cursor is already open on this statement",
                     SqlState::invalid_cursor_state(),
@@ -746,7 +746,7 @@ pub unsafe fn sql_special_columns_w<B: Backend>(
             };
 
             let empty = |stmt: &mut StatementHandle<B>| {
-                stmt.statement = Some(StatementData::Synthetic(SyntheticStatement::new(
+                stmt.set_result_set(StatementData::Synthetic(SyntheticStatement::new(
                     special_columns_columns(&B::catalog_result_column_widths()),
                     vec![],
                 )));
@@ -787,7 +787,7 @@ pub unsafe fn sql_special_columns_w<B: Backend>(
                 nullable,
             ) {
                 Ok(result) => {
-                    stmt.statement = Some(StatementData::Backend(result));
+                    stmt.set_result_set(StatementData::Backend(result));
                     Ok(SqlReturn::SUCCESS)
                 }
                 Err(OdbcError::NotImplemented { .. }) => empty(stmt),
@@ -1691,7 +1691,7 @@ mod tests {
     unsafe fn stmt_with_named_column(stmt: *mut c_void) {
         let handle = unsafe { as_handle_ref::<StatementHandle<MockBackend>>(stmt) }
             .expect("statement handle is valid");
-        handle.statement = Some(StatementData::Synthetic(SyntheticStatement::new(
+        handle.set_result_set(StatementData::Synthetic(SyntheticStatement::new(
             vec![ColumnDescriptor {
                 name: "abcde".into(),
                 type_name: String::new(),

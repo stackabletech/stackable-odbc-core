@@ -313,7 +313,9 @@ pub unsafe fn sql_fetch_scroll<B: Backend>(
 ///   arms, so a request for one falls through to the generic 07006 case above.
 /// - 22018 (invalid character value for cast specification): returned via `write_column_value`
 ///   when character data does not parse as the requested numeric or datetime C type.
-/// - 24000 (invalid cursor state): returned when `stmt.statement` is `None` (no cursor open).
+/// - 24000 (invalid cursor state): returned when no cursor is open (`stmt.cursor_open` is
+///   `false`), which includes a statement that is only prepared, one that executed without
+///   producing a result set, and one whose cursor `SQLEndTran` closed under `SQL_CB_CLOSE`.
 ///   (DM) variants (not yet fetched, before-start, after-end) are driver-manager-handled;
 ///   not returned here.
 /// - HY000 (general error): propagated from the backend; `write_column_value` does not produce
@@ -372,7 +374,18 @@ pub unsafe fn sql_get_data<B: Backend>(
             let stmt = as_handle_ref::<StatementHandle<B>>(statement_handle)?;
             stmt.diagnostics.clear();
 
-            // Spec 24000 / HY010: No cursor open.
+            // Spec 24000 / HY010: No cursor open. A statement that is only
+            // prepared, or whose cursor `SQLEndTran` closed under
+            // `SQL_CB_CLOSE`, still holds a backend statement but has no cursor
+            // to read from.
+            if !stmt.cursor_open {
+                return Err(OdbcError::general(
+                    "No cursor is open",
+                    SqlState::invalid_cursor_state(),
+                ));
+            }
+            // `cursor_open` implies `statement.is_some()`; this arm keeps the
+            // invariant honest rather than unwrapping.
             let Some(ref mut statement) = stmt.statement else {
                 return Err(OdbcError::general(
                     "No cursor is open",
@@ -534,11 +547,10 @@ mod tests {
             let (env, conn, stmt) = alloc_env_conn_stmt();
             // Manually set a statement to have a cursor open
             let handle = as_handle_ref::<StatementHandle<MockBackend>>(stmt).expect("valid handle");
-            handle.statement = Some(crate::handles::StatementData::Synthetic(
-                crate::synthetic::SyntheticStatement::new(
-                    vec![],
-                    vec![vec![crate::types::ColumnValue::I32(42)]],
-                ),
+            handle.set_result_set(crate::handles::StatementData::Synthetic(
+                crate::test_utils::synthetic_result_set(vec![vec![
+                    crate::types::ColumnValue::I32(42),
+                ]]),
             ));
 
             let mut buf: i32 = 0;

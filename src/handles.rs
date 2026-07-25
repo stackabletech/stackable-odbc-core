@@ -266,8 +266,15 @@ unsafe impl Sync for DataAtExecState {}
 /// ODBC statement handle (`SQL_HANDLE_STMT`).
 ///
 /// Models the statement state machine: allocated → executed → cursor open → fetching.
-/// `statement` is `None` until a query is executed (e.g. `SQLExecDirectW`), then
-/// `Some(StatementData)` which implements [`StatementBackend`] for row iteration.
+/// `statement` is `None` until the backend produces one — `SQLPrepareW` already
+/// stores one, `SQLExecDirectW` and the catalog functions replace it — and then
+/// `Some(StatementData)`, which implements [`StatementBackend`] for row iteration.
+///
+/// `statement` answers "is there a backend statement to operate on?", never "is
+/// a cursor open?": a prepared-but-unexecuted statement (ODBC state S2) has a
+/// `statement` and no cursor, and `SQLEndTran` under `SQL_CB_CLOSE` closes the
+/// cursor while deliberately keeping the statement. [`Self::cursor_open`] is the
+/// answer to the second question and is what every `24000` guard tests.
 ///
 /// `conn` is a raw pointer back to the parent connection, used to remove this
 /// statement from the parent's list on free.
@@ -280,6 +287,16 @@ pub struct StatementHandle<B: Backend> {
     header: HandleHeader,
     pub conn: *mut ConnectionHandle<B>,
     pub statement: Option<StatementData<B>>,
+    /// Whether a cursor is currently open on this statement (ODBC states
+    /// S5-S7). Set when an execution produces a result set, cleared when that
+    /// cursor is closed or discarded.
+    ///
+    /// Distinct from `statement.is_some()`: `SQLPrepareW` stores a backend
+    /// statement without opening a cursor, an `UPDATE` executes without
+    /// producing a result set, and `SQLEndTran` under `SQL_CB_CLOSE` closes the
+    /// cursor but keeps the statement. Every `24000` "cursor already open" /
+    /// "no cursor open" check reads this field.
+    pub cursor_open: bool,
     /// SQL text stored by `SQLPrepareW`, executed by `SQLExecute`.
     pub prepared_sql: Option<String>,
     /// Number of `?` parameter markers counted in `prepared_sql` by `SQLPrepareW`.
@@ -314,6 +331,35 @@ impl<B: Backend> HasTag for StatementHandle<B> {
 }
 
 impl<B: Backend> StatementHandle<B> {
+    /// Store the result of an execution and open a cursor over it if it has
+    /// columns.
+    ///
+    /// A statement that produced no result set — an `UPDATE`, say — reports
+    /// zero columns and leaves the cursor closed, which is exactly the ODBC
+    /// distinction between state S4 (executed, no cursor) and S5 (cursor open).
+    /// The backend must therefore report [`StatementBackend::column_count`]
+    /// accurately as soon as `execute`/`exec_direct` returns; `SQLNumResultCols`
+    /// reads the same value at the same point, so this adds no new requirement.
+    pub fn set_result_set(&mut self, data: StatementData<B>) {
+        self.cursor_open = data.column_count() > 0;
+        self.statement = Some(data);
+    }
+
+    /// Store a prepared-but-unexecuted backend statement (`SQLPrepareW`, or a
+    /// re-prepare before `SQLExecute`). No cursor is open in the prepared
+    /// states S2/S3.
+    pub fn set_prepared_statement(&mut self, data: StatementData<B>) {
+        self.statement = Some(data);
+        self.cursor_open = false;
+    }
+
+    /// Discard the result set and close the cursor (`SQLCloseCursor`,
+    /// `SQLFreeStmt(SQL_CLOSE)`, `SQLEndTran` under `SQL_CB_DELETE`).
+    pub fn discard_result_set(&mut self) {
+        self.statement = None;
+        self.cursor_open = false;
+    }
+
     /// True when `SQL_ATTR_NOSCAN` is `SQL_NOSCAN_ON` (escape scanning disabled).
     pub fn noscan_enabled(&self) -> bool {
         self.attrs
@@ -435,6 +481,7 @@ pub unsafe fn alloc_statement<B: Backend>(
         header: HandleHeader { tag: STMT_TAG },
         conn: conn_ptr as *mut ConnectionHandle<B>,
         statement: None,
+        cursor_open: false,
         prepared_sql: None,
         param_count: None,
         bindings: std::collections::HashMap::new(),

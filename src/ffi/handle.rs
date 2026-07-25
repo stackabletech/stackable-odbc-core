@@ -333,7 +333,7 @@ pub unsafe fn sql_free_stmt<B: Backend>(statement_handle: *mut c_void, option: u
 
             match opt {
                 // Discard the result set so the handle is ready for a new statement.
-                FreeStmtOption::Close => stmt.statement = None,
+                FreeStmtOption::Close => stmt.discard_result_set(),
                 FreeStmtOption::Unbind => stmt.bindings.clear(),
                 FreeStmtOption::ResetParams => stmt.param_bindings.clear(),
             }

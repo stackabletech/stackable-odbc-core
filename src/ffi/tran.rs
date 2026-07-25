@@ -26,6 +26,10 @@ use crate::types::{SqlReturn, SqlState, completion_type_from_raw, handle_type_fr
 ///   `SQLNumResultCols` would then fail with `HY010` where the spec allows it.
 ///   Note that `close_cursor` defaults to a no-op, so a backend declaring
 ///   `Close` must implement it — see [`Backend::cursor_commit_behavior`].
+///   `StatementHandle::cursor_open` is cleared either way, which is what makes
+///   the statement legal for a new `SQLExecDirect`, catalog call or
+///   `SQLSetStmtAttr(SQL_ATTR_CURSOR_TYPE)` afterwards, exactly as S4→S2 and
+///   S5-S7→S3 require.
 /// - `SQL_CB_PRESERVE` (footnote `[3]`) is `--` in every state and changes
 ///   nothing.
 ///
@@ -79,9 +83,10 @@ unsafe fn apply_cursor_behavior<B: Backend>(
             if let Some(statement) = stmt.statement.as_mut() {
                 statement.close_cursor();
             }
+            stmt.cursor_open = false;
         } else {
             // Delete (Preserve returned early above): back to S1.
-            stmt.statement = None;
+            stmt.discard_result_set();
             stmt.prepared_sql = None;
             stmt.param_count = None;
             stmt.data_at_exec = None;
@@ -529,9 +534,7 @@ mod tests {
         let _ = unsafe { sql_alloc_handle::<B>(HandleType::Stmt as i16, conn, &mut stmt) };
 
         let handle = unsafe { as_handle_ref::<StatementHandle<B>>(stmt) }.expect("valid stmt");
-        handle.statement = Some(crate::handles::StatementData::Synthetic(
-            crate::synthetic::SyntheticStatement::new(vec![], vec![]),
-        ));
+        handle.set_result_set(crate::handles::StatementData::Synthetic(one_row_synthetic()));
         handle.prepared_sql = Some("SELECT 1".to_string());
         handle.param_count = Some(0);
 
@@ -578,7 +581,7 @@ mod tests {
             {
                 let handle =
                     as_handle_ref::<StatementHandle<MockTxnCloseBackend>>(stmt).expect("valid");
-                handle.statement = Some(StatementData::Synthetic(one_row_synthetic()));
+                handle.set_result_set(StatementData::Synthetic(one_row_synthetic()));
                 let data = handle.statement.as_mut().expect("statement");
                 assert_eq!(data.fetch().expect("fetch"), FetchResult::Row);
                 assert_eq!(data.fetch().expect("fetch"), FetchResult::NoData);
@@ -628,7 +631,7 @@ mod tests {
                 // state the real SQLPrepareW path produces, nothing more.
                 let handle =
                     as_handle_ref::<StatementHandle<MockTxnCloseBackend>>(stmt).expect("valid");
-                handle.statement = None;
+                handle.discard_result_set();
                 handle.prepared_sql = None;
                 handle.param_count = None;
             }
@@ -656,6 +659,168 @@ mod tests {
                 "SQL_CB_CLOSE dropped a prepared-but-never-executed statement (S2)"
             );
             assert_eq!(handle.prepared_sql.as_deref(), Some("SELECT a, b FROM t"));
+            assert!(
+                !handle.cursor_open,
+                "S2 has no cursor open, before or after SQLEndTran"
+            );
+
+            // The point of keeping the statement: SQLNumResultCols is legal in
+            // S2 and must not fail with HY010.
+            let mut cols: i16 = -1;
+            let ret = crate::ffi::cursor::sql_num_result_cols::<MockTxnCloseBackend>(
+                stmt,
+                &mut cols as *mut i16,
+            );
+            assert_eq!(
+                ret,
+                SqlReturn::SUCCESS,
+                "SQLNumResultCols failed in S2 after SQLEndTran"
+            );
+
+            cleanup_connected::<MockTxnCloseBackend>(env, conn, stmt);
+        }
+    }
+
+    /// Asserts that the statement handle's most recent diagnostic is `24000`.
+    unsafe fn assert_invalid_cursor_state<B: crate::backend::Backend>(stmt: *mut c_void) {
+        let handle = unsafe { as_handle_ref::<StatementHandle<B>>(stmt) }.expect("valid");
+        let rec = handle.diagnostics.get(0).expect("a diagnostic record");
+        assert_eq!(
+            rec.sqlstate.as_str(),
+            crate::types::sql_state::INVALID_CURSOR_STATE,
+            "expected 24000, got {}",
+            rec.sqlstate.as_str()
+        );
+    }
+
+    #[test]
+    fn end_tran_close_lets_the_statement_execute_again() {
+        // The transition table sends S5-S7 to S3 and S4 to S2 under
+        // SQL_CB_CLOSE: no cursor is open afterwards, so SQLExecDirect is legal.
+        // Core used to answer 24000 here, because it read `statement.is_some()`
+        // as "a cursor is open" and SQL_CB_CLOSE deliberately keeps the
+        // statement.
+        unsafe {
+            let (env, conn, stmt) = alloc_connected_stmt::<MockTxnCloseBackend>("DRIVER=mock;");
+
+            let ret = sql_end_tran::<MockTxnCloseBackend>(
+                HandleType::Dbc as i16,
+                conn,
+                CompletionType::Commit as i16,
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+
+            let mut sql: Vec<u16> = "SELECT 1".encode_utf16().collect();
+            sql.push(0);
+            let ret = crate::ffi::execute::sql_exec_direct_w::<MockTxnCloseBackend>(
+                stmt,
+                sql.as_ptr(),
+                SQL_NTS,
+            );
+            assert_eq!(
+                ret,
+                SqlReturn::SUCCESS,
+                "SQLExecDirect was rejected after SQL_CB_CLOSE closed the cursor"
+            );
+
+            cleanup_connected::<MockTxnCloseBackend>(env, conn, stmt);
+        }
+    }
+
+    #[test]
+    fn end_tran_close_lets_a_catalog_function_run_again() {
+        // Same transition, same reasoning, for the catalog functions — they
+        // share the "cursor already open" guard with SQLExecDirect.
+        unsafe {
+            let (env, conn, stmt) = alloc_connected_stmt::<MockTxnCloseBackend>("DRIVER=mock;");
+
+            let ret = sql_end_tran::<MockTxnCloseBackend>(
+                HandleType::Dbc as i16,
+                conn,
+                CompletionType::Commit as i16,
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+
+            let ret = crate::ffi::metadata::sql_statistics_w::<MockTxnCloseBackend>(
+                stmt,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                crate::types::SQL_INDEX_ALL,
+                crate::types::SQL_QUICK,
+            );
+            assert_eq!(
+                ret,
+                SqlReturn::SUCCESS,
+                "SQLStatistics was rejected after SQL_CB_CLOSE closed the cursor"
+            );
+
+            cleanup_connected::<MockTxnCloseBackend>(env, conn, stmt);
+        }
+    }
+
+    #[test]
+    fn end_tran_close_lets_the_cursor_type_be_set_again() {
+        // SQLSetStmtAttr(SQL_ATTR_CURSOR_TYPE) is rejected with 24000 only while
+        // a cursor is open. After SQL_CB_CLOSE there is none.
+        unsafe {
+            let (env, conn, stmt) = alloc_connected_stmt::<MockTxnCloseBackend>("DRIVER=mock;");
+            {
+                // The helper also marks the statement prepared, which this
+                // attribute rejects with HY011 for its own (correct) reasons.
+                // Clear it so the test observes the 24000 guard alone.
+                let handle =
+                    as_handle_ref::<StatementHandle<MockTxnCloseBackend>>(stmt).expect("valid");
+                handle.prepared_sql = None;
+            }
+
+            let ret = sql_end_tran::<MockTxnCloseBackend>(
+                HandleType::Dbc as i16,
+                conn,
+                CompletionType::Commit as i16,
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+
+            let ret = crate::ffi::stmt_attr::sql_set_stmt_attr_w::<MockTxnCloseBackend>(
+                stmt,
+                crate::types::StatementAttribute::CursorType as i32,
+                crate::types::SQL_CURSOR_FORWARD_ONLY as *mut c_void,
+                0,
+            );
+            assert_eq!(
+                ret,
+                SqlReturn::SUCCESS,
+                "SQL_ATTR_CURSOR_TYPE was rejected after SQL_CB_CLOSE closed the cursor"
+            );
+
+            cleanup_connected::<MockTxnCloseBackend>(env, conn, stmt);
+        }
+    }
+
+    #[test]
+    fn end_tran_close_leaves_no_cursor_for_sql_close_cursor() {
+        // The mirror image: SQLCloseCursor needs an *open* cursor, so after
+        // SQL_CB_CLOSE has closed it the call is 24000, not SUCCESS.
+        unsafe {
+            let (env, conn, stmt) = alloc_connected_stmt::<MockTxnCloseBackend>("DRIVER=mock;");
+
+            let ret = sql_end_tran::<MockTxnCloseBackend>(
+                HandleType::Dbc as i16,
+                conn,
+                CompletionType::Commit as i16,
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+
+            let ret = crate::ffi::cursor::sql_close_cursor::<MockTxnCloseBackend>(stmt);
+            assert_eq!(
+                ret,
+                SqlReturn::ERROR,
+                "SQLCloseCursor reported success with no cursor open"
+            );
+            assert_invalid_cursor_state::<MockTxnCloseBackend>(stmt);
 
             cleanup_connected::<MockTxnCloseBackend>(env, conn, stmt);
         }
@@ -908,9 +1073,7 @@ mod tests {
             let _ = unsafe { sql_alloc_handle::<B>(HandleType::Stmt as i16, conn, &mut stmt) };
             let handle = unsafe { as_handle_ref::<crate::handles::StatementHandle<B>>(stmt) }
                 .expect("valid");
-            handle.statement = Some(crate::handles::StatementData::Synthetic(
-                crate::synthetic::SyntheticStatement::new(vec![], vec![]),
-            ));
+            handle.set_result_set(crate::handles::StatementData::Synthetic(one_row_synthetic()));
             (conn, stmt)
         };
 

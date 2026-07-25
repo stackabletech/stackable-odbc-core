@@ -244,7 +244,9 @@ pub unsafe fn sql_more_results<B: Backend>(statement_handle: *mut c_void) -> Sql
 ///
 /// - 01000 (general warning): driver-specific informational message — not produced here.
 /// - 24000 (invalid cursor state): returned with SQLSTATE `24000` when no cursor is open on the
-///   statement handle (ODBC 3.x driver behaviour).
+///   statement handle (ODBC 3.x driver behaviour). A statement that is only prepared, or that
+///   executed without producing a result set, has no cursor to close and gets this code, as does
+///   one whose cursor `SQLEndTran` already closed under `SQL_CB_CLOSE`.
 /// - HY000 (general error): returned via `OdbcError::general` for unexpected failures.
 /// - HY001 (memory allocation error): not applicable; Rust allocation panics are caught by
 ///   `panic_safe`.
@@ -267,8 +269,10 @@ pub unsafe fn sql_close_cursor<B: Backend>(statement_handle: *mut c_void) -> Sql
             let stmt = as_handle_ref::<StatementHandle<B>>(statement_handle)?;
             stmt.diagnostics.clear();
 
-            // Spec 24000: No cursor open.
-            if stmt.statement.is_none() {
+            // Spec 24000: No cursor open. A statement that is merely prepared
+            // (S2/S3) has a `statement` but no cursor, so this reads
+            // `cursor_open`.
+            if !stmt.cursor_open {
                 return Err(OdbcError::general(
                     "No cursor is open",
                     SqlState::invalid_cursor_state(),
@@ -277,7 +281,7 @@ pub unsafe fn sql_close_cursor<B: Backend>(statement_handle: *mut c_void) -> Sql
 
             // Discard the result set. After this the statement handle is in a
             // clean state and SQLExecDirect / SQLExecute can be called again.
-            stmt.statement = None;
+            stmt.discard_result_set();
             Ok(SqlReturn::SUCCESS)
         })
     };
@@ -856,12 +860,12 @@ mod tests {
     }
 
     #[test]
-    fn close_cursor_with_statement_succeeds() {
+    fn close_cursor_with_open_cursor_succeeds() {
         unsafe {
             let (env, conn, stmt) = alloc_env_conn_stmt();
             let handle = as_handle_ref::<StatementHandle<MockBackend>>(stmt).expect("valid");
-            handle.statement = Some(crate::handles::StatementData::Synthetic(
-                crate::synthetic::SyntheticStatement::new(vec![], vec![]),
+            handle.set_result_set(crate::handles::StatementData::Synthetic(
+                crate::test_utils::synthetic_result_set(vec![]),
             ));
 
             let ret = sql_close_cursor::<MockBackend>(stmt);
@@ -965,18 +969,10 @@ mod tests {
         unsafe {
             let (env, conn, stmt) = alloc_env_conn_stmt();
             let handle = as_handle_ref::<StatementHandle<MockBackend>>(stmt).expect("valid");
-            handle.statement = Some(crate::handles::StatementData::Synthetic(
-                crate::synthetic::SyntheticStatement::new(
-                    vec![crate::types::ColumnDescriptor {
-                        name: "val".into(),
-                        type_name: String::new(),
-                        sql_type: crate::types::SqlDataType(4),
-                        precision: 10,
-                        scale: 0,
-                        nullable: true,
-                    }],
-                    vec![vec![crate::types::ColumnValue::I32(1)]],
-                ),
+            handle.set_result_set(crate::handles::StatementData::Synthetic(
+                crate::test_utils::synthetic_result_set(vec![vec![
+                    crate::types::ColumnValue::I32(1),
+                ]]),
             ));
 
             // Fetch the one row
@@ -1063,8 +1059,8 @@ mod tests {
         unsafe {
             let (env, conn, stmt) = alloc_env_conn_stmt();
             let handle = as_handle_ref::<StatementHandle<MockBackend>>(stmt).expect("valid");
-            handle.statement = Some(crate::handles::StatementData::Synthetic(
-                crate::synthetic::SyntheticStatement::new(vec![], vec![]),
+            handle.set_result_set(crate::handles::StatementData::Synthetic(
+                crate::test_utils::synthetic_result_set(vec![]),
             ));
 
             // Cancel should succeed even when a cursor is open (it's a no-op).
@@ -1073,6 +1069,7 @@ mod tests {
             // Cursor must still be open; cancel does not close it.
             let handle = as_handle_ref::<StatementHandle<MockBackend>>(stmt).expect("valid");
             assert!(handle.statement.is_some());
+            assert!(handle.cursor_open);
 
             cleanup(env, conn, stmt);
         }
