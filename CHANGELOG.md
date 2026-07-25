@@ -20,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Both default to `CursorBehavior::Preserve`. A backend that supports
   transactions should declare its data source's actual behaviour here; the
   value drives both `SQLGetInfoW` and what `SQLEndTran` does to statements.
+- `SQL_CURSOR_COMMIT_BEHAVIOR` constant (23), derived from
+  `odbc_sys::InfoType::CursorCommitBehaviour`.
 
 ### Changed
 
@@ -28,6 +30,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Backend::cursor_commit_behavior` / `Backend::cursor_rollback_behavior`
   rather than hard-coded. Core previously advertised `SQL_CB_DELETE` while
   `SQLEndTran` did nothing to cursors at all.
+- The derivation now also covers backends that answer these two info types
+  *nowhere*: `SQLGetInfoW`'s Driver-Manager-safe fallback reports the hooks
+  instead of the generic shape default. Previously such a backend got
+  `U16(0)` for `SQL_CURSOR_COMMIT_BEHAVIOR` and `U32(0)` for
+  `SQL_CURSOR_ROLLBACK_BEHAVIOR` — both `SQL_CB_DELETE`, the second in the
+  wrong shape — while `SQLEndTran` applied the declared behaviour.
+- Under `SQL_CB_CLOSE`, `SQLEndTran` now closes each statement's cursor via
+  `StatementBackend::close_cursor` and keeps the statement itself, instead of
+  dropping it. The `SQLEndTran` statement transition table's footnote `[2]`
+  leaves the prepared states S2/S3 unchanged; dropping the statement sent a
+  prepared-but-never-executed statement back to the allocated state, so a
+  subsequent `SQLNumResultCols` failed with `HY010` where the spec allows it.
+  A backend declaring `CursorBehavior::Close` must implement `close_cursor`,
+  which defaults to a no-op.
+- Under `SQL_CB_DELETE`, `SQLEndTran` now also clears a pending
+  data-at-execution sequence. It already cleared `param_count`, which
+  `SQLParamData` uses to size its parameter vector, so a surviving sequence
+  would have executed with zero parameters and silently discarded everything
+  the application streamed via `SQLPutData`.
 - **Breaking:** `default_get_info` and `common_get_info_raw` are now generic
   over the backend. Call them as `default_get_info::<Self>(info_type, widths)`
   and `common_get_info_raw::<Self>(info_type)` from a `Backend` impl.
@@ -43,3 +64,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   diagnostic on each failing connection so `SQLGetDiagRec` can identify it.
   A failure on one connection previously left every later connection holding
   an open transaction the application had asked to commit or roll back.
+- `SQLEndTran` now clears diagnostics at entry — on the handle it was given,
+  and on each connection it visits in the `SQL_HANDLE_ENV` loop. Without this,
+  a record left by an earlier failed call on a connection that then committed
+  fine made `SQLGetDiagRec` blame the wrong connection, defeating the
+  per-connection diagnostics the spec tells applications to read.
+- A corrupt entry in an environment's connection list no longer makes
+  `SQLEndTran(SQL_HANDLE_ENV)` return `SQL_INVALID_HANDLE` for a call whose
+  input handle was valid (and with no diagnostic record, since none is pushed
+  for that variant). It now records a general error, so a genuinely failing
+  connection's own SQLSTATE is no longer suppressed by a corrupt entry
+  encountered before it.
