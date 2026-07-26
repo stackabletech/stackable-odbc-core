@@ -132,10 +132,10 @@ pub unsafe fn sql_driver_connect_w<B: Backend>(
             let params = merge_dsn_params(&conn_str, read_dsn_keys)?;
             let connection = B::connect(&params).map_err(Into::into)?;
             handle.connection = Some(connection);
-            // A deferred SQL_ATTR_AUTOCOMMIT the backend cannot honour fails the
+            // A deferred attribute the backend cannot honour fails the
             // connect. Close the connection first: the application sees
             // SQL_ERROR and so will never call SQLDisconnect for it.
-            if let Err(e) = crate::ffi::connect_attr::apply_pending_autocommit::<B>(handle) {
+            if let Err(e) = crate::ffi::connect_attr::apply_pending_connect_attrs::<B>(handle) {
                 if let Some(mut c) = handle.connection.take() {
                     let _ = B::disconnect(&mut c);
                 }
@@ -287,10 +287,10 @@ pub unsafe fn sql_connect_w<B: Backend>(
             tracing::debug!("SQLConnectW: params = {:?}", params);
             let connection = B::connect(&params).map_err(Into::into)?;
             handle.connection = Some(connection);
-            // A deferred SQL_ATTR_AUTOCOMMIT the backend cannot honour fails the
+            // A deferred attribute the backend cannot honour fails the
             // connect. Close the connection first: the application sees
             // SQL_ERROR and so will never call SQLDisconnect for it.
-            if let Err(e) = crate::ffi::connect_attr::apply_pending_autocommit::<B>(handle) {
+            if let Err(e) = crate::ffi::connect_attr::apply_pending_connect_attrs::<B>(handle) {
                 if let Some(mut c) = handle.connection.take() {
                     let _ = B::disconnect(&mut c);
                 }
@@ -470,10 +470,10 @@ pub unsafe fn sql_browse_connect_w<B: Backend>(
             // All required attributes are present; connect.
             let connection = B::connect(&merged).map_err(Into::into)?;
             handle.connection = Some(connection);
-            // A deferred SQL_ATTR_AUTOCOMMIT the backend cannot honour fails the
+            // A deferred attribute the backend cannot honour fails the
             // connect. Close the connection first: the application sees
             // SQL_ERROR and so will never call SQLDisconnect for it.
-            if let Err(e) = crate::ffi::connect_attr::apply_pending_autocommit::<B>(handle) {
+            if let Err(e) = crate::ffi::connect_attr::apply_pending_connect_attrs::<B>(handle) {
                 if let Some(mut c) = handle.connection.take() {
                     let _ = B::disconnect(&mut c);
                 }

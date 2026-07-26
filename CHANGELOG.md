@@ -24,7 +24,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `odbc_sys::InfoType::CursorCommitBehaviour`.
 - The `SQL_AT_*` bitmask constants for the `SQL_ALTER_TABLE` (86) info type, so
   a driver can describe its `ALTER TABLE` support by name instead of by raw
-  literal.
+  literal. The set is now complete: `SQL_AT_ADD_COLUMN`, `SQL_AT_DROP_COLUMN`
+  and `SQL_AT_ADD_CONSTRAINT` (defined in `sql.h`) and the four
+  `SQL_AT_CONSTRAINT_INITIALLY_*` / `_DEFERRABLE` / `_NON_DEFERRABLE`
+  deferrability bits were missing, so a driver still needed raw literals for
+  them.
+- `Backend::set_txn_isolation`, for a backend that can switch isolation
+  levels. Defaulted: a data source with exactly one level in
+  `txn_isolation_options` needs no implementation, while one declaring several
+  and not overriding this reports `NotImplemented` rather than accepting a
+  level it would silently fail to apply.
 - `StatementHandle::cursor_open`, plus the `set_result_set`,
   `set_prepared_statement` and `discard_result_set` helpers that maintain it.
   `StatementHandle::statement` no longer doubles as the answer to "is a cursor
@@ -59,9 +68,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking:** `default_get_info` and `common_get_info_raw` are now generic
   over the backend. Call them as `default_get_info::<Self>(info_type, widths)`
   and `common_get_info_raw::<Self>(info_type)` from a `Backend` impl.
+- **Breaking:** six new **required** `Backend` methods —
+  `supports_catalogs`, `supports_schemas`, `alter_table_support`,
+  `outer_join_capabilities`, `default_txn_isolation` and
+  `txn_isolation_options`. They are required rather than defaulted on purpose:
+  each states a *capability*, where a defaulted value is a claim the backend
+  author never made and is unlikely to notice. A defaulted `0` understates and
+  a defaulted `true` overstates; the compiler asking is what makes the fact
+  explicit. Every one of them replaces a value core previously invented (see
+  `Fixed`).
+- `SQL_ALTER_TABLE` and `SQL_OJ_CAPABILITIES` now come from
+  `Backend::alter_table_support` / `Backend::outer_join_capabilities` instead
+  of defaulting to `0`. `0` remains the shared default for the surrounding
+  *limits* (`SQL_MAX_INDEX_SIZE`, `SQL_MAX_ROW_SIZE`, `SQL_MAX_STATEMENT_LEN`,
+  the `SQL_MAX_COLUMNS_IN_*` group), where the spec defines it as "no
+  specified limit or the limit is unknown".
+- `SQLSetConnectAttr(SQL_ATTR_TXN_ISOLATION)` now validates its value and
+  applies it, where it previously stored any `usize` and echoed it back. A
+  value that does not name exactly one isolation level, or names one outside
+  `Backend::txn_isolation_options`, is rejected with `HY024` — the spec assigns
+  this check to the driver, since the Driver Manager only validates attributes
+  "that accept a discrete set of values". An accepted level is passed to the
+  new `Backend::set_txn_isolation`, including one set before connecting, which
+  is applied when the connection opens (the same deferral
+  `SQL_ATTR_AUTOCOMMIT` already had).
 
 ### Fixed
 
+- `SQL_CATALOG_TERM`, `SQL_SCHEMA_TERM` and `SQL_CATALOG_NAME_SEPARATOR` no
+  longer name catalogs and schemas that the data source does not have. The
+  `SQLGetInfo` spec defines the whole group — those three plus
+  `SQL_CATALOG_NAME`, `SQL_CATALOG_LOCATION`, `SQL_CATALOG_USAGE` and
+  `SQL_SCHEMA_USAGE` — in terms of whether catalogs (resp. schemas) exist at
+  all, and mandates an empty string or zero when they do not. Core hard-coded
+  `"catalog"`, `"schema"` and `"."`, so a backend reporting
+  `SQL_CATALOG_NAME = "N"` and letting the rest fall through contradicted
+  itself. All seven are now derived from `Backend::supports_catalogs` /
+  `Backend::supports_schemas`. Where the spec only mandates the *zero*, core
+  asserts only that: `SQL_CATALOG_LOCATION`, `SQL_CATALOG_USAGE` and
+  `SQL_SCHEMA_USAGE` are left to the backend once catalogs or schemas exist,
+  rather than core inventing a value it cannot know.
+- `SQLGetConnectAttr(SQL_ATTR_TXN_ISOLATION)` on a connection where the
+  application has not set the attribute now reports
+  `Backend::default_txn_isolation` instead of a hard-coded
+  `SQL_TXN_READ_COMMITTED`. `SQL_DEFAULT_TXN_ISOLATION` is derived from the
+  same hook, so the info type and the connection attribute can no longer report
+  two different levels for one connection — a driver declaring
+  `SQL_TXN_SERIALIZABLE` previously disagreed with itself.
 - Cursor state is now tracked explicitly, by `StatementHandle::cursor_open`,
   instead of being inferred from `StatementHandle::statement`. Every `24000`
   check reads it: `SQLExecDirect`, `SQLGetData`, `SQLCloseCursor`, all ten

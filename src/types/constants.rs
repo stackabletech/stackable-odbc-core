@@ -223,7 +223,20 @@ pub const SQL_U_UNION: u32 = 0x0000_0001;
 /// `SQL_U_UNION_ALL` — the `UNION ALL` clause is supported.
 pub const SQL_U_UNION_ALL: u32 = 0x0000_0002;
 
-// --- SQL_ALTER_TABLE (86) flags (sqlext.h) ---
+// --- SQL_ALTER_TABLE (86) flags ---
+// The low three bits are defined in sql.h; every other bit is defined in
+// sqlext.h. Each header comments out the other's block and defers to it.
+
+/// `SQL_AT_ADD_COLUMN` — the `<add column>` clause is supported (sql.h).
+pub const SQL_AT_ADD_COLUMN: u32 = 0x0000_0001;
+/// `SQL_AT_DROP_COLUMN` — the `<drop column>` clause is supported (sql.h).
+pub const SQL_AT_DROP_COLUMN: u32 = 0x0000_0002;
+/// `SQL_AT_ADD_CONSTRAINT` — the `<add column>` clause is supported with the
+/// facility to specify column constraints (FIPS Transitional level, sql.h).
+/// Setting this bit is what makes the four `SQL_AT_CONSTRAINT_*` deferrability
+/// bits below meaningful.
+pub const SQL_AT_ADD_CONSTRAINT: u32 = 0x0000_0008;
+
 /// `SQL_AT_ADD_COLUMN_SINGLE` — `ALTER TABLE ... ADD COLUMN` is supported for
 /// a single column (FIPS Transitional level).
 pub const SQL_AT_ADD_COLUMN_SINGLE: u32 = 0x0000_0020;
@@ -260,6 +273,22 @@ pub const SQL_AT_DROP_TABLE_CONSTRAINT_RESTRICT: u32 = 0x0000_4000;
 /// clause is supported for naming column and table constraints (FIPS
 /// Intermediate level).
 pub const SQL_AT_CONSTRAINT_NAME_DEFINITION: u32 = 0x0000_8000;
+/// `SQL_AT_CONSTRAINT_INITIALLY_DEFERRED` — the `INITIALLY DEFERRED`
+/// constraint attribute is supported (FIPS Full level). Only meaningful when
+/// [`SQL_AT_ADD_CONSTRAINT`] is also set.
+pub const SQL_AT_CONSTRAINT_INITIALLY_DEFERRED: u32 = 0x0001_0000;
+/// `SQL_AT_CONSTRAINT_INITIALLY_IMMEDIATE` — the `INITIALLY IMMEDIATE`
+/// constraint attribute is supported (FIPS Full level). Only meaningful when
+/// [`SQL_AT_ADD_CONSTRAINT`] is also set.
+pub const SQL_AT_CONSTRAINT_INITIALLY_IMMEDIATE: u32 = 0x0002_0000;
+/// `SQL_AT_CONSTRAINT_DEFERRABLE` — the `DEFERRABLE` constraint attribute is
+/// supported (FIPS Full level). Only meaningful when
+/// [`SQL_AT_ADD_CONSTRAINT`] is also set.
+pub const SQL_AT_CONSTRAINT_DEFERRABLE: u32 = 0x0004_0000;
+/// `SQL_AT_CONSTRAINT_NON_DEFERRABLE` — the `NOT DEFERRABLE` constraint
+/// attribute is supported (FIPS Full level). Only meaningful when
+/// [`SQL_AT_ADD_CONSTRAINT`] is also set.
+pub const SQL_AT_CONSTRAINT_NON_DEFERRABLE: u32 = 0x0008_0000;
 
 // --- SQL_SCHEMA_USAGE (91) flags (sqlext.h: aliases of SQL_OU_*) ---
 /// `SQL_SU_DML_STATEMENTS` — a schema name can be used in a DML statement
@@ -953,6 +982,95 @@ mod tests {
         assert_eq!(
             SQL_OJ_ALL_COMPARISON_OPS, 0x0000_0040,
             "SQL_OJ_ALL_COMPARISON_OPS (sql.h)"
+        );
+    }
+
+    /// The `SQL_AT_*` bitmasks for `SQL_ALTER_TABLE` (86), asserted against the
+    /// C headers for the same reason as
+    /// [`capability_flag_constants_match_sqlext_h`] above: nothing else in the
+    /// workspace ties them back to the specification's own source, and a
+    /// driver that reports its `ALTER TABLE` support by name inherits any typo
+    /// silently.
+    ///
+    /// The set is split across two headers. `SQL_AT_ADD_COLUMN`,
+    /// `SQL_AT_DROP_COLUMN` and `SQL_AT_ADD_CONSTRAINT` are live `#define`s in
+    /// `/usr/include/sql.h` (and commented out in `sqlext.h`, which points at
+    /// sql.h for them); every other bit is a live `#define` in
+    /// `/usr/include/sqlext.h` (and commented out in `sql.h`). Each assertion
+    /// below names the header the value is actually defined in.
+    #[test]
+    fn sql_at_constants_match_sql_headers() {
+        // Defined in sql.h; sqlext.h comments these out and defers to sql.h.
+        assert_eq!(SQL_AT_ADD_COLUMN, 0x0000_0001, "SQL_AT_ADD_COLUMN (sql.h)");
+        assert_eq!(
+            SQL_AT_DROP_COLUMN, 0x0000_0002,
+            "SQL_AT_DROP_COLUMN (sql.h)"
+        );
+        assert_eq!(
+            SQL_AT_ADD_CONSTRAINT, 0x0000_0008,
+            "SQL_AT_ADD_CONSTRAINT (sql.h)"
+        );
+
+        // Defined in sqlext.h; sql.h comments these out and defers to sqlext.h.
+        assert_eq!(
+            SQL_AT_ADD_COLUMN_SINGLE, 0x0000_0020,
+            "SQL_AT_ADD_COLUMN_SINGLE (sqlext.h)"
+        );
+        assert_eq!(
+            SQL_AT_ADD_COLUMN_DEFAULT, 0x0000_0040,
+            "SQL_AT_ADD_COLUMN_DEFAULT (sqlext.h)"
+        );
+        assert_eq!(
+            SQL_AT_ADD_COLUMN_COLLATION, 0x0000_0080,
+            "SQL_AT_ADD_COLUMN_COLLATION (sqlext.h)"
+        );
+        assert_eq!(
+            SQL_AT_SET_COLUMN_DEFAULT, 0x0000_0100,
+            "SQL_AT_SET_COLUMN_DEFAULT (sqlext.h)"
+        );
+        assert_eq!(
+            SQL_AT_DROP_COLUMN_DEFAULT, 0x0000_0200,
+            "SQL_AT_DROP_COLUMN_DEFAULT (sqlext.h)"
+        );
+        assert_eq!(
+            SQL_AT_DROP_COLUMN_CASCADE, 0x0000_0400,
+            "SQL_AT_DROP_COLUMN_CASCADE (sqlext.h)"
+        );
+        assert_eq!(
+            SQL_AT_DROP_COLUMN_RESTRICT, 0x0000_0800,
+            "SQL_AT_DROP_COLUMN_RESTRICT (sqlext.h)"
+        );
+        assert_eq!(
+            SQL_AT_ADD_TABLE_CONSTRAINT, 0x0000_1000,
+            "SQL_AT_ADD_TABLE_CONSTRAINT (sqlext.h)"
+        );
+        assert_eq!(
+            SQL_AT_DROP_TABLE_CONSTRAINT_CASCADE, 0x0000_2000,
+            "SQL_AT_DROP_TABLE_CONSTRAINT_CASCADE (sqlext.h)"
+        );
+        assert_eq!(
+            SQL_AT_DROP_TABLE_CONSTRAINT_RESTRICT, 0x0000_4000,
+            "SQL_AT_DROP_TABLE_CONSTRAINT_RESTRICT (sqlext.h)"
+        );
+        assert_eq!(
+            SQL_AT_CONSTRAINT_NAME_DEFINITION, 0x0000_8000,
+            "SQL_AT_CONSTRAINT_NAME_DEFINITION (sqlext.h)"
+        );
+        assert_eq!(
+            SQL_AT_CONSTRAINT_INITIALLY_DEFERRED, 0x0001_0000,
+            "SQL_AT_CONSTRAINT_INITIALLY_DEFERRED (sqlext.h)"
+        );
+        assert_eq!(
+            SQL_AT_CONSTRAINT_INITIALLY_IMMEDIATE, 0x0002_0000,
+            "SQL_AT_CONSTRAINT_INITIALLY_IMMEDIATE (sqlext.h)"
+        );
+        assert_eq!(
+            SQL_AT_CONSTRAINT_DEFERRABLE, 0x0004_0000,
+            "SQL_AT_CONSTRAINT_DEFERRABLE (sqlext.h)"
+        );
+        assert_eq!(
+            SQL_AT_CONSTRAINT_NON_DEFERRABLE, 0x0008_0000,
+            "SQL_AT_CONSTRAINT_NON_DEFERRABLE (sqlext.h)"
         );
     }
 }

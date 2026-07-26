@@ -358,6 +358,116 @@ pub trait Backend: Sized + Send + Sync + 'static {
     fn catalog_result_column_widths() -> CatalogResultColumnWidths {
         CatalogResultColumnWidths::default()
     }
+
+    /// Whether this data source exposes ODBC **catalogs**.
+    ///
+    /// The `SQLGetInfo` spec defines a whole group of info types in terms of
+    /// this one fact, and mandates an empty string or zero for every one of
+    /// them when the answer is no:
+    ///
+    /// | Info type | Value when `false` |
+    /// |---|---|
+    /// | `SQL_CATALOG_NAME` | `"N"` |
+    /// | `SQL_CATALOG_TERM` | `""` |
+    /// | `SQL_CATALOG_NAME_SEPARATOR` | `""` |
+    /// | `SQL_CATALOG_LOCATION` | `0` |
+    /// | `SQL_CATALOG_USAGE` | `0` |
+    ///
+    /// [`default_get_info`] derives all five from this method, so a backend
+    /// cannot report `SQL_CATALOG_NAME = "N"` and name its catalogs in the
+    /// same breath.
+    ///
+    /// Deliberately **required**: a defaulted `true` would silently reproduce
+    /// that contradiction in the next catalog-less backend, and the fact is
+    /// one every backend author already knows.
+    ///
+    /// Note that when the answer is `true`, `SQL_CATALOG_LOCATION` and
+    /// `SQL_CATALOG_USAGE` become genuinely data-source-specific; core returns
+    /// `None` for them rather than inventing a value, so a backend with
+    /// catalogs answers those two itself.
+    fn supports_catalogs() -> bool;
+
+    /// Whether this data source exposes ODBC **schemas**.
+    ///
+    /// The schema half of [`Backend::supports_catalogs`]: the spec mandates
+    /// `SQL_SCHEMA_TERM = ""` and `SQL_SCHEMA_USAGE = 0` when the answer is
+    /// no, and both are derived from this method by [`default_get_info`].
+    /// When the answer is `true`, `SQL_SCHEMA_USAGE` is data-source-specific
+    /// and left to the backend.
+    ///
+    /// There is no `SQL_SCHEMA_NAME` info type; the spec directs applications
+    /// to `SQL_CATALOG_NAME` for both questions, so this hook is the only
+    /// place the schema fact is stated.
+    fn supports_schemas() -> bool;
+
+    /// The `SQL_ALTER_TABLE` (86) capability bitmask — an OR of the
+    /// [`SQL_AT_*`](crate::types::SQL_AT_ADD_COLUMN_SINGLE) constants.
+    ///
+    /// Required rather than defaulted for the reason a capability bitmap
+    /// always should be: `0` means "this data source cannot `ALTER TABLE` at
+    /// all", which is a claim, not an absence of one. A backend author is
+    /// unlikely to notice a capability they never wrote code for, so the
+    /// compiler asks instead. Return `0` only if that is genuinely true.
+    fn alter_table_support() -> u32;
+
+    /// The `SQL_OJ_CAPABILITIES` (115) bitmask — an OR of the
+    /// [`SQL_OJ_*`](crate::types::SQL_OJ_LEFT) constants.
+    ///
+    /// Required for the same reason as [`Backend::alter_table_support`]: `0`
+    /// asserts that the data source supports no outer joins whatsoever.
+    fn outer_join_capabilities() -> u32;
+
+    /// The `SQL_DEFAULT_TXN_ISOLATION` (26) level this data source runs at
+    /// when the application has not set one — a single
+    /// [`SQL_TXN_*`](crate::types::SQL_TXN_SERIALIZABLE) constant, or `0` if
+    /// the data source does not support transactions.
+    ///
+    /// This is also what `SQLGetConnectAttr(SQL_ATTR_TXN_ISOLATION)` reports
+    /// on a connection where the application has not set the attribute. Both
+    /// answers come from here so they cannot disagree; core previously
+    /// hard-coded `SQL_TXN_READ_COMMITTED` for the connection attribute while
+    /// the backend reported something else for the info type.
+    fn default_txn_isolation() -> u32;
+
+    /// The `SQL_TXN_ISOLATION_OPTION` (72) bitmask: every isolation level this
+    /// data source can actually run at, as an OR of the
+    /// [`SQL_TXN_*`](crate::types::SQL_TXN_SERIALIZABLE) constants. `0` if the
+    /// data source does not support transactions.
+    ///
+    /// `SQLSetConnectAttr(SQL_ATTR_TXN_ISOLATION)` validates against this and
+    /// rejects anything outside it with `HY024`, so a level reported here is a
+    /// promise the backend must be able to keep — see
+    /// [`Backend::set_txn_isolation`], which a backend declaring more than one
+    /// level is required to implement.
+    ///
+    /// Must include [`Backend::default_txn_isolation`] whenever that is
+    /// non-zero.
+    fn txn_isolation_options() -> u32;
+
+    /// Apply an isolation level to an open connection.
+    ///
+    /// Called by `SQLSetConnectAttr(SQL_ATTR_TXN_ISOLATION)` after `level` has
+    /// been validated against [`Backend::txn_isolation_options`], and by
+    /// `SQLDriverConnect`/`SQLConnect` for a level the application set before
+    /// connecting. `level` is always exactly one `SQL_TXN_*` bit.
+    ///
+    /// The default handles the common case of a data source with exactly one
+    /// isolation level: there is nothing to switch to, so applying the only
+    /// supported level succeeds without the backend writing any code. A
+    /// backend that declares **more than one** level in
+    /// `txn_isolation_options` must override this — otherwise the default
+    /// reports `NotImplemented` rather than accepting a level it would then
+    /// silently fail to apply.
+    fn set_txn_isolation(_conn: &Self::Connection, level: u32) -> Result<(), OdbcError> {
+        if Self::txn_isolation_options() == level {
+            // The only level this data source has; it is already in effect.
+            Ok(())
+        } else {
+            Err(OdbcError::NotImplemented {
+                feature: "set_txn_isolation".into(),
+            })
+        }
+    }
 }
 
 /// Separate trait for statement/cursor operations.
@@ -460,9 +570,35 @@ pub fn default_get_info<B: Backend>(
         InfoType::DriverOdbcVer => Some(InfoValue::String(SQL_DRIVER_ODBC_VER_STRING.into())),
         InfoType::SearchPatternEscape => Some(InfoValue::String("\\".into())),
         InfoType::IdentifierQuoteChar => Some(InfoValue::String("\"".into())),
-        InfoType::CatalogTerm => Some(InfoValue::String("catalog".into())),
-        InfoType::SchemaTerm => Some(InfoValue::String("schema".into())),
-        InfoType::CatalogNameSeparator => Some(InfoValue::String(".".into())),
+        // --- Catalog / schema group: all derived from the two backend hooks ---
+        // The spec defines each of these in terms of whether the data source
+        // has catalogs (resp. schemas) at all, and mandates the empty string
+        // or zero when it does not. See `Backend::supports_catalogs`.
+        InfoType::CatalogTerm => Some(InfoValue::String(
+            if B::supports_catalogs() {
+                "catalog"
+            } else {
+                ""
+            }
+            .into(),
+        )),
+        InfoType::SchemaTerm => Some(InfoValue::String(
+            if B::supports_schemas() { "schema" } else { "" }.into(),
+        )),
+        InfoType::CatalogNameSeparator => Some(InfoValue::String(
+            if B::supports_catalogs() { "." } else { "" }.into(),
+        )),
+        InfoType::CatalogName => Some(InfoValue::String(
+            if B::supports_catalogs() { "Y" } else { "N" }.into(),
+        )),
+        // Only the spec-mandated zero is asserted here. Once catalogs or
+        // schemas exist, the position of the catalog in a qualified name and
+        // the statements catalogs/schemas may appear in are genuinely
+        // per-data-source, so core falls through and lets the backend answer
+        // rather than overstating a capability it cannot know.
+        InfoType::CatalogLocation if !B::supports_catalogs() => Some(InfoValue::U16(0)),
+        InfoType::CatalogUsage if !B::supports_catalogs() => Some(InfoValue::U32(0)),
+        InfoType::SchemaUsage if !B::supports_schemas() => Some(InfoValue::U32(0)),
         InfoType::ColumnAlias => Some(InfoValue::String("Y".into())),
         InfoType::OrderByColumnsInSelect => Some(InfoValue::String("N".into())),
         InfoType::Subqueries => Some(InfoValue::U32(
@@ -522,11 +658,20 @@ pub fn default_get_info<B: Backend>(
         // --- U32 types identical in all drivers ---
         InfoType::ScrollOptions => Some(InfoValue::U32(SQL_SO_FORWARD_ONLY)),
         InfoType::ConvertFunctions => Some(InfoValue::U32(SQL_FN_CVT_CAST)),
-        InfoType::AlterTable => Some(InfoValue::U32(0)),
+        // Capability bitmaps, not limits: a `0` here is the claim "this data
+        // source cannot do this at all", so the backend has to state it.
+        InfoType::AlterTable => Some(InfoValue::U32(B::alter_table_support())),
+        InfoType::OuterJoinCapabilities => Some(InfoValue::U32(B::outer_join_capabilities())),
+        // Limits, where the spec defines 0 as "no specified limit or the limit
+        // is unknown" -- correct as a shared default, unlike the two above.
         InfoType::MaxIndexSize => Some(InfoValue::U32(0)),
         InfoType::MaxRowSize => Some(InfoValue::U32(0)),
         InfoType::MaxStatementLen => Some(InfoValue::U32(0)),
-        InfoType::OuterJoinCapabilities => Some(InfoValue::U32(0)),
+        // Derived from the backend hooks so that SQL_DEFAULT_TXN_ISOLATION and
+        // SQLGetConnectAttr(SQL_ATTR_TXN_ISOLATION) cannot report two
+        // different levels for the same connection.
+        InfoType::DefaultTxnIsolation => Some(InfoValue::U32(B::default_txn_isolation())),
+        InfoType::TransactionIsolationProtocol => Some(InfoValue::U32(B::txn_isolation_options())),
         InfoType::SqlConformance => Some(InfoValue::U32(SQL_SC_SQL92_ENTRY)),
         InfoType::OdbcInterfaceConformance => Some(InfoValue::U32(SQL_OIC_CORE)),
         InfoType::AsyncMode => Some(InfoValue::U32(SQL_AM_NONE)),
@@ -581,11 +726,12 @@ mod tests {
     use super::*;
     use crate::test_utils::{MockBackend, MockTxnDeleteCloseBackend};
     use crate::types::{
-        DEFAULT_IDENTIFIER_LEN, InfoType, InfoValue, SQL_AM_NONE, SQL_CA1_NEXT, SQL_CB_PRESERVE,
-        SQL_DRIVER_ODBC_VER_STRING, SQL_FN_CVT_CAST, SQL_GB_NO_RELATION, SQL_INSENSITIVE,
-        SQL_MAX_CURSOR_NAME_LEN, SQL_OIC_CORE, SQL_SC_SQL92_ENTRY, SQL_SO_FORWARD_ONLY,
+        DEFAULT_IDENTIFIER_LEN, InfoType, InfoValue, SQL_AM_NONE, SQL_AT_ADD_COLUMN_SINGLE,
+        SQL_AT_DROP_COLUMN_RESTRICT, SQL_CA1_NEXT, SQL_CB_PRESERVE, SQL_DRIVER_ODBC_VER_STRING,
+        SQL_FN_CVT_CAST, SQL_GB_NO_RELATION, SQL_INSENSITIVE, SQL_MAX_CURSOR_NAME_LEN,
+        SQL_OIC_CORE, SQL_OJ_LEFT, SQL_OJ_NESTED, SQL_SC_SQL92_ENTRY, SQL_SO_FORWARD_ONLY,
         SQL_SQ_COMPARISON, SQL_SQ_CORRELATED_SUBQUERIES, SQL_SQ_EXISTS, SQL_SQ_IN,
-        SQL_SQ_QUANTIFIED, SQL_U_UNION, SQL_U_UNION_ALL,
+        SQL_SQ_QUANTIFIED, SQL_TXN_SERIALIZABLE, SQL_U_UNION, SQL_U_UNION_ALL,
     };
 
     enum Expected {
@@ -644,11 +790,15 @@ mod tests {
         (InfoType::UnionStatement,                Expected::U32(SQL_U_UNION | SQL_U_UNION_ALL)),
         (InfoType::ScrollOptions,                 Expected::U32(SQL_SO_FORWARD_ONLY)),
         (InfoType::ConvertFunctions,              Expected::U32(SQL_FN_CVT_CAST)),
-        (InfoType::AlterTable,                    Expected::U32(0)),
+        // Capability bitmaps: MockBackend's declared values, not a shared 0.
+        (InfoType::AlterTable,                    Expected::U32(SQL_AT_ADD_COLUMN_SINGLE | SQL_AT_DROP_COLUMN_RESTRICT)),
+        (InfoType::OuterJoinCapabilities,         Expected::U32(SQL_OJ_LEFT | SQL_OJ_NESTED)),
+        // Limits, where the spec defines 0 as "no limit or unknown".
         (InfoType::MaxIndexSize,                  Expected::U32(0)),
         (InfoType::MaxRowSize,                    Expected::U32(0)),
         (InfoType::MaxStatementLen,               Expected::U32(0)),
-        (InfoType::OuterJoinCapabilities,         Expected::U32(0)),
+        (InfoType::DefaultTxnIsolation,           Expected::U32(SQL_TXN_SERIALIZABLE)),
+        (InfoType::TransactionIsolationProtocol,  Expected::U32(SQL_TXN_SERIALIZABLE)),
         (InfoType::SqlConformance,                Expected::U32(SQL_SC_SQL92_ENTRY)),
         (InfoType::OdbcInterfaceConformance,      Expected::U32(SQL_OIC_CORE)),
         (InfoType::AsyncMode,                     Expected::U32(SQL_AM_NONE)),
@@ -733,6 +883,149 @@ mod tests {
         assert_eq!(
             common_get_info_raw::<MockBackend>(SQL_CURSOR_ROLLBACK_BEHAVIOR),
             Some(InfoValue::U16(SQL_CB_PRESERVE))
+        );
+    }
+
+    /// `SQL_CATALOG_TERM`, `SQL_CATALOG_NAME_SEPARATOR`, `SQL_CATALOG_NAME`,
+    /// `SQL_CATALOG_LOCATION` and `SQL_CATALOG_USAGE` are all defined by the
+    /// `SQLGetInfo` spec in terms of one fact — whether the data source has
+    /// catalogs at all — so a backend that says it has none must not be handed
+    /// a name for them. Core used to answer "catalog" and "." unconditionally,
+    /// which let a driver report `SQL_CATALOG_NAME = "N"` and name its
+    /// catalogs in the same breath.
+    #[test]
+    fn catalog_less_backend_reports_the_spec_mandated_empty_catalog_group() {
+        use crate::test_utils::MockNoCatalogBackend;
+
+        let widths = CatalogResultColumnWidths::default();
+        assert_eq!(
+            default_get_info::<MockNoCatalogBackend>(InfoType::CatalogTerm, &widths),
+            Some(InfoValue::String(String::new())),
+            "SQL_CATALOG_TERM must be empty when the data source has no catalogs"
+        );
+        assert_eq!(
+            default_get_info::<MockNoCatalogBackend>(InfoType::CatalogNameSeparator, &widths),
+            Some(InfoValue::String(String::new())),
+            "SQL_CATALOG_NAME_SEPARATOR must be empty when the data source has no catalogs"
+        );
+        assert_eq!(
+            default_get_info::<MockNoCatalogBackend>(InfoType::CatalogName, &widths),
+            Some(InfoValue::String("N".into())),
+            "SQL_CATALOG_NAME must be \"N\" when the data source has no catalogs"
+        );
+        assert_eq!(
+            default_get_info::<MockNoCatalogBackend>(InfoType::CatalogLocation, &widths),
+            Some(InfoValue::U16(0)),
+            "SQL_CATALOG_LOCATION must be 0 when the data source has no catalogs"
+        );
+        assert_eq!(
+            default_get_info::<MockNoCatalogBackend>(InfoType::CatalogUsage, &widths),
+            Some(InfoValue::U32(0)),
+            "SQL_CATALOG_USAGE must be 0 when the data source has no catalogs"
+        );
+    }
+
+    /// The schema half of the same rule: `SQL_SCHEMA_TERM` and
+    /// `SQL_SCHEMA_USAGE` are defined in terms of whether schemas exist.
+    #[test]
+    fn schema_less_backend_reports_the_spec_mandated_empty_schema_group() {
+        use crate::test_utils::MockNoCatalogBackend;
+
+        let widths = CatalogResultColumnWidths::default();
+        assert_eq!(
+            default_get_info::<MockNoCatalogBackend>(InfoType::SchemaTerm, &widths),
+            Some(InfoValue::String(String::new())),
+            "SQL_SCHEMA_TERM must be empty when the data source has no schemas"
+        );
+        assert_eq!(
+            default_get_info::<MockNoCatalogBackend>(InfoType::SchemaUsage, &widths),
+            Some(InfoValue::U32(0)),
+            "SQL_SCHEMA_USAGE must be 0 when the data source has no schemas"
+        );
+    }
+
+    /// A backend that *does* have catalogs and schemas still gets the SQL-92
+    /// Full level terms the spec names, so the fix does not quietly blank the
+    /// values for the drivers that were already right.
+    #[test]
+    fn catalog_supporting_backend_keeps_the_sql92_full_terms() {
+        let widths = CatalogResultColumnWidths::default();
+        for (info_type, expected) in [
+            (InfoType::CatalogTerm, "catalog"),
+            (InfoType::SchemaTerm, "schema"),
+            (InfoType::CatalogNameSeparator, "."),
+            (InfoType::CatalogName, "Y"),
+        ] {
+            assert_eq!(
+                default_get_info::<MockBackend>(info_type, &widths),
+                Some(InfoValue::String(expected.into())),
+                "{info_type:?} changed for a catalog-supporting backend"
+            );
+        }
+    }
+
+    /// Where the spec only mandates the *zero*, core must not invent the
+    /// non-zero. `SQL_CATALOG_LOCATION` (start vs end), `SQL_CATALOG_USAGE`
+    /// and `SQL_SCHEMA_USAGE` are genuinely per-data-source once catalogs or
+    /// schemas exist, so core returns `None` and leaves them to the backend
+    /// rather than overstating a capability it cannot know.
+    #[test]
+    fn catalog_supporting_backend_leaves_location_and_usage_to_the_backend() {
+        let widths = CatalogResultColumnWidths::default();
+        for info_type in [
+            InfoType::CatalogLocation,
+            InfoType::CatalogUsage,
+            InfoType::SchemaUsage,
+        ] {
+            assert_eq!(
+                default_get_info::<MockBackend>(info_type, &widths),
+                None,
+                "{info_type:?} must be left to the backend when catalogs/schemas exist"
+            );
+        }
+    }
+
+    /// C5: `SQL_ALTER_TABLE` and `SQL_OJ_CAPABILITIES` are capability bitmaps,
+    /// where a defaulted `0` claims "this data source cannot do this at all".
+    /// They now come from required `Backend` methods, so a backend author has
+    /// to state the fact instead of inheriting a silent understatement.
+    #[test]
+    fn alter_table_and_outer_join_capabilities_come_from_the_backend() {
+        let widths = CatalogResultColumnWidths::default();
+        assert_eq!(
+            default_get_info::<MockBackend>(InfoType::AlterTable, &widths),
+            Some(InfoValue::U32(MockBackend::alter_table_support())),
+            "SQL_ALTER_TABLE ignored Backend::alter_table_support"
+        );
+        assert_eq!(
+            default_get_info::<MockBackend>(InfoType::OuterJoinCapabilities, &widths),
+            Some(InfoValue::U32(MockBackend::outer_join_capabilities())),
+            "SQL_OJ_CAPABILITIES ignored Backend::outer_join_capabilities"
+        );
+        // A non-zero declaration is what proves the value is read rather than
+        // hard-coded: the previous implementation returned 0 for both.
+        assert_ne!(MockBackend::alter_table_support(), 0);
+        assert_ne!(MockBackend::outer_join_capabilities(), 0);
+    }
+
+    /// C2: `SQL_DEFAULT_TXN_ISOLATION` and `SQL_TXN_ISOLATION_OPTION` are
+    /// derived from the same two hooks that
+    /// `SQLGetConnectAttr(SQL_ATTR_TXN_ISOLATION)` reads, so the two cannot
+    /// disagree on one connection.
+    #[test]
+    fn txn_isolation_info_types_come_from_the_backend() {
+        use crate::types::SQL_TXN_SERIALIZABLE;
+
+        let widths = CatalogResultColumnWidths::default();
+        assert_eq!(
+            default_get_info::<MockBackend>(InfoType::DefaultTxnIsolation, &widths),
+            Some(InfoValue::U32(SQL_TXN_SERIALIZABLE)),
+            "SQL_DEFAULT_TXN_ISOLATION ignored Backend::default_txn_isolation"
+        );
+        assert_eq!(
+            default_get_info::<MockBackend>(InfoType::TransactionIsolationProtocol, &widths),
+            Some(InfoValue::U32(SQL_TXN_SERIALIZABLE)),
+            "SQL_TXN_ISOLATION_OPTION ignored Backend::txn_isolation_options"
         );
     }
 

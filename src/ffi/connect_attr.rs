@@ -11,13 +11,13 @@ use crate::panic::panic_safe;
 use crate::types::{
     SQL_AUTOCOMMIT_OFF, SQL_AUTOCOMMIT_ON, SQL_CD_FALSE, SQL_FALSE, SQL_NTS, SqlReturn, SqlState,
 };
+#[cfg(test)]
+use crate::types::{SQL_TXN_READ_COMMITTED, SQL_TXN_REPEATABLE_READ, SQL_TXN_SERIALIZABLE};
 use crate::utf16::{utf16_to_string, write_utf16};
 
 // SQL_ATTR_ACCESS_MODE values
 const SQL_MODE_READ_WRITE: usize = 0;
 const SQL_MODE_READ_ONLY: usize = 1;
-// SQL_ATTR_TXN_ISOLATION values
-const SQL_TXN_READ_COMMITTED: usize = 2;
 // SQL_ATTR_TRACE values
 const SQL_OPT_TRACE_OFF: usize = 0;
 const SQL_OPT_TRACE_ON: usize = 1;
@@ -26,15 +26,28 @@ const SQL_CUR_USE_IF_NEEDED: usize = 0;
 const SQL_CUR_USE_ODBC: usize = 1;
 const SQL_CUR_USE_DRIVER: usize = 2;
 
-/// Apply a `SQL_ATTR_AUTOCOMMIT` value that was set before the connection was
-/// open.
+/// Apply every connection attribute that was set before the connection was
+/// open and has to reach the backend.
 ///
-/// The ODBC spec allows the attribute to be set either before or after
-/// connecting, so a value stored pre-connect must still reach the backend;
-/// otherwise manual-commit mode would be silently ignored.
-pub(crate) fn apply_pending_autocommit<B: Backend>(
+/// The ODBC spec lists both `SQL_ATTR_AUTOCOMMIT` and
+/// `SQL_ATTR_TXN_ISOLATION` as settable either side of the connection, so a
+/// value stored pre-connect must still be applied once the connection exists;
+/// otherwise the application is told the setting took effect while the data
+/// source runs at the old one.
+///
+/// Called by `SQLDriverConnectW`, `SQLConnectW` and `SQLBrowseConnectW` on the
+/// success path. An error here fails the connect, and the caller tears the
+/// connection down.
+pub(crate) fn apply_pending_connect_attrs<B: Backend>(
     handle: &mut ConnectionHandle<B>,
 ) -> Result<(), OdbcError> {
+    apply_pending_autocommit::<B>(handle)?;
+    apply_pending_txn_isolation::<B>(handle)
+}
+
+/// Apply a `SQL_ATTR_AUTOCOMMIT` value that was set before the connection was
+/// open. See [`apply_pending_connect_attrs`].
+fn apply_pending_autocommit<B: Backend>(handle: &mut ConnectionHandle<B>) -> Result<(), OdbcError> {
     let Some(&val) = handle.attrs.get(&ConnectionAttribute::AUTOCOMMIT.0) else {
         return Ok(());
     };
@@ -42,6 +55,52 @@ pub(crate) fn apply_pending_autocommit<B: Backend>(
         return Ok(());
     };
     B::set_autocommit(connection, val == SQL_AUTOCOMMIT_ON)
+}
+
+/// Apply a `SQL_ATTR_TXN_ISOLATION` value that was set before the connection
+/// was open. See [`apply_pending_connect_attrs`].
+///
+/// The value was already validated against
+/// [`Backend::txn_isolation_options`] when it was set, so this only has to
+/// apply it.
+fn apply_pending_txn_isolation<B: Backend>(
+    handle: &mut ConnectionHandle<B>,
+) -> Result<(), OdbcError> {
+    let Some(&val) = handle.attrs.get(&ConnectionAttribute::TXN_ISOLATION.0) else {
+        return Ok(());
+    };
+    let Some(connection) = handle.connection.as_ref() else {
+        return Ok(());
+    };
+    B::set_txn_isolation(connection, val as u32)
+}
+
+/// Reject a `SQL_ATTR_TXN_ISOLATION` value the data source cannot run at.
+///
+/// Two things make a value invalid. It must name exactly one level — the
+/// attribute selects *a* level, so a value with several `SQL_TXN_*` bits set
+/// is meaningless even when each bit is individually supported — and that
+/// level must appear in [`Backend::txn_isolation_options`], which is what
+/// `SQLGetInfo(SQL_TXN_ISOLATION_OPTION)` reports to the application as the
+/// menu to choose from.
+fn validate_txn_isolation<B: Backend>(level: u32) -> Result<(), OdbcError> {
+    let supported = B::txn_isolation_options();
+    if level == 0 || !level.is_power_of_two() {
+        return Err(OdbcError::general(
+            format!("SQL_ATTR_TXN_ISOLATION: {level:#x} does not name exactly one isolation level"),
+            SqlState::invalid_attribute_value(),
+        ));
+    }
+    if level & supported == 0 {
+        return Err(OdbcError::general(
+            format!(
+                "SQL_ATTR_TXN_ISOLATION: isolation level {level:#x} is not supported by this data \
+                 source (SQL_TXN_ISOLATION_OPTION = {supported:#x})"
+            ),
+            SqlState::invalid_attribute_value(),
+        ));
+    }
+    Ok(())
 }
 
 /// Generic implementation of SQLSetConnectAttrW.
@@ -95,7 +154,13 @@ pub(crate) fn apply_pending_autocommit<B: Backend>(
 /// - HY024 Invalid attribute value: returned for `SQL_ATTR_ACCESS_MODE` (not 0 or 1),
 ///   `SQL_ATTR_AUTOCOMMIT` (not 0 or 1), `SQL_ATTR_TRACE` (not 0 or 1), and
 ///   `SQL_ATTR_ODBC_CURSORS` (not 0, 1, or 2). Also returned when
-///   `SQL_ATTR_CONNECTION_DEAD` is set (read-only attribute).
+///   `SQL_ATTR_CONNECTION_DEAD` is set (read-only attribute), and for
+///   `SQL_ATTR_TXN_ISOLATION` when the value does not name exactly one
+///   isolation level or names one outside [`Backend::txn_isolation_options`].
+///   The spec's own HY024 row assigns this check to the driver: the Driver
+///   Manager only validates attributes "that accept a discrete set of values",
+///   and "for all other connection and statement attributes, the driver must
+///   verify the value specified in ValuePtr".
 /// - HY090 Invalid string or buffer length: (driver-manager-handled; not returned
 ///   here). A `string_length < 0` check for `SQL_ATTR_CURRENT_CATALOG` is
 ///   performed as a defensive measure.
@@ -109,7 +174,9 @@ pub(crate) fn apply_pending_autocommit<B: Backend>(
 ///   not applicable; the cursor library and connection pooling are not used.
 /// - HYC00 Optional feature not implemented: not returned; unknown/unsupported
 ///   attributes are accepted silently for DM/tool compatibility (a warning is
-///   logged instead).
+///   logged instead). Note that this row is about an unsupported *attribute*,
+///   not an unsupported *value* — an isolation level the data source cannot
+///   run at is HY024 above, not HYC00.
 /// - HYT01 Connection timeout expired: not returned; this function does not wait
 ///   on the data source.
 /// - IM001 Driver does not support this function: (driver-manager-handled; not
@@ -217,10 +284,35 @@ pub unsafe fn sql_set_connect_attr_w<B: Backend>(
                     Ok(SqlReturn::SUCCESS)
                 }
 
+                // SQL_ATTR_TXN_ISOLATION selects *one* isolation level, and the
+                // spec's HY024 row makes verifying it the driver's job: "For
+                // all other connection and statement attributes, the driver
+                // must verify the value specified in ValuePtr". A level the
+                // data source cannot run at must be rejected rather than
+                // stored and echoed back, and a level it can must actually
+                // reach the data source.
+                _ if attr == ConnectionAttribute::TXN_ISOLATION => {
+                    let level = u32::try_from(value_ptr as usize).map_err(|_| {
+                        OdbcError::general(
+                            format!("SQL_ATTR_TXN_ISOLATION: invalid value {:?}", value_ptr),
+                            SqlState::invalid_attribute_value(),
+                        )
+                    })?;
+                    validate_txn_isolation::<B>(level)?;
+                    // Applied here when connected; deferred to
+                    // `apply_pending_txn_isolation` at connect otherwise, since
+                    // the spec lists this attribute as settable either side of
+                    // the connection.
+                    if let Some(c) = conn.connection.as_ref() {
+                        B::set_txn_isolation(c, level)?;
+                    }
+                    conn.attrs.insert(attribute, level as usize);
+                    Ok(SqlReturn::SUCCESS)
+                }
+
                 // Non-discrete integer-valued attributes: store value directly.
                 _ if attr == ConnectionAttribute::LOGIN_TIMEOUT
                     || attr == ConnectionAttribute::TRANSLATE_OPTION
-                    || attr == ConnectionAttribute::TXN_ISOLATION
                     || attr == ConnectionAttribute::PACKET_SIZE
                     || attr == ConnectionAttribute::CONNECTION_TIMEOUT
                     || attr == ConnectionAttribute::ASYNC_ENABLE
@@ -397,11 +489,15 @@ pub unsafe fn sql_get_connect_attr_w<B: Backend>(
                     Ok(SqlReturn::SUCCESS)
                 }
                 _ if attr == ConnectionAttribute::TXN_ISOLATION => {
+                    // Unset: report what the backend declares, not a constant.
+                    // `SQL_DEFAULT_TXN_ISOLATION` is derived from the same hook
+                    // (see `default_get_info`), so the info type and the
+                    // connection attribute cannot disagree on one connection.
                     let v = conn
                         .attrs
                         .get(&attribute)
                         .copied()
-                        .unwrap_or(SQL_TXN_READ_COMMITTED);
+                        .unwrap_or(B::default_txn_isolation() as usize);
                     write_u32(v as u32);
                     Ok(SqlReturn::SUCCESS)
                 }
@@ -494,27 +590,48 @@ pub unsafe fn sql_get_connect_attr_w<B: Backend>(
 mod tests {
     use super::*;
     use crate::ffi::handle::{sql_alloc_handle, sql_free_handle};
-    use crate::test_utils::MockBackend;
+    use crate::handles::as_handle_ref;
+    use crate::test_utils::{
+        MockBackend, MockIsolationBackend, MockIsolationConnection, MockUnappliedIsolationBackend,
+    };
     use odbc_sys::HandleType;
 
-    unsafe fn alloc_env_conn() -> (*mut c_void, *mut c_void) {
+    /// Allocate an environment and connection handle **for the backend the
+    /// test then calls through**.
+    ///
+    /// The type parameter is load-bearing, not decoration. A handle is a
+    /// `ConnectionHandle<B>`, whose `connection: Option<B::Connection>` field
+    /// has a different layout for every backend, while the tag that
+    /// `as_handle_ref` validates is the same for all of them. Allocating as
+    /// one backend and calling as another therefore passes the tag check and
+    /// then reads uninitialised memory -- undefined behaviour that Miri
+    /// catches and a plain `cargo test` does not.
+    unsafe fn alloc_env_conn_for<B: Backend>() -> (*mut c_void, *mut c_void) {
         let mut env: *mut c_void = std::ptr::null_mut();
         let _ = unsafe {
-            sql_alloc_handle::<MockBackend>(HandleType::Env as i16, std::ptr::null_mut(), &mut env)
+            sql_alloc_handle::<B>(HandleType::Env as i16, std::ptr::null_mut(), &mut env)
         };
         let mut conn: *mut c_void = std::ptr::null_mut();
-        let _ = unsafe { sql_alloc_handle::<MockBackend>(HandleType::Dbc as i16, env, &mut conn) };
+        let _ = unsafe { sql_alloc_handle::<B>(HandleType::Dbc as i16, env, &mut conn) };
         (env, conn)
     }
 
-    unsafe fn cleanup(env: *mut c_void, conn: *mut c_void) {
+    unsafe fn alloc_env_conn() -> (*mut c_void, *mut c_void) {
+        unsafe { alloc_env_conn_for::<MockBackend>() }
+    }
+
+    unsafe fn cleanup_for<B: Backend>(env: *mut c_void, conn: *mut c_void) {
         unsafe {
             // A connected handle cannot be freed; disconnect first so the
             // connection is not leaked. Harmless when never connected.
-            let _ = crate::ffi::connect::sql_disconnect::<MockBackend>(conn);
-            let _ = sql_free_handle::<MockBackend>(HandleType::Dbc as i16, conn);
-            let _ = sql_free_handle::<MockBackend>(HandleType::Env as i16, env);
+            let _ = crate::ffi::connect::sql_disconnect::<B>(conn);
+            let _ = sql_free_handle::<B>(HandleType::Dbc as i16, conn);
+            let _ = sql_free_handle::<B>(HandleType::Env as i16, env);
         }
+    }
+
+    unsafe fn cleanup(env: *mut c_void, conn: *mut c_void) {
+        unsafe { cleanup_for::<MockBackend>(env, conn) }
     }
 
     #[test]
@@ -870,6 +987,248 @@ mod tests {
             );
             assert_eq!(ret, SqlReturn::ERROR);
             cleanup(env, conn);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // SQL_ATTR_TXN_ISOLATION
+    // -----------------------------------------------------------------------
+
+    /// Reads the SQLSTATE of the connection's first diagnostic record.
+    unsafe fn first_sqlstate<B: Backend>(conn: *mut c_void) -> String {
+        let mut state = [0u16; 6];
+        let mut native_err: i32 = 0;
+        let mut msg = [0u16; 256];
+        let mut msg_len: i16 = 0;
+        let ret = unsafe {
+            crate::ffi::diag::sql_get_diag_rec_w::<B>(
+                odbc_sys::HandleType::Dbc as i16,
+                conn,
+                1,
+                state.as_mut_ptr(),
+                &mut native_err,
+                msg.as_mut_ptr(),
+                msg.len() as i16,
+                &mut msg_len,
+            )
+        };
+        assert_eq!(ret, SqlReturn::SUCCESS, "expected a diagnostic record");
+        String::from_utf16_lossy(&state[..5])
+    }
+
+    /// The isolation level the backend actually had applied to it, read out of
+    /// the connection the handle owns. This is what separates "core stored the
+    /// value" from "the data source runs at it".
+    unsafe fn applied_isolation(conn: *mut c_void) -> u32 {
+        let handle =
+            unsafe { as_handle_ref::<ConnectionHandle<MockIsolationBackend>>(conn) }.unwrap();
+        let connection: &MockIsolationConnection =
+            handle.connection.as_ref().expect("not connected");
+        connection.applied.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    unsafe fn driver_connect<B: Backend>(conn: *mut c_void) -> SqlReturn {
+        let cs: Vec<u16> = "Database=test"
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        unsafe {
+            crate::ffi::connect::sql_driver_connect_w::<B>(
+                conn,
+                std::ptr::null_mut(),
+                cs.as_ptr(),
+                SQL_NTS as i16,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                0,
+            )
+        }
+    }
+
+    /// C2: an unset `SQL_ATTR_TXN_ISOLATION` must report the level the backend
+    /// declares, not a constant. Core used to answer `SQL_TXN_READ_COMMITTED`
+    /// unconditionally, so a backend reporting `SQL_TXN_SERIALIZABLE` for
+    /// `SQL_DEFAULT_TXN_ISOLATION` contradicted itself on the same connection.
+    #[test]
+    fn get_txn_isolation_default_comes_from_the_backend() {
+        unsafe {
+            let (env, conn) = alloc_env_conn();
+            let mut val: u32 = 99;
+            let ret = sql_get_connect_attr_w::<MockBackend>(
+                conn,
+                ConnectionAttribute::TXN_ISOLATION.0,
+                &mut val as *mut u32 as *mut c_void,
+                0,
+                std::ptr::null_mut(),
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+            assert_eq!(
+                val,
+                MockBackend::default_txn_isolation(),
+                "unset SQL_ATTR_TXN_ISOLATION ignored Backend::default_txn_isolation"
+            );
+            assert_ne!(
+                val, SQL_TXN_READ_COMMITTED,
+                "still reporting the old hard-coded READ_COMMITTED"
+            );
+            cleanup(env, conn);
+        }
+    }
+
+    /// C3: the spec's HY024 row makes validating this the driver's job --
+    /// "For all other connection and statement attributes, the driver must
+    /// verify the value specified in ValuePtr". A level outside
+    /// `SQL_TXN_ISOLATION_OPTION` is not one the data source can run at.
+    #[test]
+    fn set_txn_isolation_rejects_a_level_the_backend_does_not_support() {
+        unsafe {
+            let (env, conn) = alloc_env_conn();
+            // MockBackend declares SERIALIZABLE only.
+            let ret = sql_set_connect_attr_w::<MockBackend>(
+                conn,
+                ConnectionAttribute::TXN_ISOLATION.0,
+                std::ptr::without_provenance_mut(SQL_TXN_READ_COMMITTED as usize),
+                0,
+            );
+            assert_eq!(ret, SqlReturn::ERROR);
+            assert_eq!(first_sqlstate::<MockBackend>(conn), "HY024");
+            cleanup(env, conn);
+        }
+    }
+
+    /// The attribute sets *a* level, not a set of them, so a value with more
+    /// than one `SQL_TXN_*` bit is invalid even when every bit is supported.
+    #[test]
+    fn set_txn_isolation_rejects_a_multi_bit_value() {
+        unsafe {
+            let (env, conn) = alloc_env_conn_for::<MockIsolationBackend>();
+            let ret = sql_set_connect_attr_w::<MockIsolationBackend>(
+                conn,
+                ConnectionAttribute::TXN_ISOLATION.0,
+                std::ptr::without_provenance_mut(
+                    (SQL_TXN_READ_COMMITTED | SQL_TXN_SERIALIZABLE) as usize,
+                ),
+                0,
+            );
+            assert_eq!(ret, SqlReturn::ERROR);
+            assert_eq!(first_sqlstate::<MockIsolationBackend>(conn), "HY024");
+            cleanup_for::<MockIsolationBackend>(env, conn);
+        }
+    }
+
+    /// A supported level is accepted and reads back unchanged.
+    #[test]
+    fn set_txn_isolation_accepts_a_supported_level() {
+        unsafe {
+            let (env, conn) = alloc_env_conn();
+            let ret = sql_set_connect_attr_w::<MockBackend>(
+                conn,
+                ConnectionAttribute::TXN_ISOLATION.0,
+                std::ptr::without_provenance_mut(SQL_TXN_SERIALIZABLE as usize),
+                0,
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+
+            let mut val: u32 = 0;
+            let ret = sql_get_connect_attr_w::<MockBackend>(
+                conn,
+                ConnectionAttribute::TXN_ISOLATION.0,
+                &mut val as *mut u32 as *mut c_void,
+                0,
+                std::ptr::null_mut(),
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+            assert_eq!(val, SQL_TXN_SERIALIZABLE);
+            cleanup(env, conn);
+        }
+    }
+
+    /// C3's worse half: the stored value has to *reach the data source*. An
+    /// application that sets REPEATABLE READ, gets SQL_SUCCESS and reads its
+    /// own value back must not be talking to a connection still running at
+    /// whatever it always ran at.
+    #[test]
+    fn set_txn_isolation_reaches_the_backend() {
+        unsafe {
+            let (env, conn) = alloc_env_conn_for::<MockIsolationBackend>();
+            assert_eq!(
+                driver_connect::<MockIsolationBackend>(conn),
+                SqlReturn::SUCCESS
+            );
+
+            let ret = sql_set_connect_attr_w::<MockIsolationBackend>(
+                conn,
+                ConnectionAttribute::TXN_ISOLATION.0,
+                std::ptr::without_provenance_mut(SQL_TXN_REPEATABLE_READ as usize),
+                0,
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+            assert_eq!(
+                applied_isolation(conn),
+                SQL_TXN_REPEATABLE_READ,
+                "the level never reached the backend"
+            );
+
+            cleanup_for::<MockIsolationBackend>(env, conn);
+        }
+    }
+
+    /// The spec lists SQL_ATTR_TXN_ISOLATION as settable "Either" side of the
+    /// connection, so a level set before connecting must still be applied once
+    /// the connection exists -- the same contract as SQL_ATTR_AUTOCOMMIT.
+    #[test]
+    fn txn_isolation_set_before_connect_is_applied_on_connect() {
+        unsafe {
+            let (env, conn) = alloc_env_conn_for::<MockIsolationBackend>();
+            assert_eq!(
+                sql_set_connect_attr_w::<MockIsolationBackend>(
+                    conn,
+                    ConnectionAttribute::TXN_ISOLATION.0,
+                    std::ptr::without_provenance_mut(SQL_TXN_REPEATABLE_READ as usize),
+                    0,
+                ),
+                SqlReturn::SUCCESS,
+                "pre-connect set must be accepted and deferred"
+            );
+            assert_eq!(
+                driver_connect::<MockIsolationBackend>(conn),
+                SqlReturn::SUCCESS
+            );
+            assert_eq!(
+                applied_isolation(conn),
+                SQL_TXN_REPEATABLE_READ,
+                "deferred isolation level was silently dropped at connect"
+            );
+
+            cleanup_for::<MockIsolationBackend>(env, conn);
+        }
+    }
+
+    /// A backend declaring more than one level but not implementing
+    /// `set_txn_isolation` must fail loudly rather than accept a level it
+    /// cannot apply -- the exact silent lie C3 is about.
+    #[test]
+    fn multi_level_backend_without_the_hook_cannot_switch_levels() {
+        unsafe {
+            let (env, conn) = alloc_env_conn_for::<MockUnappliedIsolationBackend>();
+            assert_eq!(
+                driver_connect::<MockUnappliedIsolationBackend>(conn),
+                SqlReturn::SUCCESS
+            );
+            let ret = sql_set_connect_attr_w::<MockUnappliedIsolationBackend>(
+                conn,
+                ConnectionAttribute::TXN_ISOLATION.0,
+                std::ptr::without_provenance_mut(SQL_TXN_SERIALIZABLE as usize),
+                0,
+            );
+            assert_eq!(
+                ret,
+                SqlReturn::ERROR,
+                "accepted a level the backend has no way to apply"
+            );
+
+            cleanup_for::<MockUnappliedIsolationBackend>(env, conn);
         }
     }
 }

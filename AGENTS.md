@@ -200,6 +200,43 @@ If `odbc-sys` adds a new enum that we need to convert from raw values, add a `xx
 2. Implement `Backend` + `StatementBackend` for your backend type.
 3. In `lib.rs`, invoke `stackable_odbc_core::forward_ffi!(crate::backend::YourBackend);` — no `ffi.rs` needed.
 
+### Capability methods are required, not defaulted
+
+Most of `Backend` is defaulted, so a driver implements only what it needs.
+Six methods deliberately are not:
+
+| Method | States |
+|--------|--------|
+| `supports_catalogs` | whether the data source has ODBC catalogs |
+| `supports_schemas` | whether it has ODBC schemas |
+| `alter_table_support` | the `SQL_ALTER_TABLE` `SQL_AT_*` bitmask |
+| `outer_join_capabilities` | the `SQL_OJ_CAPABILITIES` `SQL_OJ_*` bitmask |
+| `default_txn_isolation` | `SQL_DEFAULT_TXN_ISOLATION` (`0` = no transactions) |
+| `txn_isolation_options` | `SQL_TXN_ISOLATION_OPTION` (`0` = no transactions) |
+
+Each states a **capability**, where any default is a claim the backend author
+never made. `0` understates ("this data source cannot do this at all") and
+`true` overstates, and a backend author is unlikely to notice a capability they
+never wrote code for — so the compiler asks instead of core guessing. Each of
+these replaced a value core used to invent, and each of those values was wrong
+for at least one real driver.
+
+`supports_catalogs` and `supports_schemas` between them drive seven info types
+(`SQL_CATALOG_NAME`, `SQL_CATALOG_TERM`, `SQL_CATALOG_NAME_SEPARATOR`,
+`SQL_CATALOG_LOCATION`, `SQL_CATALOG_USAGE`, `SQL_SCHEMA_TERM`,
+`SQL_SCHEMA_USAGE`), which the `SQLGetInfo` spec defines in terms of that one
+fact. Note the asymmetry: core answers the whole group when the answer is
+*no*, because the spec mandates the empty string or zero, but for
+`SQL_CATALOG_LOCATION`, `SQL_CATALOG_USAGE` and `SQL_SCHEMA_USAGE` when the
+answer is *yes* it returns `None` and leaves them to the backend rather than
+inventing a value. A driver with catalogs still answers those three itself.
+
+`Backend::set_txn_isolation` stays defaulted, and the default is only correct
+for a data source with exactly one isolation level. A backend declaring more
+than one bit in `txn_isolation_options` **must** override it, or
+`SQLSetConnectAttr(SQL_ATTR_TXN_ISOLATION)` reports `NotImplemented` rather
+than accepting a level it cannot apply.
+
 ### Windows Driver Manager compatibility checklist
 
 The Windows DM is much stricter than unixODBC. These items are **required** for
