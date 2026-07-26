@@ -203,7 +203,7 @@ If `odbc-sys` adds a new enum that we need to convert from raw values, add a `xx
 ### Capability methods are required, not defaulted
 
 Most of `Backend` is defaulted, so a driver implements only what it needs.
-Fourteen methods deliberately are not:
+These deliberately are not:
 
 | Method | States |
 |--------|--------|

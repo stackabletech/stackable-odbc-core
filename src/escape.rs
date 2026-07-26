@@ -14,7 +14,32 @@ pub struct EscapeDialect {
     pub identifier_quotes: &'static [(char, char)],
     /// Remap an ODBC `{fn NAME(...)}` scalar-function name to the backend's
     /// name; `None` passes the name through unchanged. Input is the raw name.
+    ///
+    /// The cheap path: it swaps the identifier in front of the parentheses and
+    /// never sees the arguments, which is all `UCASE` → `upper` needs. When
+    /// the argument syntax differs too, use [`EscapeDialect::rewrite_scalar_fn`].
     pub remap_scalar_fn: fn(&str) -> Option<&'static str>,
+    /// Rewrite a whole `{fn NAME(args)}` escape.
+    ///
+    /// `args` is the text between the outer parentheses, **already
+    /// escape-translated** — a nested `{fn}`, `{ts}` or `{d}` inside the
+    /// argument list is resolved before the dialect sees it, so a dialect
+    /// never has to re-implement escape parsing. It is handed over with
+    /// string literals, quoted identifiers, comments and nested parentheses
+    /// intact: splitting it into arguments is the dialect's job, because only
+    /// the dialect knows how many arguments each function takes. Core
+    /// deliberately does not split on commas, which would corrupt
+    /// `{fn LOCATE(',', x)}`.
+    ///
+    /// Return `None` to fall back to [`EscapeDialect::remap_scalar_fn`] plus
+    /// verbatim arguments. Returning `Some` replaces the entire escape, so a
+    /// zero-argument call can emit a bare keyword with no trailing `()` —
+    /// which is what `{fn CURDATE()}` → `current_date` requires and what
+    /// `remap_scalar_fn` alone cannot express.
+    ///
+    /// Only consulted when the call has a balanced parenthesis pair; a
+    /// malformed `{fn ...}` takes the pass-through path unchanged.
+    pub rewrite_scalar_fn: fn(name: &str, args: &str) -> Option<String>,
     /// Render `{d <lit>}` given the raw inner literal text (e.g. `"'2020-01-01'"`).
     pub render_date: fn(&str) -> String,
     /// Render `{t <lit>}`.
@@ -31,6 +56,7 @@ impl EscapeDialect {
         EscapeDialect {
             identifier_quotes: &[('"', '"')],
             remap_scalar_fn: |_| None,
+            rewrite_scalar_fn: |_, _| None,
             render_date: ansi_date,
             render_time: ansi_time,
             render_timestamp: ansi_timestamp,
@@ -200,6 +226,55 @@ fn find_matching_brace(
     ))
 }
 
+/// Find the index of the `)` matching the `(` at `open`, skipping strings,
+/// quoted identifiers, comments and nested parentheses — the same
+/// literal-awareness [`find_matching_brace`] has, so that a `)` inside
+/// `'a)b'`, `"a)b"` or `-- a)b` does not close the call.
+///
+/// Bounded by `limit` (the index of the escape's closing `}`). Returns `None`
+/// rather than an error when there is no match, so an unbalanced `{fn ...}`
+/// takes the pass-through path instead of failing the statement. Only a
+/// malformed *escape* is an error here; malformed SQL inside one is the data
+/// source's to reject.
+fn find_matching_paren(
+    chars: &[char],
+    open: usize,
+    limit: usize,
+    dialect: &EscapeDialect,
+) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut i = open;
+    while i < limit {
+        let c = chars[i];
+        if c == '\'' {
+            let mut s = String::new();
+            copy_string(chars, &mut i, &mut s);
+            continue;
+        } else if let Some(close) = dialect.ident_close(c) {
+            let mut s = String::new();
+            copy_quoted_ident(chars, &mut i, &mut s, c, close);
+            continue;
+        } else if c == '-' && chars.get(i + 1) == Some(&'-') {
+            let mut s = String::new();
+            copy_line_comment(chars, &mut i, &mut s);
+            continue;
+        } else if c == '/' && chars.get(i + 1) == Some(&'*') {
+            let mut s = String::new();
+            copy_block_comment(chars, &mut i, &mut s);
+            continue;
+        } else if c == '(' {
+            depth += 1;
+        } else if c == ')' {
+            depth -= 1;
+            if depth == 0 {
+                return Some(i);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
 /// Translate one `{...}` escape starting at `*i == '{'`. Advances `*i` past the
 /// matching `}`.
 fn translate_escape(
@@ -244,6 +319,10 @@ fn translate_escape(
             if name.is_empty() {
                 // malformed {fn} — copy verbatim
                 out.extend(chars[open..=close].iter().copied());
+            } else if let Some(rewritten) =
+                rewrite_call(chars, &name, n, close, dialect).transpose()?
+            {
+                out.push_str(&rewritten);
             } else {
                 let mapped = (dialect.remap_scalar_fn)(&name).unwrap_or(&name);
                 out.push_str(mapped);
@@ -289,6 +368,48 @@ fn translate_escape(
     Ok(())
 }
 
+/// Offer a `{fn NAME(args)}` call to [`EscapeDialect::rewrite_scalar_fn`].
+///
+/// `name_end` is the index just past the function name, `close` the index of
+/// the escape's `}`. Returns `Ok(None)` when the dialect declines or the call
+/// has no balanced parenthesis pair, in which case the caller falls back to
+/// the `remap_scalar_fn` path. The inner `Result` propagates an error from
+/// translating the argument text — a `{call ...}` nested inside an argument
+/// list must still fail with `HYC00`, not be silently swallowed.
+#[allow(clippy::type_complexity)]
+fn rewrite_call(
+    chars: &[char],
+    name: &str,
+    name_end: usize,
+    close: usize,
+    dialect: &EscapeDialect,
+) -> Option<Result<String, OdbcError>> {
+    let mut p = name_end;
+    while p < close && chars[p].is_whitespace() {
+        p += 1;
+    }
+    if chars.get(p) != Some(&'(') {
+        return None;
+    }
+    let arg_close = find_matching_paren(chars, p, close, dialect)?;
+
+    // Translate the arguments *before* the dialect sees them, so a nested
+    // escape is already resolved and the dialect never parses escapes itself.
+    let args = match translate_slice(&chars[p + 1..arg_close], dialect) {
+        Ok(a) => a,
+        Err(e) => return Some(Err(e)),
+    };
+    let rewritten = (dialect.rewrite_scalar_fn)(name, args.trim())?;
+
+    // Anything between the closing paren and `}` is whitespace in a
+    // well-formed call, but translate it rather than dropping it so that a
+    // trailing nested escape is not silently lost.
+    match translate_slice(&chars[arg_close + 1..close], dialect) {
+        Ok(tail) => Some(Ok(rewritten + tail.trim_end())),
+        Err(e) => Some(Err(e)),
+    }
+}
+
 fn inner_trimmed(chars: &[char], from: usize, close: usize) -> String {
     chars[from..close]
         .iter()
@@ -322,6 +443,10 @@ mod tests {
         EscapeDialect {
             identifier_quotes: &[('"', '"'), ('[', ']')],
             remap_scalar_fn: remap,
+            // Deliberately the no-op, so every other test in this module
+            // covers a dialect that sets only `remap_scalar_fn` and pins what
+            // such a dialect does with a `{fn}` call it has no rule for.
+            rewrite_scalar_fn: |_, _| None,
             render_date: d,
             render_time: t,
             render_timestamp: ts,
@@ -329,6 +454,135 @@ mod tests {
     }
     fn tr(sql: &str) -> String {
         translate_escapes(sql, &dialect()).unwrap()
+    }
+
+    // ------------------------------------------------------------------
+    // rewrite_scalar_fn — argument-aware scalar function rewriting
+    // ------------------------------------------------------------------
+
+    /// A dialect that rewrites the shapes `remap_scalar_fn` cannot express:
+    /// an argument reordering, a bare keyword with no parentheses, and a
+    /// rewrite that inspects the argument text.
+    fn rewrite(name: &str, args: &str) -> Option<String> {
+        match name.to_ascii_uppercase().as_str() {
+            // Argument syntax differs, not just the name.
+            "LOCATE" => {
+                let (needle, haystack) = args.split_once(',')?;
+                Some(format!(
+                    "position({} IN {})",
+                    needle.trim(),
+                    haystack.trim()
+                ))
+            }
+            // Zero-argument calls that must emit a bare keyword: the target
+            // dialect rejects `current_date()`.
+            "CURDATE" if args.is_empty() => Some("current_date".to_string()),
+            "USERNAME" if args.is_empty() => Some("current_user".to_string()),
+            // Proves the hook sees the whole argument text, not just a name.
+            "ARGS" => Some(format!("<<{args}>>")),
+            _ => None,
+        }
+    }
+    fn rewriting_dialect() -> EscapeDialect {
+        EscapeDialect {
+            rewrite_scalar_fn: rewrite,
+            ..dialect()
+        }
+    }
+    fn rtr(sql: &str) -> String {
+        translate_escapes(sql, &rewriting_dialect()).unwrap()
+    }
+
+    #[test]
+    fn rewrite_scalar_fn_can_reorder_arguments() {
+        // `remap_scalar_fn` only swaps the identifier in front of the parens,
+        // so this rewrite was impossible to express before.
+        assert_eq!(
+            rtr("SELECT {fn LOCATE('b','ab')}"),
+            "SELECT position('b' IN 'ab')"
+        );
+    }
+
+    #[test]
+    fn rewrite_scalar_fn_can_emit_a_bare_keyword_for_a_zero_argument_call() {
+        // No trailing "()" -- the whole point: `current_date()` is a syntax
+        // error in the dialects that need this.
+        assert_eq!(rtr("SELECT {fn CURDATE()}"), "SELECT current_date");
+        assert_eq!(rtr("SELECT {fn USERNAME()}"), "SELECT current_user");
+    }
+
+    #[test]
+    fn rewrite_scalar_fn_sees_arguments_with_nested_escapes_already_translated() {
+        // The hook must run *after* the argument text is itself translated,
+        // so a dialect never has to re-implement escape parsing.
+        assert_eq!(
+            rtr("SELECT {fn ARGS({ts '2020-01-01 00:00:00'})}"),
+            "SELECT <<TIMESTAMP '2020-01-01 00:00:00'>>"
+        );
+        // Nested {fn} inside the arguments, including one that is itself
+        // rewritten.
+        assert_eq!(
+            rtr("SELECT {fn ARGS({fn UCASE(a)}, {fn CURDATE()})}"),
+            "SELECT <<upper(a), current_date>>"
+        );
+    }
+
+    #[test]
+    fn rewrite_scalar_fn_argument_text_keeps_literals_intact() {
+        // Core must not split on commas: this comma is inside a string, and
+        // splitting there would corrupt the call. Argument splitting is the
+        // dialect's problem, but only if core hands over honest text.
+        assert_eq!(rtr("SELECT {fn ARGS(',')}"), "SELECT <<','>>");
+        assert_eq!(
+            rtr("SELECT {fn ARGS('a,b', \"c,d\", -- x,y\n e)}"),
+            "SELECT <<'a,b', \"c,d\", -- x,y\n e>>"
+        );
+    }
+
+    #[test]
+    fn rewrite_scalar_fn_argument_text_keeps_nested_parens_intact() {
+        assert_eq!(
+            rtr("SELECT {fn ARGS(foo(a,b), c)}"),
+            "SELECT <<foo(a,b), c>>"
+        );
+    }
+
+    #[test]
+    fn rewrite_scalar_fn_returning_none_falls_back_to_remap_scalar_fn() {
+        // UCASE has no rewrite but does have a remap, so the cheap path still
+        // applies and the arguments are passed through verbatim.
+        assert_eq!(rtr("SELECT {fn UCASE(name)}"), "SELECT upper(name)");
+        // Neither a rewrite nor a remap: name and arguments both untouched.
+        assert_eq!(rtr("SELECT {fn WHATEVER(a, b)}"), "SELECT WHATEVER(a, b)");
+    }
+
+    #[test]
+    fn rewrite_scalar_fn_is_not_consulted_by_a_dialect_that_does_not_set_it() {
+        // A dialect that sets only `remap_scalar_fn` passes an unrecognised
+        // call straight through, name and arguments untouched. It must not
+        // become an error just because the hook exists.
+        assert_eq!(
+            tr("SELECT {fn LOCATE('b','ab')}"),
+            "SELECT LOCATE('b','ab')"
+        );
+        assert_eq!(tr("SELECT {fn CURDATE()}"), "SELECT CURDATE()");
+    }
+
+    #[test]
+    fn rewriting_dialect_preserves_the_existing_escape_errors() {
+        let d = rewriting_dialect();
+        // {call} and {?= call} stay HYC00 ...
+        for sql in ["{call foo()}", "{?= call foo()}"] {
+            let err = translate_escapes(sql, &d).unwrap_err();
+            assert_eq!(
+                err.sqlstate().as_str(),
+                "HYC00",
+                "{sql} must stay optional-feature-not-implemented"
+            );
+        }
+        // ... and an unterminated escape stays 42000.
+        let err = translate_escapes("SELECT {fn LOCATE('b','ab')", &d).unwrap_err();
+        assert_eq!(err.sqlstate().as_str(), "42000");
     }
 
     #[test]

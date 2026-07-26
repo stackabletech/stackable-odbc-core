@@ -35,6 +35,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `/usr/include/sql.h` and `sqlext.h` by
   `info_type_value_constants_match_sql_headers`. These are values where a typo
   cannot look empty, because zero is itself a valid claim for several of them.
+- `EscapeDialect::rewrite_scalar_fn`, which receives a whole
+  `{fn NAME(args)}` escape and returns the replacement text.
+  `remap_scalar_fn` only swaps the identifier in front of the parentheses and
+  never sees the arguments, so any scalar function whose ODBC form differs
+  from the target dialect in *argument* syntax was untranslatable —
+  `{fn LOCATE('b','ab')}` → `position('b' IN 'ab')`,
+  `{fn TIMESTAMPADD(SQL_TSI_DAY, 1, t)}` → `date_add('day', 1, t)`, or a
+  zero-argument call that must become a bare keyword with no trailing `()`
+  such as `{fn CURDATE()}` → `current_date`. Because the `SQL_*_FUNCTIONS`
+  bitmaps are defined in terms of the `{fn}` escape, a driver that could not
+  translate one could not honestly advertise it.
+  `args` arrives already escape-translated, so a nested `{fn}` or `{ts}` is
+  resolved before the dialect sees it, and with string literals, quoted
+  identifiers, comments and nested parentheses intact — core does not split
+  on commas, which would corrupt `{fn LOCATE(',', x)}`. Splitting arguments is
+  the dialect's job. `remap_scalar_fn` stays as the cheap path, and a dialect
+  setting only it is unaffected.
 - `Backend::set_txn_isolation`, for a backend that can switch isolation
   levels. Defaulted: a data source with exactly one level in
   `txn_isolation_options` needs no implementation, while one declaring several
@@ -74,7 +91,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking:** `default_get_info` and `common_get_info_raw` are now generic
   over the backend. Call them as `default_get_info::<Self>(info_type, widths)`
   and `common_get_info_raw::<Self>(info_type)` from a `Backend` impl.
-- **Breaking:** fourteen new **required** `Backend` methods —
+- **Breaking:** new **required** `Backend` methods —
   `supports_catalogs`, `supports_schemas`, `alter_table_support`,
   `outer_join_capabilities`, `default_txn_isolation`,
   `txn_isolation_options`, `group_by`, `null_collation`, `correlation_name`,
@@ -104,16 +121,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- `SQL_ROW_UPDATES` (11) and `SQL_PROCEDURES` (21) are answered as the
-  `"Y"`/`"N"` character strings the spec declares. Neither has an
-  `odbc_sys::InfoType` variant, so both fell through to the unnamed-raw
-  default `U32(0)` — an application passing a character buffer got four bytes
-  of binary zero with `StringLength = 4`. Both now return `"N"` from
-  `common_get_info_raw`, and core's own fallback consults that helper, so a
-  backend whose `get_info_raw` does not delegate to it gets the same answer.
-  That last change also fixes `SQL_QUOTED_IDENTIFIER_CASE` for such a backend,
-  which previously defaulted to `U16(0)` — not one of the four `SQL_IC_*`
-  values.
+- Every `SQLGetInfo` type the spec declares as a character string but which
+  `odbc_sys::InfoType` has no variant for is answered as a string, instead of
+  falling through to the unnamed-raw default `U32(0)`. An application reading
+  one into a character buffer got four bytes of binary zero with
+  `StringLength = 4`. Found by sweeping every info-type number in
+  `sql.h`/`sqlext.h` against `info_type_from_raw`, rather than one at a time:
+  `SQL_ROW_UPDATES` (11) `"N"`, `SQL_PROCEDURES` (21) `"N"`,
+  `SQL_MULTIPLE_ACTIVE_TXN` (37) `"N"`, `SQL_DATABASE_NAME` (16) `""`,
+  `SQL_PROCEDURE_TERM` (40) `""` (consistent with `SQL_PROCEDURES = "N"`),
+  `SQL_TABLE_TERM` (45) `"table"`, and `SQL_KEYWORDS` (89) `""`.
+  All come from `common_get_info_raw`, and core's own fallback consults that
+  helper, so a backend whose `get_info_raw` does not delegate to it gets the
+  same answer. That last change also fixes `SQL_QUOTED_IDENTIFIER_CASE` for
+  such a backend, which previously defaulted to `U16(0)` — not one of the four
+  `SQL_IC_*` values.
 - `SQL_MULT_RESULT_SETS`, `SQL_MAX_ROW_SIZE_INCLUDES_LONG` and
   `SQL_NEED_LONG_DATA_LEN` now default to `"N"` instead of `""`. They had no
   arm in `default_get_info`, so the shape-aware fallback gave them the empty
