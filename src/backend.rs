@@ -822,8 +822,9 @@ pub fn default_get_info<B: Backend>(
 /// `common_get_info_raw::<Self>(info_type)`.
 pub fn common_get_info_raw<B: Backend>(info_type: u16) -> Option<InfoValue> {
     use crate::types::{
-        InfoValue, SQL_CURSOR_ROLLBACK_BEHAVIOR, SQL_FILE_USAGE, SQL_IC_SENSITIVE, SQL_PROCEDURES,
-        SQL_QUOTED_IDENTIFIER_CASE, SQL_ROW_UPDATES,
+        InfoValue, SQL_CURSOR_ROLLBACK_BEHAVIOR, SQL_DATABASE_NAME, SQL_FILE_USAGE,
+        SQL_IC_SENSITIVE, SQL_KEYWORDS, SQL_MULTIPLE_ACTIVE_TXN, SQL_PROCEDURE_TERM,
+        SQL_PROCEDURES, SQL_QUOTED_IDENTIFIER_CASE, SQL_ROW_UPDATES, SQL_TABLE_TERM,
     };
     match info_type {
         SQL_FILE_USAGE => Some(InfoValue::U16(0)),
@@ -843,6 +844,20 @@ pub fn common_get_info_raw<B: Backend>(info_type: u16) -> Option<InfoValue> {
         // backend that has either answers it before delegating here.
         SQL_ROW_UPDATES => Some(InfoValue::String("N".into())),
         SQL_PROCEDURES => Some(InfoValue::String("N".into())),
+        // Core opens no transaction of its own, so it certainly cannot hold
+        // two open at once. A backend that can answers before delegating.
+        SQL_MULTIPLE_ACTIVE_TXN => Some(InfoValue::String("N".into())),
+        // The remaining character-string info types with no
+        // `odbc_sys::InfoType` variant. Empty is a valid value for all but
+        // SQL_TABLE_TERM: there is no shared name for the current database,
+        // no shared list of data-source-specific reserved words, and -- given
+        // SQL_PROCEDURES above answers "N" -- no procedures to have a vendor
+        // term for. Every data source has tables, so that one gets the
+        // generic term rather than "".
+        SQL_DATABASE_NAME => Some(InfoValue::String(String::new())),
+        SQL_KEYWORDS => Some(InfoValue::String(String::new())),
+        SQL_PROCEDURE_TERM => Some(InfoValue::String(String::new())),
+        SQL_TABLE_TERM => Some(InfoValue::String("table".into())),
         _ => None,
     }
 }

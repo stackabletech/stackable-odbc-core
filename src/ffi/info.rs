@@ -1136,6 +1136,78 @@ mod tests {
         }
     }
 
+    /// Every `SQLGetInfo` type the spec declares as a character string but
+    /// which `odbc_sys::InfoType` has no variant for.
+    ///
+    /// `info_type_from_raw` returns `None` for each, so
+    /// `info_type_default_response`'s shape-aware fallback has no declared
+    /// shape to honour and reaches the unnamed-raw default `U32(0)`. An
+    /// application reading any of them into a character buffer then gets four
+    /// bytes of binary zero with `StringLength = 4`.
+    ///
+    /// This is the defect that was fixed for `SQL_ROW_UPDATES` and
+    /// `SQL_PROCEDURES` one type at a time. The list is the result of sweeping
+    /// every info-type number in `sql.h`/`sqlext.h` against
+    /// `info_type_from_raw`, so a new one cannot be missed by hand again — and
+    /// the assertion runs through the whole `sql_get_info_w` path rather than
+    /// calling `common_get_info_raw` directly, so the dispatch ordering is
+    /// exercised too.
+    #[rustfmt::skip]
+    const STRING_SHAPED_WITHOUT_INFOTYPE_VARIANT: &[(u16, &str, &str)] = &[
+        (crate::types::SQL_ROW_UPDATES,         "N",         "SQL_ROW_UPDATES"),
+        (crate::types::SQL_PROCEDURES,          "N",         "SQL_PROCEDURES"),
+        (crate::types::SQL_MULTIPLE_ACTIVE_TXN, "N",         "SQL_MULTIPLE_ACTIVE_TXN"),
+        // Consistent with SQL_PROCEDURES = "N": no procedures, so no vendor
+        // term for one. Same rule as the catalog/schema term group.
+        (crate::types::SQL_PROCEDURE_TERM,      "",          "SQL_PROCEDURE_TERM"),
+        // Every data source has tables, so unlike the catalog and schema terms
+        // this one has no "empty if unsupported" case.
+        (crate::types::SQL_TABLE_TERM,          "table",     "SQL_TABLE_TERM"),
+        // A comma-separated list of data-source-specific reserved words; empty
+        // is a valid list and the only honest shared answer.
+        (crate::types::SQL_KEYWORDS,            "",          "SQL_KEYWORDS"),
+        (crate::types::SQL_DATABASE_NAME,       "",          "SQL_DATABASE_NAME"),
+    ];
+
+    #[test]
+    fn string_shaped_info_types_without_an_odbc_sys_variant_return_strings() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            assert_eq!(connect_handle(conn), SqlReturn::SUCCESS);
+
+            for (info_type, expected, name) in STRING_SHAPED_WITHOUT_INFOTYPE_VARIANT {
+                // Sentinel-filled, so a U32(0) answer (4 bytes of zero, then
+                // 0xEEEE) is distinguishable from a genuine empty string.
+                let mut buf = [0xEEu16; 32];
+                let mut str_len: i16 = -1;
+                let ret = sql_get_info_w::<MockBackend>(
+                    conn,
+                    *info_type,
+                    buf.as_mut_ptr() as *mut c_void,
+                    (buf.len() * 2) as i16,
+                    &mut str_len,
+                );
+                assert_eq!(ret, SqlReturn::SUCCESS, "{name} must not error");
+
+                let expected_units = expected.encode_utf16().count();
+                assert_eq!(
+                    str_len as usize,
+                    expected_units * 2,
+                    "{name} reported the wrong StringLength -- a U32(0) answer \
+                     reports 4 bytes for what the spec declares a character string"
+                );
+                let actual = String::from_utf16_lossy(&buf[..expected_units]);
+                assert_eq!(actual, *expected, "{name} returned the wrong text");
+                assert_eq!(
+                    buf[expected_units], 0,
+                    "{name} must be null-terminated after its {expected_units} code units"
+                );
+            }
+
+            cleanup(env, conn, stmt);
+        }
+    }
+
     #[test]
     fn backend_error_other_than_not_implemented_still_propagates() {
         // The fallback in `info_type_or_default` must only trigger for

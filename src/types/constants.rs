@@ -572,6 +572,38 @@ pub const SQL_ROW_UPDATES: u16 = 11;
 /// `odbc_sys::InfoType`; see [`SQL_ROW_UPDATES`].
 pub const SQL_PROCEDURES: u16 = 21;
 
+/// `SQL_MULTIPLE_ACTIVE_TXN` (37) — `SQLGetInfo` type reporting whether the
+/// driver supports more than one active transaction at a time. A `"Y"` /
+/// `"N"` character string. Not modelled by `odbc_sys::InfoType`; see
+/// [`SQL_ROW_UPDATES`].
+pub const SQL_MULTIPLE_ACTIVE_TXN: u16 = 37;
+
+/// `SQL_DATABASE_NAME` (16) — `SQLGetInfo` type carrying the name of the
+/// database currently in use, where the data source has a named object called
+/// a "database". A character string. Superseded in ODBC 3.x by
+/// `SQLGetConnectAttr(SQL_ATTR_CURRENT_CATALOG)`, but still queried. Not
+/// modelled by `odbc_sys::InfoType`; see [`SQL_ROW_UPDATES`].
+pub const SQL_DATABASE_NAME: u16 = 16;
+
+/// `SQL_PROCEDURE_TERM` (40) — `SQLGetInfo` type carrying the data source
+/// vendor's name for a procedure. A character string, empty when the data
+/// source has no procedures. Not modelled by `odbc_sys::InfoType`; see
+/// [`SQL_ROW_UPDATES`].
+pub const SQL_PROCEDURE_TERM: u16 = 40;
+
+/// `SQL_TABLE_TERM` (45) — `SQLGetInfo` type carrying the data source vendor's
+/// name for a table (e.g. `"table"` or `"file"`). A character string. Unlike
+/// the catalog, schema and procedure terms it has no "empty if unsupported"
+/// case, because every data source has tables. Not modelled by
+/// `odbc_sys::InfoType`; see [`SQL_ROW_UPDATES`].
+pub const SQL_TABLE_TERM: u16 = 45;
+
+/// `SQL_KEYWORDS` (89) — `SQLGetInfo` type carrying a comma-separated list of
+/// the data source's own reserved keywords, excluding those it shares with
+/// ODBC. A character string; an empty list is valid. Not modelled by
+/// `odbc_sys::InfoType`; see [`SQL_ROW_UPDATES`].
+pub const SQL_KEYWORDS: u16 = 89;
+
 /// `SQL_FILE_USAGE` (84) — `SQLGetInfo` type describing how a single-tier
 /// driver treats files in the data source.
 ///
@@ -1259,5 +1291,13 @@ mod tests {
         // two restate it, so they need the same header check as the values.
         assert_eq!(SQL_ROW_UPDATES, 11, "SQL_ROW_UPDATES (sqlext.h)");
         assert_eq!(SQL_PROCEDURES, 21, "SQL_PROCEDURES (sqlext.h)");
+        assert_eq!(
+            SQL_MULTIPLE_ACTIVE_TXN, 37,
+            "SQL_MULTIPLE_ACTIVE_TXN (sqlext.h)"
+        );
+        assert_eq!(SQL_DATABASE_NAME, 16, "SQL_DATABASE_NAME (sqlext.h)");
+        assert_eq!(SQL_PROCEDURE_TERM, 40, "SQL_PROCEDURE_TERM (sqlext.h)");
+        assert_eq!(SQL_TABLE_TERM, 45, "SQL_TABLE_TERM (sqlext.h)");
+        assert_eq!(SQL_KEYWORDS, 89, "SQL_KEYWORDS (sqlext.h)");
     }
 }
