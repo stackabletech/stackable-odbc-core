@@ -553,6 +553,27 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// cannot distinguish from a backend that simply never set it.
     fn search_pattern_escape() -> &'static str;
 
+    /// The data source's own reserved words, unfiltered.
+    ///
+    /// Core reports `SQL_KEYWORDS` (89) from this, after removing everything
+    /// ODBC already reserves — the spec defines the info type as the data
+    /// source's keywords *excluding* its own ("This list does not contain
+    /// keywords specific to ODBC or keywords used by both the data source and
+    /// ODBC"), so a backend states the raw fact and core applies the rule once
+    /// against [`ODBC_RESERVED_KEYWORDS`](crate::types::ODBC_RESERVED_KEYWORDS).
+    ///
+    /// Required, not defaulted: an empty list is the claim that this data
+    /// source reserves nothing beyond ODBC, which applications act on when
+    /// deciding what to quote.
+    ///
+    /// Return the raw names in any order and in any case; core filters
+    /// case-insensitively, sorts, and joins. Note that it does so on **every**
+    /// call rather than caching: a `static` cannot be generic over `B`, and
+    /// `SQLGetInfo(SQL_KEYWORDS)` is not a hot path. A backend whose list is
+    /// expensive to produce — read out of a linked library, say — should cache
+    /// behind its own `OnceLock` and return the cached slice from here.
+    fn keywords() -> &'static [&'static str];
+
     /// The `SQL_TIMEDATE_ADD_INTERVALS` (109) bitmask: the interval units the
     /// `TIMESTAMPADD` scalar function accepts, as an OR of the
     /// [`SQL_FN_TSI_*`](crate::types::SQL_FN_TSI_SECOND) constants.
@@ -915,6 +936,36 @@ pub fn default_get_info<B: Backend>(
 /// Generic over the calling backend so that `SQL_CURSOR_ROLLBACK_BEHAVIOR` can be
 /// derived from [`Backend::cursor_rollback_behavior`] -- call it as
 /// `common_get_info_raw::<Self>(info_type)`.
+/// The `SQL_KEYWORDS` (89) value for `B`: [`Backend::keywords`] minus
+/// everything ODBC itself reserves, sorted, comma-separated with no spaces.
+///
+/// The subtraction is what the spec defines the info type to be — "This list
+/// does not contain keywords specific to ODBC or keywords used by both the
+/// data source and ODBC" — so it lives here once rather than in every backend.
+/// Comparison is ASCII-case-insensitive: the reserved list is upper-case and a
+/// data source that spells its keywords in lower case still shares them.
+///
+/// Sorting is not required by the spec, but makes the value stable for
+/// anything that diffs or caches it, whatever order the backend enumerates in.
+///
+/// Recomputed on every call. A `static` cache cannot be generic over `B`, and
+/// this is a linear scan of a short list against a fixed one on a path
+/// `SQLGetInfo` reaches at most a handful of times per connection; a backend
+/// with an expensive list caches on its own side (see [`Backend::keywords`]).
+fn data_source_specific_keywords<B: Backend>() -> String {
+    let mut names: Vec<&'static str> = B::keywords()
+        .iter()
+        .copied()
+        .filter(|name| {
+            !crate::types::ODBC_RESERVED_KEYWORDS
+                .iter()
+                .any(|reserved| reserved.eq_ignore_ascii_case(name))
+        })
+        .collect();
+    names.sort_unstable();
+    names.join(",")
+}
+
 pub fn common_get_info_raw<B: Backend>(info_type: u16) -> Option<InfoValue> {
     use crate::types::{
         InfoValue, SQL_CURSOR_ROLLBACK_BEHAVIOR, SQL_DATABASE_NAME, SQL_FILE_USAGE,
@@ -942,15 +993,19 @@ pub fn common_get_info_raw<B: Backend>(info_type: u16) -> Option<InfoValue> {
         // Core opens no transaction of its own, so it certainly cannot hold
         // two open at once. A backend that can answers before delegating.
         SQL_MULTIPLE_ACTIVE_TXN => Some(InfoValue::String("N".into())),
+        // The data source's own reserved words, minus everything ODBC already
+        // reserves -- the subtraction the spec defines for this info type,
+        // applied once here rather than in each backend. The list itself is a
+        // capability, so it comes from `Backend::keywords`; core only owns the
+        // rule.
+        SQL_KEYWORDS => Some(InfoValue::String(data_source_specific_keywords::<B>())),
         // The remaining character-string info types with no
-        // `odbc_sys::InfoType` variant. Empty is a valid value for all but
-        // SQL_TABLE_TERM: there is no shared name for the current database,
-        // no shared list of data-source-specific reserved words, and -- given
+        // `odbc_sys::InfoType` variant. Empty is a valid value for both:
+        // there is no shared name for the current database, and -- given
         // SQL_PROCEDURES above answers "N" -- no procedures to have a vendor
-        // term for. Every data source has tables, so that one gets the
+        // term for. Every data source has tables, so SQL_TABLE_TERM gets the
         // generic term rather than "".
         SQL_DATABASE_NAME => Some(InfoValue::String(String::new())),
-        SQL_KEYWORDS => Some(InfoValue::String(String::new())),
         SQL_PROCEDURE_TERM => Some(InfoValue::String(String::new())),
         SQL_TABLE_TERM => Some(InfoValue::String("table".into())),
         _ => None,
@@ -1627,6 +1682,7 @@ mod tests {
             accessible_tables,
             data_source_read_only,
             search_pattern_escape,
+            keywords,
             cursor_commit_behavior,
             cursor_rollback_behavior,
         );

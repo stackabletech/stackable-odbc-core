@@ -70,6 +70,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `set_prepared_statement` and `discard_result_set` helpers that maintain it.
   `StatementHandle::statement` no longer doubles as the answer to "is a cursor
   open?" — see the `Fixed` entry below.
+- `types::ODBC_RESERVED_KEYWORDS`, the reserved-word list from Appendix C of
+  the ODBC specification. `SQL_KEYWORDS` is defined as the data source's own
+  keywords *excluding* these, so the list and the subtraction now live in core
+  once instead of being transcribed into each driver.
 
 ### Changed
 
@@ -108,13 +112,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `timedate_add_intervals`, `timedate_diff_intervals`, `subqueries`,
   `column_alias`, `concat_null_behavior`, `union_support`,
   `convert_functions`, `order_by_columns_in_select`, `accessible_tables`,
-  `data_source_read_only` and `search_pattern_escape`.
+  `data_source_read_only`, `search_pattern_escape` and `keywords`.
   They are required rather than defaulted on purpose:
   each states a *capability*, where a defaulted value is a claim the backend
   author never made and is unlikely to notice. A defaulted `0` understates and
   a defaulted `true` overstates; the compiler asking is what makes the fact
   explicit. Every one of them replaces a value core previously invented (see
   `Fixed`).
+- **Breaking:** `SQL_KEYWORDS` (89) now comes from the new required
+  `Backend::keywords`, filtered against `ODBC_RESERVED_KEYWORDS`, sorted and
+  comma-separated. **Every backend must implement it** — there is no default,
+  because an empty list is the claim that the data source reserves nothing
+  beyond ODBC. A backend returns its raw reserved words in any order and any
+  case; core applies the spec's subtraction. It does so on every call rather
+  than caching (a `static` cannot be generic over the backend); a backend whose
+  list is expensive to produce should cache on its own side. Returning `&[]`
+  reproduces the value core previously gave everyone.
 - `SQL_ALTER_TABLE` and `SQL_OJ_CAPABILITIES` now come from
   `Backend::alter_table_support` / `Backend::outer_join_capabilities` instead
   of defaulting to `0`. `0` remains the shared default for the surrounding
@@ -142,7 +155,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `SQL_ROW_UPDATES` (11) `"N"`, `SQL_PROCEDURES` (21) `"N"`,
   `SQL_MULTIPLE_ACTIVE_TXN` (37) `"N"`, `SQL_DATABASE_NAME` (16) `""`,
   `SQL_PROCEDURE_TERM` (40) `""` (consistent with `SQL_PROCEDURES = "N"`),
-  `SQL_TABLE_TERM` (45) `"table"`, and `SQL_KEYWORDS` (89) `""`.
+  `SQL_TABLE_TERM` (45) `"table"`, and `SQL_KEYWORDS` (89) — the last of these
+  now carrying the backend's own list rather than `""`, see below.
   All come from `common_get_info_raw`, and core's own fallback consults that
   helper, so a backend whose `get_info_raw` does not delegate to it gets the
   same answer. That last change also fixes `SQL_QUOTED_IDENTIFIER_CASE` for
@@ -187,6 +201,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `SQL_SEARCH_PATTERN_ESCAPE` comes from the backend. It describes what
   escapes `%` and `_` in catalog-function pattern arguments, which the backend
   interprets.
+- `SQL_KEYWORDS` is stated by the backend. Core answered it with `""` for
+  everyone, which is not an absence of an answer but the claim that the data
+  source reserves nothing beyond ODBC — and applications read it to decide
+  which identifiers need quoting, so a wrong empty list is how a generated
+  identifier goes unquoted and the statement fails to parse. Every real
+  backend has keywords of its own.
 - `SQL_EXPRESSIONS_IN_ORDERBY` is stated by the backend. It previously fell to
   `""`, which reads as "no" to a tool deciding whether to push an expression
   into `ORDER BY`.

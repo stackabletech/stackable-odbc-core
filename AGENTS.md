@@ -230,6 +230,7 @@ These deliberately are not:
 | `accessible_tables` | `SQL_ACCESSIBLE_TABLES` |
 | `data_source_read_only` | `SQL_DATA_SOURCE_READ_ONLY` |
 | `search_pattern_escape` | `SQL_SEARCH_PATTERN_ESCAPE` |
+| `keywords` | the data source's own reserved words, *before* ODBC's are subtracted (`SQL_KEYWORDS`) |
 
 Each states a **capability**, where any default is a claim the backend author
 never made. `0` understates ("this data source cannot do this at all") and
@@ -259,6 +260,12 @@ Two corollaries worth checking when adding an info type:
   `info_type_default_response` gives an unhandled `String`-shaped info type
   `""`, which is the right *shape* but is not in any Y/N value list. Such a
   type needs either a shared `"N"` arm in `default_get_info` or a hook.
+- **An empty *list* is an answer too.** `SQL_KEYWORDS` reads as an empty
+  string just like an unhandled `String`-shaped type, but it means "this data
+  source reserves nothing beyond ODBC" — which applications act on when
+  deciding what to quote. It is a `Backend::keywords` hook for that reason;
+  core owns only the spec's subtraction of `ODBC_RESERVED_KEYWORDS`, which is
+  the same for every backend.
 - **Watch for info types that constrain each other.** `SQL_SQL_CONFORMANCE`
   fixes the value of `SQL_GROUP_BY`, `SQL_CORRELATION_NAME`,
   `SQL_NON_NULLABLE_COLUMNS`, `SQL_CONCAT_NULL_BEHAVIOR`, `SQL_SUBQUERIES`

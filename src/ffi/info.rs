@@ -1163,9 +1163,12 @@ mod tests {
         // Every data source has tables, so unlike the catalog and schema terms
         // this one has no "empty if unsupported" case.
         (crate::types::SQL_TABLE_TERM,          "table",     "SQL_TABLE_TERM"),
-        // A comma-separated list of data-source-specific reserved words; empty
-        // is a valid list and the only honest shared answer.
-        (crate::types::SQL_KEYWORDS,            "",          "SQL_KEYWORDS"),
+        // A comma-separated list of data-source-specific reserved words,
+        // derived from `MockBackend::keywords` with ODBC's own subtracted out
+        // (`SELECT` is dropped) and the remainder sorted. Asserted here rather
+        // than only in `backend.rs` so the value is proven to survive the
+        // string-shaped `sql_get_info_w` path, not just the raw dispatch.
+        (crate::types::SQL_KEYWORDS,            "MOCK_ATTACH,MOCK_PRAGMA", "SQL_KEYWORDS"),
         (crate::types::SQL_DATABASE_NAME,       "",          "SQL_DATABASE_NAME"),
     ];
 
@@ -1229,6 +1232,98 @@ mod tests {
             assert!(matches!(ret, Err(OdbcError::General { .. })));
 
             cleanup(env, conn, stmt);
+        }
+    }
+
+    /// Runs `SQLGetInfoW(SQL_KEYWORDS)` against `B` through the whole FFI path
+    /// — allocate, connect, query, disconnect, free — and returns the text it
+    /// wrote. Generic, unlike the shared helpers above, because the point of
+    /// these assertions is that the answer moves with the backend.
+    unsafe fn sql_keywords_of<B: Backend>() -> String {
+        unsafe {
+            let mut env: *mut c_void = std::ptr::null_mut();
+            let _ = sql_alloc_handle::<B>(HandleType::Env as i16, std::ptr::null_mut(), &mut env);
+            let mut conn: *mut c_void = std::ptr::null_mut();
+            let _ = sql_alloc_handle::<B>(HandleType::Dbc as i16, env, &mut conn);
+
+            let wide: Vec<u16> = "Host=localhost;Database=test".encode_utf16().collect();
+            assert_eq!(
+                crate::ffi::connect::sql_driver_connect_w::<B>(
+                    conn,
+                    std::ptr::null_mut(),
+                    wide.as_ptr(),
+                    wide.len() as i16,
+                    std::ptr::null_mut(),
+                    0,
+                    std::ptr::null_mut(),
+                    0,
+                ),
+                SqlReturn::SUCCESS,
+            );
+
+            // Sentinel-filled, so an empty answer is distinguishable from a
+            // `U32(0)` one that merely looks empty.
+            let mut buf = [0xEEu16; 64];
+            let mut str_len: i16 = -1;
+            let ret = sql_get_info_w::<B>(
+                conn,
+                crate::types::SQL_KEYWORDS,
+                buf.as_mut_ptr() as *mut c_void,
+                (buf.len() * 2) as i16,
+                &mut str_len,
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS, "SQL_KEYWORDS must not error");
+            assert!(
+                str_len >= 0 && str_len % 2 == 0,
+                "SQL_KEYWORDS is a character string, so StringLength is an even \
+                 byte count; got {str_len}"
+            );
+            let units = str_len as usize / 2;
+            let value = String::from_utf16_lossy(&buf[..units]);
+            assert_eq!(buf[units], 0, "SQL_KEYWORDS must be null-terminated");
+
+            let _ = crate::ffi::connect::sql_disconnect::<B>(conn);
+            let _ = sql_free_handle::<B>(HandleType::Dbc as i16, conn);
+            let _ = sql_free_handle::<B>(HandleType::Env as i16, env);
+            value
+        }
+    }
+
+    /// `SQL_KEYWORDS` is the spec's *subtraction*: the data source's reserved
+    /// words minus the ones ODBC already reserves. Core owns that rule and
+    /// `Backend::keywords` owns the raw list, so what an application sees has
+    /// to move with the backend — the empty string core used to return for
+    /// everyone is the claim "this data source reserves nothing beyond ODBC",
+    /// which is how a generated identifier ends up unquoted.
+    ///
+    /// Asserted through `sql_get_info_w` rather than `common_get_info_raw`, so
+    /// the dispatch ordering is covered too.
+    #[test]
+    fn sql_keywords_is_the_backend_list_minus_odbcs_own() {
+        use crate::test_utils::{
+            MockAltBackend, MockNoKeywordsBackend, MockOverlappingKeywordsBackend,
+            MockReservedOnlyKeywordsBackend,
+        };
+
+        unsafe {
+            // Nothing to subtract from: the same value core produced before the
+            // hook existed, so the shape is unchanged for a data source that
+            // genuinely reserves nothing extra.
+            assert_eq!(sql_keywords_of::<MockNoKeywordsBackend>(), "");
+            // `SELECT` is ODBC's; `UNNEST` is not.
+            assert_eq!(
+                sql_keywords_of::<MockOverlappingKeywordsBackend>(),
+                "UNNEST"
+            );
+            // Case-insensitive, so a lower-case list of ODBC's own words leaves
+            // nothing behind.
+            assert_eq!(sql_keywords_of::<MockReservedOnlyKeywordsBackend>(), "");
+            // Sorted and comma-separated with no spaces, whatever order the
+            // backend enumerates in — `MockBackend` declares
+            // `["MOCK_PRAGMA", "SELECT", "MOCK_ATTACH"]`.
+            assert_eq!(sql_keywords_of::<MockBackend>(), "MOCK_ATTACH,MOCK_PRAGMA");
+            // And it moves with the backend.
+            assert_eq!(sql_keywords_of::<MockAltBackend>(), "ALT_VACUUM");
         }
     }
 }

@@ -50,8 +50,18 @@ impl StatementBackend for MockStatement {}
 /// info types, so a mock that means "minimal" should say so explicitly rather
 /// than have core assume it — which is the whole point of the methods being
 /// required. Expand this in a mock that is actually testing one of them.
+///
+/// `minimal_capability_decls!(keywords = <slice>)` keeps every other value
+/// minimal but states a reserved-word list, for the mocks that exist only to
+/// test the `SQL_KEYWORDS` subtraction.
 macro_rules! minimal_capability_decls {
     () => {
+        minimal_capability_decls!(keywords = &[]);
+    };
+    (keywords = $keywords:expr) => {
+        fn keywords() -> &'static [&'static str] {
+            $keywords
+        }
         fn group_by() -> u16 {
             crate::types::SQL_GB_NOT_SUPPORTED
         }
@@ -285,6 +295,12 @@ impl Backend for MockBackend {
     fn search_pattern_escape() -> &'static str {
         "\\"
     }
+    // Deliberately mixed: `SELECT` is in `ODBC_RESERVED_KEYWORDS` and must be
+    // subtracted out, the other two are not and must survive. Unsorted, so the
+    // ordering guarantee is exercised too.
+    fn keywords() -> &'static [&'static str] {
+        &["MOCK_PRAGMA", "SELECT", "MOCK_ATTACH"]
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -372,6 +388,121 @@ impl Backend for MockNoCatalogBackend {
 
     minimal_capability_decls!();
 }
+
+// ---------------------------------------------------------------------------
+// SQL_KEYWORDS subtraction mocks
+// ---------------------------------------------------------------------------
+
+/// Generates a minimal `Backend` whose only interesting declaration is
+/// [`Backend::keywords`].
+///
+/// The `SQL_KEYWORDS` subtraction has three outcomes worth pinning separately —
+/// nothing to filter, some entries filtered, everything filtered — and each
+/// needs its own backend type because `keywords` is an associated function with
+/// no receiver to vary.
+macro_rules! mock_keywords_backend {
+    ($(#[$doc:meta])* $name:ident, keywords = $keywords:expr) => {
+        $(#[$doc])*
+        pub struct $name;
+
+        impl Backend for $name {
+            type Connection = MockConnection;
+            type Statement = MockStatement;
+            type Error = MockError;
+
+            fn connect(_: &ConnectParams) -> Result<MockConnection, MockError> {
+                Ok(MockConnection)
+            }
+            fn disconnect(_: &mut MockConnection) -> Result<(), MockError> {
+                Ok(())
+            }
+            fn exec_direct(_: &MockConnection, _: &str) -> Result<MockStatement, MockError> {
+                Err(MockError)
+            }
+            fn prepare(_: &MockConnection, _: &str) -> Result<MockStatement, MockError> {
+                Ok(MockStatement)
+            }
+            fn execute(
+                _: &MockConnection,
+                _: &mut MockStatement,
+                _: &[crate::types::ColumnValue],
+            ) -> Result<crate::types::ExecuteOutcome, MockError> {
+                Ok(crate::types::ExecuteOutcome::default())
+            }
+            fn get_info(
+                _: &MockConnection,
+                _: crate::types::InfoType,
+            ) -> Result<InfoValue, MockError> {
+                Err(MockError)
+            }
+            fn get_functions() -> &'static [crate::function_id::FunctionId] {
+                &[]
+            }
+            fn get_type_info() -> &'static [TypeInfoRow] {
+                &[]
+            }
+            fn tables(
+                _: &MockConnection,
+                _: Option<&str>,
+                _: Option<&str>,
+                _: Option<&str>,
+                _: Option<&str>,
+            ) -> Result<MockStatement, MockError> {
+                Err(MockError)
+            }
+            fn columns(
+                _: &MockConnection,
+                _: Option<&str>,
+                _: Option<&str>,
+                _: Option<&str>,
+                _: Option<&str>,
+            ) -> Result<MockStatement, MockError> {
+                Err(MockError)
+            }
+
+            fn supports_catalogs() -> bool {
+                false
+            }
+            fn supports_schemas() -> bool {
+                false
+            }
+            fn alter_table_support() -> u32 {
+                0
+            }
+            fn outer_join_capabilities() -> u32 {
+                0
+            }
+            fn default_txn_isolation() -> u32 {
+                0
+            }
+            fn txn_isolation_options() -> u32 {
+                0
+            }
+
+            minimal_capability_decls!(keywords = $keywords);
+        }
+    };
+}
+
+mock_keywords_backend!(
+    /// A data source that reserves nothing beyond ODBC — the value core
+    /// produced for every backend before `Backend::keywords` existed.
+    MockNoKeywordsBackend,
+    keywords = &[]
+);
+
+mock_keywords_backend!(
+    /// One keyword ODBC already reserves, one it does not.
+    MockOverlappingKeywordsBackend,
+    keywords = &["SELECT", "UNNEST"]
+);
+
+mock_keywords_backend!(
+    /// A list that is entirely ODBC's, spelled in lower case: the subtraction
+    /// is case-insensitive, so nothing survives it.
+    MockReservedOnlyKeywordsBackend,
+    keywords = &["select"]
+);
 
 // ---------------------------------------------------------------------------
 // MockAltBackend — differs from MockBackend in every capability hook
@@ -511,6 +642,11 @@ impl Backend for MockAltBackend {
     }
     fn search_pattern_escape() -> &'static str {
         "/"
+    }
+    // Shares no entry with MockBackend's list, and spells its ODBC-reserved
+    // overlap in lower case so the subtraction is proven case-insensitive.
+    fn keywords() -> &'static [&'static str] {
+        &["alter", "ALT_VACUUM"]
     }
 
     // Differs from the default, so the SQL_MAX_*_NAME_LEN group moves with the
