@@ -101,6 +101,30 @@ pub const SQL_GB_GROUP_BY_EQUALS_SELECT: u16 = 1;
 pub const SQL_GB_GROUP_BY_CONTAINS_SELECT: u16 = 2;
 /// `SQL_GB_NO_RELATION` — `GROUP BY` and `SELECT` are independent; extra or missing columns are allowed in either.
 pub const SQL_GB_NO_RELATION: u16 = 3;
+/// `SQL_GB_COLLATE` — a `COLLATE` clause may be specified at the end of each
+/// grouping column. Returned by a SQL-92 Full level-conformant driver.
+pub const SQL_GB_COLLATE: u16 = 4;
+
+// --- SQL_CORRELATION_NAME (74) values ---
+
+/// `SQL_CN_NONE` — table correlation names are not supported.
+pub const SQL_CN_NONE: u16 = 0x0000;
+/// `SQL_CN_DIFFERENT` — correlation names are supported but must differ from
+/// the names of the tables they represent.
+pub const SQL_CN_DIFFERENT: u16 = 0x0001;
+/// `SQL_CN_ANY` — correlation names are supported and may be any valid
+/// user-defined name. Returned by a SQL-92 Entry level-conformant driver.
+pub const SQL_CN_ANY: u16 = 0x0002;
+
+// --- SQL_NON_NULLABLE_COLUMNS (75) values ---
+
+/// `SQL_NNC_NULL` — all columns must be nullable; the data source does not
+/// support the `NOT NULL` column constraint.
+pub const SQL_NNC_NULL: u16 = 0x0000;
+/// `SQL_NNC_NON_NULL` — the data source supports the `NOT NULL` column
+/// constraint in `CREATE TABLE`. Returned by a SQL-92 Entry level-conformant
+/// driver.
+pub const SQL_NNC_NON_NULL: u16 = 0x0001;
 
 /// `SQL_IC_UPPER` — identifiers are case-insensitive and stored in upper case.
 pub const SQL_IC_UPPER: u16 = 1;
@@ -110,10 +134,20 @@ pub const SQL_IC_LOWER: u16 = 2;
 pub const SQL_IC_SENSITIVE: u16 = 3;
 /// `SQL_IC_MIXED` — identifiers are case-insensitive and stored in mixed case.
 pub const SQL_IC_MIXED: u16 = 4;
+// SQL_NULL_COLLATION (85) values. HIGH/LOW are defined in sql.h, START/END in
+// sqlext.h; all four are values of the same info type. HIGH and LOW depend on
+// the ASC/DESC keywords, START and END override them.
+
 /// `SQL_NC_HIGH` — NULL values sort at the high end of the result set (last in ASC order).
 pub const SQL_NC_HIGH: u16 = 0;
 /// `SQL_NC_LOW` — NULL values sort at the low end of the result set (first in ASC order).
 pub const SQL_NC_LOW: u16 = 1;
+/// `SQL_NC_START` — NULL values sort at the start of the result set, regardless
+/// of the `ASC` / `DESC` keywords.
+pub const SQL_NC_START: u16 = 0x0002;
+/// `SQL_NC_END` — NULL values sort at the end of the result set, regardless of
+/// the `ASC` / `DESC` keywords.
+pub const SQL_NC_END: u16 = 0x0004;
 
 /// `SQL_INSENSITIVE` — cursors are insensitive to changes made by any other transaction or cursor.
 pub const SQL_INSENSITIVE: u16 = 1;
@@ -193,6 +227,37 @@ pub const SQL_CONVERT_WVARCHAR: u16 = 126;
 
 /// `SQL_SC_SQL92_ENTRY` — entry level SQL-92 conformance.
 pub const SQL_SC_SQL92_ENTRY: u32 = 0x0000_0001;
+/// `SQL_SC_FIPS127_2_TRANSITIONAL` — FIPS 127-2 transitional level conformance.
+pub const SQL_SC_FIPS127_2_TRANSITIONAL: u32 = 0x0000_0002;
+/// `SQL_SC_SQL92_INTERMEDIATE` — intermediate level SQL-92 conformance.
+pub const SQL_SC_SQL92_INTERMEDIATE: u32 = 0x0000_0004;
+/// `SQL_SC_SQL92_FULL` — full level SQL-92 conformance.
+pub const SQL_SC_SQL92_FULL: u32 = 0x0000_0008;
+
+// --- SQL_TIMEDATE_ADD_INTERVALS (109) / SQL_TIMEDATE_DIFF_INTERVALS (110) ---
+// The interval units the `TIMESTAMPADD` and `TIMESTAMPDIFF` scalar functions
+// accept. A backend claiming `SQL_FN_TD_TIMESTAMPADD` or
+// `SQL_FN_TD_TIMESTAMPDIFF` in `SQL_TIMEDATE_FUNCTIONS` must also name the
+// units here; see `Backend::timedate_add_intervals`.
+
+/// `SQL_FN_TSI_FRAC_SECOND` — the `SQL_TSI_FRAC_SECOND` interval is supported.
+pub const SQL_FN_TSI_FRAC_SECOND: u32 = 0x0000_0001;
+/// `SQL_FN_TSI_SECOND` — the `SQL_TSI_SECOND` interval is supported.
+pub const SQL_FN_TSI_SECOND: u32 = 0x0000_0002;
+/// `SQL_FN_TSI_MINUTE` — the `SQL_TSI_MINUTE` interval is supported.
+pub const SQL_FN_TSI_MINUTE: u32 = 0x0000_0004;
+/// `SQL_FN_TSI_HOUR` — the `SQL_TSI_HOUR` interval is supported.
+pub const SQL_FN_TSI_HOUR: u32 = 0x0000_0008;
+/// `SQL_FN_TSI_DAY` — the `SQL_TSI_DAY` interval is supported.
+pub const SQL_FN_TSI_DAY: u32 = 0x0000_0010;
+/// `SQL_FN_TSI_WEEK` — the `SQL_TSI_WEEK` interval is supported.
+pub const SQL_FN_TSI_WEEK: u32 = 0x0000_0020;
+/// `SQL_FN_TSI_MONTH` — the `SQL_TSI_MONTH` interval is supported.
+pub const SQL_FN_TSI_MONTH: u32 = 0x0000_0040;
+/// `SQL_FN_TSI_QUARTER` — the `SQL_TSI_QUARTER` interval is supported.
+pub const SQL_FN_TSI_QUARTER: u32 = 0x0000_0080;
+/// `SQL_FN_TSI_YEAR` — the `SQL_TSI_YEAR` interval is supported.
+pub const SQL_FN_TSI_YEAR: u32 = 0x0000_0100;
 
 /// `SQL_OIC_CORE` — ODBC 3.x core interface conformance.
 pub const SQL_OIC_CORE: u32 = 1;
@@ -226,15 +291,30 @@ pub const SQL_U_UNION_ALL: u32 = 0x0000_0002;
 // --- SQL_ALTER_TABLE (86) flags ---
 // The low three bits are defined in sql.h; every other bit is defined in
 // sqlext.h. Each header comments out the other's block and defers to it.
+//
+// Only two of the three are ODBC 2.x leftovers. `SQL_AT_ADD_COLUMN` and
+// `SQL_AT_DROP_COLUMN` do not appear in the ODBC 3.0 SQL_ALTER_TABLE value
+// list at all -- the 3.x replacements are `SQL_AT_ADD_COLUMN_SINGLE` and the
+// `SQL_AT_DROP_COLUMN_*` pair. `SQL_AT_ADD_CONSTRAINT` is *not* deprecated:
+// the 3.0 list carries it, and a data source that accepts
+// `ADD COLUMN f integer NOT NULL` needs exactly that bit.
 
 /// `SQL_AT_ADD_COLUMN` — the `<add column>` clause is supported (sql.h).
+/// An ODBC 2.x name, absent from the ODBC 3.0 `SQL_ALTER_TABLE` value list;
+/// a 3.x driver reports [`SQL_AT_ADD_COLUMN_SINGLE`] instead.
 pub const SQL_AT_ADD_COLUMN: u32 = 0x0000_0001;
 /// `SQL_AT_DROP_COLUMN` — the `<drop column>` clause is supported (sql.h).
+/// An ODBC 2.x name, absent from the ODBC 3.0 `SQL_ALTER_TABLE` value list; a
+/// 3.x driver reports [`SQL_AT_DROP_COLUMN_CASCADE`] or
+/// [`SQL_AT_DROP_COLUMN_RESTRICT`] instead.
 pub const SQL_AT_DROP_COLUMN: u32 = 0x0000_0002;
 /// `SQL_AT_ADD_CONSTRAINT` — the `<add column>` clause is supported with the
 /// facility to specify column constraints (FIPS Transitional level, sql.h).
-/// Setting this bit is what makes the four `SQL_AT_CONSTRAINT_*` deferrability
-/// bits below meaningful.
+///
+/// Live in ODBC 3.0, unlike the two above: the 3.0 `SQL_ALTER_TABLE` value
+/// list names it, and a data source accepting `ADD COLUMN <col> <type> NOT
+/// NULL` must set this bit. Setting it is also what makes the four
+/// `SQL_AT_CONSTRAINT_*` deferrability bits below meaningful.
 pub const SQL_AT_ADD_CONSTRAINT: u32 = 0x0000_0008;
 
 /// `SQL_AT_ADD_COLUMN_SINGLE` — `ALTER TABLE ... ADD COLUMN` is supported for
@@ -479,6 +559,18 @@ pub const SQL_CURSOR_COMMIT_BEHAVIOR: u16 = InfoType::CursorCommitBehaviour as u
 /// `odbc_sys::InfoType`, which has `CursorCommitBehaviour` but no rollback
 /// counterpart.
 pub const SQL_CURSOR_ROLLBACK_BEHAVIOR: u16 = 24;
+
+/// `SQL_ROW_UPDATES` (11) — `SQLGetInfo` type reporting whether the data
+/// source supports row updates such as positioned update statements. A `"Y"` /
+/// `"N"` character string. Not modelled by `odbc_sys::InfoType`, so it can only
+/// be answered through the raw-`u16` path.
+pub const SQL_ROW_UPDATES: u16 = 11;
+
+/// `SQL_PROCEDURES` (21) — `SQLGetInfo` type reporting whether the data source
+/// supports procedures *and* the driver supports the ODBC procedure invocation
+/// syntax. A `"Y"` / `"N"` character string. Not modelled by
+/// `odbc_sys::InfoType`; see [`SQL_ROW_UPDATES`].
+pub const SQL_PROCEDURES: u16 = 21;
 
 /// `SQL_FILE_USAGE` (84) — `SQLGetInfo` type describing how a single-tier
 /// driver treats files in the data source.
@@ -1072,5 +1164,100 @@ mod tests {
             SQL_AT_CONSTRAINT_NON_DEFERRABLE, 0x0008_0000,
             "SQL_AT_CONSTRAINT_NON_DEFERRABLE (sqlext.h)"
         );
+    }
+
+    /// The enum values behind the info types that `Backend` now requires a
+    /// backend to state (`SQL_NULL_COLLATION`, `SQL_CORRELATION_NAME`,
+    /// `SQL_NON_NULLABLE_COLUMNS`, `SQL_GROUP_BY`, `SQL_SQL_CONFORMANCE`) plus
+    /// the `SQL_TIMEDATE_*_INTERVALS` bitmaps, asserted against the C headers.
+    ///
+    /// These are the values where **zero is a substantive answer**, not
+    /// "unknown": `SQL_NC_HIGH`, `SQL_CN_NONE` and `SQL_NNC_NULL` are all `0`.
+    /// A typo in one of them therefore cannot show up as an obviously-empty
+    /// value the way a wrong bitmask flag would — it shows up as a different,
+    /// equally plausible claim. Same rationale as
+    /// [`capability_flag_constants_match_sqlext_h`]: the literal is the only
+    /// independent check tying the named constant to the specification's own
+    /// source.
+    #[test]
+    fn info_type_value_constants_match_sql_headers() {
+        // SQL_NULL_COLLATION (85) — SQL_NC_HIGH/LOW are sql.h, START/END sqlext.h
+        assert_eq!(SQL_NC_HIGH, 0, "SQL_NC_HIGH (sql.h)");
+        assert_eq!(SQL_NC_LOW, 1, "SQL_NC_LOW (sql.h)");
+        assert_eq!(SQL_NC_START, 0x0002, "SQL_NC_START (sqlext.h)");
+        assert_eq!(SQL_NC_END, 0x0004, "SQL_NC_END (sqlext.h)");
+
+        // SQL_CORRELATION_NAME (74) values — sqlext.h
+        assert_eq!(SQL_CN_NONE, 0x0000, "SQL_CN_NONE (sqlext.h)");
+        assert_eq!(SQL_CN_DIFFERENT, 0x0001, "SQL_CN_DIFFERENT (sqlext.h)");
+        assert_eq!(SQL_CN_ANY, 0x0002, "SQL_CN_ANY (sqlext.h)");
+
+        // SQL_NON_NULLABLE_COLUMNS (75) values — sqlext.h
+        assert_eq!(SQL_NNC_NULL, 0x0000, "SQL_NNC_NULL (sqlext.h)");
+        assert_eq!(SQL_NNC_NON_NULL, 0x0001, "SQL_NNC_NON_NULL (sqlext.h)");
+
+        // SQL_GROUP_BY (88) values — sqlext.h
+        assert_eq!(
+            SQL_GB_NOT_SUPPORTED, 0x0000,
+            "SQL_GB_NOT_SUPPORTED (sqlext.h)"
+        );
+        assert_eq!(
+            SQL_GB_GROUP_BY_EQUALS_SELECT, 0x0001,
+            "SQL_GB_GROUP_BY_EQUALS_SELECT (sqlext.h)"
+        );
+        assert_eq!(
+            SQL_GB_GROUP_BY_CONTAINS_SELECT, 0x0002,
+            "SQL_GB_GROUP_BY_CONTAINS_SELECT (sqlext.h)"
+        );
+        assert_eq!(SQL_GB_NO_RELATION, 0x0003, "SQL_GB_NO_RELATION (sqlext.h)");
+        assert_eq!(SQL_GB_COLLATE, 0x0004, "SQL_GB_COLLATE (sqlext.h)");
+
+        // SQL_SQL_CONFORMANCE (118) values — sqlext.h
+        assert_eq!(
+            SQL_SC_SQL92_ENTRY, 0x0000_0001,
+            "SQL_SC_SQL92_ENTRY (sqlext.h)"
+        );
+        assert_eq!(
+            SQL_SC_FIPS127_2_TRANSITIONAL, 0x0000_0002,
+            "SQL_SC_FIPS127_2_TRANSITIONAL (sqlext.h)"
+        );
+        assert_eq!(
+            SQL_SC_SQL92_INTERMEDIATE, 0x0000_0004,
+            "SQL_SC_SQL92_INTERMEDIATE (sqlext.h)"
+        );
+        assert_eq!(
+            SQL_SC_SQL92_FULL, 0x0000_0008,
+            "SQL_SC_SQL92_FULL (sqlext.h)"
+        );
+
+        // SQL_TIMEDATE_ADD_INTERVALS (109) / SQL_TIMEDATE_DIFF_INTERVALS (110)
+        // flags — sqlext.h. Both info types use this one set of values.
+        assert_eq!(
+            SQL_FN_TSI_FRAC_SECOND, 0x0000_0001,
+            "SQL_FN_TSI_FRAC_SECOND (sqlext.h)"
+        );
+        assert_eq!(
+            SQL_FN_TSI_SECOND, 0x0000_0002,
+            "SQL_FN_TSI_SECOND (sqlext.h)"
+        );
+        assert_eq!(
+            SQL_FN_TSI_MINUTE, 0x0000_0004,
+            "SQL_FN_TSI_MINUTE (sqlext.h)"
+        );
+        assert_eq!(SQL_FN_TSI_HOUR, 0x0000_0008, "SQL_FN_TSI_HOUR (sqlext.h)");
+        assert_eq!(SQL_FN_TSI_DAY, 0x0000_0010, "SQL_FN_TSI_DAY (sqlext.h)");
+        assert_eq!(SQL_FN_TSI_WEEK, 0x0000_0020, "SQL_FN_TSI_WEEK (sqlext.h)");
+        assert_eq!(SQL_FN_TSI_MONTH, 0x0000_0040, "SQL_FN_TSI_MONTH (sqlext.h)");
+        assert_eq!(
+            SQL_FN_TSI_QUARTER, 0x0000_0080,
+            "SQL_FN_TSI_QUARTER (sqlext.h)"
+        );
+        assert_eq!(SQL_FN_TSI_YEAR, 0x0000_0100, "SQL_FN_TSI_YEAR (sqlext.h)");
+
+        // Info type numbers with no odbc_sys::InfoType variant — sqlext.h.
+        // Everything else in this file derives its number from odbc-sys; these
+        // two restate it, so they need the same header check as the values.
+        assert_eq!(SQL_ROW_UPDATES, 11, "SQL_ROW_UPDATES (sqlext.h)");
+        assert_eq!(SQL_PROCEDURES, 21, "SQL_PROCEDURES (sqlext.h)");
     }
 }

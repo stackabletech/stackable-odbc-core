@@ -417,6 +417,85 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// asserts that the data source supports no outer joins whatsoever.
     fn outer_join_capabilities() -> u32;
 
+    /// The `SQL_GROUP_BY` (88) relationship between the columns in a
+    /// `GROUP BY` clause and the non-aggregated columns in the select list —
+    /// one of the [`SQL_GB_*`](crate::types::SQL_GB_NO_RELATION) values.
+    ///
+    /// Required because every value here is a claim, `0`
+    /// (`SQL_GB_NOT_SUPPORTED`, "GROUP BY is not supported") included. Core
+    /// used to answer `SQL_GB_NO_RELATION`, which is both a claim no backend
+    /// made and one the spec says an entry-level driver does not return: "a
+    /// SQL-92 Entry level-conformant driver will always return the
+    /// SQL_GB_GROUP_BY_EQUALS_SELECT option as supported."
+    fn group_by() -> u16;
+
+    /// The `SQL_NULL_COLLATION` (85) position of NULLs in a sorted result set
+    /// — one of the [`SQL_NC_*`](crate::types::SQL_NC_END) values.
+    ///
+    /// Required because `0` is [`SQL_NC_HIGH`](crate::types::SQL_NC_HIGH), a
+    /// substantive answer ("NULLs sort high, depending on ASC/DESC") rather
+    /// than an absence of one — so the shape default silently claimed it for
+    /// every backend.
+    fn null_collation() -> u16;
+
+    /// The `SQL_CORRELATION_NAME` (74) support level — one of the
+    /// [`SQL_CN_*`](crate::types::SQL_CN_ANY) values.
+    ///
+    /// Required because `0` is [`SQL_CN_NONE`](crate::types::SQL_CN_NONE),
+    /// "correlation names are not supported". The spec also ties this to
+    /// [`Backend::sql_conformance`]: "a SQL-92 Entry level-conformant driver
+    /// will always return SQL_CN_ANY."
+    fn correlation_name() -> u16;
+
+    /// The `SQL_NON_NULLABLE_COLUMNS` (75) answer to whether the data source
+    /// supports `NOT NULL` — [`SQL_NNC_NULL`](crate::types::SQL_NNC_NULL) or
+    /// [`SQL_NNC_NON_NULL`](crate::types::SQL_NNC_NON_NULL).
+    ///
+    /// Required because `0` is `SQL_NNC_NULL`, "all columns must be nullable".
+    /// The spec ties this to [`Backend::sql_conformance`] too: "a SQL-92 Entry
+    /// level-conformant driver will return SQL_NNC_NON_NULL."
+    fn non_nullable_columns() -> u16;
+
+    /// Whether the data source supports expressions (not just column names) in
+    /// an `ORDER BY` list — `SQL_EXPRESSIONS_IN_ORDERBY` (27), reported as
+    /// `"Y"` or `"N"`.
+    ///
+    /// Required rather than defaulted because it is a capability an
+    /// application acts on: a tool deciding whether to push `ORDER BY
+    /// lower(name)` down to the data source reads this, and both a wrong `"N"`
+    /// and the `""` core used to fall back to read as "no".
+    fn expressions_in_order_by() -> bool;
+
+    /// The `SQL_SQL_CONFORMANCE` (118) level — one of the
+    /// [`SQL_SC_*`](crate::types::SQL_SC_SQL92_ENTRY) values.
+    ///
+    /// Required because core cannot know it, and hard-coding it made core
+    /// contradict itself: it claimed `SQL_SC_SQL92_ENTRY` while separately
+    /// supplying `SQL_GROUP_BY`, `SQL_CORRELATION_NAME` and
+    /// `SQL_NON_NULLABLE_COLUMNS` values the spec says an entry-level driver
+    /// never returns. Declaring a level here is a promise about those three
+    /// hooks.
+    fn sql_conformance() -> u32;
+
+    /// The `SQL_TIMEDATE_ADD_INTERVALS` (109) bitmask: the interval units the
+    /// `TIMESTAMPADD` scalar function accepts, as an OR of the
+    /// [`SQL_FN_TSI_*`](crate::types::SQL_FN_TSI_SECOND) constants.
+    ///
+    /// Coupled to `SQL_TIMEDATE_FUNCTIONS`: a backend claiming
+    /// `SQL_FN_TD_TIMESTAMPADD` there and `0` here would be saying the function
+    /// exists but accepts no units. Required so that contradiction cannot be
+    /// inherited silently. Return `0` only if `TIMESTAMPADD` is genuinely not
+    /// supported.
+    fn timedate_add_intervals() -> u32;
+
+    /// The `SQL_TIMEDATE_DIFF_INTERVALS` (110) bitmask: the interval units the
+    /// `TIMESTAMPDIFF` scalar function accepts.
+    ///
+    /// Separate from [`Backend::timedate_add_intervals`] because a data source
+    /// may accept different units for each; see that method for the coupling
+    /// to `SQL_TIMEDATE_FUNCTIONS`.
+    fn timedate_diff_intervals() -> u32;
+
     /// The `SQL_DEFAULT_TXN_ISOLATION` (26) level this data source runs at
     /// when the application has not set one — a single
     /// [`SQL_TXN_*`](crate::types::SQL_TXN_SERIALIZABLE) constant, or `0` if
@@ -458,6 +537,12 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// `txn_isolation_options` must override this — otherwise the default
     /// reports `NotImplemented` rather than accepting a level it would then
     /// silently fail to apply.
+    ///
+    /// A backend with **no** transactions (`txn_isolation_options` of `0`,
+    /// matching `SQL_TC_NONE`) never reaches this method at all: validation
+    /// rejects every level before the call, because no level can be inside an
+    /// empty set. The `NotImplemented` branch below is therefore unreachable
+    /// for such a backend, and it needs no implementation.
     fn set_txn_isolation(_conn: &Self::Connection, level: u32) -> Result<(), OdbcError> {
         if Self::txn_isolation_options() == level {
             // The only level this data source has; it is already in effect.
@@ -560,10 +645,9 @@ pub fn default_get_info<B: Backend>(
 ) -> Option<InfoValue> {
     use crate::types::{
         InfoType, InfoValue, SQL_AM_NONE, SQL_CA1_NEXT, SQL_DRIVER_ODBC_VER_STRING,
-        SQL_FN_CVT_CAST, SQL_GB_NO_RELATION, SQL_INSENSITIVE, SQL_MAX_CURSOR_NAME_LEN,
-        SQL_OIC_CORE, SQL_SC_SQL92_ENTRY, SQL_SO_FORWARD_ONLY, SQL_SQ_COMPARISON,
-        SQL_SQ_CORRELATED_SUBQUERIES, SQL_SQ_EXISTS, SQL_SQ_IN, SQL_SQ_QUANTIFIED, SQL_U_UNION,
-        SQL_U_UNION_ALL,
+        SQL_FN_CVT_CAST, SQL_INSENSITIVE, SQL_MAX_CURSOR_NAME_LEN, SQL_OIC_CORE,
+        SQL_SO_FORWARD_ONLY, SQL_SQ_COMPARISON, SQL_SQ_CORRELATED_SUBQUERIES, SQL_SQ_EXISTS,
+        SQL_SQ_IN, SQL_SQ_QUANTIFIED, SQL_U_UNION, SQL_U_UNION_ALL,
     };
     match info_type {
         // --- String types identical in all drivers ---
@@ -620,8 +704,31 @@ pub fn default_get_info<B: Backend>(
         InfoType::XopenCliYear => Some(InfoValue::String("1995".into())),
         InfoType::CollationSeq => Some(InfoValue::String(String::new())),
         InfoType::DescribeParameter => Some(InfoValue::String("Y".into())),
+        // Spec-declared "Y"/"N" strings that previously had no arm, so the
+        // shape-aware fallback gave them `""` -- the right shape, but not a
+        // value in any of their value lists.
+        InfoType::MultResultSets => Some(InfoValue::String("N".into())),
+        InfoType::MaxRowSizeIncludesLong => Some(InfoValue::String("N".into())),
+        InfoType::NeedLongDataLen => Some(InfoValue::String("N".into())),
+        // A capability, not a shared default: `""` and a wrong "N" both read as
+        // "no" to a tool deciding whether to push an expression into ORDER BY.
+        InfoType::ExpressionsInOrderBy => Some(InfoValue::String(
+            if B::expressions_in_order_by() {
+                "Y"
+            } else {
+                "N"
+            }
+            .into(),
+        )),
         // --- U16 types identical in all drivers ---
-        InfoType::GroupBy => Some(InfoValue::U16(SQL_GB_NO_RELATION)),
+        // Enum-valued info types where zero is a substantive answer
+        // (SQL_GB_NOT_SUPPORTED, SQL_NC_HIGH, SQL_CN_NONE, SQL_NNC_NULL), not
+        // "unknown" -- so the backend has to state them rather than inherit a
+        // claim it never made. See the `Backend` docs for each.
+        InfoType::GroupBy => Some(InfoValue::U16(B::group_by())),
+        InfoType::NullCollation => Some(InfoValue::U16(B::null_collation())),
+        InfoType::CorrelationName => Some(InfoValue::U16(B::correlation_name())),
+        InfoType::NonNullableColumns => Some(InfoValue::U16(B::non_nullable_columns())),
         InfoType::MaxDriverConnections => Some(InfoValue::U16(0)),
         InfoType::MaxConcurrentActivities => Some(InfoValue::U16(0)),
         InfoType::ConcatNullBehavior => Some(InfoValue::U16(0)),
@@ -672,7 +779,15 @@ pub fn default_get_info<B: Backend>(
         // different levels for the same connection.
         InfoType::DefaultTxnIsolation => Some(InfoValue::U32(B::default_txn_isolation())),
         InfoType::TransactionIsolationProtocol => Some(InfoValue::U32(B::txn_isolation_options())),
-        InfoType::SqlConformance => Some(InfoValue::U32(SQL_SC_SQL92_ENTRY)),
+        // Core cannot know the conformance level, and hard-coding it made core
+        // contradict its own SQL_GROUP_BY / SQL_CORRELATION_NAME /
+        // SQL_NON_NULLABLE_COLUMNS answers.
+        InfoType::SqlConformance => Some(InfoValue::U32(B::sql_conformance())),
+        // The units TIMESTAMPADD / TIMESTAMPDIFF accept. Defaulting these to 0
+        // while the backend claims SQL_FN_TD_TIMESTAMPADD in
+        // SQL_TIMEDATE_FUNCTIONS is self-contradictory.
+        InfoType::TimedateAddIntervals => Some(InfoValue::U32(B::timedate_add_intervals())),
+        InfoType::TimedateDiffIntervals => Some(InfoValue::U32(B::timedate_diff_intervals())),
         InfoType::OdbcInterfaceConformance => Some(InfoValue::U32(SQL_OIC_CORE)),
         InfoType::AsyncMode => Some(InfoValue::U32(SQL_AM_NONE)),
         InfoType::AsyncDbcFunctions => Some(InfoValue::U32(0)),
@@ -707,8 +822,8 @@ pub fn default_get_info<B: Backend>(
 /// `common_get_info_raw::<Self>(info_type)`.
 pub fn common_get_info_raw<B: Backend>(info_type: u16) -> Option<InfoValue> {
     use crate::types::{
-        InfoValue, SQL_CURSOR_ROLLBACK_BEHAVIOR, SQL_FILE_USAGE, SQL_IC_SENSITIVE,
-        SQL_QUOTED_IDENTIFIER_CASE,
+        InfoValue, SQL_CURSOR_ROLLBACK_BEHAVIOR, SQL_FILE_USAGE, SQL_IC_SENSITIVE, SQL_PROCEDURES,
+        SQL_QUOTED_IDENTIFIER_CASE, SQL_ROW_UPDATES,
     };
     match info_type {
         SQL_FILE_USAGE => Some(InfoValue::U16(0)),
@@ -717,6 +832,17 @@ pub fn common_get_info_raw<B: Backend>(info_type: u16) -> Option<InfoValue> {
             Some(InfoValue::U16(B::cursor_rollback_behavior().as_u16()))
         }
         SQL_QUOTED_IDENTIFIER_CASE => Some(InfoValue::U16(SQL_IC_SENSITIVE)),
+        // Both are spec-defined "Y"/"N" character strings with no
+        // `odbc_sys::InfoType` variant, so this raw path is the only place
+        // they can be answered. Without these arms they reach the
+        // unnamed-raw default `U32(0)` and an application reading them into a
+        // character buffer gets four bytes of binary zero.
+        //
+        // "N" for both: core drives a forward-only cursor with no positioned
+        // updates, and exports no procedure-invocation support of its own. A
+        // backend that has either answers it before delegating here.
+        SQL_ROW_UPDATES => Some(InfoValue::String("N".into())),
+        SQL_PROCEDURES => Some(InfoValue::String("N".into())),
         _ => None,
     }
 }
@@ -724,14 +850,15 @@ pub fn common_get_info_raw<B: Backend>(info_type: u16) -> Option<InfoValue> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::{MockBackend, MockTxnDeleteCloseBackend};
+    use crate::test_utils::{MockBackend, MockNoCatalogBackend, MockTxnDeleteCloseBackend};
     use crate::types::{
         DEFAULT_IDENTIFIER_LEN, InfoType, InfoValue, SQL_AM_NONE, SQL_AT_ADD_COLUMN_SINGLE,
-        SQL_AT_DROP_COLUMN_RESTRICT, SQL_CA1_NEXT, SQL_CB_PRESERVE, SQL_DRIVER_ODBC_VER_STRING,
-        SQL_FN_CVT_CAST, SQL_GB_NO_RELATION, SQL_INSENSITIVE, SQL_MAX_CURSOR_NAME_LEN,
-        SQL_OIC_CORE, SQL_OJ_LEFT, SQL_OJ_NESTED, SQL_SC_SQL92_ENTRY, SQL_SO_FORWARD_ONLY,
-        SQL_SQ_COMPARISON, SQL_SQ_CORRELATED_SUBQUERIES, SQL_SQ_EXISTS, SQL_SQ_IN,
-        SQL_SQ_QUANTIFIED, SQL_TXN_SERIALIZABLE, SQL_U_UNION, SQL_U_UNION_ALL,
+        SQL_AT_DROP_COLUMN_RESTRICT, SQL_CA1_NEXT, SQL_CB_PRESERVE, SQL_CN_ANY,
+        SQL_DRIVER_ODBC_VER_STRING, SQL_FN_CVT_CAST, SQL_FN_TSI_DAY, SQL_FN_TSI_SECOND,
+        SQL_FN_TSI_YEAR, SQL_GB_GROUP_BY_EQUALS_SELECT, SQL_INSENSITIVE, SQL_MAX_CURSOR_NAME_LEN,
+        SQL_NC_END, SQL_NNC_NON_NULL, SQL_OIC_CORE, SQL_OJ_LEFT, SQL_OJ_NESTED, SQL_SC_SQL92_ENTRY,
+        SQL_SO_FORWARD_ONLY, SQL_SQ_COMPARISON, SQL_SQ_CORRELATED_SUBQUERIES, SQL_SQ_EXISTS,
+        SQL_SQ_IN, SQL_SQ_QUANTIFIED, SQL_TXN_SERIALIZABLE, SQL_U_UNION, SQL_U_UNION_ALL,
     };
 
     enum Expected {
@@ -762,8 +889,19 @@ mod tests {
         (InfoType::XopenCliYear,                  Expected::Str("1995")),
         (InfoType::CollationSeq,                  Expected::Str("")),
         (InfoType::DescribeParameter,             Expected::Str("Y")),
+        // Y/N strings that used to fall through to the shape default's "",
+        // which is not in any of their value lists.
+        (InfoType::MultResultSets,                Expected::Str("N")),
+        (InfoType::MaxRowSizeIncludesLong,        Expected::Str("N")),
+        (InfoType::NeedLongDataLen,               Expected::Str("N")),
+        // Backend-stated capability; MockBackend declares true.
+        (InfoType::ExpressionsInOrderBy,          Expected::Str("Y")),
         // --- U16 values ---
-        (InfoType::GroupBy,                       Expected::U16(SQL_GB_NO_RELATION)),
+        // Enum values where 0 is a real answer, so they come from the backend.
+        (InfoType::GroupBy,                       Expected::U16(SQL_GB_GROUP_BY_EQUALS_SELECT)),
+        (InfoType::NullCollation,                 Expected::U16(SQL_NC_END)),
+        (InfoType::CorrelationName,               Expected::U16(SQL_CN_ANY)),
+        (InfoType::NonNullableColumns,            Expected::U16(SQL_NNC_NON_NULL)),
         (InfoType::MaxDriverConnections,          Expected::U16(0)),
         (InfoType::MaxConcurrentActivities,       Expected::U16(0)),
         (InfoType::ConcatNullBehavior,            Expected::U16(0)),
@@ -800,6 +938,8 @@ mod tests {
         (InfoType::DefaultTxnIsolation,           Expected::U32(SQL_TXN_SERIALIZABLE)),
         (InfoType::TransactionIsolationProtocol,  Expected::U32(SQL_TXN_SERIALIZABLE)),
         (InfoType::SqlConformance,                Expected::U32(SQL_SC_SQL92_ENTRY)),
+        (InfoType::TimedateAddIntervals,          Expected::U32(SQL_FN_TSI_SECOND | SQL_FN_TSI_DAY)),
+        (InfoType::TimedateDiffIntervals,         Expected::U32(SQL_FN_TSI_SECOND | SQL_FN_TSI_YEAR)),
         (InfoType::OdbcInterfaceConformance,      Expected::U32(SQL_OIC_CORE)),
         (InfoType::AsyncMode,                     Expected::U32(SQL_AM_NONE)),
         (InfoType::AsyncDbcFunctions,             Expected::U32(0)),
@@ -1006,6 +1146,183 @@ mod tests {
         // hard-coded: the previous implementation returned 0 for both.
         assert_ne!(MockBackend::alter_table_support(), 0);
         assert_ne!(MockBackend::outer_join_capabilities(), 0);
+    }
+
+    /// `SQL_ROW_UPDATES` (11) and `SQL_PROCEDURES` (21) are spec-defined
+    /// `"Y"`/`"N"` character strings with no `odbc_sys::InfoType` variant, so
+    /// they can only be answered through the raw-`u16` path. Without an arm
+    /// there they fall to the unnamed-raw default `U32(0)`, and an application
+    /// passing a character buffer gets four bytes of binary zero with
+    /// `StringLength = 4`.
+    #[test]
+    fn row_updates_and_procedures_are_yn_strings_not_u32() {
+        use crate::types::{SQL_PROCEDURES, SQL_ROW_UPDATES};
+
+        for info_type in [SQL_ROW_UPDATES, SQL_PROCEDURES] {
+            let value = common_get_info_raw::<MockBackend>(info_type)
+                .unwrap_or_else(|| panic!("common_get_info_raw returned None for {info_type}"));
+            assert!(
+                matches!(&value, InfoValue::String(s) if s == "N"),
+                "info type {info_type} must be a Y/N string, got {value:?}"
+            );
+        }
+    }
+
+    /// Four info types the spec declares as `"Y"`/`"N"` strings had no arm at
+    /// all, so the shape-aware fallback gave them `""` — the right *shape*,
+    /// but not a value in any of their value lists.
+    /// `SQL_EXPRESSIONS_IN_ORDERBY` is not here: it is a capability a backend
+    /// states (see [`Backend::expressions_in_order_by`]), not a shared default.
+    #[test]
+    fn yn_info_types_default_to_a_value_in_their_value_list() {
+        let widths = CatalogResultColumnWidths::default();
+        for info_type in [
+            InfoType::MultResultSets,
+            InfoType::MaxRowSizeIncludesLong,
+            InfoType::NeedLongDataLen,
+        ] {
+            assert_eq!(
+                default_get_info::<MockBackend>(info_type, &widths),
+                Some(InfoValue::String("N".into())),
+                "{info_type:?} must be \"Y\" or \"N\", never the empty string"
+            );
+        }
+    }
+
+    /// The C5 failure mode in its purest form: for these four info types zero
+    /// is a *substantive answer*, not "unknown", so the shape default handed
+    /// out a real spec claim (`SQL_NC_HIGH`, `SQL_CN_NONE`, `SQL_NNC_NULL`,
+    /// `SQL_GB_NOT_SUPPORTED`) that no backend ever made. They are now stated
+    /// by the backend.
+    #[test]
+    fn enum_valued_info_types_come_from_the_backend() {
+        let widths = CatalogResultColumnWidths::default();
+        for (info_type, actual) in [
+            (InfoType::NullCollation, MockBackend::null_collation()),
+            (InfoType::CorrelationName, MockBackend::correlation_name()),
+            (
+                InfoType::NonNullableColumns,
+                MockBackend::non_nullable_columns(),
+            ),
+            (InfoType::GroupBy, MockBackend::group_by()),
+        ] {
+            assert_eq!(
+                default_get_info::<MockBackend>(info_type, &widths),
+                Some(InfoValue::U16(actual)),
+                "{info_type:?} ignored its Backend hook"
+            );
+        }
+    }
+
+    /// Core hard-coded `SQL_SQL_CONFORMANCE = SQL_SC_SQL92_ENTRY` while
+    /// separately supplying `SQL_GROUP_BY`, `SQL_CORRELATION_NAME` and
+    /// `SQL_NON_NULLABLE_COLUMNS` values the spec says an entry-level driver
+    /// never returns. Every backend inherited that contradiction; the
+    /// conformance claim is now the backend's too.
+    ///
+    /// Asserted across two backends declaring *different* levels, because a
+    /// single backend cannot distinguish "core read the hook" from "core still
+    /// hard-codes the value this backend happens to declare".
+    #[test]
+    fn sql_conformance_comes_from_the_backend() {
+        let widths = CatalogResultColumnWidths::default();
+        assert_eq!(
+            default_get_info::<MockBackend>(InfoType::SqlConformance, &widths),
+            Some(InfoValue::U32(SQL_SC_SQL92_ENTRY)),
+            "SQL_SQL_CONFORMANCE ignored Backend::sql_conformance"
+        );
+        assert_eq!(
+            default_get_info::<MockNoCatalogBackend>(InfoType::SqlConformance, &widths),
+            Some(InfoValue::U32(0)),
+            "SQL_SQL_CONFORMANCE is still pinned to SQL_SC_SQL92_ENTRY"
+        );
+        assert_ne!(
+            MockBackend::sql_conformance(),
+            MockNoCatalogBackend::sql_conformance(),
+            "the two mocks must declare different levels or this test proves nothing"
+        );
+    }
+
+    /// The contradiction item 4 is about: core claimed `SQL_SC_SQL92_ENTRY`
+    /// while separately supplying `SQL_GROUP_BY`, `SQL_CORRELATION_NAME` and
+    /// `SQL_NON_NULLABLE_COLUMNS` values the spec says an entry-level driver
+    /// never returns. Now that all four come from the same backend, a backend
+    /// declaring entry level reports the three values the spec names for it.
+    #[test]
+    fn entry_level_conformance_no_longer_contradicts_the_other_info_types() {
+        use crate::types::{SQL_CN_ANY, SQL_GB_GROUP_BY_EQUALS_SELECT, SQL_NNC_NON_NULL};
+
+        let widths = CatalogResultColumnWidths::default();
+        assert_eq!(
+            default_get_info::<MockBackend>(InfoType::SqlConformance, &widths),
+            Some(InfoValue::U32(SQL_SC_SQL92_ENTRY)),
+        );
+        for (info_type, expected, spec) in [
+            (
+                InfoType::CorrelationName,
+                SQL_CN_ANY,
+                "will always return SQL_CN_ANY",
+            ),
+            (
+                InfoType::NonNullableColumns,
+                SQL_NNC_NON_NULL,
+                "will return SQL_NNC_NON_NULL",
+            ),
+            (
+                InfoType::GroupBy,
+                SQL_GB_GROUP_BY_EQUALS_SELECT,
+                "will always return the SQL_GB_GROUP_BY_EQUALS_SELECT option",
+            ),
+        ] {
+            assert_eq!(
+                default_get_info::<MockBackend>(info_type, &widths),
+                Some(InfoValue::U16(expected)),
+                "an entry-level-conformant driver {spec} for {info_type:?}"
+            );
+        }
+    }
+
+    /// `SQL_EXPRESSIONS_IN_ORDERBY` is a capability, and `""` reads as "no" to
+    /// a tool deciding whether to push an expression into `ORDER BY`.
+    #[test]
+    fn expressions_in_order_by_comes_from_the_backend() {
+        let widths = CatalogResultColumnWidths::default();
+        assert_eq!(
+            default_get_info::<MockBackend>(InfoType::ExpressionsInOrderBy, &widths),
+            Some(InfoValue::String("Y".into())),
+            "SQL_EXPRESSIONS_IN_ORDERBY ignored Backend::expressions_in_order_by"
+        );
+        assert_eq!(
+            default_get_info::<MockNoCatalogBackend>(InfoType::ExpressionsInOrderBy, &widths),
+            Some(InfoValue::String("N".into())),
+            "a backend declaring no ORDER BY expressions must report \"N\", not \"\""
+        );
+    }
+
+    /// The interval bitmaps are the units `TIMESTAMPADD` / `TIMESTAMPDIFF`
+    /// accept. Defaulting them to 0 while a backend freely claims
+    /// `SQL_FN_TD_TIMESTAMPADD` in `SQL_TIMEDATE_FUNCTIONS` is
+    /// self-contradictory, so the backend states both. They are separate hooks
+    /// because a data source can legitimately support different units for each.
+    #[test]
+    fn timedate_interval_bitmaps_come_from_the_backend() {
+        let widths = CatalogResultColumnWidths::default();
+        assert_eq!(
+            default_get_info::<MockBackend>(InfoType::TimedateAddIntervals, &widths),
+            Some(InfoValue::U32(MockBackend::timedate_add_intervals())),
+            "SQL_TIMEDATE_ADD_INTERVALS ignored Backend::timedate_add_intervals"
+        );
+        assert_eq!(
+            default_get_info::<MockBackend>(InfoType::TimedateDiffIntervals, &widths),
+            Some(InfoValue::U32(MockBackend::timedate_diff_intervals())),
+            "SQL_TIMEDATE_DIFF_INTERVALS ignored Backend::timedate_diff_intervals"
+        );
+        assert_ne!(
+            MockBackend::timedate_add_intervals(),
+            MockBackend::timedate_diff_intervals(),
+            "the mock must declare different units for each, or one hook could \
+             serve both and the test would not notice"
+        );
     }
 
     /// C2: `SQL_DEFAULT_TXN_ISOLATION` and `SQL_TXN_ISOLATION_OPTION` are

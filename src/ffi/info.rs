@@ -147,17 +147,23 @@ fn info_type_default_response<B: Backend>(
         return result.map_err(Into::into);
     }
 
-    // Derived from the backend hooks so that a backend which answers these
-    // info types nowhere still reports what `sql_end_tran` actually does.
+    // Derived from the backend hook so that a backend which answers this info
+    // type nowhere still reports what `sql_end_tran` actually does.
     // See "The cursor-behaviour info types never take the generic default".
-    match info_type {
-        crate::types::SQL_CURSOR_COMMIT_BEHAVIOR => {
-            return Ok(InfoValue::U16(B::cursor_commit_behavior().as_u16()));
-        }
-        crate::types::SQL_CURSOR_ROLLBACK_BEHAVIOR => {
-            return Ok(InfoValue::U16(B::cursor_rollback_behavior().as_u16()));
-        }
-        _ => {}
+    // `SQL_CURSOR_ROLLBACK_BEHAVIOR` gets the same treatment one step below,
+    // via `common_get_info_raw`.
+    if info_type == crate::types::SQL_CURSOR_COMMIT_BEHAVIOR {
+        return Ok(InfoValue::U16(B::cursor_commit_behavior().as_u16()));
+    }
+
+    // The shared raw-path answers, for a backend whose `get_info_raw` does not
+    // delegate to `common_get_info_raw` (or does not exist). Without this,
+    // "the info type has a correct shared value" and "this backend happens to
+    // delegate" stay coupled: `SQL_ROW_UPDATES` and `SQL_PROCEDURES` would
+    // fall to `U32(0)` for a Y/N string, and `SQL_QUOTED_IDENTIFIER_CASE` to
+    // `U16(0)`, which is not one of the four `SQL_IC_*` values.
+    if let Some(value) = crate::backend::common_get_info_raw::<B>(info_type) {
+        return Ok(value);
     }
 
     use crate::types::{

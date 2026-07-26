@@ -203,7 +203,7 @@ If `odbc-sys` adds a new enum that we need to convert from raw values, add a `xx
 ### Capability methods are required, not defaulted
 
 Most of `Backend` is defaulted, so a driver implements only what it needs.
-Six methods deliberately are not:
+Fourteen methods deliberately are not:
 
 | Method | States |
 |--------|--------|
@@ -213,6 +213,14 @@ Six methods deliberately are not:
 | `outer_join_capabilities` | the `SQL_OJ_CAPABILITIES` `SQL_OJ_*` bitmask |
 | `default_txn_isolation` | `SQL_DEFAULT_TXN_ISOLATION` (`0` = no transactions) |
 | `txn_isolation_options` | `SQL_TXN_ISOLATION_OPTION` (`0` = no transactions) |
+| `group_by` | `SQL_GROUP_BY` (`0` = `GROUP BY` not supported) |
+| `null_collation` | `SQL_NULL_COLLATION` (`0` = `SQL_NC_HIGH`) |
+| `correlation_name` | `SQL_CORRELATION_NAME` (`0` = `SQL_CN_NONE`) |
+| `non_nullable_columns` | `SQL_NON_NULLABLE_COLUMNS` (`0` = `SQL_NNC_NULL`) |
+| `expressions_in_order_by` | `SQL_EXPRESSIONS_IN_ORDERBY` |
+| `sql_conformance` | `SQL_SQL_CONFORMANCE` (`SQL_SC_*`) |
+| `timedate_add_intervals` | `SQL_TIMEDATE_ADD_INTERVALS` (`SQL_FN_TSI_*`) |
+| `timedate_diff_intervals` | `SQL_TIMEDATE_DIFF_INTERVALS` (`SQL_FN_TSI_*`) |
 
 Each states a **capability**, where any default is a claim the backend author
 never made. `0` understates ("this data source cannot do this at all") and
@@ -220,6 +228,35 @@ never made. `0` understates ("this data source cannot do this at all") and
 never wrote code for — so the compiler asks instead of core guessing. Each of
 these replaced a value core used to invent, and each of those values was wrong
 for at least one real driver.
+
+#### Deciding whether a new info type belongs here
+
+The test is one question: **is zero "unknown", or is zero an answer?**
+
+- Zero means *unknown or no limit* → shared default in `default_get_info`.
+  `SQL_MAX_ROW_SIZE`, `SQL_MAX_INDEX_SIZE`, `SQL_MAX_STATEMENT_LEN` and the
+  `SQL_MAX_COLUMNS_IN_*` group are all of this kind: the spec explicitly
+  defines `0` as "no specified limit or the limit is unknown", so a shared `0`
+  asserts nothing.
+- Zero is a *substantive claim* → required `Backend` method. Every enum in the
+  table above has this shape. `SQL_NULL_COLLATION`'s zero is `SQL_NC_HIGH`,
+  `SQL_CORRELATION_NAME`'s is `SQL_CN_NONE`, `SQL_NON_NULLABLE_COLUMNS`'s is
+  `SQL_NNC_NULL` — each a specific, falsifiable statement about the data
+  source that core has no way to know.
+
+Two corollaries worth checking when adding an info type:
+
+- **A Y/N string has no valid empty value.** The shape-aware fallback in
+  `info_type_default_response` gives an unhandled `String`-shaped info type
+  `""`, which is the right *shape* but is not in any Y/N value list. Such a
+  type needs either a shared `"N"` arm in `default_get_info` or a hook.
+- **Watch for info types that constrain each other.** `SQL_SQL_CONFORMANCE`
+  fixes the value of `SQL_GROUP_BY`, `SQL_CORRELATION_NAME` and
+  `SQL_NON_NULLABLE_COLUMNS` (the spec names what an entry-level driver
+  returns for each); `SQL_TIMEDATE_FUNCTIONS` claiming
+  `SQL_FN_TD_TIMESTAMPADD` obliges `SQL_TIMEDATE_ADD_INTERVALS` to be
+  non-zero. Core supplying one side of such a pair while the backend supplies
+  the other is how it ends up contradicting itself.
 
 `supports_catalogs` and `supports_schemas` between them drive seven info types
 (`SQL_CATALOG_NAME`, `SQL_CATALOG_TERM`, `SQL_CATALOG_NAME_SEPARATOR`,

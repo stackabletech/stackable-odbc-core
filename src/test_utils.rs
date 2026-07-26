@@ -42,6 +42,46 @@ impl From<MockError> for OdbcError {
 // Uses trait defaults (all return NotImplemented).
 impl StatementBackend for MockStatement {}
 
+/// The eight required capability declarations, for a mock that stands for a
+/// minimal data source and whose test does not care about them.
+///
+/// Every value is the *least* capable one the spec defines, which for four of
+/// them happens to be `0`. That is deliberate: `0` is a real claim for these
+/// info types, so a mock that means "minimal" should say so explicitly rather
+/// than have core assume it — which is the whole point of the methods being
+/// required. Expand this in a mock that is actually testing one of them.
+macro_rules! minimal_capability_decls {
+    () => {
+        fn group_by() -> u16 {
+            crate::types::SQL_GB_NOT_SUPPORTED
+        }
+        fn null_collation() -> u16 {
+            crate::types::SQL_NC_HIGH
+        }
+        fn correlation_name() -> u16 {
+            crate::types::SQL_CN_NONE
+        }
+        fn non_nullable_columns() -> u16 {
+            crate::types::SQL_NNC_NULL
+        }
+        fn expressions_in_order_by() -> bool {
+            false
+        }
+        // Conforms to no SQL-92 level, which is consistent with the values
+        // above -- an entry-level claim would contradict SQL_CN_NONE and
+        // SQL_NNC_NULL.
+        fn sql_conformance() -> u32 {
+            0
+        }
+        fn timedate_add_intervals() -> u32 {
+            0
+        }
+        fn timedate_diff_intervals() -> u32 {
+            0
+        }
+    };
+}
+
 /// A one-column synthetic result set carrying `rows`.
 ///
 /// Tests that need a statement with a genuinely open cursor must go through
@@ -149,6 +189,39 @@ impl Backend for MockBackend {
     fn txn_isolation_options() -> u32 {
         crate::types::SQL_TXN_SERIALIZABLE
     }
+
+    // A self-consistent SQL-92 Entry level declaration. The spec names the
+    // value an entry-level driver returns for three of these, so declaring
+    // `SQL_SC_SQL92_ENTRY` and then contradicting it would make this mock a
+    // bad example as well as a bad test fixture. Each value is also
+    // deliberately *not* the old core default, so a test cannot pass by
+    // accident against the hard-coded value it replaced.
+    fn group_by() -> u16 {
+        crate::types::SQL_GB_GROUP_BY_EQUALS_SELECT // was SQL_GB_NO_RELATION
+    }
+    fn null_collation() -> u16 {
+        crate::types::SQL_NC_END // was SQL_NC_HIGH (0), via the shape default
+    }
+    fn correlation_name() -> u16 {
+        crate::types::SQL_CN_ANY // was SQL_CN_NONE (0)
+    }
+    fn non_nullable_columns() -> u16 {
+        crate::types::SQL_NNC_NON_NULL // was SQL_NNC_NULL (0)
+    }
+    fn expressions_in_order_by() -> bool {
+        true // was "" -- neither "Y" nor "N"
+    }
+    fn sql_conformance() -> u32 {
+        crate::types::SQL_SC_SQL92_ENTRY
+    }
+    // Deliberately different from each other, so one hook cannot serve both
+    // without a test noticing.
+    fn timedate_add_intervals() -> u32 {
+        crate::types::SQL_FN_TSI_SECOND | crate::types::SQL_FN_TSI_DAY
+    }
+    fn timedate_diff_intervals() -> u32 {
+        crate::types::SQL_FN_TSI_SECOND | crate::types::SQL_FN_TSI_YEAR
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -233,6 +306,8 @@ impl Backend for MockNoCatalogBackend {
     fn txn_isolation_options() -> u32 {
         0
     }
+
+    minimal_capability_decls!();
 }
 
 // ---------------------------------------------------------------------------
@@ -334,6 +409,8 @@ macro_rules! mock_isolation_backend {
             fn txn_isolation_options() -> u32 {
                 $options
             }
+
+            minimal_capability_decls!();
 
             $($extra)*
         }
@@ -485,6 +562,8 @@ macro_rules! mock_txn_backend {
             fn txn_isolation_options() -> u32 {
                 crate::types::SQL_TXN_SERIALIZABLE
             }
+
+            minimal_capability_decls!();
         }
     };
 }

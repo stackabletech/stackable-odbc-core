@@ -29,6 +29,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `SQL_AT_CONSTRAINT_INITIALLY_*` / `_DEFERRABLE` / `_NON_DEFERRABLE`
   deferrability bits were missing, so a driver still needed raw literals for
   them.
+- The `SQL_NC_START` / `SQL_NC_END`, `SQL_CN_*`, `SQL_NNC_*`, `SQL_GB_COLLATE`,
+  `SQL_SC_*` and `SQL_FN_TSI_*` constants, plus the `SQL_ROW_UPDATES` (11) and
+  `SQL_PROCEDURES` (21) info type numbers, all asserted against
+  `/usr/include/sql.h` and `sqlext.h` by
+  `info_type_value_constants_match_sql_headers`. These are values where a typo
+  cannot look empty, because zero is itself a valid claim for several of them.
 - `Backend::set_txn_isolation`, for a backend that can switch isolation
   levels. Defaulted: a data source with exactly one level in
   `txn_isolation_options` needs no implementation, while one declaring several
@@ -68,10 +74,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking:** `default_get_info` and `common_get_info_raw` are now generic
   over the backend. Call them as `default_get_info::<Self>(info_type, widths)`
   and `common_get_info_raw::<Self>(info_type)` from a `Backend` impl.
-- **Breaking:** six new **required** `Backend` methods —
+- **Breaking:** fourteen new **required** `Backend` methods —
   `supports_catalogs`, `supports_schemas`, `alter_table_support`,
-  `outer_join_capabilities`, `default_txn_isolation` and
-  `txn_isolation_options`. They are required rather than defaulted on purpose:
+  `outer_join_capabilities`, `default_txn_isolation`,
+  `txn_isolation_options`, `group_by`, `null_collation`, `correlation_name`,
+  `non_nullable_columns`, `expressions_in_order_by`, `sql_conformance`,
+  `timedate_add_intervals` and `timedate_diff_intervals`.
+  They are required rather than defaulted on purpose:
   each states a *capability*, where a defaulted value is a claim the backend
   author never made and is unlikely to notice. A defaulted `0` understates and
   a defaulted `true` overstates; the compiler asking is what makes the fact
@@ -95,6 +104,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `SQL_ROW_UPDATES` (11) and `SQL_PROCEDURES` (21) are answered as the
+  `"Y"`/`"N"` character strings the spec declares. Neither has an
+  `odbc_sys::InfoType` variant, so both fell through to the unnamed-raw
+  default `U32(0)` — an application passing a character buffer got four bytes
+  of binary zero with `StringLength = 4`. Both now return `"N"` from
+  `common_get_info_raw`, and core's own fallback consults that helper, so a
+  backend whose `get_info_raw` does not delegate to it gets the same answer.
+  That last change also fixes `SQL_QUOTED_IDENTIFIER_CASE` for such a backend,
+  which previously defaulted to `U16(0)` — not one of the four `SQL_IC_*`
+  values.
+- `SQL_MULT_RESULT_SETS`, `SQL_MAX_ROW_SIZE_INCLUDES_LONG` and
+  `SQL_NEED_LONG_DATA_LEN` now default to `"N"` instead of `""`. They had no
+  arm in `default_get_info`, so the shape-aware fallback gave them the empty
+  string: the right shape, but not a value in any of their value lists.
+- `SQL_GROUP_BY`, `SQL_NULL_COLLATION`, `SQL_CORRELATION_NAME` and
+  `SQL_NON_NULLABLE_COLUMNS` are stated by the backend rather than invented by
+  core. For all four, zero is a *substantive answer* — `SQL_GB_NOT_SUPPORTED`,
+  `SQL_NC_HIGH`, `SQL_CN_NONE`, `SQL_NNC_NULL` — so the shape default was
+  handing every backend a specific spec claim it never made. `SQL_GROUP_BY`
+  was worse than a default: core actively reported `SQL_GB_NO_RELATION`.
+- `SQL_SQL_CONFORMANCE` comes from the backend instead of a hard-coded
+  `SQL_SC_SQL92_ENTRY`. Core claimed entry level while separately supplying
+  `SQL_CORRELATION_NAME`, `SQL_NON_NULLABLE_COLUMNS` and `SQL_GROUP_BY` values
+  the spec says an entry-level driver never returns, so every backend built on
+  core inherited a contradiction it could not see.
+- `SQL_EXPRESSIONS_IN_ORDERBY` is stated by the backend. It previously fell to
+  `""`, which reads as "no" to a tool deciding whether to push an expression
+  into `ORDER BY`.
+- `SQL_TIMEDATE_ADD_INTERVALS` and `SQL_TIMEDATE_DIFF_INTERVALS` are stated by
+  the backend instead of defaulting to `0`. The spec defines them as the units
+  `TIMESTAMPADD` / `TIMESTAMPDIFF` accept, so `0` alongside a
+  `SQL_FN_TD_TIMESTAMPADD` claim in `SQL_TIMEDATE_FUNCTIONS` says the function
+  exists but takes no units.
 - `SQL_CATALOG_TERM`, `SQL_SCHEMA_TERM` and `SQL_CATALOG_NAME_SEPARATOR` no
   longer name catalogs and schemas that the data source does not have. The
   `SQLGetInfo` spec defines the whole group — those three plus
