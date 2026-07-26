@@ -477,6 +477,82 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// hooks.
     fn sql_conformance() -> u32;
 
+    /// The `SQL_SUBQUERIES` (95) bitmask: which predicates accept a subquery,
+    /// as an OR of the [`SQL_SQ_*`](crate::types::SQL_SQ_EXISTS) constants.
+    ///
+    /// Constrained by [`Backend::sql_conformance`]: "a SQL-92 Entry
+    /// level-conformant driver will always return a bitmask with all of these
+    /// bits set." Core used to hard-code exactly that, which is why a backend
+    /// declaring no conformance level was still told it supported correlated
+    /// subqueries — the claim a BI tool acts on when it decides to push one
+    /// down.
+    fn subqueries() -> u32;
+
+    /// Whether the data source supports column aliases (`SELECT x AS y`) —
+    /// `SQL_COLUMN_ALIAS` (87), reported as `"Y"` or `"N"`.
+    ///
+    /// Constrained by [`Backend::sql_conformance`]: "a SQL-92 Entry
+    /// level-conformant driver will always return 'Y'."
+    fn column_alias() -> bool;
+
+    /// How the data source concatenates a NULL character column with a
+    /// non-NULL one — `SQL_CONCAT_NULL_BEHAVIOR` (22), either
+    /// [`SQL_CB_NULL`](crate::types::SQL_CB_NULL) or
+    /// [`SQL_CB_NON_NULL`](crate::types::SQL_CB_NON_NULL).
+    ///
+    /// Required because `0` is `SQL_CB_NULL`, a substantive answer. Also
+    /// constrained by [`Backend::sql_conformance`]: "a SQL-92 Entry
+    /// level-conformant driver will always return SQL_CB_NULL."
+    fn concat_null_behavior() -> u16;
+
+    /// The `SQL_UNION` (96) bitmask: which of `UNION` and `UNION ALL` the data
+    /// source supports, as an OR of
+    /// [`SQL_U_UNION`](crate::types::SQL_U_UNION) and
+    /// [`SQL_U_UNION_ALL`](crate::types::SQL_U_UNION_ALL).
+    fn union_support() -> u32;
+
+    /// The `SQL_CONVERT_FUNCTIONS` (48) bitmask: which of the ODBC conversion
+    /// functions the driver supports, as an OR of
+    /// [`SQL_FN_CVT_CAST`](crate::types::SQL_FN_CVT_CAST) and
+    /// [`SQL_FN_CVT_CONVERT`](crate::types::SQL_FN_CVT_CONVERT).
+    ///
+    /// Note this is about `CAST` / `CONVERT` themselves. Which *type pairs*
+    /// each can convert between is the separate `SQL_CONVERT_*` family, which
+    /// a backend answers through [`Backend::get_info_raw`].
+    fn convert_functions() -> u32;
+
+    /// Whether a column named in `ORDER BY` must also appear in the select
+    /// list — `SQL_ORDER_BY_COLUMNS_IN_SELECT` (90), reported as `"Y"` or
+    /// `"N"`.
+    ///
+    /// `false` is the *permissive* answer, so it is a claim rather than an
+    /// absence of one: it tells an application it may order by a column it did
+    /// not select.
+    fn order_by_columns_in_select() -> bool;
+
+    /// Whether the connected user is guaranteed `SELECT` on **every** table
+    /// `SQLTables` returns — `SQL_ACCESSIBLE_TABLES` (19).
+    ///
+    /// `true` is a guarantee core cannot make on a backend's behalf, and one
+    /// that depends on the connected principal rather than the driver. Return
+    /// `false` unless the data source genuinely filters its catalog by
+    /// privilege.
+    fn accessible_tables() -> bool;
+
+    /// Whether the data source is read-only — `SQL_DATA_SOURCE_READ_ONLY`
+    /// (25), reported as `"Y"` or `"N"`.
+    fn data_source_read_only() -> bool;
+
+    /// The `SQL_SEARCH_PATTERN_ESCAPE` (14) character: what escapes `%` and
+    /// `_` in the pattern arguments of the catalog functions, so they match
+    /// literally.
+    ///
+    /// Applies only to catalog-function patterns, not to the `LIKE` predicate
+    /// (that is `SQL_LIKE_ESCAPE_CLAUSE`). Return `""` if the data source has
+    /// no escape character — the spec's answer for that case, and one core
+    /// cannot distinguish from a backend that simply never set it.
+    fn search_pattern_escape() -> &'static str;
+
     /// The `SQL_TIMEDATE_ADD_INTERVALS` (109) bitmask: the interval units the
     /// `TIMESTAMPADD` scalar function accepts, as an OR of the
     /// [`SQL_FN_TSI_*`](crate::types::SQL_FN_TSI_SECOND) constants.
@@ -645,15 +721,24 @@ pub fn default_get_info<B: Backend>(
 ) -> Option<InfoValue> {
     use crate::types::{
         InfoType, InfoValue, SQL_AM_NONE, SQL_CA1_NEXT, SQL_DRIVER_ODBC_VER_STRING,
-        SQL_FN_CVT_CAST, SQL_INSENSITIVE, SQL_MAX_CURSOR_NAME_LEN, SQL_OIC_CORE,
-        SQL_SO_FORWARD_ONLY, SQL_SQ_COMPARISON, SQL_SQ_CORRELATED_SUBQUERIES, SQL_SQ_EXISTS,
-        SQL_SQ_IN, SQL_SQ_QUANTIFIED, SQL_U_UNION, SQL_U_UNION_ALL,
+        SQL_INSENSITIVE, SQL_MAX_CURSOR_NAME_LEN, SQL_OIC_CORE, SQL_SO_FORWARD_ONLY,
     };
     match info_type {
         // --- String types identical in all drivers ---
         InfoType::DriverOdbcVer => Some(InfoValue::String(SQL_DRIVER_ODBC_VER_STRING.into())),
-        InfoType::SearchPatternEscape => Some(InfoValue::String("\\".into())),
-        InfoType::IdentifierQuoteChar => Some(InfoValue::String("\"".into())),
+        InfoType::SearchPatternEscape => Some(InfoValue::String(B::search_pattern_escape().into())),
+        // Derived from the escape dialect, which already carries this fact and
+        // is what the escape translator itself consults. Hard-coding `"` here
+        // let a backend quote identifiers one way and tell the application
+        // another. The spec's "if the data source does not support quoted
+        // identifiers, a blank is returned" is the empty-dialect case.
+        InfoType::IdentifierQuoteChar => Some(InfoValue::String(
+            B::escape_dialect()
+                .identifier_quotes
+                .first()
+                .map(|(open, _)| open.to_string())
+                .unwrap_or_default(),
+        )),
         // --- Catalog / schema group: all derived from the two backend hooks ---
         // The spec defines each of these in terms of whether the data source
         // has catalogs (resp. schemas) at all, and mandates the empty string
@@ -683,21 +768,32 @@ pub fn default_get_info<B: Backend>(
         InfoType::CatalogLocation if !B::supports_catalogs() => Some(InfoValue::U16(0)),
         InfoType::CatalogUsage if !B::supports_catalogs() => Some(InfoValue::U32(0)),
         InfoType::SchemaUsage if !B::supports_schemas() => Some(InfoValue::U32(0)),
-        InfoType::ColumnAlias => Some(InfoValue::String("Y".into())),
-        InfoType::OrderByColumnsInSelect => Some(InfoValue::String("N".into())),
-        InfoType::Subqueries => Some(InfoValue::U32(
-            SQL_SQ_COMPARISON
-                | SQL_SQ_EXISTS
-                | SQL_SQ_IN
-                | SQL_SQ_QUANTIFIED
-                | SQL_SQ_CORRELATED_SUBQUERIES,
+        // Each of these was core asserting an entry-level SQL-92 answer while
+        // the conformance level itself is the backend's to declare, so a
+        // backend claiming no level was still told it had all of them.
+        InfoType::ColumnAlias => Some(InfoValue::String(
+            if B::column_alias() { "Y" } else { "N" }.into(),
         )),
-        InfoType::UnionStatement => Some(InfoValue::U32(SQL_U_UNION | SQL_U_UNION_ALL)),
+        InfoType::Subqueries => Some(InfoValue::U32(B::subqueries())),
+        InfoType::ConcatNullBehavior => Some(InfoValue::U16(B::concat_null_behavior())),
+        InfoType::OrderByColumnsInSelect => Some(InfoValue::String(
+            if B::order_by_columns_in_select() {
+                "Y"
+            } else {
+                "N"
+            }
+            .into(),
+        )),
+        InfoType::UnionStatement => Some(InfoValue::U32(B::union_support())),
         InfoType::DataSourceName => Some(InfoValue::String(String::new())),
         InfoType::ServerName => Some(InfoValue::String(String::new())),
         InfoType::UserName => Some(InfoValue::String(String::new())),
-        InfoType::DataSourceReadOnly => Some(InfoValue::String("N".into())),
-        InfoType::AccessibleTables => Some(InfoValue::String("Y".into())),
+        InfoType::DataSourceReadOnly => Some(InfoValue::String(
+            if B::data_source_read_only() { "Y" } else { "N" }.into(),
+        )),
+        InfoType::AccessibleTables => Some(InfoValue::String(
+            if B::accessible_tables() { "Y" } else { "N" }.into(),
+        )),
         InfoType::AccessibleProcedures => Some(InfoValue::String("N".into())),
         InfoType::Integrity => Some(InfoValue::String("N".into())),
         InfoType::SpecialCharacters => Some(InfoValue::String(String::new())),
@@ -731,7 +827,6 @@ pub fn default_get_info<B: Backend>(
         InfoType::NonNullableColumns => Some(InfoValue::U16(B::non_nullable_columns())),
         InfoType::MaxDriverConnections => Some(InfoValue::U16(0)),
         InfoType::MaxConcurrentActivities => Some(InfoValue::U16(0)),
-        InfoType::ConcatNullBehavior => Some(InfoValue::U16(0)),
         // Derived from the backend hook so the value reported here and the
         // behaviour `sql_end_tran` applies cannot disagree.
         InfoType::CursorCommitBehaviour => {
@@ -764,7 +859,7 @@ pub fn default_get_info<B: Backend>(
         InfoType::MaxIdentifierLen => Some(InfoValue::U16(widths.identifier_len)),
         // --- U32 types identical in all drivers ---
         InfoType::ScrollOptions => Some(InfoValue::U32(SQL_SO_FORWARD_ONLY)),
-        InfoType::ConvertFunctions => Some(InfoValue::U32(SQL_FN_CVT_CAST)),
+        InfoType::ConvertFunctions => Some(InfoValue::U32(B::convert_functions())),
         // Capability bitmaps, not limits: a `0` here is the claim "this data
         // source cannot do this at all", so the backend has to state it.
         InfoType::AlterTable => Some(InfoValue::U32(B::alter_table_support())),
@@ -897,7 +992,10 @@ mod tests {
         (InfoType::ServerName,                    Expected::Str("")),
         (InfoType::UserName,                      Expected::Str("")),
         (InfoType::DataSourceReadOnly,             Expected::Str("N")),
-        (InfoType::AccessibleTables,              Expected::Str("Y")),
+        // "Y" guarantees the user has SELECT on every table SQLTables returns.
+        // Core cannot make that promise for a backend, and it depends on the
+        // connected principal, so the mock declares the honest "N".
+        (InfoType::AccessibleTables,              Expected::Str("N")),
         (InfoType::AccessibleProcedures,          Expected::Str("N")),
         (InfoType::Integrity,                     Expected::Str("N")),
         (InfoType::SpecialCharacters,             Expected::Str("")),
@@ -1358,6 +1456,183 @@ mod tests {
             default_get_info::<MockBackend>(InfoType::TransactionIsolationProtocol, &widths),
             Some(InfoValue::U32(SQL_TXN_SERIALIZABLE)),
             "SQL_TXN_ISOLATION_OPTION ignored Backend::txn_isolation_options"
+        );
+    }
+
+    /// Info types `default_get_info` answers identically for **every** backend,
+    /// each with the reason core is entitled to decide it.
+    ///
+    /// The entries fall into three kinds, and nothing else belongs here:
+    ///
+    /// - **Facts about core's own implementation.** Core's fetch really is
+    ///   forward-only and the `Backend` trait really is synchronous, so these
+    ///   are not claims about the data source at all. A hook would be worse:
+    ///   it would let a backend contradict what core actually does.
+    /// - **Limits where the spec defines `0` as "no limit or unknown".**
+    ///   Asserting nothing.
+    /// - **Driver-level identity** that has no per-backend answer.
+    ///
+    /// Anything else — any value that is a falsifiable statement about the
+    /// *data source* — belongs on a `Backend` method instead. See AGENTS.md,
+    /// "Deciding whether a new info type belongs here".
+    #[rustfmt::skip]
+    const CORE_FACTS: &[(InfoType, &str)] = &[
+        // --- Facts about core's own implementation ---
+        (InfoType::ScrollOptions,                "core's fetch is forward-only"),
+        (InfoType::CursorSensitivity,            "forward-only cursors cannot see other transactions' changes"),
+        (InfoType::ForwardOnlyCursorAttributes1, "the fetch operations core implements"),
+        (InfoType::ForwardOnlyCursorAttributes2, "core implements none of these"),
+        (InfoType::DynamicCursorAttributes1,     "core has no dynamic cursor"),
+        (InfoType::DynamicCursorAttributes2,     "core has no dynamic cursor"),
+        (InfoType::KeysetCursorAttributes1,      "core has no keyset cursor"),
+        (InfoType::KeysetCursorAttributes2,      "core has no keyset cursor"),
+        (InfoType::StaticCursorAttributes1,      "core has no static cursor"),
+        (InfoType::StaticCursorAttributes2,      "core has no static cursor"),
+        (InfoType::AsyncMode,                    "the Backend trait is synchronous"),
+        (InfoType::AsyncDbcFunctions,            "the Backend trait is synchronous"),
+        (InfoType::MultResultSets,               "sql_more_results always returns SQL_NO_DATA"),
+        (InfoType::NeedLongDataLen,              "core's data-at-execution path never needs the length up front"),
+        (InfoType::OdbcInterfaceConformance,     "describes the FFI surface core exports"),
+        (InfoType::DriverOdbcVer,                "describes the FFI surface core exports"),
+        (InfoType::XopenCliYear,                 "driver-level identity, not a data-source property"),
+        (InfoType::MaxCursorNameLen,             "a cursor name is an ODBC-level convention core owns"),
+        (InfoType::DescribeParameter,            "core's SQLDescribeParam always answers, generically"),
+        (InfoType::MaxRowSizeIncludesLong,       "follows from SQL_MAX_ROW_SIZE being 'unknown'"),
+        // --- Limits: the spec defines 0 as "no limit or unknown" ---
+        (InfoType::MaxDriverConnections,         "0 = no limit"),
+        (InfoType::MaxConcurrentActivities,      "0 = no limit"),
+        (InfoType::ActiveEnvironments,           "0 = no limit"),
+        (InfoType::MaxColumnsInGroupBy,          "0 = no limit or unknown"),
+        (InfoType::MaxColumnsInIndex,            "0 = no limit or unknown"),
+        (InfoType::MaxColumnsInOrderBy,          "0 = no limit or unknown"),
+        (InfoType::MaxColumnsInSelect,           "0 = no limit or unknown"),
+        (InfoType::MaxColumnsInTable,            "0 = no limit or unknown"),
+        (InfoType::MaxTablesInSelect,            "0 = no limit or unknown"),
+        (InfoType::MaxUserNameLen,               "0 = no limit or unknown"),
+        (InfoType::MaxIndexSize,                 "0 = no limit or unknown"),
+        (InfoType::MaxRowSize,                   "0 = no limit or unknown"),
+        (InfoType::MaxStatementLen,              "0 = no limit or unknown"),
+        // --- No per-backend answer to give ---
+        (InfoType::DataSourceName,               "the DM supplies the DSN; core has none"),
+        (InfoType::ServerName,                   "carried in the connection string, not known here"),
+        (InfoType::UserName,                     "carried in the connection string, not known here"),
+        (InfoType::SpecialCharacters,            "empty understates; a backend with any overrides"),
+        (InfoType::CollationSeq,                 "unknown, and the spec allows empty"),
+        (InfoType::AccessibleProcedures,         "core exports no procedure support of its own"),
+        (InfoType::Integrity,                    "core implements no integrity-enhancement grammar"),
+    ];
+
+    /// Classifies every info type `default_get_info` answers by asking one
+    /// question: **does the answer move when the backend does?**
+    ///
+    /// Two backends that share no capability declaration are compared. An info
+    /// type answering the same for both is one *core* decided, and must appear
+    /// in [`CORE_FACTS`] with the reason core is entitled to decide it. One
+    /// that differs is backend-derived and needs no entry.
+    ///
+    /// This is what keeps the backend/`SQLGetInfo` split from drifting.
+    /// Hard-coding a claim about the data source into `default_get_info` now
+    /// fails a test naming the info type, instead of surviving review — which
+    /// is how `SQL_GROUP_BY`, `SQL_CORRELATION_NAME`, `SQL_SUBQUERIES` and the
+    /// rest got there in the first place.
+    #[test]
+    fn default_get_info_answers_are_backend_derived_or_declared_core_facts() {
+        use crate::test_utils::MockAltBackend;
+
+        // Each backend's own widths, exactly as `sql_get_info_w` calls this.
+        // Passing one shared value would make the `SQL_MAX_*_NAME_LEN` group
+        // look core-decided when it is derived from
+        // `Backend::catalog_result_column_widths`.
+        let mine_widths = MockBackend::catalog_result_column_widths();
+        let alt_widths = MockAltBackend::catalog_result_column_widths();
+        assert_ne!(
+            mine_widths.identifier_len, alt_widths.identifier_len,
+            "the two mocks must declare different identifier widths"
+        );
+        let mut undeclared = Vec::new();
+        let mut stale = Vec::new();
+
+        for info_type in crate::conformance::all_info_types() {
+            let mine = default_get_info::<MockBackend>(info_type, &mine_widths);
+            let theirs = default_get_info::<MockAltBackend>(info_type, &alt_widths);
+            let declared = CORE_FACTS.iter().find(|(t, _)| *t == info_type);
+
+            match (mine.is_some() && mine == theirs, declared) {
+                // Core decides it, and said why. Fine.
+                (true, Some(_)) => {}
+                // Core decides it, and did not say why.
+                (true, None) => undeclared.push(info_type),
+                // Backend-derived (or unanswered) but still listed as a core
+                // fact -- the entry outlived the hard-coded value it described.
+                (false, Some(_)) => stale.push(info_type),
+                (false, None) => {}
+            }
+        }
+
+        assert!(
+            undeclared.is_empty(),
+            "these info types answer the same for two backends with nothing in \
+             common, so core is deciding them. Either derive each from a \
+             `Backend` method, or add it to CORE_FACTS with the reason core is \
+             entitled to decide it: {undeclared:?}"
+        );
+        assert!(
+            stale.is_empty(),
+            "these are listed in CORE_FACTS but no longer answered identically \
+             for every backend; drop the stale entries: {stale:?}"
+        );
+    }
+
+    /// The classification above is only as strong as the two mocks differing.
+    /// A hook added to `MockBackend` and copied verbatim into `MockAltBackend`
+    /// would silently turn a backend-derived info type into a "core fact"
+    /// without anyone noticing.
+    #[test]
+    fn the_two_classification_mocks_share_no_capability_declaration() {
+        use crate::test_utils::MockAltBackend;
+
+        macro_rules! differs {
+            ($($hook:ident),+ $(,)?) => {$(
+                assert_ne!(
+                    MockBackend::$hook(), MockAltBackend::$hook(),
+                    concat!(
+                        "MockBackend and MockAltBackend declare the same ",
+                        stringify!($hook),
+                        ", which weakens the classification test",
+                    )
+                );
+            )+};
+        }
+        differs!(
+            supports_catalogs,
+            supports_schemas,
+            alter_table_support,
+            outer_join_capabilities,
+            default_txn_isolation,
+            txn_isolation_options,
+            group_by,
+            null_collation,
+            correlation_name,
+            non_nullable_columns,
+            expressions_in_order_by,
+            sql_conformance,
+            timedate_add_intervals,
+            timedate_diff_intervals,
+            subqueries,
+            column_alias,
+            concat_null_behavior,
+            union_support,
+            convert_functions,
+            order_by_columns_in_select,
+            accessible_tables,
+            data_source_read_only,
+            search_pattern_escape,
+            cursor_commit_behavior,
+            cursor_rollback_behavior,
+        );
+        assert_ne!(
+            MockBackend::escape_dialect().identifier_quotes,
+            MockAltBackend::escape_dialect().identifier_quotes,
         );
     }
 

@@ -79,6 +79,33 @@ macro_rules! minimal_capability_decls {
         fn timedate_diff_intervals() -> u32 {
             0
         }
+        fn subqueries() -> u32 {
+            0
+        }
+        fn column_alias() -> bool {
+            false
+        }
+        fn concat_null_behavior() -> u16 {
+            crate::types::SQL_CB_NULL
+        }
+        fn union_support() -> u32 {
+            0
+        }
+        fn convert_functions() -> u32 {
+            0
+        }
+        fn order_by_columns_in_select() -> bool {
+            true
+        }
+        fn accessible_tables() -> bool {
+            false
+        }
+        fn data_source_read_only() -> bool {
+            false
+        }
+        fn search_pattern_escape() -> &'static str {
+            ""
+        }
     };
 }
 
@@ -222,6 +249,42 @@ impl Backend for MockBackend {
     fn timedate_diff_intervals() -> u32 {
         crate::types::SQL_FN_TSI_SECOND | crate::types::SQL_FN_TSI_YEAR
     }
+
+    // The values core used to hard-code. Keeping them here rather than
+    // changing them keeps this mock's `SQL_SC_SQL92_ENTRY` claim honest --
+    // the spec names each of the first three as what an entry-level driver
+    // returns -- and means the snapshot test still pins the same output.
+    fn subqueries() -> u32 {
+        crate::types::SQL_SQ_COMPARISON
+            | crate::types::SQL_SQ_EXISTS
+            | crate::types::SQL_SQ_IN
+            | crate::types::SQL_SQ_QUANTIFIED
+            | crate::types::SQL_SQ_CORRELATED_SUBQUERIES
+    }
+    fn column_alias() -> bool {
+        true
+    }
+    fn concat_null_behavior() -> u16 {
+        crate::types::SQL_CB_NULL
+    }
+    fn union_support() -> u32 {
+        crate::types::SQL_U_UNION | crate::types::SQL_U_UNION_ALL
+    }
+    fn convert_functions() -> u32 {
+        crate::types::SQL_FN_CVT_CAST
+    }
+    fn order_by_columns_in_select() -> bool {
+        false
+    }
+    fn accessible_tables() -> bool {
+        false
+    }
+    fn data_source_read_only() -> bool {
+        false
+    }
+    fn search_pattern_escape() -> &'static str {
+        "\\"
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -308,6 +371,171 @@ impl Backend for MockNoCatalogBackend {
     }
 
     minimal_capability_decls!();
+}
+
+// ---------------------------------------------------------------------------
+// MockAltBackend — differs from MockBackend in every capability hook
+// ---------------------------------------------------------------------------
+
+/// A backend declaring a *different* value from [`MockBackend`] for every
+/// hook `default_get_info` consults.
+///
+/// This exists for `default_get_info_answers_are_backend_derived_or_declared`,
+/// which classifies each info type by asking whether the answer moves when the
+/// backend does. An info type that answers identically for two backends with
+/// nothing in common is, by construction, one core decides — so it must be
+/// listed as a core fact with a reason, or it is a claim core has no business
+/// making.
+///
+/// Every value here must differ from `MockBackend`'s. The test asserts that,
+/// so a hook added to one mock and not the other cannot silently weaken it.
+pub struct MockAltBackend;
+
+impl Backend for MockAltBackend {
+    type Connection = MockConnection;
+    type Statement = MockStatement;
+    type Error = MockError;
+
+    fn connect(_: &ConnectParams) -> Result<MockConnection, MockError> {
+        Ok(MockConnection)
+    }
+    fn disconnect(_: &mut MockConnection) -> Result<(), MockError> {
+        Ok(())
+    }
+    fn exec_direct(_: &MockConnection, _: &str) -> Result<MockStatement, MockError> {
+        Err(MockError)
+    }
+    fn prepare(_: &MockConnection, _: &str) -> Result<MockStatement, MockError> {
+        Ok(MockStatement)
+    }
+    fn execute(
+        _: &MockConnection,
+        _: &mut MockStatement,
+        _: &[crate::types::ColumnValue],
+    ) -> Result<crate::types::ExecuteOutcome, MockError> {
+        Ok(crate::types::ExecuteOutcome::default())
+    }
+    fn get_info(_: &MockConnection, _: crate::types::InfoType) -> Result<InfoValue, MockError> {
+        Err(MockError)
+    }
+    fn get_functions() -> &'static [crate::function_id::FunctionId] {
+        &[]
+    }
+    fn get_type_info() -> &'static [TypeInfoRow] {
+        &[]
+    }
+    fn tables(
+        _: &MockConnection,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+    ) -> Result<MockStatement, MockError> {
+        Err(MockError)
+    }
+    fn columns(
+        _: &MockConnection,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+    ) -> Result<MockStatement, MockError> {
+        Err(MockError)
+    }
+
+    fn supports_catalogs() -> bool {
+        false
+    }
+    fn supports_schemas() -> bool {
+        false
+    }
+    fn alter_table_support() -> u32 {
+        crate::types::SQL_AT_ADD_CONSTRAINT
+    }
+    fn outer_join_capabilities() -> u32 {
+        crate::types::SQL_OJ_RIGHT
+    }
+    fn default_txn_isolation() -> u32 {
+        crate::types::SQL_TXN_READ_UNCOMMITTED
+    }
+    fn txn_isolation_options() -> u32 {
+        crate::types::SQL_TXN_READ_UNCOMMITTED
+    }
+    fn group_by() -> u16 {
+        crate::types::SQL_GB_NO_RELATION
+    }
+    fn null_collation() -> u16 {
+        crate::types::SQL_NC_LOW
+    }
+    fn correlation_name() -> u16 {
+        crate::types::SQL_CN_DIFFERENT
+    }
+    fn non_nullable_columns() -> u16 {
+        crate::types::SQL_NNC_NULL
+    }
+    fn expressions_in_order_by() -> bool {
+        false
+    }
+    fn sql_conformance() -> u32 {
+        crate::types::SQL_SC_SQL92_FULL
+    }
+    fn timedate_add_intervals() -> u32 {
+        crate::types::SQL_FN_TSI_HOUR
+    }
+    fn timedate_diff_intervals() -> u32 {
+        crate::types::SQL_FN_TSI_WEEK
+    }
+    fn subqueries() -> u32 {
+        crate::types::SQL_SQ_EXISTS
+    }
+    fn column_alias() -> bool {
+        false
+    }
+    fn concat_null_behavior() -> u16 {
+        crate::types::SQL_CB_NON_NULL
+    }
+    fn union_support() -> u32 {
+        crate::types::SQL_U_UNION
+    }
+    fn convert_functions() -> u32 {
+        crate::types::SQL_FN_CVT_CONVERT
+    }
+    fn order_by_columns_in_select() -> bool {
+        true
+    }
+    fn accessible_tables() -> bool {
+        true
+    }
+    fn data_source_read_only() -> bool {
+        true
+    }
+    fn search_pattern_escape() -> &'static str {
+        "/"
+    }
+
+    // Differs from the default, so the SQL_MAX_*_NAME_LEN group moves with the
+    // backend rather than looking core-decided.
+    fn catalog_result_column_widths() -> crate::types::CatalogResultColumnWidths {
+        crate::types::CatalogResultColumnWidths {
+            identifier_len: 63,
+            ..crate::types::CatalogResultColumnWidths::default()
+        }
+    }
+
+    // Differs from MockBackend's `"`-quoted ANSI dialect, so
+    // SQL_IDENTIFIER_QUOTE_CHAR moves with it.
+    fn escape_dialect() -> crate::escape::EscapeDialect {
+        crate::escape::EscapeDialect {
+            identifier_quotes: &[('`', '`')],
+            ..crate::escape::EscapeDialect::ansi_default()
+        }
+    }
+    fn cursor_commit_behavior() -> crate::types::CursorBehavior {
+        crate::types::CursorBehavior::Delete
+    }
+    fn cursor_rollback_behavior() -> crate::types::CursorBehavior {
+        crate::types::CursorBehavior::Close
+    }
 }
 
 // ---------------------------------------------------------------------------

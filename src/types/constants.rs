@@ -105,6 +105,15 @@ pub const SQL_GB_NO_RELATION: u16 = 3;
 /// grouping column. Returned by a SQL-92 Full level-conformant driver.
 pub const SQL_GB_COLLATE: u16 = 4;
 
+// --- SQL_CONCAT_NULL_BEHAVIOR (22) values ---
+
+/// `SQL_CB_NULL` — concatenating a NULL character column with a non-NULL one
+/// yields NULL. Returned by a SQL-92 Entry level-conformant driver.
+pub const SQL_CB_NULL: u16 = 0x0000;
+/// `SQL_CB_NON_NULL` — the result is the concatenation of the non-NULL
+/// column or columns.
+pub const SQL_CB_NON_NULL: u16 = 0x0001;
+
 // --- SQL_CORRELATION_NAME (74) values ---
 
 /// `SQL_CN_NONE` — table correlation names are not supported.
@@ -1218,6 +1227,17 @@ mod tests {
         assert_eq!(SQL_NC_LOW, 1, "SQL_NC_LOW (sql.h)");
         assert_eq!(SQL_NC_START, 0x0002, "SQL_NC_START (sqlext.h)");
         assert_eq!(SQL_NC_END, 0x0004, "SQL_NC_END (sqlext.h)");
+
+        // SQL_CONCAT_NULL_BEHAVIOR (22) values — sqlext.h
+        assert_eq!(SQL_CB_NULL, 0x0000, "SQL_CB_NULL (sqlext.h)");
+        assert_eq!(SQL_CB_NON_NULL, 0x0001, "SQL_CB_NON_NULL (sqlext.h)");
+
+        // SQL_CONVERT_FUNCTIONS (48) values — sqlext.h
+        assert_eq!(
+            SQL_FN_CVT_CONVERT, 0x0000_0001,
+            "SQL_FN_CVT_CONVERT (sqlext.h)"
+        );
+        assert_eq!(SQL_FN_CVT_CAST, 0x0000_0002, "SQL_FN_CVT_CAST (sqlext.h)");
 
         // SQL_CORRELATION_NAME (74) values — sqlext.h
         assert_eq!(SQL_CN_NONE, 0x0000, "SQL_CN_NONE (sqlext.h)");

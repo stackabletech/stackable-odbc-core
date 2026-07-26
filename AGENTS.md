@@ -221,6 +221,15 @@ These deliberately are not:
 | `sql_conformance` | `SQL_SQL_CONFORMANCE` (`SQL_SC_*`) |
 | `timedate_add_intervals` | `SQL_TIMEDATE_ADD_INTERVALS` (`SQL_FN_TSI_*`) |
 | `timedate_diff_intervals` | `SQL_TIMEDATE_DIFF_INTERVALS` (`SQL_FN_TSI_*`) |
+| `subqueries` | `SQL_SUBQUERIES` (`SQL_SQ_*`) |
+| `column_alias` | `SQL_COLUMN_ALIAS` |
+| `concat_null_behavior` | `SQL_CONCAT_NULL_BEHAVIOR` (`0` = `SQL_CB_NULL`) |
+| `union_support` | `SQL_UNION` (`SQL_U_*`) |
+| `convert_functions` | `SQL_CONVERT_FUNCTIONS` (`SQL_FN_CVT_*`) |
+| `order_by_columns_in_select` | `SQL_ORDER_BY_COLUMNS_IN_SELECT` |
+| `accessible_tables` | `SQL_ACCESSIBLE_TABLES` |
+| `data_source_read_only` | `SQL_DATA_SOURCE_READ_ONLY` |
+| `search_pattern_escape` | `SQL_SEARCH_PATTERN_ESCAPE` |
 
 Each states a **capability**, where any default is a claim the backend author
 never made. `0` understates ("this data source cannot do this at all") and
@@ -251,12 +260,37 @@ Two corollaries worth checking when adding an info type:
   `""`, which is the right *shape* but is not in any Y/N value list. Such a
   type needs either a shared `"N"` arm in `default_get_info` or a hook.
 - **Watch for info types that constrain each other.** `SQL_SQL_CONFORMANCE`
-  fixes the value of `SQL_GROUP_BY`, `SQL_CORRELATION_NAME` and
-  `SQL_NON_NULLABLE_COLUMNS` (the spec names what an entry-level driver
-  returns for each); `SQL_TIMEDATE_FUNCTIONS` claiming
+  fixes the value of `SQL_GROUP_BY`, `SQL_CORRELATION_NAME`,
+  `SQL_NON_NULLABLE_COLUMNS`, `SQL_CONCAT_NULL_BEHAVIOR`, `SQL_SUBQUERIES`
+  and `SQL_COLUMN_ALIAS` — the spec names what an entry-level driver returns
+  for each of those six. `SQL_TIMEDATE_FUNCTIONS` claiming
   `SQL_FN_TD_TIMESTAMPADD` obliges `SQL_TIMEDATE_ADD_INTERVALS` to be
-  non-zero. Core supplying one side of such a pair while the backend supplies
-  the other is how it ends up contradicting itself.
+  non-zero. `SQL_CATALOG_NAME` drives the whole catalog group. Core supplying
+  one side of such a pair while the backend supplies the other is how it ends
+  up contradicting itself.
+- **Prefer deriving over adding a hook when the fact is already declared.**
+  `SQL_IDENTIFIER_QUOTE_CHAR` comes from `EscapeDialect::identifier_quotes`
+  and `SQL_CURSOR_COMMIT_BEHAVIOR` from `Backend::cursor_commit_behavior`,
+  because a second way to state the same fact is a second way to state it
+  *differently*. Check whether an existing hook already answers the question
+  before adding one.
+
+#### The rule is enforced by a test, not by review
+
+`default_get_info_answers_are_backend_derived_or_declared_core_facts`
+(`src/backend.rs`) asks one question of every info type: **does the answer
+move when the backend does?** It evaluates `default_get_info` for two mock
+backends that share no capability declaration. An info type answering
+identically for both is one core decided, and must appear in that test's
+`CORE_FACTS` list together with the reason core is entitled to decide it —
+a fact about core's own implementation (its fetch really is forward-only, its
+`Backend` trait really is synchronous), a limit where the spec defines `0` as
+"no limit or unknown", or driver-level identity with no per-backend answer.
+
+So adding a hard-coded claim to `default_get_info` fails a test that names the
+info type. If you find yourself adding an entry to `CORE_FACTS`, the reason
+string is the test: if you cannot write one that is about *core* rather than
+about the data source, the value belongs on a `Backend` method.
 
 `supports_catalogs` and `supports_schemas` between them drive seven info types
 (`SQL_CATALOG_NAME`, `SQL_CATALOG_TERM`, `SQL_CATALOG_NAME_SEPARATOR`,

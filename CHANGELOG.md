@@ -35,6 +35,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `/usr/include/sql.h` and `sqlext.h` by
   `info_type_value_constants_match_sql_headers`. These are values where a typo
   cannot look empty, because zero is itself a valid claim for several of them.
+- A test that enforces the backend/`SQLGetInfo` split instead of leaving it to
+  review. `default_get_info_answers_are_backend_derived_or_declared_core_facts`
+  evaluates `default_get_info` for two mock backends sharing no capability
+  declaration; any info type answering identically for both is one core
+  decided, and must be listed with the reason core is entitled to decide it —
+  a fact about core's own implementation, a limit where the spec defines `0`
+  as "no limit or unknown", or driver identity. Hard-coding a claim about the
+  data source now fails a test naming the info type. Every item fixed in this
+  release was found by hand; this is what stops the next one needing that.
 - `EscapeDialect::rewrite_scalar_fn`, which receives a whole
   `{fn NAME(args)}` escape and returns the replacement text.
   `remap_scalar_fn` only swaps the identifier in front of the parentheses and
@@ -96,7 +105,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `outer_join_capabilities`, `default_txn_isolation`,
   `txn_isolation_options`, `group_by`, `null_collation`, `correlation_name`,
   `non_nullable_columns`, `expressions_in_order_by`, `sql_conformance`,
-  `timedate_add_intervals` and `timedate_diff_intervals`.
+  `timedate_add_intervals`, `timedate_diff_intervals`, `subqueries`,
+  `column_alias`, `concat_null_behavior`, `union_support`,
+  `convert_functions`, `order_by_columns_in_select`, `accessible_tables`,
+  `data_source_read_only` and `search_pattern_escape`.
   They are required rather than defaulted on purpose:
   each states a *capability*, where a defaulted value is a claim the backend
   author never made and is unlikely to notice. A defaulted `0` understates and
@@ -151,6 +163,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `SQL_CORRELATION_NAME`, `SQL_NON_NULLABLE_COLUMNS` and `SQL_GROUP_BY` values
   the spec says an entry-level driver never returns, so every backend built on
   core inherited a contradiction it could not see.
+- `SQL_SUBQUERIES`, `SQL_COLUMN_ALIAS` and `SQL_CONCAT_NULL_BEHAVIOR` come
+  from the backend too — the other half of that same contradiction. The spec
+  names all three as values a SQL-92 Entry level-conformant driver returns,
+  and core hard-coded exactly those, so a backend declaring *no* conformance
+  level was still reported as supporting correlated subqueries, quantified
+  predicates and column aliases. `SQL_SUBQUERIES` is the one an application
+  acts on: claiming `SQL_SQ_CORRELATED_SUBQUERIES` for a source without them
+  is how a BI tool comes to push down SQL the server rejects.
+  `SQL_CONCAT_NULL_BEHAVIOR` was additionally a bare `0` literal for a
+  spec-named constant; `SQL_CB_NULL` and `SQL_CB_NON_NULL` now exist.
+- `SQL_UNION`, `SQL_CONVERT_FUNCTIONS`, `SQL_ORDER_BY_COLUMNS_IN_SELECT`,
+  `SQL_ACCESSIBLE_TABLES` and `SQL_DATA_SOURCE_READ_ONLY` come from the
+  backend. Each was a statement about the data source that core had no way to
+  know. `SQL_ACCESSIBLE_TABLES` was the sharpest: `"Y"` guarantees the
+  connected user has `SELECT` on every table `SQLTables` returns, which
+  depends on the principal, not the driver.
+- `SQL_IDENTIFIER_QUOTE_CHAR` is derived from
+  `EscapeDialect::identifier_quotes` rather than hard-coded to `"`. The escape
+  translator already consulted the dialect, so a backend quoting identifiers
+  with a backtick or brackets had core telling applications something the
+  translator contradicted. No new hook: the fact was already declared.
+- `SQL_SEARCH_PATTERN_ESCAPE` comes from the backend. It describes what
+  escapes `%` and `_` in catalog-function pattern arguments, which the backend
+  interprets.
 - `SQL_EXPRESSIONS_IN_ORDERBY` is stated by the backend. It previously fell to
   `""`, which reads as "no" to a tool deciding whether to push an expression
   into `ORDER BY`.
