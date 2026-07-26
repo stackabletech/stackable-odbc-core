@@ -100,3 +100,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for that variant). It now records a general error, so a genuinely failing
   connection's own SQLSTATE is no longer suppressed by a corrupt entry
   encountered before it.
+
+[Unreleased]: https://github.com/stackabletech/stackable-odbc-core/commits/HEAD
