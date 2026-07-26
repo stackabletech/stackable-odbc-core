@@ -22,6 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   value drives both `SQLGetInfoW` and what `SQLEndTran` does to statements.
 - `SQL_CURSOR_COMMIT_BEHAVIOR` constant (23), derived from
   `odbc_sys::InfoType::CursorCommitBehaviour`.
+- The `SQL_AT_*` bitmask constants for the `SQL_ALTER_TABLE` (86) info type, so
+  a driver can describe its `ALTER TABLE` support by name instead of by raw
+  literal.
 - `StatementHandle::cursor_open`, plus the `set_result_set`,
   `set_prepared_statement` and `discard_result_set` helpers that maintain it.
   `StatementHandle::statement` no longer doubles as the answer to "is a cursor

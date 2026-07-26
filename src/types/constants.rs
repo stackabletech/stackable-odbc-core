@@ -223,6 +223,44 @@ pub const SQL_U_UNION: u32 = 0x0000_0001;
 /// `SQL_U_UNION_ALL` — the `UNION ALL` clause is supported.
 pub const SQL_U_UNION_ALL: u32 = 0x0000_0002;
 
+// --- SQL_ALTER_TABLE (86) flags (sqlext.h) ---
+/// `SQL_AT_ADD_COLUMN_SINGLE` — `ALTER TABLE ... ADD COLUMN` is supported for
+/// a single column (FIPS Transitional level).
+pub const SQL_AT_ADD_COLUMN_SINGLE: u32 = 0x0000_0020;
+/// `SQL_AT_ADD_COLUMN_DEFAULT` — the `<default value>` clause is supported on
+/// `ADD COLUMN` (FIPS Transitional level).
+pub const SQL_AT_ADD_COLUMN_DEFAULT: u32 = 0x0000_0040;
+/// `SQL_AT_ADD_COLUMN_COLLATION` — the `<column collation>` clause is supported
+/// on `ADD COLUMN` (FIPS Full level).
+pub const SQL_AT_ADD_COLUMN_COLLATION: u32 = 0x0000_0080;
+/// `SQL_AT_SET_COLUMN_DEFAULT` — the `<alter column> <set column default>`
+/// clause is supported (FIPS Intermediate level).
+pub const SQL_AT_SET_COLUMN_DEFAULT: u32 = 0x0000_0100;
+/// `SQL_AT_DROP_COLUMN_DEFAULT` — the `<alter column> <drop column default>`
+/// clause is supported (FIPS Intermediate level).
+pub const SQL_AT_DROP_COLUMN_DEFAULT: u32 = 0x0000_0200;
+/// `SQL_AT_DROP_COLUMN_CASCADE` — the `<drop column> CASCADE` clause is
+/// supported (FIPS Transitional level).
+pub const SQL_AT_DROP_COLUMN_CASCADE: u32 = 0x0000_0400;
+/// `SQL_AT_DROP_COLUMN_RESTRICT` — the `<drop column> RESTRICT` clause is
+/// supported (FIPS Transitional level).
+pub const SQL_AT_DROP_COLUMN_RESTRICT: u32 = 0x0000_0800;
+/// `SQL_AT_ADD_TABLE_CONSTRAINT` — the `<add table constraint>` clause is
+/// supported (FIPS Transitional level).
+pub const SQL_AT_ADD_TABLE_CONSTRAINT: u32 = 0x0000_1000;
+/// `SQL_AT_DROP_TABLE_CONSTRAINT_CASCADE` — the
+/// `<drop table constraint> CASCADE` clause is supported (FIPS Transitional
+/// level).
+pub const SQL_AT_DROP_TABLE_CONSTRAINT_CASCADE: u32 = 0x0000_2000;
+/// `SQL_AT_DROP_TABLE_CONSTRAINT_RESTRICT` — the
+/// `<drop table constraint> RESTRICT` clause is supported (FIPS Transitional
+/// level).
+pub const SQL_AT_DROP_TABLE_CONSTRAINT_RESTRICT: u32 = 0x0000_4000;
+/// `SQL_AT_CONSTRAINT_NAME_DEFINITION` — the `<constraint name definition>`
+/// clause is supported for naming column and table constraints (FIPS
+/// Intermediate level).
+pub const SQL_AT_CONSTRAINT_NAME_DEFINITION: u32 = 0x0000_8000;
+
 // --- SQL_SCHEMA_USAGE (91) flags (sqlext.h: aliases of SQL_OU_*) ---
 /// `SQL_SU_DML_STATEMENTS` — a schema name can be used in a DML statement
 /// (`SELECT`/`INSERT`/`UPDATE`/`DELETE`).
