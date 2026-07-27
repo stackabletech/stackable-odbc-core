@@ -324,6 +324,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `SQLGetTypeInfo` orders its result set by `DATA_TYPE`, then `TYPE_NAME`. The
+  spec requires ordering by `DATA_TYPE` and then by how closely each type maps to
+  the ODBC type; core cannot rank closeness, so it uses `TYPE_NAME` as a stable,
+  total second key. Ordering was previously whatever the backend declared, which
+  matters because an application picking "the first row for this `DATA_TYPE`"
+  reads it as the preferred type. The sort is stable, so a backend's own
+  preference between same-named rows survives.
 - `SQLColAttributeW` reports `SQL_DESC_TYPE` as the *verbose* type. The spec
   splits it from `SQL_DESC_CONCISE_TYPE` for the datetime and interval families:
   a `SQL_TYPE_TIMESTAMP` column reports `SQL_DATETIME` for the former, `93` for

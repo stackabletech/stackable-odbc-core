@@ -1002,6 +1002,129 @@ mock_txn_backend!(
 );
 
 // ---------------------------------------------------------------------------
+// A backend that declares type info
+// ---------------------------------------------------------------------------
+
+/// Declares several `SQLGetTypeInfo` rows in deliberately wrong order, so a
+/// test can tell that `sql_get_type_info` sorts rather than passing the
+/// backend's list through.
+pub struct MockTypeInfoBackend;
+
+impl MockTypeInfoBackend {
+    /// Out of spec order on both keys: DATA_TYPE descends, and the two
+    /// `VARCHAR` rows are reverse-alphabetical by TYPE_NAME.
+    const TYPES: &'static [TypeInfoRow] = &[
+        type_info_row("VARCHAR2", crate::types::SqlDataType::VARCHAR),
+        type_info_row("INTEGER", crate::types::SqlDataType::INTEGER),
+        type_info_row("VARCHAR", crate::types::SqlDataType::VARCHAR),
+        type_info_row("BIGINT", crate::types::SqlDataType::EXT_BIG_INT),
+    ];
+}
+
+/// A minimal `TypeInfoRow`; only `type_name` and `data_type` matter for
+/// ordering.
+const fn type_info_row(
+    type_name: &'static str,
+    data_type: crate::types::SqlDataType,
+) -> TypeInfoRow {
+    TypeInfoRow {
+        type_name,
+        data_type,
+        column_size: 0,
+        literal_prefix: None,
+        literal_suffix: None,
+        create_params: None,
+        nullable: 1,
+        case_sensitive: false,
+        searchable: 3,
+        unsigned: None,
+        fixed_prec_scale: false,
+        auto_unique_value: None,
+        local_type_name: None,
+        minimum_scale: None,
+        maximum_scale: None,
+        sql_data_type: 0,
+        sql_datetime_sub: None,
+        num_prec_radix: None,
+        interval_precision: None,
+    }
+}
+
+impl Backend for MockTypeInfoBackend {
+    type Connection = MockConnection;
+    type Statement = MockStatement;
+    type Error = MockError;
+
+    fn connect(_: &ConnectParams) -> Result<MockConnection, MockError> {
+        Ok(MockConnection)
+    }
+    fn disconnect(_: &mut MockConnection) -> Result<(), MockError> {
+        Ok(())
+    }
+    fn exec_direct(_: &MockConnection, _: &str) -> Result<MockStatement, MockError> {
+        Err(MockError)
+    }
+    fn prepare(_: &MockConnection, _: &str) -> Result<MockStatement, MockError> {
+        Ok(MockStatement)
+    }
+    fn execute(
+        _: &MockConnection,
+        _: &mut MockStatement,
+        _: &[crate::types::ColumnValue],
+    ) -> Result<crate::types::ExecuteOutcome, MockError> {
+        Ok(crate::types::ExecuteOutcome::default())
+    }
+    fn get_info(_: &MockConnection, _: crate::types::InfoType) -> Result<InfoValue, MockError> {
+        Err(MockError)
+    }
+    fn get_functions() -> &'static [crate::function_id::FunctionId] {
+        &[]
+    }
+    fn get_type_info() -> &'static [TypeInfoRow] {
+        Self::TYPES
+    }
+    fn tables(
+        _: &MockConnection,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+    ) -> Result<MockStatement, MockError> {
+        Err(MockError)
+    }
+    fn columns(
+        _: &MockConnection,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+    ) -> Result<MockStatement, MockError> {
+        Err(MockError)
+    }
+
+    fn supports_catalogs() -> bool {
+        false
+    }
+    fn supports_schemas() -> bool {
+        false
+    }
+    fn alter_table_support() -> u32 {
+        0
+    }
+    fn outer_join_capabilities() -> u32 {
+        0
+    }
+    fn default_txn_isolation() -> u32 {
+        0
+    }
+    fn txn_isolation_options() -> u32 {
+        0
+    }
+
+    minimal_capability_decls!();
+}
+
+// ---------------------------------------------------------------------------
 // A backend that declares functions
 // ---------------------------------------------------------------------------
 

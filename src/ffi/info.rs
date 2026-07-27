@@ -509,13 +509,33 @@ pub unsafe fn sql_get_type_info<B: Backend>(
             let all_types = B::get_type_info();
 
             // Filter by data_type if not SQL_ALL_TYPES (SqlDataType::UNKNOWN_TYPE = 0)
-            let rows: Vec<_> = all_types
+            let mut selected: Vec<_> = all_types
                 .iter()
                 .filter(|t| {
                     data_type_val == SqlDataType::UNKNOWN_TYPE || t.data_type == data_type_val
                 })
-                .map(|t| t.to_column_values())
                 .collect();
+
+            // Spec: "the result set is ordered by DATA_TYPE and then by how
+            // closely the data type maps to the corresponding ODBC SQL data
+            // type". Core cannot rank closeness of mapping, so it orders by
+            // TYPE_NAME within a DATA_TYPE, which is stable and total. Sorted
+            // here rather than left to the backend so that every driver's
+            // result set is ordered, and ordered the same way -- an application
+            // picking "the first row for this DATA_TYPE" as the preferred type
+            // otherwise gets whatever order the backend happened to declare.
+            //
+            // `sort_by` is stable, so a backend that has deliberately put its
+            // preferred type first among several sharing a name keeps that
+            // order.
+            selected.sort_by(|a, b| {
+                a.data_type
+                    .0
+                    .cmp(&b.data_type.0)
+                    .then_with(|| a.type_name.cmp(b.type_name))
+            });
+
+            let rows: Vec<_> = selected.iter().map(|t| t.to_column_values()).collect();
 
             let columns = type_info_columns(&B::catalog_result_column_widths());
             let synthetic = SyntheticStatement::new(columns, rows);
@@ -804,6 +824,28 @@ mod tests {
         (env, conn, stmt)
     }
 
+    /// Generic counterparts of the `MockBackend`-fixed helpers above, for tests
+    /// that need a different backend.
+    unsafe fn alloc_env_conn_stmt_for<B: Backend>() -> (*mut c_void, *mut c_void, *mut c_void) {
+        unsafe {
+            let mut env: *mut c_void = std::ptr::null_mut();
+            let _ = sql_alloc_handle::<B>(HandleType::Env as i16, std::ptr::null_mut(), &mut env);
+            let mut conn: *mut c_void = std::ptr::null_mut();
+            let _ = sql_alloc_handle::<B>(HandleType::Dbc as i16, env, &mut conn);
+            let mut stmt: *mut c_void = std::ptr::null_mut();
+            let _ = sql_alloc_handle::<B>(HandleType::Stmt as i16, conn, &mut stmt);
+            (env, conn, stmt)
+        }
+    }
+
+    unsafe fn cleanup_for<B: Backend>(env: *mut c_void, conn: *mut c_void, stmt: *mut c_void) {
+        unsafe {
+            let _ = sql_free_handle::<B>(HandleType::Stmt as i16, stmt);
+            let _ = sql_free_handle::<B>(HandleType::Dbc as i16, conn);
+            let _ = sql_free_handle::<B>(HandleType::Env as i16, env);
+        }
+    }
+
     /// Helper: connect a handle using a valid connection string. `MockBackend::connect`
     /// always succeeds, so this establishes `handle.connection = Some(_)`, putting
     /// `sql_get_info_w` on the connected (`B::get_info`) path rather than the
@@ -945,6 +987,60 @@ mod tests {
             let _ = crate::ffi::connect::sql_disconnect::<MockTxnDeleteCloseBackend>(conn);
             let _ = sql_free_handle::<MockTxnDeleteCloseBackend>(HandleType::Dbc as i16, conn);
             let _ = sql_free_handle::<MockTxnDeleteCloseBackend>(HandleType::Env as i16, env);
+        }
+    }
+
+    #[test]
+    fn get_type_info_orders_by_data_type_then_type_name() {
+        use crate::test_utils::MockTypeInfoBackend;
+
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockTypeInfoBackend>();
+            let ret = sql_get_type_info::<MockTypeInfoBackend>(
+                stmt,
+                crate::types::SqlDataType::UNKNOWN_TYPE.0,
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+
+            let handle =
+                as_handle_ref::<StatementHandle<MockTypeInfoBackend>>(stmt).expect("valid");
+            let mut seen: Vec<(i16, String)> = Vec::new();
+            use crate::backend::StatementBackend as _;
+            let statement = handle.statement.as_mut().expect("result set");
+            while matches!(
+                statement.fetch().expect("fetch"),
+                crate::types::FetchResult::Row
+            ) {
+                let name = match &*statement
+                    .get_data(1, crate::types::CDataType::WChar)
+                    .expect("TYPE_NAME")
+                {
+                    crate::types::ColumnValue::String(s) => s.clone(),
+                    other => panic!("TYPE_NAME was {other:?}"),
+                };
+                let dt = match &*statement
+                    .get_data(2, crate::types::CDataType::SShort)
+                    .expect("DATA_TYPE")
+                {
+                    crate::types::ColumnValue::I16(v) => *v,
+                    other => panic!("DATA_TYPE was {other:?}"),
+                };
+                seen.push((dt, name));
+            }
+
+            let mut expected = seen.clone();
+            expected.sort();
+            assert_eq!(
+                seen, expected,
+                "SQLGetTypeInfo must order by DATA_TYPE then TYPE_NAME, however \
+                 the backend declared its list"
+            );
+            assert!(
+                seen.len() >= 3,
+                "the mock must declare enough rows to order"
+            );
+
+            cleanup_for::<MockTypeInfoBackend>(env, conn, stmt);
         }
     }
 
