@@ -116,10 +116,6 @@ impl<'a> HandleScope<'a> {
     /// They share one group, so this needs no second acquisition.
     ///
     /// [`HandleKind`]: crate::handles::registry::HandleKind
-    #[allow(
-        dead_code,
-        reason = "no caller until the ffi/metadata.rs migration (tasks 8-9) needs a statement and its parent connection from one acquisition"
-    )]
     pub fn stmt_with_parent<B: Backend>(
         &mut self,
         token: *mut c_void,

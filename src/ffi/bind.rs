@@ -3,8 +3,8 @@
 use std::ffi::c_void;
 
 use crate::backend::Backend;
-use crate::handles::{ColumnBinding, StatementHandle, as_handle_ref};
-use crate::panic::panic_safe;
+use crate::handles::{ColumnBinding, StatementHandle};
+use crate::panic::panic_safe_scoped;
 use crate::types::SqlReturn;
 
 /// Generic implementation of SQLBindCol.
@@ -78,8 +78,8 @@ pub unsafe fn sql_bind_col<B: Backend>(
         buffer_length
     );
     let ret = unsafe {
-        panic_safe::<B, _>(statement_handle, || {
-            let stmt = as_handle_ref::<StatementHandle<B>>(statement_handle)?;
+        panic_safe_scoped::<B, _>(statement_handle, |scope| {
+            let stmt = scope.get::<StatementHandle<B>>(statement_handle)?;
             stmt.diagnostics.clear();
 
             // Spec HYC00: bookmark column (col=0) is not supported by this driver.
@@ -127,32 +127,10 @@ pub unsafe fn sql_bind_col<B: Backend>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ffi::handle::{sql_alloc_handle, sql_free_handle};
-    use crate::test_utils::MockBackend;
+    use crate::handles::as_handle_ref;
+    use crate::test_utils::{MockBackend, alloc_env_conn_stmt, cleanup_env_conn_stmt};
     use crate::types::CDataType;
-    use odbc_sys::HandleType;
     use std::ffi::c_void;
-
-    unsafe fn alloc_env_conn_stmt() -> (*mut c_void, *mut c_void, *mut c_void) {
-        let mut env: *mut c_void = std::ptr::null_mut();
-        let _ = unsafe {
-            sql_alloc_handle::<MockBackend>(HandleType::Env as i16, std::ptr::null_mut(), &mut env)
-        };
-        let mut conn: *mut c_void = std::ptr::null_mut();
-        let _ = unsafe { sql_alloc_handle::<MockBackend>(HandleType::Dbc as i16, env, &mut conn) };
-        let mut stmt: *mut c_void = std::ptr::null_mut();
-        let _ =
-            unsafe { sql_alloc_handle::<MockBackend>(HandleType::Stmt as i16, conn, &mut stmt) };
-        (env, conn, stmt)
-    }
-
-    unsafe fn cleanup(env: *mut c_void, conn: *mut c_void, stmt: *mut c_void) {
-        unsafe {
-            let _ = sql_free_handle::<MockBackend>(HandleType::Stmt as i16, stmt);
-            let _ = sql_free_handle::<MockBackend>(HandleType::Dbc as i16, conn);
-            let _ = sql_free_handle::<MockBackend>(HandleType::Env as i16, env);
-        }
-    }
 
     #[test]
     fn bind_col_zero_returns_hyc00() {
@@ -168,7 +146,7 @@ mod tests {
                 std::ptr::null_mut(),
             );
             assert_eq!(ret, SqlReturn::ERROR);
-            cleanup(env, conn, stmt);
+            cleanup_env_conn_stmt(env, conn, stmt);
         }
     }
 
@@ -209,7 +187,7 @@ mod tests {
             let handle = as_handle_ref::<StatementHandle<MockBackend>>(stmt).unwrap();
             assert!(!handle.bindings.contains_key(&1));
 
-            cleanup(env, conn, stmt);
+            cleanup_env_conn_stmt(env, conn, stmt);
         }
     }
 
@@ -227,7 +205,7 @@ mod tests {
                 std::ptr::null_mut(),
             );
             assert_eq!(ret, SqlReturn::ERROR);
-            cleanup(env, conn, stmt);
+            cleanup_env_conn_stmt(env, conn, stmt);
         }
     }
 

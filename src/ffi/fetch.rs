@@ -7,8 +7,8 @@ use odbc_sys::FetchOrientation;
 use crate::backend::{Backend, StatementBackend};
 use crate::column_value::write_column_value;
 use crate::errors::OdbcError;
-use crate::handles::{StatementHandle, as_handle_ref};
-use crate::panic::panic_safe;
+use crate::handles::StatementHandle;
+use crate::panic::panic_safe_scoped;
 use crate::types::{ColumnValue, FetchResult, SqlReturn, SqlState, fetch_orientation_from_raw};
 
 /// Generic implementation of SQLFetch.
@@ -78,10 +78,10 @@ use crate::types::{ColumnValue, FetchResult, SqlReturn, SqlState, fetch_orientat
 pub unsafe fn sql_fetch<B: Backend>(statement_handle: *mut c_void) -> SqlReturn {
     tracing::debug!("SQLFetch(stmt={:?})", statement_handle);
     // SAFETY: statement_handle is null or a valid StatementHandle<B> allocated by
-    // sql_alloc_handle; tag is validated by as_handle_ref inside the closure.
+    // sql_alloc_handle; kind and group are validated by scope.get inside the closure.
     let ret = unsafe {
-        panic_safe::<B, _>(statement_handle, || {
-            let stmt = as_handle_ref::<StatementHandle<B>>(statement_handle)?;
+        panic_safe_scoped::<B, _>(statement_handle, |scope| {
+            let stmt = scope.get::<StatementHandle<B>>(statement_handle)?;
             stmt.diagnostics.clear();
 
             // Read before the mutable borrow of `stmt.statement` below.
@@ -267,9 +267,9 @@ pub unsafe fn sql_fetch_scroll<B: Backend>(
         return unsafe { sql_fetch::<B>(statement_handle) };
     }
     // SAFETY: statement_handle is null or a valid StatementHandle<B> allocated by
-    // sql_alloc_handle; tag is validated by as_handle_ref inside the closure.
+    // sql_alloc_handle; kind and group are validated by scope.get inside the closure.
     let ret = unsafe {
-        panic_safe::<B, _>(statement_handle, || {
+        panic_safe_scoped::<B, _>(statement_handle, |_scope| {
             Err(OdbcError::general(
                 format!("SQLFetchScroll: unsupported fetch orientation {fetch_orientation}"),
                 SqlState::fetch_type_out_of_range(),
@@ -391,10 +391,10 @@ pub unsafe fn sql_get_data<B: Backend>(
         c_type_log
     );
     // SAFETY: statement_handle is null or a valid StatementHandle<B> allocated by
-    // sql_alloc_handle; tag is validated by as_handle_ref inside the closure.
+    // sql_alloc_handle; kind and group are validated by scope.get inside the closure.
     let ret = unsafe {
-        panic_safe::<B, _>(statement_handle, || {
-            let stmt = as_handle_ref::<StatementHandle<B>>(statement_handle)?;
+        panic_safe_scoped::<B, _>(statement_handle, |scope| {
+            let stmt = scope.get::<StatementHandle<B>>(statement_handle)?;
             stmt.diagnostics.clear();
 
             // Spec 24000 / HY010: No cursor open. A statement that is only
@@ -469,32 +469,10 @@ pub unsafe fn sql_get_data<B: Backend>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ffi::handle::{sql_alloc_handle, sql_free_handle};
-    use crate::test_utils::MockBackend;
+    use crate::handles::as_handle_ref;
+    use crate::test_utils::{MockBackend, alloc_env_conn_stmt, cleanup_env_conn_stmt};
     use crate::types::CDataType;
     use odbc_sys::HandleType;
-
-    /// Helper: allocate env + connection + statement handles.
-    unsafe fn alloc_env_conn_stmt() -> (*mut c_void, *mut c_void, *mut c_void) {
-        let mut env: *mut c_void = std::ptr::null_mut();
-        let _ = unsafe {
-            sql_alloc_handle::<MockBackend>(HandleType::Env as i16, std::ptr::null_mut(), &mut env)
-        };
-        let mut conn: *mut c_void = std::ptr::null_mut();
-        let _ = unsafe { sql_alloc_handle::<MockBackend>(HandleType::Dbc as i16, env, &mut conn) };
-        let mut stmt: *mut c_void = std::ptr::null_mut();
-        let _ =
-            unsafe { sql_alloc_handle::<MockBackend>(HandleType::Stmt as i16, conn, &mut stmt) };
-        (env, conn, stmt)
-    }
-
-    unsafe fn cleanup(env: *mut c_void, conn: *mut c_void, stmt: *mut c_void) {
-        unsafe {
-            let _ = sql_free_handle::<MockBackend>(HandleType::Stmt as i16, stmt);
-            let _ = sql_free_handle::<MockBackend>(HandleType::Dbc as i16, conn);
-            let _ = sql_free_handle::<MockBackend>(HandleType::Env as i16, env);
-        }
-    }
 
     /// Read the SQLSTATE of the statement's first diagnostic record.
     unsafe fn first_sqlstate(stmt: *mut c_void) -> String {
@@ -570,7 +548,7 @@ mod tests {
             assert_eq!(first_sqlstate(stmt), "24000");
 
             let _ = crate::ffi::connect::sql_disconnect::<MockBackend>(conn);
-            cleanup(env, conn, stmt);
+            cleanup_env_conn_stmt(env, conn, stmt);
         }
     }
 
@@ -580,7 +558,7 @@ mod tests {
             let (env, conn, stmt) = alloc_env_conn_stmt();
             let ret = sql_fetch::<MockBackend>(stmt);
             assert_eq!(ret, SqlReturn::ERROR);
-            cleanup(env, conn, stmt);
+            cleanup_env_conn_stmt(env, conn, stmt);
         }
     }
 
@@ -599,7 +577,7 @@ mod tests {
                 &mut ind,
             );
             assert_eq!(ret, SqlReturn::ERROR);
-            cleanup(env, conn, stmt);
+            cleanup_env_conn_stmt(env, conn, stmt);
         }
     }
 
@@ -618,7 +596,7 @@ mod tests {
             // SQL_FETCH_PRIOR (4) is not supported by forward-only cursor
             let ret = sql_fetch_scroll::<MockBackend>(stmt, 4, 0);
             assert_eq!(ret, SqlReturn::ERROR);
-            cleanup(env, conn, stmt);
+            cleanup_env_conn_stmt(env, conn, stmt);
         }
     }
 
@@ -638,7 +616,7 @@ mod tests {
                 std::ptr::null_mut(),
             );
             assert_eq!(ret, SqlReturn::ERROR);
-            cleanup(env, conn, stmt);
+            cleanup_env_conn_stmt(env, conn, stmt);
         }
     }
 
@@ -665,7 +643,7 @@ mod tests {
                 &mut ind,
             );
             assert_eq!(ret, SqlReturn::ERROR);
-            cleanup(env, conn, stmt);
+            cleanup_env_conn_stmt(env, conn, stmt);
         }
     }
 }

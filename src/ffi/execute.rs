@@ -4,8 +4,7 @@ use std::ffi::c_void;
 
 use crate::backend::{Backend, StatementBackend};
 use crate::errors::{IntoOdbc, OdbcError};
-use crate::handles::{ConnectionHandle, StatementHandle, as_handle_ref};
-use crate::panic::panic_safe;
+use crate::panic::panic_safe_scoped;
 use crate::types::{SQL_NTS, SqlReturn, SqlState};
 use crate::utf16::utf16_to_string;
 
@@ -105,13 +104,14 @@ pub unsafe fn sql_exec_direct_w<B: Backend>(
         statement_handle,
         text_length
     );
-    // SAFETY: statement_handle is null or a valid StatementHandle<B>; tag validated inside
-    // panic_safe/as_handle_ref before any dereference occurs. statement_text is checked for
-    // null before use, and is then valid for text_length UTF-16 code units (or null-terminated
-    // if text_length == SQL_NTS/-3); caller upholds this per the function's safety contract.
+    // SAFETY: statement_handle is null or a valid StatementHandle<B>; kind and group
+    // validated by scope.stmt_with_parent inside the closure. statement_text is checked
+    // for null before use, and is then valid for text_length UTF-16 code units (or
+    // null-terminated if text_length == SQL_NTS/-3); caller upholds this per the
+    // function's safety contract.
     let ret = unsafe {
-        panic_safe::<B, _>(statement_handle, || {
-            let stmt = as_handle_ref::<StatementHandle<B>>(statement_handle)?;
+        panic_safe_scoped::<B, _>(statement_handle, |scope| {
+            let (stmt, conn) = scope.stmt_with_parent::<B>(statement_handle)?;
             stmt.diagnostics.clear();
             let noscan = stmt.noscan_enabled();
 
@@ -140,9 +140,6 @@ pub unsafe fn sql_exec_direct_w<B: Backend>(
                     SqlState::invalid_cursor_state(),
                 ));
             }
-
-            // Get parent connection via tag-validated traversal.
-            let conn = as_handle_ref::<ConnectionHandle<B>>(stmt.conn)?;
 
             // Spec HY010: Connection must be open.
             let Some(ref connection) = conn.connection else {
@@ -290,13 +287,14 @@ pub unsafe fn sql_prepare_w<B: Backend>(
         statement_handle,
         text_length
     );
-    // SAFETY: statement_handle is null or a valid StatementHandle<B>; tag validated inside
-    // panic_safe/as_handle_ref before any dereference occurs. statement_text is checked for
-    // null before use, and is then valid for text_length UTF-16 code units (or null-terminated
-    // if text_length == SQL_NTS/-3); caller upholds this per the function's safety contract.
+    // SAFETY: statement_handle is null or a valid StatementHandle<B>; kind and group
+    // validated by scope.stmt_with_parent inside the closure. statement_text is checked
+    // for null before use, and is then valid for text_length UTF-16 code units (or
+    // null-terminated if text_length == SQL_NTS/-3); caller upholds this per the
+    // function's safety contract.
     let ret = unsafe {
-        panic_safe::<B, _>(statement_handle, || {
-            let stmt = as_handle_ref::<StatementHandle<B>>(statement_handle)?;
+        panic_safe_scoped::<B, _>(statement_handle, |scope| {
+            let (stmt, conn) = scope.stmt_with_parent::<B>(statement_handle)?;
             stmt.diagnostics.clear();
             let noscan = stmt.noscan_enabled();
 
@@ -318,8 +316,6 @@ pub unsafe fn sql_prepare_w<B: Backend>(
 
             // Resolved before translating, because the escape dialect is a
             // property of the connection.
-            let conn_ptr = stmt.conn;
-            let conn = as_handle_ref::<ConnectionHandle<B>>(conn_ptr)?;
             let Some(ref connection) = conn.connection else {
                 return Err(OdbcError::general(
                     "Connection is not open",
@@ -341,8 +337,6 @@ pub unsafe fn sql_prepare_w<B: Backend>(
             // Ask backend to validate and prepare the statement.
             let prepared = B::prepare(connection, &sql).into_odbc()?;
 
-            // Re-acquire stmt after conn borrow ends, then store state.
-            let stmt = as_handle_ref::<StatementHandle<B>>(statement_handle)?;
             // Prepared, not executed (S2/S3): no cursor is open, and a
             // re-prepare closes any cursor the previous execution left open.
             stmt.set_prepared_statement(crate::handles::StatementData::Backend(prepared));
@@ -439,13 +433,14 @@ pub unsafe fn sql_prepare_w<B: Backend>(
 /// `statement_handle` must point to a valid `StatementHandle<B>`.
 pub unsafe fn sql_execute<B: Backend>(statement_handle: *mut c_void) -> SqlReturn {
     tracing::debug!("SQLExecute(stmt={:?})", statement_handle);
-    // SAFETY: statement_handle is null or a valid StatementHandle<B>; tag validated inside
-    // panic_safe/as_handle_ref before any dereference occurs. Bound parameter buffer pointers
-    // in stmt.param_bindings are validated when they were registered via SQLBindParameter;
-    // collect_params reads them under the caller's guarantee that they remain valid.
+    // SAFETY: statement_handle is null or a valid StatementHandle<B>; kind and group
+    // validated by scope.stmt_with_parent inside the closure. Bound parameter buffer
+    // pointers in stmt.param_bindings are validated when they were registered via
+    // SQLBindParameter; collect_params reads them under the caller's guarantee that
+    // they remain valid.
     let ret = unsafe {
-        panic_safe::<B, _>(statement_handle, || {
-            let stmt = as_handle_ref::<StatementHandle<B>>(statement_handle)?;
+        panic_safe_scoped::<B, _>(statement_handle, |scope| {
+            let (stmt, conn) = scope.stmt_with_parent::<B>(statement_handle)?;
             stmt.diagnostics.clear();
 
             let param_count = match stmt.param_count {
@@ -485,17 +480,12 @@ pub unsafe fn sql_execute<B: Backend>(statement_handle: *mut c_void) -> SqlRetur
             // SAFETY: caller guarantees all bound buffer pointers remain valid.
             let params = crate::ffi::params::collect_params(&stmt.param_bindings, param_count)?;
 
-            let conn_ptr = stmt.conn;
-            let conn = as_handle_ref::<ConnectionHandle<B>>(conn_ptr)?;
             let Some(ref connection) = conn.connection else {
                 return Err(OdbcError::general(
                     "Connection is not open",
                     SqlState::function_sequence_error(),
                 ));
             };
-
-            // Re-acquire stmt (different allocation from conn, no aliasing).
-            let stmt = as_handle_ref::<StatementHandle<B>>(statement_handle)?;
 
             // `SQLFreeStmt(SQL_CLOSE)` clears `stmt.statement` (discards the result set)
             // but the prepared SQL survives in `stmt.prepared_sql`. Per ODBC spec, calling
@@ -508,11 +498,9 @@ pub unsafe fn sql_execute<B: Backend>(statement_handle: *mut c_void) -> SqlRetur
                     )
                 })?;
                 let prepared = B::prepare(connection, sql).into_odbc()?;
-                let stmt = as_handle_ref::<StatementHandle<B>>(statement_handle)?;
                 stmt.set_prepared_statement(crate::handles::StatementData::Backend(prepared));
             }
 
-            let stmt = as_handle_ref::<StatementHandle<B>>(statement_handle)?;
             let stmt_data = stmt.statement.as_mut().ok_or_else(|| {
                 OdbcError::general(
                     "No prepared statement (call SQLPrepare first)",
@@ -532,10 +520,9 @@ pub unsafe fn sql_execute<B: Backend>(statement_handle: *mut c_void) -> SqlRetur
                 }
             };
 
-            // The `stmt_data` mutable borrow has ended; re-acquire the statement
-            // to write any OUTPUT / INOUT parameter values back into the bound
-            // buffers, the symmetric counterpart of collecting the input params.
-            let stmt = as_handle_ref::<StatementHandle<B>>(statement_handle)?;
+            // The `stmt_data` mutable borrow has ended; write any OUTPUT / INOUT
+            // parameter values back into the bound buffers, the symmetric
+            // counterpart of collecting the input params.
             // A cursor is open only if the execution produced columns; an
             // `UPDATE` leaves the statement in S4, not S5.
             stmt.cursor_open = stmt
@@ -557,23 +544,10 @@ pub unsafe fn sql_execute<B: Backend>(statement_handle: *mut c_void) -> SqlRetur
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ffi::handle::{sql_alloc_handle, sql_free_handle};
-    use crate::test_utils::MockBackend;
+    use crate::ffi::handle::sql_free_handle;
+    use crate::handles::as_handle_ref;
+    use crate::test_utils::{MockBackend, alloc_env_conn_stmt};
     use odbc_sys::HandleType;
-
-    /// Helper: allocate env + connection + statement handles.
-    unsafe fn alloc_env_conn_stmt() -> (*mut c_void, *mut c_void, *mut c_void) {
-        let mut env: *mut c_void = std::ptr::null_mut();
-        let _ = unsafe {
-            sql_alloc_handle::<MockBackend>(HandleType::Env as i16, std::ptr::null_mut(), &mut env)
-        };
-        let mut conn: *mut c_void = std::ptr::null_mut();
-        let _ = unsafe { sql_alloc_handle::<MockBackend>(HandleType::Dbc as i16, env, &mut conn) };
-        let mut stmt: *mut c_void = std::ptr::null_mut();
-        let _ =
-            unsafe { sql_alloc_handle::<MockBackend>(HandleType::Stmt as i16, conn, &mut stmt) };
-        (env, conn, stmt)
-    }
 
     /// Helper: connect a handle using a valid connection string.
     unsafe fn connect_handle(conn: *mut c_void) -> SqlReturn {
