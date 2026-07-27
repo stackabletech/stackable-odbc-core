@@ -239,7 +239,7 @@ jobs:
           fi
 
       # The published tarball must carry the licence and the notice, and must
-      # not carry the toolchain pin -- shipped, it pins consumers to this
+      # not carry the toolchain pin, shipped, it pins consumers to this
       # crate's Rust version.
       - name: Check the tarball's contents
         run: |

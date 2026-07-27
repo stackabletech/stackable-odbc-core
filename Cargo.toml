@@ -5,6 +5,17 @@ edition = "2024"
 rust-version = "1.95.0"
 authors = ["Stackable GmbH <info@stackable.tech>"]
 license = "Apache-2.0"
+
+# Publishing is switched off at the manifest, not only in `release.toml`.
+# `cargo publish` refuses outright while this is false, so neither a stray
+# `cargo release --execute` nor a hand-run publish can push this crate to
+# crates.io by accident.
+#
+# Everything else needed to publish is in place: metadata, `exclude`, the
+# docs.rs targets, LICENSE and NOTICE, and a CI job that packages the crate and
+# compiles it from the tarball. Publishing is this one line, flipped
+# deliberately, plus credentials.
+publish = false
 description = "Database-independent framework for building ODBC drivers in Rust: protocol logic, handle management, UTF-16 marshalling, diagnostics, and the generic ODBC FFI entry points."
 repository = "https://github.com/stackabletech/stackable-odbc-core"
 readme = "README.md"
