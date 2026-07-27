@@ -146,6 +146,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Security.** Deeply nested escape sequences killed the host process.
+  `translate_slice` and `translate_escape` are mutually recursive, one level per
+  nested escape, over SQL the application supplies, and had no depth bound —
+  so `{oj {oj {oj …}}}` recursed until the stack was exhausted. A stack overflow
+  is a guard-page abort rather than a panic, so `panic_safe`'s `catch_unwind`
+  could not contain it: the application hosting the driver died. Reachable from
+  `SQLExecDirectW`, `SQLPrepareW` and `SQLNativeSqlW`. Nesting is now capped at
+  `MAX_ESCAPE_DEPTH` (64, far above anything real SQL produces) and deeper input
+  returns `42000`. The margin mattered: at roughly 330 bytes per level the old
+  behaviour aborted at about 25 000 levels on Linux's 8 MiB main stack, but only
+  about 3 000 — some 12 KB of SQL — on a 1 MiB Windows thread stack.
 - **Security.** `SQL_C_DEFAULT` could overrun the application's buffer.
   `write_column_value` ignored `BufferLength` for every fixed-width C type,
   which is correct when the application *names* the type — naming it states the

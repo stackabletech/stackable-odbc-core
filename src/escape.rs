@@ -81,14 +81,43 @@ fn ansi_timestamp(x: &str) -> String {
     format!("TIMESTAMP {x}")
 }
 
+/// How deeply ODBC escape sequences may nest before translation gives up.
+///
+/// [`translate_slice`] and [`translate_escape`] are mutually recursive, one
+/// level per nested escape, over SQL the application supplies. Without a bound,
+/// input like `{oj {oj {oj …}}}` recurses until the stack is exhausted — and a
+/// stack overflow is a guard-page abort, not a panic, so
+/// [`panic_safe`](crate::panic::panic_safe) cannot contain it and the host
+/// application dies. Measured at roughly 330 bytes per level, which is about
+/// 25 000 levels on Linux's 8 MiB main stack and only about 3 000 on a 1 MiB
+/// Windows thread stack.
+///
+/// 64 is far above anything real SQL produces (a handful of levels at most) and
+/// far below any platform's limit.
+const MAX_ESCAPE_DEPTH: usize = 64;
+
 /// Translate ODBC escapes in `sql`. Returns the rewritten SQL, or an error for
-/// an unsupported (`{call}` → HYC00) or malformed (unterminated → 42000) escape.
+/// an unsupported (`{call}` → HYC00) or malformed (unterminated → 42000)
+/// escape, or one nested more than 64 levels deep (42000).
 pub fn translate_escapes(sql: &str, dialect: &EscapeDialect) -> Result<String, OdbcError> {
     let chars: Vec<char> = sql.chars().collect();
-    translate_slice(&chars, dialect)
+    translate_slice(&chars, dialect, 0)
 }
 
-fn translate_slice(chars: &[char], dialect: &EscapeDialect) -> Result<String, OdbcError> {
+fn translate_slice(
+    chars: &[char],
+    dialect: &EscapeDialect,
+    depth: usize,
+) -> Result<String, OdbcError> {
+    // Checked here rather than in `translate_escape` because every recursive
+    // path -- the `{oj}` body, the `{fn}` argument list and the tail after a
+    // rewritten call -- re-enters through this function.
+    if depth > MAX_ESCAPE_DEPTH {
+        return Err(OdbcError::general(
+            format!("Escape sequences nested deeper than {MAX_ESCAPE_DEPTH} levels"),
+            SqlState::syntax_error_or_access_violation(),
+        ));
+    }
     let mut out = String::new();
     let mut i = 0;
     while i < chars.len() {
@@ -107,7 +136,7 @@ fn translate_slice(chars: &[char], dialect: &EscapeDialect) -> Result<String, Od
             // Likewise for an unterminated block comment (no closing `*/`).
             copy_block_comment(chars, &mut i, &mut out);
         } else if c == '{' {
-            translate_escape(chars, &mut i, dialect, &mut out)?;
+            translate_escape(chars, &mut i, dialect, &mut out, depth)?;
         } else {
             out.push(c);
             i += 1;
@@ -282,6 +311,7 @@ fn translate_escape(
     i: &mut usize,
     dialect: &EscapeDialect,
     out: &mut String,
+    depth: usize,
 ) -> Result<(), OdbcError> {
     let open = *i;
     // Peek the keyword after '{' and optional whitespace.
@@ -320,13 +350,13 @@ fn translate_escape(
                 // malformed {fn} — copy verbatim
                 out.extend(chars[open..=close].iter().copied());
             } else if let Some(rewritten) =
-                rewrite_call(chars, &name, n, close, dialect).transpose()?
+                rewrite_call(chars, &name, n, close, dialect, depth).transpose()?
             {
                 out.push_str(&rewritten);
             } else {
                 let mapped = (dialect.remap_scalar_fn)(&name).unwrap_or(&name);
                 out.push_str(mapped);
-                let rest = translate_slice(&chars[n..close], dialect)?;
+                let rest = translate_slice(&chars[n..close], dialect, depth + 1)?;
                 out.push_str(&rest);
             }
         }
@@ -340,7 +370,7 @@ fn translate_escape(
             inner_trimmed(chars, after_kw, close).as_str(),
         )),
         "oj" => {
-            let body = translate_slice(&chars[after_kw..close], dialect)?;
+            let body = translate_slice(&chars[after_kw..close], dialect, depth + 1)?;
             out.push_str(body.trim());
         }
         "escape" => {
@@ -383,6 +413,7 @@ fn rewrite_call(
     name_end: usize,
     close: usize,
     dialect: &EscapeDialect,
+    depth: usize,
 ) -> Option<Result<String, OdbcError>> {
     let mut p = name_end;
     while p < close && chars[p].is_whitespace() {
@@ -395,7 +426,7 @@ fn rewrite_call(
 
     // Translate the arguments *before* the dialect sees them, so a nested
     // escape is already resolved and the dialect never parses escapes itself.
-    let args = match translate_slice(&chars[p + 1..arg_close], dialect) {
+    let args = match translate_slice(&chars[p + 1..arg_close], dialect, depth + 1) {
         Ok(a) => a,
         Err(e) => return Some(Err(e)),
     };
@@ -404,7 +435,7 @@ fn rewrite_call(
     // Anything between the closing paren and `}` is whitespace in a
     // well-formed call, but translate it rather than dropping it so that a
     // trailing nested escape is not silently lost.
-    match translate_slice(&chars[arg_close + 1..close], dialect) {
+    match translate_slice(&chars[arg_close + 1..close], dialect, depth + 1) {
         Ok(tail) => Some(Ok(rewritten + tail.trim_end())),
         Err(e) => Some(Err(e)),
     }
@@ -582,6 +613,55 @@ mod tests {
         }
         // ... and an unterminated escape stays 42000.
         let err = translate_escapes("SELECT {fn LOCATE('b','ab')", &d).unwrap_err();
+        assert_eq!(err.sqlstate().as_str(), "42000");
+    }
+
+    // ------------------------------------------------------------------
+    // Nesting depth
+    //
+    // translate_slice and translate_escape are mutually recursive, one level
+    // per nested escape, over SQL the application supplies. A stack overflow
+    // is a guard-page abort rather than a panic, so `panic_safe`'s
+    // catch_unwind cannot contain it: the host process dies.
+    // ------------------------------------------------------------------
+
+    /// `{oj ...}` nests through `translate_escape`'s body recursion.
+    fn nested_oj(depth: usize) -> String {
+        format!("{}x{}", "{oj ".repeat(depth), "}".repeat(depth))
+    }
+
+    /// `{fn ...}` nests through `rewrite_call`'s argument recursion, a
+    /// different path into `translate_slice`.
+    fn nested_fn(depth: usize) -> String {
+        format!("{}x{}", "{fn UCASE(".repeat(depth), ")}".repeat(depth))
+    }
+
+    #[test]
+    fn nesting_within_the_depth_limit_still_translates() {
+        // Real SQL nests escapes a handful deep at most; the limit must not be
+        // so tight that ordinary queries hit it.
+        let out = translate_escapes(&nested_oj(MAX_ESCAPE_DEPTH - 1), &dialect())
+            .expect("nesting inside the limit must translate");
+        assert!(out.contains('x'));
+    }
+
+    #[test]
+    fn nesting_beyond_the_depth_limit_is_rejected_not_overflowed() {
+        let err = translate_escapes(&nested_oj(MAX_ESCAPE_DEPTH + 1), &dialect()).unwrap_err();
+        assert_eq!(err.sqlstate().as_str(), "42000");
+    }
+
+    #[test]
+    fn nesting_beyond_the_depth_limit_is_rejected_through_the_fn_argument_path() {
+        let err = translate_escapes(&nested_fn(MAX_ESCAPE_DEPTH + 1), &dialect()).unwrap_err();
+        assert_eq!(err.sqlstate().as_str(), "42000");
+    }
+
+    #[test]
+    fn pathological_nesting_returns_an_error_rather_than_killing_the_process() {
+        // The depth that measurably aborted the process before the limit
+        // existed. It must now come back as an ordinary error.
+        let err = translate_escapes(&nested_oj(50_000), &dialect()).unwrap_err();
         assert_eq!(err.sqlstate().as_str(), "42000");
     }
 
