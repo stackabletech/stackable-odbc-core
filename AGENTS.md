@@ -381,9 +381,59 @@ Takes about 35 seconds. Notes:
 - **Leak reporting is deliberately left on.** It is what catches a handle or
   descriptor allocation that a teardown path forgets to free. If you add a
   test that allocates handles, it must free them or the job goes red.
-- Writes through application-supplied pointers must use `write_unaligned` /
-  byte-wise copies. ODBC applications using row-wise binding pass pointers at
-  arbitrary offsets into a packed buffer, so alignment is never guaranteed.
+- **The 35 seconds assumes warm build artifacts.** A run after any source change
+  rebuilds the crate under Miri first, which dominates and can take many
+  minutes. Budget for that before assuming a run has hung.
+
+### Alignment: what Miri does and does not catch
+
+Every access through an application-supplied pointer must be
+`read_unaligned` / `write_unaligned`, a byte-wise copy, or an element-wise
+loop. ODBC applications using row-wise binding pass pointers at arbitrary
+offsets into a packed buffer, so alignment is never guaranteed. Four operations
+carry an alignment requirement, and all four have been the source of real bugs
+here:
+
+| Operation | Requirement |
+|-----------|-------------|
+| `*ptr = v` / `*ptr`, including `*(p as *mut T) = v` | aligned for `T` |
+| `slice::from_raw_parts(_mut)` | aligned for the element type — **UB on construction, before anything is read** |
+| `ptr::copy_nonoverlapping` | *both* pointers aligned for `T`; cast to `*mut u8` to avoid it |
+| `&*(p as *const T)` | aligned for `T` |
+
+`u8` pointers are exempt: `u8` has alignment 1.
+
+Two things make this easy to get wrong when auditing:
+
+- **Grep for the operation, not for `*ptr`.** A deref of a cast
+  (`*(diag_info as *mut i32) = v`) and a multi-line `unsafe` block both evade
+  the obvious pattern. `from_raw_parts` looks nothing like a deref at all.
+- **A misaligned access is not reliably observable on x86-64.** In a *debug*
+  build the standard library's precondition check fires, but it raises a
+  **non-unwinding** panic, which `panic_safe`'s `catch_unwind` cannot contain —
+  the host process aborts. In release it usually just works, until it does not.
+
+**`-Zmiri-symbolic-alignment-check` is a manual tool, deliberately not in CI.**
+Plain Miri checks alignment against the concrete address the allocator returned,
+so a test can pass by luck: offsetting `+1` into a `Vec<u8>` is not reliably
+misaligned, because a byte allocation has alignment 1 and may already start on
+an odd address. The symbolic check ignores the concrete address and catches the
+class regardless. It is slow enough that it was not worth a per-PR job, though
+the incremental cost over plain Miri has not been measured separately from the
+rebuild. Run it by hand when touching pointer marshalling:
+
+```bash
+MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-symbolic-alignment-check" \
+  cargo +nightly miri test -p stackable-odbc-core --lib -- --skip proptest
+```
+
+To write a test that is misaligned on every platform, offset one byte into an
+allocation of the *target* type, not into a byte buffer:
+
+```rust
+let mut arena = vec![0u16; 16];
+let ptr = unsafe { arena.as_mut_ptr().cast::<u8>().add(1) }.cast::<u16>();
+```
 
 ### Fuzzing
 
