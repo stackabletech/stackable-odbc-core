@@ -132,6 +132,28 @@ pub unsafe fn write_utf16(
     }
 }
 
+/// Records the `01004` diagnostic that goes with a truncated string write.
+///
+/// [`write_utf16`] reports truncation by returning `SQL_SUCCESS_WITH_INFO`, but
+/// the spec also requires a diagnostic record saying why: an application that
+/// sees `SQL_SUCCESS_WITH_INFO` calls `SQLGetDiagRec` to find out what happened,
+/// and with no record there it cannot distinguish truncation from any other
+/// informational condition.
+///
+/// Not used by the `SQLGetDiagRec` / `SQLGetDiagField` paths themselves. Those
+/// return `SQL_SUCCESS_WITH_INFO` for a truncated message too, but posting a
+/// record about reading a record would both recurse and overwrite the queue the
+/// application is in the middle of reading.
+pub(crate) fn note_truncation(
+    ret: SqlReturn,
+    diagnostics: &mut crate::diagnostics::DiagnosticQueue,
+) -> SqlReturn {
+    if ret == SqlReturn::SUCCESS_WITH_INFO {
+        diagnostics.push(&crate::errors::OdbcError::StringTruncated);
+    }
+    ret
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

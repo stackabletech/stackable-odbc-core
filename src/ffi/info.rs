@@ -340,7 +340,10 @@ pub unsafe fn sql_get_info_w<B: Backend>(
                     // be aligned (row-wise-bound applications pass pointers at arbitrary
                     // offsets into a packed buffer).
                     let mut units: i16 = 0;
-                    let ret = write_utf16(&s, info_value_ptr as *mut u16, buf_len_u16, &mut units);
+                    let ret = crate::utf16::note_truncation(
+                        write_utf16(&s, info_value_ptr as *mut u16, buf_len_u16, &mut units),
+                        &mut handle.diagnostics,
+                    );
                     // Spec: SQLGetInfoW reports StringLengthPtr in bytes,
                     // but write_utf16 reports in u16 units. Convert.
                     if !string_length_ptr.is_null() {
@@ -1041,6 +1044,38 @@ mod tests {
             );
 
             cleanup_for::<MockTypeInfoBackend>(env, conn, stmt);
+        }
+    }
+
+    #[test]
+    fn a_truncated_info_string_posts_the_01004_it_refers_to() {
+        // SQL_SUCCESS_WITH_INFO tells the application to call SQLGetDiagRec.
+        // With no record there it cannot tell truncation from any other
+        // informational condition.
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            assert_eq!(connect_handle(conn), SqlReturn::SUCCESS);
+
+            // Two bytes: room for one UTF-16 unit, i.e. the terminator only.
+            let mut buf = [0u16; 4];
+            let mut str_len: i16 = -1;
+            let ret = sql_get_info_w::<MockBackend>(
+                conn,
+                InfoType::DriverOdbcVer as u16,
+                buf.as_mut_ptr() as *mut c_void,
+                2,
+                &mut str_len,
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS_WITH_INFO, "must report truncation");
+
+            let handle = as_handle_ref::<ConnectionHandle<MockBackend>>(conn).expect("valid");
+            let rec = handle
+                .diagnostics
+                .get(0)
+                .expect("a truncation must leave a diagnostic record");
+            assert_eq!(rec.sqlstate.as_str(), "01004");
+
+            cleanup(env, conn, stmt);
         }
     }
 

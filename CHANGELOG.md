@@ -324,6 +324,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Six functions post the `01004` diagnostic record that their
+  `SQL_SUCCESS_WITH_INFO` refers to when they truncate a string:
+  `SQLGetInfoW`, `SQLGetConnectAttrW`, `SQLDescribeColW`, `SQLColAttributeW`,
+  `SQLGetCursorNameW` and `SQLNativeSqlW`. An application that sees
+  `SQL_SUCCESS_WITH_INFO` calls `SQLGetDiagRec` to learn why, and an empty queue
+  left it unable to distinguish truncation from any other informational
+  condition. `SQLGetData` and `SQLFetch` already did this.
+
+  Two paths deliberately still do not. `SQLGetDiagRecW` / `SQLGetDiagFieldW`
+  truncate their own messages, but posting a record about reading a record would
+  recurse and overwrite the queue the application is reading. `SQLDriverConnectW`
+  and `SQLBrowseConnectW` do not report a truncated output connection string at
+  all, because `SQL_SUCCESS_WITH_INFO` there sends the Windows Driver Manager
+  down a diagnostic-retrieval path that crashes; the required length still
+  reaches the application so it can retry with a larger buffer. That reasoning is
+  now written at the browse site too, not only at `SQLDriverConnectW`.
 - `SQLGetTypeInfo` orders its result set by `DATA_TYPE`, then `TYPE_NAME`. The
   spec requires ordering by `DATA_TYPE` and then by how closely each type maps to
   the ODBC type; core cannot rank closeness, so it uses `TYPE_NAME` as a stable,

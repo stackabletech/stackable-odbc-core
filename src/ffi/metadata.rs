@@ -949,11 +949,10 @@ pub unsafe fn sql_describe_col_w<B: Backend>(
             }
 
             // Write column name via write_utf16.
-            Ok(write_utf16(
-                &desc.name,
-                column_name,
-                buffer_length,
-                name_length_ptr,
+            let name = desc.name.clone();
+            Ok(crate::utf16::note_truncation(
+                write_utf16(&name, column_name, buffer_length, name_length_ptr),
+                &mut stmt.diagnostics,
             ))
         })
     };
@@ -1110,11 +1109,14 @@ pub unsafe fn sql_col_attribute_w<B: Backend>(
                     // write_utf16 reports UTF-16 code units, so convert on the way out.
                     let buf_len_u16 = buffer_length / 2;
                     let mut units: i16 = 0;
-                    let ret = write_utf16(
-                        &s,
-                        character_attribute_ptr as *mut u16,
-                        buf_len_u16,
-                        &mut units,
+                    let ret = crate::utf16::note_truncation(
+                        write_utf16(
+                            &s,
+                            character_attribute_ptr as *mut u16,
+                            buf_len_u16,
+                            &mut units,
+                        ),
+                        &mut stmt.diagnostics,
                     );
                     if !string_length_ptr.is_null() {
                         let bytes = i16::try_from(i32::from(units) * 2).unwrap_or_else(|_| {

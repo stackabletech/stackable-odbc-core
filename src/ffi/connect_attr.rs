@@ -567,7 +567,10 @@ pub unsafe fn sql_get_connect_attr_w<B: Backend>(
                         )
                     })?;
                     let mut len_u16: i16 = 0;
-                    let ret = write_utf16(&s, value_ptr as *mut u16, buf_u16, &mut len_u16);
+                    let ret = crate::utf16::note_truncation(
+                        write_utf16(&s, value_ptr as *mut u16, buf_u16, &mut len_u16),
+                        &mut conn.diagnostics,
+                    );
                     if !string_length_ptr.is_null() {
                         // SAFETY: non-null checked above; caller guarantees writable i32
                         std::ptr::write_unaligned(string_length_ptr, i32::from(len_u16) * 2); // bytes

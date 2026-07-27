@@ -522,6 +522,14 @@ pub unsafe fn sql_browse_connect_w<B: Backend>(
             handle.browse_request = None;
 
             // Write the complete connection string to the output buffer.
+            //
+            // Truncation is deliberately not reported, for the reason given in
+            // `sql_driver_connect_w`: returning SQL_SUCCESS_WITH_INFO for a
+            // truncated output connection string sends the Windows Driver
+            // Manager down a diagnostic-retrieval path that crashes. The
+            // required length still reaches the application through
+            // `string_length2_ptr`, which is what lets it retry with a larger
+            // buffer.
             let complete = merged.to_connection_string();
             if !out_connection_string.is_null() {
                 let _ = write_utf16(
@@ -860,6 +868,10 @@ pub unsafe fn sql_native_sql_w<B: Backend>(
                 );
                 std::ptr::write_unaligned(out_statement_text.add(copy_len), 0);
                 if copy_len < wide.len() {
+                    // The 01004 record the SUCCESS_WITH_INFO refers to: an
+                    // application that sees it calls SQLGetDiagRec to find out
+                    // what happened.
+                    conn.diagnostics.push(&OdbcError::StringTruncated);
                     return Ok(SqlReturn::SUCCESS_WITH_INFO);
                 }
             }

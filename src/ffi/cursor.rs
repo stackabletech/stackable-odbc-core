@@ -428,15 +428,14 @@ pub unsafe fn sql_get_cursor_name_w<B: Backend>(
                 stmt.cursor_name = Some(format!("SQL_CURSR{n:04}"));
             }
 
-            let name = stmt.cursor_name.as_deref().unwrap_or("");
+            let name = stmt.cursor_name.clone().unwrap_or_default();
 
-            // write_utf16 handles truncation (01004 → SUCCESS_WITH_INFO),
-            // null output pointer, and length reporting.
-            Ok(write_utf16(
-                name,
-                cursor_name,
-                buffer_length,
-                name_length_ptr,
+            // write_utf16 handles the null output pointer and length reporting;
+            // note_truncation adds the 01004 record that goes with a truncated
+            // write.
+            Ok(crate::utf16::note_truncation(
+                write_utf16(&name, cursor_name, buffer_length, name_length_ptr),
+                &mut stmt.diagnostics,
             ))
         })
     };
