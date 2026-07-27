@@ -10,11 +10,6 @@ license = "Apache-2.0"
 # `cargo publish` refuses outright while this is false, so neither a stray
 # `cargo release --execute` nor a hand-run publish can push this crate to
 # crates.io by accident.
-#
-# Everything else needed to publish is in place: metadata, `exclude`, the
-# docs.rs targets, LICENSE and NOTICE, and a CI job that packages the crate and
-# compiles it from the tarball. Publishing is this one line, flipped
-# deliberately, plus credentials.
 publish = false
 repository = "https://github.com/stackabletech/stackable-odbc-core"
 homepage = "https://github.com/stackabletech/stackable-odbc-core"
@@ -30,16 +25,6 @@ categories = ["database", "external-ffi-bindings", "api-bindings"]
 # 1.95.0, because rustup honours the file it finds in a vendored or unpacked
 # dependency. That is a known docs.rs and vendoring failure mode, and the pin is
 # a contributor convenience with no business travelling with the crate.
-#
-# `bench/` and `fuzz/` are nested packages, which cargo already leaves out of a
-# parent's tarball; they are listed for the reader's benefit, not because the
-# exclusion depends on it. The benchmark lives in its own crate precisely so
-# core declares no `[[bench]]` target: a declared-but-excluded benchmark makes
-# `cargo package` warn on every publish, and the only ways to silence that are
-# to ship a benchmark no consumer can run, or to leave a standing warning where
-# it would mask the next real one. It is `bench/` rather than `benches/`
-# because cargo auto-discovers the plural name as a target directory and then
-# insists on validating the manifest it finds inside.
 exclude = [
     "rust-toolchain.toml",
     ".github/",

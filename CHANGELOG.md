@@ -148,6 +148,18 @@ markers go away and this section becomes the initial-release notes.
   `SHAPE_DEFAULT_IS_THE_ANSWER` with the reason, and adding an info type without
   either an arm or an entry fails a test that names it.
 - `SQL_PARC_*`, `SQL_PAS_*` and `SQL_ASYNC_NOTIFICATION_*` constants.
+- `test_support::attach_connection` and `test_support::detach_connection`,
+  behind the same default-off `test-support` feature as `conformance`. They put
+  a connection object into an allocated connection handle without calling
+  `Backend::connect`, and take it back out without calling
+  `Backend::disconnect`, so a driver can exercise core's *connected* paths —
+  the `SQLGetInfoW` fallback chain, the catalog functions, the conformance suite
+  — with no data source running. `handles` is `pub(crate)`, so a driver
+  previously reached into `ConnectionHandle` directly; these are the supported
+  replacement, taking the same opaque token an application holds and validating
+  it the way every FFI entry point does. `detach_connection` exists because
+  `SQLFreeHandle` refuses a still-connected handle (`HY010`), and calling
+  `SQLDisconnect` on a connection that never opened is not always meaningful.
 - `CORE_EXPORTED_FUNCTIONS` and `CORE_UNEXPORTED_FUNCTIONS`, partitioning
   `FunctionId` by whether `forward_ffi!` generates a C entry point for it. Nine
   ids name real ODBC functions core does not export (`SQLGetDescRec`,
@@ -199,10 +211,16 @@ markers go away and this section becomes the initial-release notes.
   values remain the defaults. Build descriptors with `ColumnDescriptor::new` and
   the `with_*` builders, which stay source-compatible as fields are added.
 - **Breaking:** `EscapeDialect`, `TypeInfoRow`, `CatalogResultColumnWidths` and
-  `FunctionId` are `#[non_exhaustive]`, with `with_*` builders on the first
-  three. `EscapeDialect` is the cautionary case: adding `rewrite_scalar_fn` to
-  it was already a silent breaking change (commit `886007b`, labelled `feat:`),
-  which cost nothing only because nothing was released.
+  `FunctionId` are `#[non_exhaustive]`, and the first three have constructors
+  and `with_*` builders — without which a `#[non_exhaustive]` struct simply
+  cannot be built from another crate. `EscapeDialect` is the cautionary case:
+  adding `rewrite_scalar_fn` to it was already a silent breaking change (commit
+  `886007b`, labelled `feat:`), which cost nothing only because nothing was
+  released.
+
+  `TypeInfoRow`'s are `const fn`, including every builder, because
+  `Backend::get_type_info` returns `&'static [TypeInfoRow]`: a driver builds its
+  type list in a `static`, where a non-const builder cannot be called.
 - **Breaking:** the `handles`, `panic` and `diagnostics` modules are
   `pub(crate)`. Nothing outside the crate needs them — `forward_ffi!` references
   only `$crate::ffi` and `$crate::types` — and leaving them public froze

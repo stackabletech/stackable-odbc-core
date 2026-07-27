@@ -358,6 +358,156 @@ pub struct TypeInfoRow {
 }
 
 impl TypeInfoRow {
+    /// A row for `type_name` of `data_type`, with every other column at its
+    /// least-committal value: no declared size or scale, nullable, fully
+    /// searchable, no literal form and no localised name.
+    ///
+    /// `sql_data_type` defaults to `data_type`, which is correct for every type
+    /// except the datetime and interval families — those set it with
+    /// [`TypeInfoRow::with_verbose_type`].
+    ///
+    /// `const` on this and every builder below, because
+    /// [`Backend::get_type_info`](crate::backend::Backend::get_type_info)
+    /// returns `&'static [TypeInfoRow]`: a driver builds its type list in a
+    /// `static`, where a non-const builder cannot be called.
+    pub const fn new(type_name: &'static str, data_type: SqlDataType) -> Self {
+        Self {
+            type_name,
+            data_type,
+            column_size: 0,
+            literal_prefix: None,
+            literal_suffix: None,
+            create_params: None,
+            nullable: Nullable::SqlNullable as i16,
+            case_sensitive: false,
+            searchable: crate::types::SQL_SEARCHABLE,
+            unsigned: None,
+            fixed_prec_scale: false,
+            auto_unique_value: None,
+            local_type_name: None,
+            minimum_scale: None,
+            maximum_scale: None,
+            sql_data_type: data_type.0,
+            sql_datetime_sub: None,
+            num_prec_radix: None,
+            interval_precision: None,
+        }
+    }
+
+    /// Sets `COLUMN_SIZE`.
+    #[must_use]
+    pub const fn with_column_size(mut self, column_size: i32) -> Self {
+        self.column_size = column_size;
+        self
+    }
+
+    /// Sets `LITERAL_PREFIX` and `LITERAL_SUFFIX`.
+    #[must_use]
+    pub const fn with_literal_affixes(
+        mut self,
+        prefix: Option<&'static str>,
+        suffix: Option<&'static str>,
+    ) -> Self {
+        self.literal_prefix = prefix;
+        self.literal_suffix = suffix;
+        self
+    }
+
+    /// Sets `CREATE_PARAMS`, e.g. `Some("length")` or `Some("precision,scale")`.
+    #[must_use]
+    pub const fn with_create_params(mut self, create_params: Option<&'static str>) -> Self {
+        self.create_params = create_params;
+        self
+    }
+
+    /// Sets `NULLABLE`, one of the `SQL_NULLABLE_*` values.
+    #[must_use]
+    pub const fn with_nullable(mut self, nullable: i16) -> Self {
+        self.nullable = nullable;
+        self
+    }
+
+    /// Sets `CASE_SENSITIVE`.
+    #[must_use]
+    pub const fn with_case_sensitive(mut self, case_sensitive: bool) -> Self {
+        self.case_sensitive = case_sensitive;
+        self
+    }
+
+    /// Sets `SEARCHABLE`, one of the `SQL_PRED_*` values.
+    #[must_use]
+    pub const fn with_searchable(mut self, searchable: i16) -> Self {
+        self.searchable = searchable;
+        self
+    }
+
+    /// Sets `UNSIGNED_ATTRIBUTE`; `None` for a non-numeric type.
+    #[must_use]
+    pub const fn with_unsigned(mut self, unsigned: Option<bool>) -> Self {
+        self.unsigned = unsigned;
+        self
+    }
+
+    /// Sets `FIXED_PREC_SCALE`, i.e. whether this is a money type.
+    #[must_use]
+    pub const fn with_fixed_prec_scale(mut self, fixed_prec_scale: bool) -> Self {
+        self.fixed_prec_scale = fixed_prec_scale;
+        self
+    }
+
+    /// Sets `AUTO_UNIQUE_VALUE`; `None` when auto-increment does not apply.
+    #[must_use]
+    pub const fn with_auto_unique_value(mut self, auto_unique_value: Option<bool>) -> Self {
+        self.auto_unique_value = auto_unique_value;
+        self
+    }
+
+    /// Sets `LOCAL_TYPE_NAME`, the display name, which is not usable in SQL.
+    #[must_use]
+    pub const fn with_local_type_name(mut self, local_type_name: Option<&'static str>) -> Self {
+        self.local_type_name = local_type_name;
+        self
+    }
+
+    /// Sets `MINIMUM_SCALE` and `MAXIMUM_SCALE`.
+    #[must_use]
+    pub const fn with_scale_range(
+        mut self,
+        minimum_scale: Option<i16>,
+        maximum_scale: Option<i16>,
+    ) -> Self {
+        self.minimum_scale = minimum_scale;
+        self.maximum_scale = maximum_scale;
+        self
+    }
+
+    /// Sets `SQL_DATA_TYPE` and `SQL_DATETIME_SUB`, which differ from
+    /// `data_type` only for the datetime and interval families.
+    #[must_use]
+    pub const fn with_verbose_type(
+        mut self,
+        sql_data_type: i16,
+        sql_datetime_sub: Option<i16>,
+    ) -> Self {
+        self.sql_data_type = sql_data_type;
+        self.sql_datetime_sub = sql_datetime_sub;
+        self
+    }
+
+    /// Sets `NUM_PREC_RADIX`: 2 or 10, or `None` for a non-numeric type.
+    #[must_use]
+    pub const fn with_num_prec_radix(mut self, num_prec_radix: Option<i32>) -> Self {
+        self.num_prec_radix = num_prec_radix;
+        self
+    }
+
+    /// Sets `INTERVAL_PRECISION`, for interval types only.
+    #[must_use]
+    pub const fn with_interval_precision(mut self, interval_precision: Option<i16>) -> Self {
+        self.interval_precision = interval_precision;
+        self
+    }
+
     /// Convert this row into a vector of [`ColumnValue`]s matching the ODBC
     /// `SQLGetTypeInfo` result set column order (19 columns).
     pub fn to_column_values(&self) -> Vec<ColumnValue> {

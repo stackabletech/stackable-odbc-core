@@ -63,6 +63,7 @@ pub mod column_value;
 /// suites. Behind the default-off `test-support` feature: see `Cargo.toml`.
 #[cfg(any(test, feature = "test-support"))]
 pub mod conformance;
+
 pub(crate) mod diagnostics;
 pub mod errors;
 pub mod escape;
@@ -73,6 +74,10 @@ pub(crate) mod handles;
 pub mod logging;
 pub(crate) mod panic;
 pub mod synthetic;
+/// Hooks a driver's test suite needs and its production build must not have.
+/// Behind the same default-off `test-support` feature as [`conformance`].
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 pub mod types;
 pub mod utf16;
 
