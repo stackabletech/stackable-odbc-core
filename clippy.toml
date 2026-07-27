@@ -1,2 +1,8 @@
 allow-unwrap-in-tests = true
 allow-panic-in-tests = true
+allow-expect-in-tests = true
+
+disallowed-methods = [
+    { path = "std::time::SystemTime::now", reason = "core is a deterministic marshalling library, and its unit tests, proptests and fuzz targets rely on that. Exactly one wall-clock read is legitimate: `column_value::current_utc_date`, which SQL_TYPE_TIME -> SQL_C_TYPE_TIMESTAMP requires ('the date fields of the timestamp structure are set to the current date'). Each read also makes -Zmiri-disable-isolation mandatory, without which Miri aborts rather than failing an assertion. If the spec forces another one, add #[allow(clippy::disallowed_methods)] with a comment naming the rule that forces it" },
+    { path = "std::time::Instant::now", reason = "core does no timing and no async, so a duration measurement in a marshalling path is nondeterminism with no caller. To measure per-phase cost set ODBC_PROFILING=1 and read the tracing spans logging.rs already emits, or measure in the driver crate" },
+]
