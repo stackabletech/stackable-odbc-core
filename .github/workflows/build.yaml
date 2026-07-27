@@ -229,11 +229,14 @@ jobs:
         with:
           key: package
 
+      # The log goes to RUNNER_TEMP, not the workspace: `cargo package` refuses
+      # to run against a dirty tree, so a log file written next to Cargo.toml
+      # is itself the uncommitted change that fails the step.
       - name: Build the package and compile it from the tarball
         run: |
           set -o pipefail
-          cargo package --locked 2>&1 | tee package.log
-          if grep -q '^warning' package.log; then
+          cargo package --locked 2>&1 | tee "${RUNNER_TEMP}/package.log"
+          if grep -q '^warning' "${RUNNER_TEMP}/package.log"; then
             echo "::error::cargo package emitted warnings; see above"
             exit 1
           fi
