@@ -6,7 +6,7 @@ use std::ffi::c_void;
 use crate::backend::Backend;
 use crate::errors::{IntoOdbc, OdbcError};
 use crate::handles::ConnectionHandle;
-use crate::panic::panic_safe_scoped;
+use crate::panic::panic_safe;
 use crate::types::{ConnectParams, SQL_NTS, SqlReturn, SqlState};
 use crate::utf16::{utf16_to_string, write_utf16};
 
@@ -92,7 +92,7 @@ pub unsafe fn sql_driver_connect_w<B: Backend>(
     // SAFETY: connection_handle is null or a valid ConnectionHandle<B> allocated by
     // sql_alloc_handle; kind and group are validated by scope.get inside the closure.
     let ret = unsafe {
-        panic_safe_scoped::<B, _>(connection_handle, |scope| {
+        panic_safe::<B, _>(connection_handle, |scope| {
             let handle = scope.get::<ConnectionHandle<B>>(connection_handle)?;
             handle.diagnostics.clear();
 
@@ -241,7 +241,7 @@ pub unsafe fn sql_connect_w<B: Backend>(
     // SAFETY: connection_handle is null or a valid ConnectionHandle<B> allocated by
     // sql_alloc_handle; kind and group are validated by scope.get inside the closure.
     let ret = unsafe {
-        panic_safe_scoped::<B, _>(connection_handle, |scope| {
+        panic_safe::<B, _>(connection_handle, |scope| {
             let handle = scope.get::<ConnectionHandle<B>>(connection_handle)?;
             handle.diagnostics.clear();
 
@@ -405,7 +405,7 @@ pub unsafe fn sql_browse_connect_w<B: Backend>(
     // SAFETY: connection_handle is null or a valid ConnectionHandle<B> allocated by
     // sql_alloc_handle; kind and group are validated by scope.get inside the closure.
     let ret = unsafe {
-        panic_safe_scoped::<B, _>(connection_handle, |scope| {
+        panic_safe::<B, _>(connection_handle, |scope| {
             let handle = scope.get::<ConnectionHandle<B>>(connection_handle)?;
             handle.diagnostics.clear();
 
@@ -704,7 +704,7 @@ pub unsafe fn sql_disconnect<B: Backend>(connection_handle: *mut c_void) -> SqlR
     // time; no other owner exists after disconnect, so Box::from_raw is sound
     // here.
     let ret = unsafe {
-        panic_safe_scoped::<B, _>(connection_handle, |scope| {
+        panic_safe::<B, _>(connection_handle, |scope| {
             let handle = scope.get::<ConnectionHandle<B>>(connection_handle)?;
             handle.diagnostics.clear();
 
@@ -803,7 +803,7 @@ pub unsafe fn sql_native_sql_w<B: Backend>(
     // null-terminated if text_length1 == SQL_NTS); null checked before dereference.
     // out_statement_text and text_length2_ptr are checked for null before any write.
     let ret = unsafe {
-        panic_safe_scoped::<B, _>(connection_handle, |scope| {
+        panic_safe::<B, _>(connection_handle, |scope| {
             let conn = scope.get::<ConnectionHandle<B>>(connection_handle)?;
             conn.diagnostics.clear();
 

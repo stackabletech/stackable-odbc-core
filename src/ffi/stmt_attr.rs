@@ -7,7 +7,7 @@ use odbc_sys::StatementAttribute;
 use crate::backend::Backend;
 use crate::errors::OdbcError;
 use crate::handles::StatementHandle;
-use crate::panic::panic_safe_scoped;
+use crate::panic::panic_safe;
 use crate::types::{
     SQL_CURSOR_FORWARD_ONLY, SQL_FALSE, SQL_INSENSITIVE, SqlReturn, SqlState,
     statement_attribute_from_raw,
@@ -129,9 +129,9 @@ pub unsafe fn sql_set_stmt_attr_w<B: Backend>(
     tracing::debug!("SQLSetStmtAttrW: attr={:?}", attr);
     // SAFETY: statement_handle is null or a valid StatementHandle<B> allocated by
     // sql_alloc_handle. scope.get validates kind and group before any cast, and
-    // panic_safe_scoped catches any panics.
+    // panic_safe catches any panics.
     let ret = unsafe {
-        panic_safe_scoped::<B, _>(statement_handle, |scope| {
+        panic_safe::<B, _>(statement_handle, |scope| {
             let stmt = scope.get::<StatementHandle<B>>(statement_handle)?;
             stmt.diagnostics.clear();
 
@@ -373,9 +373,9 @@ pub unsafe fn sql_get_stmt_attr_w<B: Backend>(
     tracing::debug!("SQLGetStmtAttrW: attr={:?}", attr);
     // SAFETY: statement_handle is null or a valid StatementHandle<B> allocated by
     // sql_alloc_handle. scope.get validates kind and group before any cast, and
-    // panic_safe_scoped catches any panics.
+    // panic_safe catches any panics.
     let ret = unsafe {
-        panic_safe_scoped::<B, _>(statement_handle, |scope| {
+        panic_safe::<B, _>(statement_handle, |scope| {
             let stmt = scope.get::<StatementHandle<B>>(statement_handle)?;
             stmt.diagnostics.clear();
 
@@ -588,8 +588,7 @@ pub unsafe fn sql_get_stmt_attr_w<B: Backend>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::handles::as_handle_ref;
-    use crate::test_utils::{MockBackend, alloc_env_conn_stmt, cleanup_env_conn_stmt};
+    use crate::test_utils::{MockBackend, alloc_env_conn_stmt, cleanup_env_conn_stmt, with_handle};
 
     #[test]
     fn cursor_sensitivity_agrees_with_the_value_sqlgetinfo_reports() {
@@ -642,14 +641,13 @@ mod tests {
 
             // Checked before any other call: every FFI function clears the
             // handle's diagnostics on entry.
-            {
-                let handle = as_handle_ref::<StatementHandle<MockBackend>>(stmt).unwrap();
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
                 assert_eq!(
                     handle.diagnostics.len(),
                     1,
                     "no 01S02 diagnostic was recorded"
                 );
-            }
+            });
 
             // SQLGetStmtAttr must report the substituted value, per 01S02.
             let mut out: u32 = 0;
@@ -680,8 +678,9 @@ mod tests {
                 0,
             );
             assert_eq!(ret, SqlReturn::SUCCESS);
-            let handle = as_handle_ref::<StatementHandle<MockBackend>>(stmt).unwrap();
-            assert_eq!(handle.diagnostics.len(), 0);
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+                assert_eq!(handle.diagnostics.len(), 0);
+            });
             cleanup_env_conn_stmt(env, conn, stmt);
         }
     }
@@ -707,14 +706,13 @@ mod tests {
                 "oversized parameter set was accepted silently"
             );
 
-            {
-                let handle = as_handle_ref::<StatementHandle<MockBackend>>(stmt).unwrap();
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
                 assert_eq!(
                     handle.diagnostics.len(),
                     1,
                     "no 01S02 diagnostic was recorded"
                 );
-            }
+            });
 
             // SQLGetStmtAttr must report the substituted value, per 01S02.
             let mut out: u32 = 0;
@@ -745,8 +743,9 @@ mod tests {
                 0,
             );
             assert_eq!(ret, SqlReturn::SUCCESS);
-            let handle = as_handle_ref::<StatementHandle<MockBackend>>(stmt).unwrap();
-            assert_eq!(handle.diagnostics.len(), 0);
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+                assert_eq!(handle.diagnostics.len(), 0);
+            });
             cleanup_env_conn_stmt(env, conn, stmt);
         }
     }
@@ -833,16 +832,17 @@ mod tests {
             );
             assert_eq!(ret, SqlReturn::SUCCESS_WITH_INFO);
 
-            let handle = as_handle_ref::<StatementHandle<MockBackend>>(stmt).expect("valid");
-            assert_eq!(
-                handle
-                    .diagnostics
-                    .get(0)
-                    .expect("a 01S02 record")
-                    .sqlstate
-                    .as_str(),
-                "01S02"
-            );
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+                assert_eq!(
+                    handle
+                        .diagnostics
+                        .get(0)
+                        .expect("a 01S02 record")
+                        .sqlstate
+                        .as_str(),
+                    "01S02"
+                );
+            });
 
             let mut val: u32 = 99;
             let ret = sql_get_stmt_attr_w::<MockBackend>(
@@ -891,16 +891,17 @@ mod tests {
             );
             assert_eq!(ret, SqlReturn::SUCCESS_WITH_INFO);
 
-            let handle = as_handle_ref::<StatementHandle<MockBackend>>(stmt).expect("valid");
-            assert_eq!(
-                handle
-                    .diagnostics
-                    .get(0)
-                    .expect("a 01S02 record")
-                    .sqlstate
-                    .as_str(),
-                "01S02"
-            );
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+                assert_eq!(
+                    handle
+                        .diagnostics
+                        .get(0)
+                        .expect("a 01S02 record")
+                        .sqlstate
+                        .as_str(),
+                    "01S02"
+                );
+            });
 
             let mut val: u32 = 99;
             let ret = sql_get_stmt_attr_w::<MockBackend>(
@@ -976,10 +977,11 @@ mod tests {
 
             let (env, conn, stmt) = alloc_env_conn_stmt();
             // Inject a synthetic cursor to simulate "cursor open".
-            let handle = as_handle_ref::<StatementHandle<MockBackend>>(stmt).unwrap();
-            handle.set_result_set(StatementData::Synthetic(
-                crate::test_utils::synthetic_result_set(vec![]),
-            ));
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+                handle.set_result_set(StatementData::Synthetic(
+                    crate::test_utils::synthetic_result_set(vec![]),
+                ));
+            });
             let ret = sql_set_stmt_attr_w::<MockBackend>(
                 stmt,
                 StatementAttribute::CursorType as i32,
@@ -996,8 +998,9 @@ mod tests {
         // HY011: cannot set SQL_ATTR_CURSOR_TYPE after SQLPrepare.
         unsafe {
             let (env, conn, stmt) = alloc_env_conn_stmt();
-            let handle = as_handle_ref::<StatementHandle<MockBackend>>(stmt).unwrap();
-            handle.prepared_sql = Some("SELECT 1".into());
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+                handle.prepared_sql = Some("SELECT 1".into());
+            });
             let ret = sql_set_stmt_attr_w::<MockBackend>(
                 stmt,
                 StatementAttribute::CursorType as i32,

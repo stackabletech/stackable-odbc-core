@@ -10,7 +10,7 @@ use crate::backend::{Backend, StatementBackend};
 use crate::errors::{IntoOdbc, OdbcError};
 use crate::handles::scope::HandleScope;
 use crate::handles::{StatementData, StatementHandle};
-use crate::panic::panic_safe_scoped;
+use crate::panic::panic_safe;
 use crate::synthetic::SyntheticStatement;
 use crate::types::col_attr::{ColAttrValue, get_column_attribute};
 use crate::types::{
@@ -100,7 +100,7 @@ pub unsafe fn sql_tables_w<B: Backend>(
     // SAFETY: statement_handle is null or a valid StatementHandle<B>; kind and group
     // validated by scope.stmt_with_parent inside the closure.
     let ret = unsafe {
-        panic_safe_scoped::<B, _>(statement_handle, |scope| {
+        panic_safe::<B, _>(statement_handle, |scope| {
             let (stmt, conn) = scope.stmt_with_parent::<B>(statement_handle)?;
             stmt.diagnostics.clear();
 
@@ -212,7 +212,7 @@ pub unsafe fn sql_columns_w<B: Backend>(
     // SAFETY: statement_handle is null or a valid StatementHandle<B>; kind and group
     // validated by scope.stmt_with_parent inside the closure.
     let ret = unsafe {
-        panic_safe_scoped::<B, _>(statement_handle, |scope| {
+        panic_safe::<B, _>(statement_handle, |scope| {
             let (stmt, conn) = scope.stmt_with_parent::<B>(statement_handle)?;
             stmt.diagnostics.clear();
 
@@ -319,7 +319,7 @@ pub unsafe fn sql_primary_keys_w<B: Backend>(
     // SAFETY: statement_handle is null or a valid StatementHandle<B>; kind and group
     // validated by scope.stmt_with_parent inside the closure.
     let ret = unsafe {
-        panic_safe_scoped::<B, _>(statement_handle, |scope| {
+        panic_safe::<B, _>(statement_handle, |scope| {
             let (stmt, conn) = scope.stmt_with_parent::<B>(statement_handle)?;
             stmt.diagnostics.clear();
 
@@ -432,7 +432,7 @@ pub unsafe fn sql_foreign_keys_w<B: Backend>(
     // SAFETY: statement_handle is null or a valid StatementHandle<B>; kind and group
     // validated by scope.stmt_with_parent inside the closure.
     let ret = unsafe {
-        panic_safe_scoped::<B, _>(statement_handle, |scope| {
+        panic_safe::<B, _>(statement_handle, |scope| {
             let (stmt, conn) = scope.stmt_with_parent::<B>(statement_handle)?;
             stmt.diagnostics.clear();
 
@@ -481,7 +481,7 @@ pub unsafe fn sql_foreign_keys_w<B: Backend>(
 /// Used by catalog functions that return an empty result set (statistics, special columns) instead
 /// of querying the database.
 ///
-/// Called from within a `panic_safe_scoped` closure, which already holds the
+/// Called from within a `panic_safe` closure, which already holds the
 /// group `scope` protects; this function borrows through that same scope
 /// rather than acquiring anything of its own.
 fn set_empty_result<B: Backend>(
@@ -586,7 +586,7 @@ pub unsafe fn sql_statistics_w<B: Backend>(
     // SAFETY: statement_handle is null or a valid StatementHandle<B>; kind and group
     // validated by scope.stmt_with_parent inside the closure.
     let ret = unsafe {
-        panic_safe_scoped::<B, _>(statement_handle, |scope| {
+        panic_safe::<B, _>(statement_handle, |scope| {
             let (stmt, conn) = scope.stmt_with_parent::<B>(statement_handle)?;
             stmt.diagnostics.clear();
 
@@ -721,7 +721,7 @@ pub unsafe fn sql_special_columns_w<B: Backend>(
     // SAFETY: statement_handle is null or a valid StatementHandle<B>; kind and group
     // validated by scope.stmt_with_parent inside the closure.
     let ret = unsafe {
-        panic_safe_scoped::<B, _>(statement_handle, |scope| {
+        panic_safe::<B, _>(statement_handle, |scope| {
             let (stmt, conn) = scope.stmt_with_parent::<B>(statement_handle)?;
             stmt.diagnostics.clear();
 
@@ -865,7 +865,7 @@ pub unsafe fn sql_describe_col_w<B: Backend>(
     // column_size_ptr, etc.) are checked for null before writing; caller guarantees they point
     // to writable locations if non-null.
     let ret = unsafe {
-        panic_safe_scoped::<B, _>(statement_handle, |scope| {
+        panic_safe::<B, _>(statement_handle, |scope| {
             let stmt = scope.get::<StatementHandle<B>>(statement_handle)?;
             stmt.diagnostics.clear();
 
@@ -1018,7 +1018,7 @@ pub unsafe fn sql_col_attribute_w<B: Backend>(
     // (numeric_attribute_ptr, string_length_ptr, character_attribute_ptr) are checked for null
     // before writing; caller guarantees they point to writable locations if non-null.
     let ret = unsafe {
-        panic_safe_scoped::<B, _>(statement_handle, |scope| {
+        panic_safe::<B, _>(statement_handle, |scope| {
             let stmt = scope.get::<StatementHandle<B>>(statement_handle)?;
             stmt.diagnostics.clear();
 
@@ -1216,7 +1216,7 @@ pub unsafe fn sql_procedures_w<B: Backend>(
     // SAFETY: statement_handle is null or a valid StatementHandle<B>; kind and group
     // validated by scope.stmt_with_parent inside set_empty_result.
     let ret = unsafe {
-        panic_safe_scoped::<B, _>(statement_handle, |scope| {
+        panic_safe::<B, _>(statement_handle, |scope| {
             set_empty_result::<B>(
                 scope,
                 statement_handle,
@@ -1325,7 +1325,7 @@ pub unsafe fn sql_procedure_columns_w<B: Backend>(
     // SAFETY: statement_handle is null or a valid StatementHandle<B>; kind and group
     // validated by scope.stmt_with_parent inside set_empty_result.
     let ret = unsafe {
-        panic_safe_scoped::<B, _>(statement_handle, |scope| {
+        panic_safe::<B, _>(statement_handle, |scope| {
             set_empty_result::<B>(
                 scope,
                 statement_handle,
@@ -1417,7 +1417,7 @@ pub unsafe fn sql_column_privileges_w<B: Backend>(
     // SAFETY: statement_handle is null or a valid StatementHandle<B>; kind and group
     // validated by scope.stmt_with_parent inside set_empty_result.
     let ret = unsafe {
-        panic_safe_scoped::<B, _>(statement_handle, |scope| {
+        panic_safe::<B, _>(statement_handle, |scope| {
             set_empty_result::<B>(
                 scope,
                 statement_handle,
@@ -1504,7 +1504,7 @@ pub unsafe fn sql_table_privileges_w<B: Backend>(
     // SAFETY: statement_handle is null or a valid StatementHandle<B>; kind and group
     // validated by scope.stmt_with_parent inside set_empty_result.
     let ret = unsafe {
-        panic_safe_scoped::<B, _>(statement_handle, |scope| {
+        panic_safe::<B, _>(statement_handle, |scope| {
             set_empty_result::<B>(
                 scope,
                 statement_handle,
@@ -1521,8 +1521,8 @@ mod tests {
     use super::*;
     use crate::ffi::handle::sql_free_handle;
     use crate::ffi::info::type_info_columns;
-    use crate::handles::{ConnectionHandle, as_handle_ref};
-    use crate::test_utils::{MockBackend, MockConnection, alloc_env_conn_stmt};
+    use crate::handles::ConnectionHandle;
+    use crate::test_utils::{MockBackend, MockConnection, alloc_env_conn_stmt, with_handle};
     use crate::types::{
         ColumnsResultCol, Desc, ForeignKeysResultCol, Nullable, PrimaryKeysResultCol,
         SQL_BEST_ROWID, SQL_INDEX_ALL, SQL_SCOPE_CURROW, SqlDataType, TablesResultCol,
@@ -1685,20 +1685,20 @@ mod tests {
     /// Install a result set with a single column named "abcde" (5 characters,
     /// 10 bytes in UTF-16) so buffer-length units are unambiguous.
     unsafe fn stmt_with_named_column(stmt: *mut c_void) {
-        let handle = unsafe { as_handle_ref::<StatementHandle<MockBackend>>(stmt) }
-            .expect("statement handle is valid");
-        handle.set_result_set(StatementData::Synthetic(SyntheticStatement::new(
-            vec![ColumnDescriptor {
-                name: "abcde".into(),
-                type_name: String::new(),
-                sql_type: SqlDataType::VARCHAR,
-                precision: 10,
-                scale: 0,
-                nullable: Nullable::SqlNullable,
-                ..Default::default()
-            }],
-            vec![],
-        )));
+        with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+            handle.set_result_set(StatementData::Synthetic(SyntheticStatement::new(
+                vec![ColumnDescriptor {
+                    name: "abcde".into(),
+                    type_name: String::new(),
+                    sql_type: SqlDataType::VARCHAR,
+                    precision: 10,
+                    scale: 0,
+                    nullable: Nullable::SqlNullable,
+                    ..Default::default()
+                }],
+                vec![],
+            )));
+        });
     }
 
     #[test]
@@ -1910,8 +1910,9 @@ mod tests {
         unsafe {
             let (env, conn, stmt) = alloc_env_conn_stmt();
             // MockBackend uses the default statistics() -> NotImplemented.
-            let conn_ref = as_handle_ref::<ConnectionHandle<MockBackend>>(conn).expect("conn");
-            conn_ref.connection = Some(MockConnection);
+            with_handle::<MockBackend, ConnectionHandle<MockBackend>, _>(conn, |conn_ref| {
+                conn_ref.connection = Some(MockConnection);
+            });
 
             let ret = sql_statistics_w::<MockBackend>(
                 stmt,
@@ -1944,8 +1945,9 @@ mod tests {
     fn special_columns_falls_back_to_empty_result_set_when_unimplemented() {
         unsafe {
             let (env, conn, stmt) = alloc_env_conn_stmt();
-            let conn_ref = as_handle_ref::<ConnectionHandle<MockBackend>>(conn).expect("conn");
-            conn_ref.connection = Some(MockConnection);
+            with_handle::<MockBackend, ConnectionHandle<MockBackend>, _>(conn, |conn_ref| {
+                conn_ref.connection = Some(MockConnection);
+            });
 
             let ret = sql_special_columns_w::<MockBackend>(
                 stmt,
@@ -2172,11 +2174,13 @@ mod tests {
             assert_eq!(ret, SqlReturn::SUCCESS);
 
             // Verify the synthetic result set has exactly 8 columns.
-            let handle = as_handle_ref::<StatementHandle<MockBackend>>(stmt).unwrap();
-            let col_count = match &handle.statement {
-                Some(StatementData::Synthetic(s)) => s.column_count(),
-                _ => panic!("expected synthetic statement"),
-            };
+            let col_count =
+                with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+                    match &handle.statement {
+                        Some(StatementData::Synthetic(s)) => s.column_count(),
+                        _ => panic!("expected synthetic statement"),
+                    }
+                });
             assert_eq!(col_count, 8);
 
             cleanup(env, conn, stmt);
@@ -2222,11 +2226,13 @@ mod tests {
             assert_eq!(ret, SqlReturn::SUCCESS);
 
             // Verify the synthetic result set has exactly 19 columns.
-            let handle = as_handle_ref::<StatementHandle<MockBackend>>(stmt).unwrap();
-            let col_count = match &handle.statement {
-                Some(StatementData::Synthetic(s)) => s.column_count(),
-                _ => panic!("expected synthetic statement"),
-            };
+            let col_count =
+                with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+                    match &handle.statement {
+                        Some(StatementData::Synthetic(s)) => s.column_count(),
+                        _ => panic!("expected synthetic statement"),
+                    }
+                });
             assert_eq!(col_count, 19);
 
             cleanup(env, conn, stmt);
@@ -2254,11 +2260,13 @@ mod tests {
             assert_eq!(ret, SqlReturn::SUCCESS);
 
             // Verify the synthetic result set has exactly 8 columns.
-            let handle = as_handle_ref::<StatementHandle<MockBackend>>(stmt).unwrap();
-            let col_count = match &handle.statement {
-                Some(StatementData::Synthetic(s)) => s.column_count(),
-                _ => panic!("expected synthetic statement"),
-            };
+            let col_count =
+                with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+                    match &handle.statement {
+                        Some(StatementData::Synthetic(s)) => s.column_count(),
+                        _ => panic!("expected synthetic statement"),
+                    }
+                });
             assert_eq!(col_count, 8);
 
             cleanup(env, conn, stmt);
@@ -2284,11 +2292,13 @@ mod tests {
             assert_eq!(ret, SqlReturn::SUCCESS);
 
             // Verify the synthetic result set has exactly 7 columns.
-            let handle = as_handle_ref::<StatementHandle<MockBackend>>(stmt).unwrap();
-            let col_count = match &handle.statement {
-                Some(StatementData::Synthetic(s)) => s.column_count(),
-                _ => panic!("expected synthetic statement"),
-            };
+            let col_count =
+                with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+                    match &handle.statement {
+                        Some(StatementData::Synthetic(s)) => s.column_count(),
+                        _ => panic!("expected synthetic statement"),
+                    }
+                });
             assert_eq!(col_count, 7);
 
             cleanup(env, conn, stmt);

@@ -4,7 +4,7 @@ use std::ffi::c_void;
 
 use crate::backend::Backend;
 use crate::handles::{ColumnBinding, StatementHandle};
-use crate::panic::panic_safe_scoped;
+use crate::panic::panic_safe;
 use crate::types::SqlReturn;
 
 /// Generic implementation of SQLBindCol.
@@ -78,7 +78,7 @@ pub unsafe fn sql_bind_col<B: Backend>(
         buffer_length
     );
     let ret = unsafe {
-        panic_safe_scoped::<B, _>(statement_handle, |scope| {
+        panic_safe::<B, _>(statement_handle, |scope| {
             let stmt = scope.get::<StatementHandle<B>>(statement_handle)?;
             stmt.diagnostics.clear();
 
@@ -127,8 +127,7 @@ pub unsafe fn sql_bind_col<B: Backend>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::handles::as_handle_ref;
-    use crate::test_utils::{MockBackend, alloc_env_conn_stmt, cleanup_env_conn_stmt};
+    use crate::test_utils::{MockBackend, alloc_env_conn_stmt, cleanup_env_conn_stmt, with_handle};
     use crate::types::CDataType;
     use std::ffi::c_void;
 
@@ -169,8 +168,9 @@ mod tests {
             assert_eq!(ret, SqlReturn::SUCCESS);
 
             // Verify binding exists
-            let handle = as_handle_ref::<StatementHandle<MockBackend>>(stmt).unwrap();
-            assert!(handle.bindings.contains_key(&1));
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+                assert!(handle.bindings.contains_key(&1));
+            });
 
             // Unbind by passing null target_value_ptr
             let ret = sql_bind_col::<MockBackend>(
@@ -182,10 +182,9 @@ mod tests {
                 std::ptr::null_mut(),
             );
             assert_eq!(ret, SqlReturn::SUCCESS);
-            // Re-acquire: the call above derived its own &mut from the handle,
-            // which invalidates the reference obtained before it.
-            let handle = as_handle_ref::<StatementHandle<MockBackend>>(stmt).unwrap();
-            assert!(!handle.bindings.contains_key(&1));
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+                assert!(!handle.bindings.contains_key(&1));
+            });
 
             cleanup_env_conn_stmt(env, conn, stmt);
         }

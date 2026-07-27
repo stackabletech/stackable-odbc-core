@@ -10,7 +10,7 @@ use crate::{
     backend::{Backend, StatementBackend},
     errors::{IntoOdbc, OdbcError},
     handles::{ParameterBinding, StatementHandle},
-    panic::panic_safe_scoped,
+    panic::panic_safe,
     types::{
         ColumnValue, Nullable, SQL_DATA_AT_EXEC, SQL_DEFAULT_PARAM_SIZE,
         SQL_LEN_DATA_AT_EXEC_OFFSET, SQL_NTS, SQL_NULL_DATA, SqlReturn, SqlState, ULen,
@@ -117,7 +117,7 @@ pub unsafe fn sql_bind_parameter<B: Backend>(
     // SAFETY: statement_handle is a valid *mut StatementHandle<B> as required by the caller
     // (kind and group validated by scope.get inside the closure).
     let ret = unsafe {
-        panic_safe_scoped::<B, _>(statement_handle, |scope| {
+        panic_safe::<B, _>(statement_handle, |scope| {
             let stmt = scope.get::<StatementHandle<B>>(statement_handle)?;
             stmt.diagnostics.clear();
 
@@ -216,7 +216,7 @@ pub unsafe fn sql_num_params<B: Backend>(
     // SAFETY: statement_handle is a valid *mut StatementHandle<B> as required by the caller
     // (kind and group validated by scope.get inside the closure).
     let ret = unsafe {
-        panic_safe_scoped::<B, _>(statement_handle, |scope| {
+        panic_safe::<B, _>(statement_handle, |scope| {
             let stmt = scope.get::<StatementHandle<B>>(statement_handle)?;
             stmt.diagnostics.clear();
 
@@ -302,7 +302,7 @@ pub unsafe fn sql_describe_param<B: Backend>(
     // SAFETY: statement_handle is a valid *mut StatementHandle<B> as required by the caller
     // (kind and group validated by scope.get inside the closure).
     let ret = unsafe {
-        panic_safe_scoped::<B, _>(statement_handle, |scope| {
+        panic_safe::<B, _>(statement_handle, |scope| {
             let stmt = scope.get::<StatementHandle<B>>(statement_handle)?;
             stmt.diagnostics.clear();
 
@@ -912,7 +912,7 @@ pub unsafe fn sql_put_data<B: Backend>(
     // validated by scope.get inside the closure. data_ptr is checked for null
     // before use and is valid for the specified length per the caller's contract.
     let ret = unsafe {
-        panic_safe_scoped::<B, _>(statement_handle, |scope| {
+        panic_safe::<B, _>(statement_handle, |scope| {
             let stmt = scope.get::<StatementHandle<B>>(statement_handle)?;
             stmt.diagnostics.clear();
 
@@ -1046,7 +1046,7 @@ pub unsafe fn sql_param_data<B: Backend>(
     // null before write. Bound parameter buffer pointers in param_bindings were registered
     // via SQLBindParameter under the caller's guarantee that they remain valid.
     let ret = unsafe {
-        panic_safe_scoped::<B, _>(statement_handle, |scope| {
+        panic_safe::<B, _>(statement_handle, |scope| {
             let (stmt, conn) = scope.stmt_with_parent::<B>(statement_handle)?;
             // Spec: do NOT clear diagnostics; SQLParamData can return diagnostics from the
             // eventual execution.

@@ -4,7 +4,7 @@ use std::ffi::c_void;
 
 use crate::backend::{Backend, StatementBackend};
 use crate::errors::{IntoOdbc, OdbcError};
-use crate::panic::panic_safe_scoped;
+use crate::panic::panic_safe;
 use crate::types::{SQL_NTS, SqlReturn, SqlState};
 use crate::utf16::utf16_to_string;
 
@@ -110,7 +110,7 @@ pub unsafe fn sql_exec_direct_w<B: Backend>(
     // null-terminated if text_length == SQL_NTS/-3); caller upholds this per the
     // function's safety contract.
     let ret = unsafe {
-        panic_safe_scoped::<B, _>(statement_handle, |scope| {
+        panic_safe::<B, _>(statement_handle, |scope| {
             let (stmt, conn) = scope.stmt_with_parent::<B>(statement_handle)?;
             stmt.diagnostics.clear();
             let noscan = stmt.noscan_enabled();
@@ -293,7 +293,7 @@ pub unsafe fn sql_prepare_w<B: Backend>(
     // null-terminated if text_length == SQL_NTS/-3); caller upholds this per the
     // function's safety contract.
     let ret = unsafe {
-        panic_safe_scoped::<B, _>(statement_handle, |scope| {
+        panic_safe::<B, _>(statement_handle, |scope| {
             let (stmt, conn) = scope.stmt_with_parent::<B>(statement_handle)?;
             stmt.diagnostics.clear();
             let noscan = stmt.noscan_enabled();
@@ -439,7 +439,7 @@ pub unsafe fn sql_execute<B: Backend>(statement_handle: *mut c_void) -> SqlRetur
     // SQLBindParameter; collect_params reads them under the caller's guarantee that
     // they remain valid.
     let ret = unsafe {
-        panic_safe_scoped::<B, _>(statement_handle, |scope| {
+        panic_safe::<B, _>(statement_handle, |scope| {
             let (stmt, conn) = scope.stmt_with_parent::<B>(statement_handle)?;
             stmt.diagnostics.clear();
 
@@ -545,8 +545,7 @@ pub unsafe fn sql_execute<B: Backend>(statement_handle: *mut c_void) -> SqlRetur
 mod tests {
     use super::*;
     use crate::ffi::handle::sql_free_handle;
-    use crate::handles::as_handle_ref;
-    use crate::test_utils::{MockBackend, alloc_env_conn_stmt};
+    use crate::test_utils::{MockBackend, alloc_env_conn_stmt, with_handle};
     use odbc_sys::HandleType;
 
     /// Helper: connect a handle using a valid connection string.
@@ -672,10 +671,13 @@ mod tests {
             let ret = sql_prepare_w::<MockBackend>(stmt, wide.as_ptr(), wide.len() as i32);
             assert_eq!(ret, SqlReturn::SUCCESS);
 
-            let stmt_handle =
-                as_handle_ref::<crate::handles::StatementHandle<MockBackend>>(stmt).unwrap();
-            assert_eq!(stmt_handle.prepared_sql.as_deref(), Some(sql));
-            assert_eq!(stmt_handle.param_count, Some(2));
+            with_handle::<MockBackend, crate::handles::StatementHandle<MockBackend>, _>(
+                stmt,
+                |stmt_handle| {
+                    assert_eq!(stmt_handle.prepared_sql.as_deref(), Some(sql));
+                    assert_eq!(stmt_handle.param_count, Some(2));
+                },
+            );
 
             cleanup(env, conn, stmt);
         }
@@ -717,8 +719,10 @@ mod tests {
     fn noscan_attr_round_trips_and_gates() {
         unsafe {
             let (env, conn, stmt) = alloc_env_conn_stmt();
-            let h = as_handle_ref::<crate::handles::StatementHandle<MockBackend>>(stmt).unwrap();
-            assert!(!h.noscan_enabled());
+            with_handle::<MockBackend, crate::handles::StatementHandle<MockBackend>, _>(
+                stmt,
+                |h| assert!(!h.noscan_enabled()),
+            );
 
             // SQL_ATTR_NOSCAN = SQL_NOSCAN_ON (1); SQLSetStmtAttrW takes integer-valued
             // attributes through the pointer parameter itself (ODBC convention), so this
@@ -734,8 +738,10 @@ mod tests {
             );
             assert_eq!(ret, SqlReturn::SUCCESS);
 
-            let h = as_handle_ref::<crate::handles::StatementHandle<MockBackend>>(stmt).unwrap();
-            assert!(h.noscan_enabled());
+            with_handle::<MockBackend, crate::handles::StatementHandle<MockBackend>, _>(
+                stmt,
+                |h| assert!(h.noscan_enabled()),
+            );
 
             cleanup(env, conn, stmt);
         }
@@ -787,16 +793,19 @@ mod tests {
             let wide2: Vec<u16> = sql2.encode_utf16().collect();
             let _ret = sql_prepare_w::<MockBackend>(stmt, wide2.as_ptr(), wide2.len() as i32);
 
-            let stmt_handle =
-                as_handle_ref::<crate::handles::StatementHandle<MockBackend>>(stmt).unwrap();
-            assert!(
-                stmt_handle.param_bindings.contains_key(&1),
-                "SQLPrepare unbound a parameter, which only SQLBindParameter, \
-                 SQLFreeStmt(SQL_RESET_PARAMS) or SQLSetDescField may do"
+            with_handle::<MockBackend, crate::handles::StatementHandle<MockBackend>, _>(
+                stmt,
+                |stmt_handle| {
+                    assert!(
+                        stmt_handle.param_bindings.contains_key(&1),
+                        "SQLPrepare unbound a parameter, which only SQLBindParameter, \
+                         SQLFreeStmt(SQL_RESET_PARAMS) or SQLSetDescField may do"
+                    );
+                    // The new statement has no markers, so nothing reads the surviving
+                    // binding: `collect_params` walks 1..=param_count.
+                    assert_eq!(stmt_handle.param_count, Some(0));
+                },
             );
-            // The new statement has no markers, so nothing reads the surviving
-            // binding: `collect_params` walks 1..=param_count.
-            assert_eq!(stmt_handle.param_count, Some(0));
 
             cleanup(env, conn, stmt);
         }
@@ -819,15 +828,18 @@ mod tests {
             );
             assert_eq!(sql_execute::<MockBackend>(stmt), SqlReturn::SUCCESS);
 
-            let handle =
-                as_handle_ref::<crate::handles::StatementHandle<MockBackend>>(stmt).expect("valid");
-            assert!(
-                handle.statement.is_some(),
-                "the executed statement was dropped"
-            );
-            assert!(
-                !handle.cursor_open,
-                "an execution that produced no result set opened a cursor"
+            with_handle::<MockBackend, crate::handles::StatementHandle<MockBackend>, _>(
+                stmt,
+                |handle| {
+                    assert!(
+                        handle.statement.is_some(),
+                        "the executed statement was dropped"
+                    );
+                    assert!(
+                        !handle.cursor_open,
+                        "an execution that produced no result set opened a cursor"
+                    );
+                },
             );
 
             assert_eq!(
@@ -855,10 +867,76 @@ mod tests {
                 SqlReturn::SUCCESS
             );
 
-            let handle =
-                as_handle_ref::<crate::handles::StatementHandle<MockBackend>>(stmt).expect("valid");
-            assert!(handle.statement.is_some());
-            assert!(!handle.cursor_open, "SQLPrepare opened a cursor");
+            with_handle::<MockBackend, crate::handles::StatementHandle<MockBackend>, _>(
+                stmt,
+                |handle| {
+                    assert!(handle.statement.is_some());
+                    assert!(!handle.cursor_open, "SQLPrepare opened a cursor");
+                },
+            );
+
+            cleanup(env, conn, stmt);
+        }
+    }
+
+    /// `SQLFreeStmt(SQL_CLOSE)` discards the backend statement but keeps
+    /// `prepared_sql`; per spec a subsequent `SQLExecute` re-executes the same
+    /// prepared SQL rather than failing. This is the one path through
+    /// `sql_execute` that reaches the `stmt.statement.is_none()` branch:
+    /// `MockBackend::prepare` always succeeds, so `stmt.statement` is `Some`
+    /// for the entire life of an ordinarily-used handle, and no other test
+    /// exercises `B::prepare` being called a second time against the same
+    /// statement.
+    #[test]
+    fn execute_after_close_reprepares_the_statement() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            assert_eq!(connect_handle(conn), SqlReturn::SUCCESS);
+
+            let sql = "SELECT 1";
+            let wide: Vec<u16> = sql.encode_utf16().collect();
+            assert_eq!(
+                sql_prepare_w::<MockBackend>(stmt, wide.as_ptr(), wide.len() as i32),
+                SqlReturn::SUCCESS
+            );
+            assert_eq!(sql_execute::<MockBackend>(stmt), SqlReturn::SUCCESS);
+
+            assert_eq!(
+                crate::ffi::handle::sql_free_stmt::<MockBackend>(
+                    stmt,
+                    odbc_sys::FreeStmtOption::Close as u16,
+                ),
+                SqlReturn::SUCCESS
+            );
+            with_handle::<MockBackend, crate::handles::StatementHandle<MockBackend>, _>(
+                stmt,
+                |handle| {
+                    assert!(
+                        handle.statement.is_none(),
+                        "SQL_CLOSE must discard the backend statement"
+                    );
+                    assert_eq!(
+                        handle.prepared_sql.as_deref(),
+                        Some(sql),
+                        "SQL_CLOSE must not forget the prepared SQL"
+                    );
+                },
+            );
+
+            assert_eq!(
+                sql_execute::<MockBackend>(stmt),
+                SqlReturn::SUCCESS,
+                "SQLExecute after SQL_CLOSE must re-prepare the statement, not fail"
+            );
+            with_handle::<MockBackend, crate::handles::StatementHandle<MockBackend>, _>(
+                stmt,
+                |handle| {
+                    assert!(
+                        handle.statement.is_some(),
+                        "the re-prepare must leave a live backend statement"
+                    );
+                },
+            );
 
             cleanup(env, conn, stmt);
         }

@@ -2,7 +2,7 @@
 //!
 //! A `HandleScope` is the only way to obtain `&mut` to a handle. The only way
 //! to obtain one is through the two callers of the `pub(crate)`
-//! `HandleScope::new` in this crate — [`panic_safe_scoped`], which builds the
+//! `HandleScope::new` in this crate — [`panic_safe`], which builds the
 //! outermost scope for an FFI call, and [`HandleScope::with_child_group`],
 //! which builds a nested scope for the one legitimate case of holding two
 //! groups at once. Both lock the group immediately before constructing the
@@ -10,14 +10,15 @@
 //! is what makes "the group lock is held" a fact the compiler checks rather
 //! than a rule a comment states.
 //!
-//! [`panic_safe_scoped`]: crate::panic::panic_safe_scoped
+//! [`panic_safe`]: crate::panic::panic_safe
 
 use std::ffi::c_void;
 use std::marker::PhantomData;
 
 use crate::backend::Backend;
+use crate::diagnostics::DiagnosticQueue;
 use crate::errors::OdbcError;
-use crate::handles::registry::{GroupLock, registry};
+use crate::handles::registry::{GroupLock, HandleKind, registry};
 use crate::handles::{ConnectionHandle, EnvironmentHandle, HasKind, StatementHandle};
 use crate::sync::{Arc, MutexGuard};
 
@@ -25,7 +26,7 @@ use crate::sync::{Arc, MutexGuard};
 /// inside it.
 ///
 /// `HandleScope::new` is `pub(crate)`, with exactly two callers in this crate:
-/// [`panic_safe_scoped`], which builds the outermost scope for an FFI call,
+/// [`panic_safe`], which builds the outermost scope for an FFI call,
 /// and [`Self::with_child_group`], which builds a nested scope for the one
 /// legitimate case of holding two groups at once. Both lock the group
 /// immediately before constructing the scope and pass a borrow of that lock
@@ -34,7 +35,7 @@ use crate::sync::{Arc, MutexGuard};
 /// originating guard is gone, so a live `HandleScope` always corresponds to a
 /// held group lock — or, for a null handle, to nothing needing one.
 ///
-/// [`panic_safe_scoped`]: crate::panic::panic_safe_scoped
+/// [`panic_safe`]: crate::panic::panic_safe
 pub struct HandleScope<'a> {
     /// The group whose lock the caller holds, or `None` for a call that
     /// arrived with `SQL_NULL_HANDLE` and so has nothing to protect.
@@ -203,7 +204,7 @@ impl<'a> HandleScope<'a> {
 
     /// Push a diagnostic onto whichever handle `token` names.
     ///
-    /// Used by `panic_safe_scoped` on the error path. Silently does nothing for
+    /// Used by `panic_safe` on the error path. Silently does nothing for
     /// a token outside the held group or of a kind that carries no queue
     /// (descriptors), because there is no better handle to report against.
     pub fn push_diagnostic<B: Backend>(&mut self, token: *mut c_void, err: &OdbcError) {
@@ -218,25 +219,60 @@ impl<'a> HandleScope<'a> {
             stmt.diagnostics.push(err);
         }
     }
+
+    /// Borrow whichever handle `token` names, for its diagnostic queue only.
+    ///
+    /// `SQLGetDiagRecW`/`SQLGetDiagFieldW` are the spec's own exception to
+    /// clearing a handle's diagnostics at the start of a call: they read the
+    /// queue and must leave it untouched, so this hands back a plain
+    /// `&mut DiagnosticQueue` rather than the whole handle, and — like
+    /// [`Self::get`] and [`Self::push_diagnostic`] — refuses a token outside
+    /// the held group. Descriptors carry no diagnostic queue and get `None`,
+    /// the same answer a stale or foreign token gets.
+    pub fn diagnostics<B: Backend>(&mut self, token: *mut c_void) -> Option<&mut DiagnosticQueue> {
+        if !self.holds(token) {
+            return None;
+        }
+        let (kind, addr) = registry().resolve_any(token)?;
+        // SAFETY: `holds` confirmed this scope owns the lock guarding `token`'s
+        // group, and the registry produced `addr` for exactly `kind`, so the
+        // cast below matches what the corresponding `alloc_*` function
+        // allocated (same reasoning as [`Self::get`]).
+        match kind {
+            HandleKind::Env => {
+                Some(unsafe { &mut (*(addr as *mut EnvironmentHandle<B>)).diagnostics })
+            }
+            HandleKind::Dbc => {
+                Some(unsafe { &mut (*(addr as *mut ConnectionHandle<B>)).diagnostics })
+            }
+            HandleKind::Stmt => {
+                Some(unsafe { &mut (*(addr as *mut StatementHandle<B>)).diagnostics })
+            }
+            // Descriptors carry no diagnostic queue of their own.
+            HandleKind::Desc => None,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::panic::panic_safe_scoped;
+    use crate::panic::panic_safe;
     use crate::test_utils::{MockBackend, alloc_env_conn_stmt, cleanup_env_conn_stmt};
     use crate::types::SqlReturn;
 
     /// The check that makes the whole scheme real: a token from a *different*
     /// group must be refused, because the scope does not hold that group's
-    /// lock. Without this, `scope.get` is `as_handle_ref` with extra syntax.
+    /// lock. Without this, `scope.get` would validate a token's kind and
+    /// liveness but not its group, reaching a handle no lock protects it
+    /// from -- the exact unguarded access this type exists to close off.
     #[test]
     fn a_token_outside_the_locked_group_is_refused() {
         unsafe {
             let (env_a, conn_a, stmt_a) = alloc_env_conn_stmt();
             let (env_b, conn_b, stmt_b) = alloc_env_conn_stmt();
 
-            let ret = panic_safe_scoped::<MockBackend, _>(conn_a, |scope| {
+            let ret = panic_safe::<MockBackend, _>(conn_a, |scope| {
                 // Its own group: fine.
                 scope.get::<ConnectionHandle<MockBackend>>(conn_a)?;
                 // Another connection's group, whose lock this scope does not
@@ -280,7 +316,7 @@ mod tests {
             );
             assert_eq!(connect_ret, SqlReturn::SUCCESS);
 
-            let ret = panic_safe_scoped::<MockBackend, _>(stmt, |scope| {
+            let ret = panic_safe::<MockBackend, _>(stmt, |scope| {
                 let (s, c) = scope.stmt_with_parent::<MockBackend>(stmt)?;
                 assert!(s.statement.is_none());
                 assert!(c.connection.is_some());
@@ -309,9 +345,7 @@ mod tests {
     #[test]
     fn a_null_handle_yields_a_scope_holding_no_lock() {
         let ret = unsafe {
-            panic_safe_scoped::<MockBackend, _>(std::ptr::null_mut(), |_scope| {
-                Ok(SqlReturn::SUCCESS)
-            })
+            panic_safe::<MockBackend, _>(std::ptr::null_mut(), |_scope| Ok(SqlReturn::SUCCESS))
         };
         assert_eq!(ret, SqlReturn::SUCCESS);
     }
@@ -323,7 +357,7 @@ mod tests {
     fn a_null_handle_scope_still_refuses_a_live_token() {
         unsafe {
             let (env, conn, stmt) = alloc_env_conn_stmt();
-            let ret = panic_safe_scoped::<MockBackend, _>(std::ptr::null_mut(), |scope| {
+            let ret = panic_safe::<MockBackend, _>(std::ptr::null_mut(), |scope| {
                 let result = scope.get::<ConnectionHandle<MockBackend>>(conn);
                 assert!(
                     matches!(result, Err(OdbcError::InvalidHandle)),
@@ -342,13 +376,13 @@ mod tests {
     fn a_panic_releases_the_group() {
         unsafe {
             let (env, conn, stmt) = alloc_env_conn_stmt();
-            let ret = panic_safe_scoped::<MockBackend, _>(conn, |_scope| {
+            let ret = panic_safe::<MockBackend, _>(conn, |_scope| {
                 panic!("test panic");
             });
             assert_eq!(ret, SqlReturn::ERROR);
 
             // The group is free: a second call on the same connection works.
-            let ret = panic_safe_scoped::<MockBackend, _>(conn, |scope| {
+            let ret = panic_safe::<MockBackend, _>(conn, |scope| {
                 scope.get::<ConnectionHandle<MockBackend>>(conn)?;
                 Ok(SqlReturn::SUCCESS)
             });
@@ -366,7 +400,7 @@ mod tests {
     fn with_child_group_locks_a_distinct_group_and_reaches_its_handle() {
         unsafe {
             let (env, conn, stmt) = alloc_env_conn_stmt();
-            let ret = panic_safe_scoped::<MockBackend, _>(env, |scope| {
+            let ret = panic_safe::<MockBackend, _>(env, |scope| {
                 let reached = scope.with_child_group(conn, |child| {
                     child.get::<ConnectionHandle<MockBackend>>(conn).is_ok()
                 })?;
@@ -395,7 +429,7 @@ mod tests {
     fn with_child_group_on_the_scope_s_own_group_is_a_no_op_not_a_deadlock() {
         unsafe {
             let (env, conn, stmt) = alloc_env_conn_stmt();
-            let ret = panic_safe_scoped::<MockBackend, _>(env, |scope| {
+            let ret = panic_safe::<MockBackend, _>(env, |scope| {
                 // `env` belongs to the group `scope` already holds.
                 let ran = scope.with_child_group(env, |_| true)?;
                 assert!(

@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use crate::backend::{Backend, StatementBackend};
 use crate::errors::{IntoOdbc, OdbcError};
 use crate::handles::StatementHandle;
-use crate::panic::panic_safe_scoped;
+use crate::panic::panic_safe;
 #[cfg(test)]
 use crate::types::Nullable;
 use crate::types::{
@@ -69,10 +69,10 @@ pub unsafe fn sql_num_result_cols<B: Backend>(
     );
     // SAFETY: statement_handle is either null or a valid StatementHandle<B> pointer
     // previously allocated by sql_alloc_handle. scope.get validates kind and group
-    // before any cast, and panic_safe_scoped catches any panics. column_count_ptr
+    // before any cast, and panic_safe catches any panics. column_count_ptr
     // is only written through after a null check inside the closure.
     let ret = unsafe {
-        panic_safe_scoped::<B, _>(statement_handle, |scope| {
+        panic_safe::<B, _>(statement_handle, |scope| {
             let stmt = scope.get::<StatementHandle<B>>(statement_handle)?;
             stmt.diagnostics.clear();
 
@@ -144,10 +144,10 @@ pub unsafe fn sql_row_count<B: Backend>(
     tracing::debug!("SQLRowCount(stmt={:?})", statement_handle);
     // SAFETY: statement_handle is either null or a valid StatementHandle<B> pointer
     // previously allocated by sql_alloc_handle. scope.get validates kind and group
-    // before any cast, and panic_safe_scoped catches any panics. row_count_ptr
+    // before any cast, and panic_safe catches any panics. row_count_ptr
     // is only written through after a null check inside the closure.
     let ret = unsafe {
-        panic_safe_scoped::<B, _>(statement_handle, |scope| {
+        panic_safe::<B, _>(statement_handle, |scope| {
             let stmt = scope.get::<StatementHandle<B>>(statement_handle)?;
             stmt.diagnostics.clear();
 
@@ -223,9 +223,9 @@ pub unsafe fn sql_more_results<B: Backend>(statement_handle: *mut c_void) -> Sql
     tracing::debug!("SQLMoreResults(stmt={:?})", statement_handle);
     // SAFETY: statement_handle is either null or a valid StatementHandle<B> pointer
     // previously allocated by sql_alloc_handle. scope.get validates kind and group
-    // before any cast, and panic_safe_scoped catches any panics.
+    // before any cast, and panic_safe catches any panics.
     let ret = unsafe {
-        panic_safe_scoped::<B, _>(statement_handle, |scope| {
+        panic_safe::<B, _>(statement_handle, |scope| {
             let stmt = scope.get::<StatementHandle<B>>(statement_handle)?;
             stmt.diagnostics.clear();
             Ok(SqlReturn::NO_DATA)
@@ -272,9 +272,9 @@ pub unsafe fn sql_close_cursor<B: Backend>(statement_handle: *mut c_void) -> Sql
     tracing::debug!("SQLCloseCursor(stmt={:?})", statement_handle);
     // SAFETY: statement_handle is either null or a valid StatementHandle<B> pointer
     // previously allocated by sql_alloc_handle. scope.get validates kind and group
-    // before any cast, and panic_safe_scoped catches any panics.
+    // before any cast, and panic_safe catches any panics.
     let ret = unsafe {
-        panic_safe_scoped::<B, _>(statement_handle, |scope| {
+        panic_safe::<B, _>(statement_handle, |scope| {
             let stmt = scope.get::<StatementHandle<B>>(statement_handle)?;
             stmt.diagnostics.clear();
 
@@ -335,9 +335,9 @@ pub unsafe fn sql_cancel<B: Backend>(statement_handle: *mut c_void) -> SqlReturn
     tracing::debug!("SQLCancel(stmt={:?})", statement_handle);
     // SAFETY: statement_handle is either null or a valid StatementHandle<B> pointer
     // previously allocated by sql_alloc_handle. scope.get validates kind and group
-    // before any cast, and panic_safe_scoped catches any panics.
+    // before any cast, and panic_safe catches any panics.
     let ret = unsafe {
-        panic_safe_scoped::<B, _>(statement_handle, |scope| {
+        panic_safe::<B, _>(statement_handle, |scope| {
             let stmt = scope.get::<StatementHandle<B>>(statement_handle)?;
             stmt.diagnostics.clear();
 
@@ -416,11 +416,11 @@ pub unsafe fn sql_get_cursor_name_w<B: Backend>(
     );
     // SAFETY: statement_handle is either null or a valid StatementHandle<B> pointer
     // previously allocated by sql_alloc_handle. scope.get validates kind and group
-    // before any cast, and panic_safe_scoped catches any panics. cursor_name and
+    // before any cast, and panic_safe catches any panics. cursor_name and
     // name_length_ptr are only written through by write_utf16, which performs its
     // own null checks.
     let ret = unsafe {
-        panic_safe_scoped::<B, _>(statement_handle, |scope| {
+        panic_safe::<B, _>(statement_handle, |scope| {
             let stmt = scope.get::<StatementHandle<B>>(statement_handle)?;
             stmt.diagnostics.clear();
 
@@ -493,10 +493,10 @@ pub unsafe fn sql_set_cursor_name_w<B: Backend>(
     );
     // SAFETY: statement_handle is either null or a valid StatementHandle<B> pointer
     // previously allocated by sql_alloc_handle. scope.get validates kind and group
-    // before any cast, and panic_safe_scoped catches any panics. cursor_name is read
+    // before any cast, and panic_safe catches any panics. cursor_name is read
     // by utf16_to_string which handles null pointers by returning None.
     let ret = unsafe {
-        panic_safe_scoped::<B, _>(statement_handle, |scope| {
+        panic_safe::<B, _>(statement_handle, |scope| {
             let stmt = scope.get::<StatementHandle<B>>(statement_handle)?;
             stmt.diagnostics.clear();
 
@@ -592,9 +592,9 @@ pub unsafe fn sql_bulk_operations<B: Backend>(
     );
     // SAFETY: statement_handle is either null or a valid StatementHandle<B> pointer
     // previously allocated by sql_alloc_handle. scope.get validates kind and group
-    // before any cast, and panic_safe_scoped catches any panics.
+    // before any cast, and panic_safe catches any panics.
     let ret = unsafe {
-        panic_safe_scoped::<B, _>(statement_handle, |scope| {
+        panic_safe::<B, _>(statement_handle, |scope| {
             let stmt = scope.get::<StatementHandle<B>>(statement_handle)?;
             stmt.diagnostics.clear();
 
@@ -704,9 +704,9 @@ pub unsafe fn sql_set_pos<B: Backend>(
     );
     // SAFETY: statement_handle is either null or a valid StatementHandle<B> pointer
     // previously allocated by sql_alloc_handle. scope.get validates kind and group
-    // before any cast, and panic_safe_scoped catches any panics.
+    // before any cast, and panic_safe catches any panics.
     let ret = unsafe {
-        panic_safe_scoped::<B, _>(statement_handle, |scope| {
+        panic_safe::<B, _>(statement_handle, |scope| {
             let stmt = scope.get::<StatementHandle<B>>(statement_handle)?;
             stmt.diagnostics.clear();
 
@@ -753,8 +753,7 @@ pub unsafe fn sql_set_pos<B: Backend>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::handles::as_handle_ref;
-    use crate::test_utils::{MockBackend, alloc_env_conn_stmt, cleanup_env_conn_stmt};
+    use crate::test_utils::{MockBackend, alloc_env_conn_stmt, cleanup_env_conn_stmt, with_handle};
 
     #[test]
     fn num_result_cols_without_execute_returns_error() {
@@ -784,32 +783,33 @@ mod tests {
     fn num_result_cols_with_synthetic_statement() {
         unsafe {
             let (env, conn, stmt) = alloc_env_conn_stmt();
-            let handle = as_handle_ref::<StatementHandle<MockBackend>>(stmt).expect("valid");
-            handle.statement = Some(crate::handles::StatementData::Synthetic(
-                crate::synthetic::SyntheticStatement::new(
-                    vec![
-                        crate::types::ColumnDescriptor {
-                            name: "col1".into(),
-                            type_name: String::new(),
-                            sql_type: crate::types::SqlDataType(4), // INTEGER
-                            precision: 10,
-                            scale: 0,
-                            nullable: Nullable::SqlNullable,
-                            ..Default::default()
-                        },
-                        crate::types::ColumnDescriptor {
-                            name: "col2".into(),
-                            type_name: String::new(),
-                            sql_type: crate::types::SqlDataType(12), // VARCHAR
-                            precision: 255,
-                            scale: 0,
-                            nullable: Nullable::SqlNullable,
-                            ..Default::default()
-                        },
-                    ],
-                    vec![],
-                ),
-            ));
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+                handle.statement = Some(crate::handles::StatementData::Synthetic(
+                    crate::synthetic::SyntheticStatement::new(
+                        vec![
+                            crate::types::ColumnDescriptor {
+                                name: "col1".into(),
+                                type_name: String::new(),
+                                sql_type: crate::types::SqlDataType(4), // INTEGER
+                                precision: 10,
+                                scale: 0,
+                                nullable: Nullable::SqlNullable,
+                                ..Default::default()
+                            },
+                            crate::types::ColumnDescriptor {
+                                name: "col2".into(),
+                                type_name: String::new(),
+                                sql_type: crate::types::SqlDataType(12), // VARCHAR
+                                precision: 255,
+                                scale: 0,
+                                nullable: Nullable::SqlNullable,
+                                ..Default::default()
+                            },
+                        ],
+                        vec![],
+                    ),
+                ));
+            });
 
             let mut count: i16 = 0;
             let ret = sql_num_result_cols::<MockBackend>(stmt, &mut count);
@@ -855,10 +855,11 @@ mod tests {
     fn close_cursor_with_open_cursor_succeeds() {
         unsafe {
             let (env, conn, stmt) = alloc_env_conn_stmt();
-            let handle = as_handle_ref::<StatementHandle<MockBackend>>(stmt).expect("valid");
-            handle.set_result_set(crate::handles::StatementData::Synthetic(
-                crate::test_utils::synthetic_result_set(vec![]),
-            ));
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+                handle.set_result_set(crate::handles::StatementData::Synthetic(
+                    crate::test_utils::synthetic_result_set(vec![]),
+                ));
+            });
 
             let ret = sql_close_cursor::<MockBackend>(stmt);
             assert_eq!(ret, SqlReturn::SUCCESS);
@@ -874,25 +875,26 @@ mod tests {
     fn row_count_with_synthetic_statement_returns_count() {
         unsafe {
             let (env, conn, stmt) = alloc_env_conn_stmt();
-            let handle = as_handle_ref::<StatementHandle<MockBackend>>(stmt).expect("valid");
-            handle.statement = Some(crate::handles::StatementData::Synthetic(
-                crate::synthetic::SyntheticStatement::new(
-                    vec![crate::types::ColumnDescriptor {
-                        name: "col".into(),
-                        type_name: String::new(),
-                        sql_type: crate::types::SqlDataType(4),
-                        precision: 10,
-                        scale: 0,
-                        nullable: Nullable::SqlNullable,
-                        ..Default::default()
-                    }],
-                    vec![
-                        vec![crate::types::ColumnValue::I32(1)],
-                        vec![crate::types::ColumnValue::I32(2)],
-                        vec![crate::types::ColumnValue::I32(3)],
-                    ],
-                ),
-            ));
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+                handle.statement = Some(crate::handles::StatementData::Synthetic(
+                    crate::synthetic::SyntheticStatement::new(
+                        vec![crate::types::ColumnDescriptor {
+                            name: "col".into(),
+                            type_name: String::new(),
+                            sql_type: crate::types::SqlDataType(4),
+                            precision: 10,
+                            scale: 0,
+                            nullable: Nullable::SqlNullable,
+                            ..Default::default()
+                        }],
+                        vec![
+                            vec![crate::types::ColumnValue::I32(1)],
+                            vec![crate::types::ColumnValue::I32(2)],
+                            vec![crate::types::ColumnValue::I32(3)],
+                        ],
+                    ),
+                ));
+            });
 
             let mut count: isize = -999;
             let ret = sql_row_count::<MockBackend>(stmt, &mut count);
@@ -910,11 +912,12 @@ mod tests {
     fn row_count_with_mock_statement_returns_unknown() {
         unsafe {
             let (env, conn, stmt) = alloc_env_conn_stmt();
-            let handle = as_handle_ref::<StatementHandle<MockBackend>>(stmt).expect("valid");
-            // MockStatement's default row_count() returns None
-            handle.statement = Some(crate::handles::StatementData::Backend(
-                crate::test_utils::MockStatement,
-            ));
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+                // MockStatement's default row_count() returns None
+                handle.statement = Some(crate::handles::StatementData::Backend(
+                    crate::test_utils::MockStatement,
+                ));
+            });
 
             let mut count: isize = 0;
             let ret = sql_row_count::<MockBackend>(stmt, &mut count);
@@ -932,10 +935,11 @@ mod tests {
     fn num_result_cols_with_null_count_pointer() {
         unsafe {
             let (env, conn, stmt) = alloc_env_conn_stmt();
-            let handle = as_handle_ref::<StatementHandle<MockBackend>>(stmt).expect("valid");
-            handle.statement = Some(crate::handles::StatementData::Synthetic(
-                crate::synthetic::SyntheticStatement::new(vec![], vec![]),
-            ));
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+                handle.statement = Some(crate::handles::StatementData::Synthetic(
+                    crate::synthetic::SyntheticStatement::new(vec![], vec![]),
+                ));
+            });
 
             let ret = sql_num_result_cols::<MockBackend>(stmt, std::ptr::null_mut());
             assert_eq!(ret, SqlReturn::SUCCESS);
@@ -961,31 +965,33 @@ mod tests {
     fn close_cursor_resets_fetch_position() {
         unsafe {
             let (env, conn, stmt) = alloc_env_conn_stmt();
-            let handle = as_handle_ref::<StatementHandle<MockBackend>>(stmt).expect("valid");
-            handle.set_result_set(crate::handles::StatementData::Synthetic(
-                crate::test_utils::synthetic_result_set(vec![vec![
-                    crate::types::ColumnValue::I32(1),
-                ]]),
-            ));
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+                handle.set_result_set(crate::handles::StatementData::Synthetic(
+                    crate::test_utils::synthetic_result_set(vec![vec![
+                        crate::types::ColumnValue::I32(1),
+                    ]]),
+                ));
 
-            // Fetch the one row
-            let statement = handle.statement.as_mut().expect("statement");
-            assert_eq!(
-                statement.fetch().expect("fetch"),
-                crate::types::FetchResult::Row
-            );
-            assert_eq!(
-                statement.fetch().expect("fetch"),
-                crate::types::FetchResult::NoData
-            );
+                // Fetch the one row
+                let statement = handle.statement.as_mut().expect("statement");
+                assert_eq!(
+                    statement.fetch().expect("fetch"),
+                    crate::types::FetchResult::Row
+                );
+                assert_eq!(
+                    statement.fetch().expect("fetch"),
+                    crate::types::FetchResult::NoData
+                );
+            });
 
             // Close cursor via FFI; discards the result set entirely.
             let ret = sql_close_cursor::<MockBackend>(stmt);
             assert_eq!(ret, SqlReturn::SUCCESS);
 
             // After close_cursor the statement is gone; the handle is clean.
-            let handle = as_handle_ref::<StatementHandle<MockBackend>>(stmt).expect("valid");
-            assert!(handle.statement.is_none());
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+                assert!(handle.statement.is_none());
+            });
 
             // Closing an already-closed cursor returns 24000.
             let ret2 = sql_close_cursor::<MockBackend>(stmt);
@@ -1051,18 +1057,20 @@ mod tests {
     fn cancel_with_open_cursor_returns_success() {
         unsafe {
             let (env, conn, stmt) = alloc_env_conn_stmt();
-            let handle = as_handle_ref::<StatementHandle<MockBackend>>(stmt).expect("valid");
-            handle.set_result_set(crate::handles::StatementData::Synthetic(
-                crate::test_utils::synthetic_result_set(vec![]),
-            ));
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+                handle.set_result_set(crate::handles::StatementData::Synthetic(
+                    crate::test_utils::synthetic_result_set(vec![]),
+                ));
+            });
 
             // Cancel should succeed even when a cursor is open (it's a no-op).
             let ret = sql_cancel::<MockBackend>(stmt);
             assert_eq!(ret, SqlReturn::SUCCESS);
             // Cursor must still be open; cancel does not close it.
-            let handle = as_handle_ref::<StatementHandle<MockBackend>>(stmt).expect("valid");
-            assert!(handle.statement.is_some());
-            assert!(handle.cursor_open);
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+                assert!(handle.statement.is_some());
+                assert!(handle.cursor_open);
+            });
 
             cleanup_env_conn_stmt(env, conn, stmt);
         }
@@ -1094,16 +1102,20 @@ mod tests {
             let (env, conn, stmt) = alloc_env_conn_stmt();
 
             // Push a diagnostic onto the statement handle.
-            let queue = crate::handles::try_get_diagnostic_queue::<MockBackend>(stmt).unwrap();
-            queue.push(&crate::errors::OdbcError::NotConnected);
-            assert_eq!(queue.len(), 1);
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+                handle
+                    .diagnostics
+                    .push(&crate::errors::OdbcError::NotConnected);
+                assert_eq!(handle.diagnostics.len(), 1);
+            });
 
             // Cancel should clear the diagnostics.
             let ret = sql_cancel::<MockBackend>(stmt);
             assert_eq!(ret, SqlReturn::SUCCESS);
 
-            let queue = crate::handles::try_get_diagnostic_queue::<MockBackend>(stmt).unwrap();
-            assert_eq!(queue.len(), 0);
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+                assert_eq!(handle.diagnostics.len(), 0);
+            });
 
             cleanup_env_conn_stmt(env, conn, stmt);
         }
@@ -1228,14 +1240,15 @@ mod tests {
             let ret = sql_bulk_operations::<MockBackend>(stmt, SQL_ADD);
             assert_eq!(ret, SqlReturn::ERROR);
             // Verify HYC00 diagnostic was set.
-            let handle = as_handle_ref::<StatementHandle<MockBackend>>(stmt).expect("valid");
-            let rec = handle.diagnostics.get(0).expect("diagnostic record");
-            assert_eq!(
-                rec.sqlstate.as_str(),
-                "HYC00",
-                "expected HYC00, got {}",
-                rec.sqlstate.as_str()
-            );
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+                let rec = handle.diagnostics.get(0).expect("diagnostic record");
+                assert_eq!(
+                    rec.sqlstate.as_str(),
+                    "HYC00",
+                    "expected HYC00, got {}",
+                    rec.sqlstate.as_str()
+                );
+            });
             cleanup_env_conn_stmt(env, conn, stmt);
         }
     }
@@ -1247,14 +1260,15 @@ mod tests {
             // 99 is not a valid SQLBulkOperations operation.
             let ret = sql_bulk_operations::<MockBackend>(stmt, 99);
             assert_eq!(ret, SqlReturn::ERROR);
-            let handle = as_handle_ref::<StatementHandle<MockBackend>>(stmt).expect("valid");
-            let rec = handle.diagnostics.get(0).expect("diagnostic record");
-            assert_eq!(
-                rec.sqlstate.as_str(),
-                "HY092",
-                "expected HY092, got {}",
-                rec.sqlstate.as_str()
-            );
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+                let rec = handle.diagnostics.get(0).expect("diagnostic record");
+                assert_eq!(
+                    rec.sqlstate.as_str(),
+                    "HY092",
+                    "expected HY092, got {}",
+                    rec.sqlstate.as_str()
+                );
+            });
             cleanup_env_conn_stmt(env, conn, stmt);
         }
     }
@@ -1283,14 +1297,15 @@ mod tests {
             let ret = sql_set_pos::<MockBackend>(stmt, 1, SQL_POSITION, SQL_LOCK_NO_CHANGE);
             assert_eq!(ret, SqlReturn::ERROR);
             // Verify HYC00 diagnostic was set.
-            let handle = as_handle_ref::<StatementHandle<MockBackend>>(stmt).expect("valid");
-            let rec = handle.diagnostics.get(0).expect("diagnostic record");
-            assert_eq!(
-                rec.sqlstate.as_str(),
-                "HYC00",
-                "expected HYC00, got {}",
-                rec.sqlstate.as_str()
-            );
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+                let rec = handle.diagnostics.get(0).expect("diagnostic record");
+                assert_eq!(
+                    rec.sqlstate.as_str(),
+                    "HYC00",
+                    "expected HYC00, got {}",
+                    rec.sqlstate.as_str()
+                );
+            });
             cleanup_env_conn_stmt(env, conn, stmt);
         }
     }
@@ -1302,14 +1317,15 @@ mod tests {
             // 99 is not a valid SQLSetPos operation.
             let ret = sql_set_pos::<MockBackend>(stmt, 1, 99, SQL_LOCK_NO_CHANGE);
             assert_eq!(ret, SqlReturn::ERROR);
-            let handle = as_handle_ref::<StatementHandle<MockBackend>>(stmt).expect("valid");
-            let rec = handle.diagnostics.get(0).expect("diagnostic record");
-            assert_eq!(
-                rec.sqlstate.as_str(),
-                "HY092",
-                "expected HY092, got {}",
-                rec.sqlstate.as_str()
-            );
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+                let rec = handle.diagnostics.get(0).expect("diagnostic record");
+                assert_eq!(
+                    rec.sqlstate.as_str(),
+                    "HY092",
+                    "expected HY092, got {}",
+                    rec.sqlstate.as_str()
+                );
+            });
             cleanup_env_conn_stmt(env, conn, stmt);
         }
     }
@@ -1321,14 +1337,15 @@ mod tests {
             // 99 is not a valid lock type.
             let ret = sql_set_pos::<MockBackend>(stmt, 1, SQL_POSITION, 99);
             assert_eq!(ret, SqlReturn::ERROR);
-            let handle = as_handle_ref::<StatementHandle<MockBackend>>(stmt).expect("valid");
-            let rec = handle.diagnostics.get(0).expect("diagnostic record");
-            assert_eq!(
-                rec.sqlstate.as_str(),
-                "HY092",
-                "expected HY092, got {}",
-                rec.sqlstate.as_str()
-            );
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+                let rec = handle.diagnostics.get(0).expect("diagnostic record");
+                assert_eq!(
+                    rec.sqlstate.as_str(),
+                    "HY092",
+                    "expected HY092, got {}",
+                    rec.sqlstate.as_str()
+                );
+            });
             cleanup_env_conn_stmt(env, conn, stmt);
         }
     }

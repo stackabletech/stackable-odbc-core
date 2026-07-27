@@ -39,6 +39,7 @@ pub(crate) mod registry;
 pub(crate) mod scope;
 
 use registry::{GroupLock, HandleKind, encode_token, registry};
+use scope::HandleScope;
 
 /// SQL_ATTR_NOSCAN = SQL_NOSCAN_ON: the application asks the driver not to scan
 /// SQL for escape sequences.
@@ -72,12 +73,6 @@ impl DescriptorHandle {
     }
 }
 
-/// First field of every handle struct. The `tag` is a magic constant that
-/// identifies the handle type and is checked by [`as_handle_ref`] before
-/// casting a raw `*mut c_void` to a typed reference.
-///
-/// Must be `#[repr(C)]` and the first field so that we can read it from an
-/// untyped pointer without knowing the concrete handle type.
 /// First field of every handle struct.
 ///
 /// Records where the handle sits in the registry so that freeing it does not
@@ -129,9 +124,9 @@ pub struct EnvironmentHandle<B: Backend> {
     header: HandleHeader,
     pub odbc_version: AttrOdbcVersion,
     /// No field names `B`, since child handles are tokens rather than typed
-    /// pointers, but the struct must stay generic: `as_handle_ref::<T>` keys on
-    /// the concrete type, and an environment allocated for one backend must not
-    /// resolve as another's.
+    /// pointers, but the struct must stay generic: the registry resolves a
+    /// token against the concrete `HasKind` type a caller asks for, and an
+    /// environment allocated for one backend must not resolve as another's.
     _backend: std::marker::PhantomData<fn() -> B>,
     pub diagnostics: DiagnosticQueue,
 }
@@ -424,32 +419,6 @@ impl<B: Backend> StatementHandle<B> {
     }
 }
 
-/// Validate a raw pointer and cast it to a mutable reference of the expected handle type.
-///
-/// Checks for null and verifies the tag matches before casting.
-///
-/// # Lifetime
-///
-/// Returns `&'static mut T` because the true lifetime (until `free_*` is called)
-/// cannot be expressed in Rust's type system here: the allocation is managed by
-/// raw pointers, not by Rust ownership. Callers must NOT cache or store the
-/// returned reference beyond the current FFI function call.
-///
-/// # Safety
-///
-/// The caller must ensure the pointer was originally created from a `Box<T>` of the
-/// same type and that no other mutable references to the handle exist.
-pub unsafe fn as_handle_ref<T: HasKind>(token: *mut c_void) -> Result<&'static mut T, OdbcError> {
-    let addr = registry()
-        .resolve(token, T::KIND)
-        .ok_or(OdbcError::InvalidHandle)?;
-    // SAFETY: `addr` came out of the registry, so it was produced by
-    // `Box::into_raw` in an `alloc_*` function for a handle of exactly `T::KIND`
-    // and has not been freed — freeing clears the slot, and the generation
-    // check above rejects any token issued before that.
-    Ok(unsafe { &mut *(addr as *mut T) })
-}
-
 /// Allocate a new environment handle and write it to `output`.
 ///
 /// # Safety
@@ -622,12 +591,21 @@ pub unsafe fn alloc_statement<B: Backend>(
 /// Free an environment handle. Fails with `SqlReturn::ERROR` if there are
 /// still active connections.
 ///
+/// `scope` must hold `handle`'s own lock group, obtained by the caller passing
+/// `handle` itself to [`crate::panic::panic_safe`] — freeing an environment
+/// reaches its diagnostics and, on the HY010 path, pushes to them, so this
+/// goes through the scope like every other handle mutation rather than
+/// resolving the token off to one side of it.
+///
 /// # Safety
 ///
 /// `handle` must point to a valid `EnvironmentHandle<B>` previously allocated
 /// by [`alloc_environment`].
-pub unsafe fn free_environment<B: Backend>(handle: *mut c_void) -> SqlReturn {
-    let env = match unsafe { as_handle_ref::<EnvironmentHandle<B>>(handle) } {
+pub unsafe fn free_environment<B: Backend>(
+    handle: *mut c_void,
+    scope: &mut HandleScope<'_>,
+) -> SqlReturn {
+    let env = match scope.get::<EnvironmentHandle<B>>(handle) {
         Ok(e) => e,
         Err(_) => return SqlReturn::INVALID_HANDLE,
     };
@@ -658,12 +636,18 @@ pub unsafe fn free_environment<B: Backend>(handle: *mut c_void) -> SqlReturn {
 /// - The connection is still open (HY010: SQLDisconnect must be called first)
 /// - There are still active statements (HY010)
 ///
+/// `scope` must hold `handle`'s own lock group, for the same reason as
+/// [`free_environment`].
+///
 /// # Safety
 ///
 /// `handle` must point to a valid `ConnectionHandle<B>` previously allocated
 /// by [`alloc_connection`].
-pub unsafe fn free_connection<B: Backend>(handle: *mut c_void) -> SqlReturn {
-    let conn = match unsafe { as_handle_ref::<ConnectionHandle<B>>(handle) } {
+pub unsafe fn free_connection<B: Backend>(
+    handle: *mut c_void,
+    scope: &mut HandleScope<'_>,
+) -> SqlReturn {
+    let conn = match scope.get::<ConnectionHandle<B>>(handle) {
         Ok(c) => c,
         Err(_) => return SqlReturn::INVALID_HANDLE,
     };
@@ -760,45 +744,47 @@ pub(crate) unsafe fn free_connection_statements<B: Backend>(conn_token: *mut c_v
     }
 }
 
-/// Try to obtain a mutable reference to the diagnostic queue of any handle type.
-///
-/// Reads the tag from the header to determine the handle type, then returns
-/// the `diagnostics` field. Returns `Err(())` if the pointer is null or the
-/// tag is unrecognized.
-///
-/// This function is generic over `B: Backend` because the connection and
-/// statement handle layouts depend on the backend's associated types.
-///
-/// # Lifetime
-///
-/// Same caveat as [`as_handle_ref`]: returns `&'static mut` because the true
-/// lifetime cannot be expressed. Callers must NOT store the returned reference
-/// beyond the current function call.
-///
-/// # Safety
-///
-/// `handle` must point to a valid handle previously allocated by one of the
-/// `alloc_*` functions.
-#[allow(clippy::result_unit_err)]
-pub unsafe fn try_get_diagnostic_queue<B: Backend>(
-    handle: *mut c_void,
-) -> Result<&'static mut DiagnosticQueue, ()> {
-    let (kind, addr) = registry().resolve_any(handle).ok_or(())?;
-    // SAFETY: the registry produced both the kind and the address, so the cast
-    // matches what `alloc_*` allocated and the handle is live.
-    match kind {
-        HandleKind::Env => Ok(unsafe { &mut (*(addr as *mut EnvironmentHandle<B>)).diagnostics }),
-        HandleKind::Dbc => Ok(unsafe { &mut (*(addr as *mut ConnectionHandle<B>)).diagnostics }),
-        HandleKind::Stmt => Ok(unsafe { &mut (*(addr as *mut StatementHandle<B>)).diagnostics }),
-        // Descriptors carry no diagnostic queue of their own.
-        HandleKind::Desc => Err(()),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::{MockBackend, MockConnection};
+    use crate::test_utils::{MockBackend, MockConnection, with_handle};
+
+    /// Free an environment through the same lock-gated path `SQLFreeHandle`
+    /// uses: `free_environment` takes a scope rather than resolving its own
+    /// handle, so a test calling it directly must acquire one first.
+    fn free_env(env: *mut c_void) -> SqlReturn {
+        unsafe {
+            crate::panic::panic_safe::<MockBackend, _>(env, |scope| {
+                Ok(free_environment::<MockBackend>(env, scope))
+            })
+        }
+    }
+
+    /// As [`free_env`], for `free_connection`.
+    fn free_conn(conn: *mut c_void) -> SqlReturn {
+        unsafe {
+            crate::panic::panic_safe::<MockBackend, _>(conn, |scope| {
+                Ok(free_connection::<MockBackend>(conn, scope))
+            })
+        }
+    }
+
+    /// Whether `token` resolves as a live `T` through the scope, for tests
+    /// pinning the *rejection* itself. [`with_handle`] is for the
+    /// complementary case: reading or mutating through a token already known
+    /// to be valid.
+    fn resolves_as<T: HasKind>(token: *mut c_void) -> bool {
+        let ret = unsafe {
+            crate::panic::panic_safe::<MockBackend, _>(token, |scope| {
+                Ok(if scope.get::<T>(token).is_ok() {
+                    SqlReturn::SUCCESS
+                } else {
+                    SqlReturn::INVALID_HANDLE
+                })
+            })
+        };
+        ret == SqlReturn::SUCCESS
+    }
 
     // -----------------------------------------------------------------------
     // Handle validation
@@ -818,8 +804,10 @@ mod tests {
         // Not a pointer at all. Reading a header from it must never be
         // attempted.
         let bogus = 0x1234_usize as *mut c_void;
-        let result = unsafe { as_handle_ref::<EnvironmentHandle<MockBackend>>(bogus) };
-        assert!(result.is_err(), "a non-handle value must be rejected");
+        assert!(
+            !resolves_as::<EnvironmentHandle<MockBackend>>(bogus),
+            "a non-handle value must be rejected"
+        );
     }
 
     #[test]
@@ -827,11 +815,13 @@ mod tests {
         unsafe {
             let mut env_ptr: *mut c_void = std::ptr::null_mut();
             let _ = alloc_environment::<MockBackend>(&mut env_ptr as *mut _);
-            assert_eq!(free_environment::<MockBackend>(env_ptr), SqlReturn::SUCCESS);
+            assert_eq!(free_env(env_ptr), SqlReturn::SUCCESS);
 
             // The application still holds the old value.
-            let result = as_handle_ref::<EnvironmentHandle<MockBackend>>(env_ptr);
-            assert!(result.is_err(), "a freed handle must be rejected");
+            assert!(
+                !resolves_as::<EnvironmentHandle<MockBackend>>(env_ptr),
+                "a freed handle must be rejected"
+            );
         }
     }
 
@@ -840,20 +830,19 @@ mod tests {
         unsafe {
             let mut first: *mut c_void = std::ptr::null_mut();
             let _ = alloc_environment::<MockBackend>(&mut first as *mut _);
-            let _ = free_environment::<MockBackend>(first);
+            let _ = free_env(first);
 
             // The next allocation is very likely to take the slot just freed.
             let mut second: *mut c_void = std::ptr::null_mut();
             let _ = alloc_environment::<MockBackend>(&mut second as *mut _);
 
-            let stale = as_handle_ref::<EnvironmentHandle<MockBackend>>(first);
             assert!(
-                stale.is_err(),
+                !resolves_as::<EnvironmentHandle<MockBackend>>(first),
                 "the old handle must not be revived by a reused slot"
             );
-            assert!(as_handle_ref::<EnvironmentHandle<MockBackend>>(second).is_ok());
+            assert!(resolves_as::<EnvironmentHandle<MockBackend>>(second));
 
-            let _ = free_environment::<MockBackend>(second);
+            let _ = free_env(second);
         }
     }
 
@@ -862,9 +851,9 @@ mod tests {
         unsafe {
             let mut env_ptr: *mut c_void = std::ptr::null_mut();
             let _ = alloc_environment::<MockBackend>(&mut env_ptr as *mut _);
-            assert_eq!(free_environment::<MockBackend>(env_ptr), SqlReturn::SUCCESS);
+            assert_eq!(free_env(env_ptr), SqlReturn::SUCCESS);
             assert_eq!(
-                free_environment::<MockBackend>(env_ptr),
+                free_env(env_ptr),
                 SqlReturn::INVALID_HANDLE,
                 "a double free must be refused, not performed"
             );
@@ -881,16 +870,16 @@ mod tests {
             let mut stmt_ptr: *mut c_void = std::ptr::null_mut();
             let _ = alloc_statement::<MockBackend>(conn_ptr, &mut stmt_ptr as *mut _);
 
-            assert!(as_handle_ref::<StatementHandle<MockBackend>>(stmt_ptr).is_ok());
+            assert!(resolves_as::<StatementHandle<MockBackend>>(stmt_ptr));
 
             let _ = free_statement::<MockBackend>(stmt_ptr);
             assert!(
-                as_handle_ref::<StatementHandle<MockBackend>>(stmt_ptr).is_err(),
+                !resolves_as::<StatementHandle<MockBackend>>(stmt_ptr),
                 "a freed statement must be rejected"
             );
 
-            let _ = free_connection::<MockBackend>(conn_ptr);
-            let _ = free_environment::<MockBackend>(env_ptr);
+            let _ = free_conn(conn_ptr);
+            let _ = free_env(env_ptr);
         }
     }
 
@@ -901,11 +890,11 @@ mod tests {
             let _ = alloc_environment::<MockBackend>(&mut env_ptr as *mut _);
 
             // A real, live handle — but asked for as the wrong type.
-            assert!(as_handle_ref::<ConnectionHandle<MockBackend>>(env_ptr).is_err());
-            assert!(as_handle_ref::<StatementHandle<MockBackend>>(env_ptr).is_err());
-            assert!(as_handle_ref::<EnvironmentHandle<MockBackend>>(env_ptr).is_ok());
+            assert!(!resolves_as::<ConnectionHandle<MockBackend>>(env_ptr));
+            assert!(!resolves_as::<StatementHandle<MockBackend>>(env_ptr));
+            assert!(resolves_as::<EnvironmentHandle<MockBackend>>(env_ptr));
 
-            let _ = free_environment::<MockBackend>(env_ptr);
+            let _ = free_env(env_ptr);
         }
     }
 
@@ -916,7 +905,7 @@ mod tests {
             let result = alloc_environment::<MockBackend>(&mut output as *mut *mut c_void);
             assert_eq!(result, SqlReturn::SUCCESS);
             assert!(!output.is_null());
-            let result = free_environment::<MockBackend>(output);
+            let result = free_env(output);
             assert_eq!(result, SqlReturn::SUCCESS);
         }
     }
@@ -932,8 +921,8 @@ mod tests {
             assert_eq!(result, SqlReturn::SUCCESS);
             assert!(!conn_ptr.is_null());
 
-            let _ = free_connection::<MockBackend>(conn_ptr);
-            let _ = free_environment::<MockBackend>(env_ptr);
+            let _ = free_conn(conn_ptr);
+            let _ = free_env(env_ptr);
         }
     }
 
@@ -968,8 +957,8 @@ mod tests {
             );
 
             let _ = free_statement::<MockBackend>(stmt);
-            let _ = free_connection::<MockBackend>(conn);
-            let _ = free_environment::<MockBackend>(env);
+            let _ = free_conn(conn);
+            let _ = free_env(env);
         }
     }
 
@@ -996,7 +985,7 @@ mod tests {
                 "no statement should have been registered under the environment"
             );
 
-            let _ = free_environment::<MockBackend>(env_ptr);
+            let _ = free_env(env_ptr);
         }
     }
 
@@ -1009,19 +998,19 @@ mod tests {
             let mut conn_ptr: *mut c_void = std::ptr::null_mut();
             let _ = alloc_connection::<MockBackend>(env_ptr, &mut conn_ptr as *mut _);
 
-            let result = free_environment::<MockBackend>(env_ptr);
+            let result = free_env(env_ptr);
             assert_eq!(result, SqlReturn::ERROR);
 
-            let _ = free_connection::<MockBackend>(conn_ptr);
-            let _ = free_environment::<MockBackend>(env_ptr);
+            let _ = free_conn(conn_ptr);
+            let _ = free_env(env_ptr);
         }
     }
 
     #[test]
     fn null_handle_returns_invalid() {
-        let result =
-            unsafe { as_handle_ref::<EnvironmentHandle<MockBackend>>(std::ptr::null_mut()) };
-        assert!(result.is_err());
+        assert!(!resolves_as::<EnvironmentHandle<MockBackend>>(
+            std::ptr::null_mut()
+        ));
     }
 
     #[test]
@@ -1036,8 +1025,8 @@ mod tests {
             assert_eq!(result, SqlReturn::SUCCESS);
 
             let _ = free_statement::<MockBackend>(stmt_ptr);
-            let _ = free_connection::<MockBackend>(conn_ptr);
-            let _ = free_environment::<MockBackend>(env_ptr);
+            let _ = free_conn(conn_ptr);
+            let _ = free_env(env_ptr);
         }
     }
 
@@ -1069,13 +1058,16 @@ mod tests {
                 "a statement must share its connection's lock group"
             );
 
-            let stmt = as_handle_ref::<StatementHandle<MockBackend>>(stmt_ptr).expect("live");
-            for desc_token in [
-                stmt.app_row_desc.token(),
-                stmt.app_param_desc.token(),
-                stmt.imp_row_desc.token(),
-                stmt.imp_param_desc.token(),
-            ] {
+            let desc_tokens =
+                with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt_ptr, |stmt| {
+                    [
+                        stmt.app_row_desc.token(),
+                        stmt.app_param_desc.token(),
+                        stmt.imp_row_desc.token(),
+                        stmt.imp_param_desc.token(),
+                    ]
+                });
+            for desc_token in desc_tokens {
                 let desc_group = registry().group_of(desc_token).expect("live");
                 assert!(
                     Arc::ptr_eq(&desc_group, &stmt_group),
@@ -1084,8 +1076,8 @@ mod tests {
             }
 
             let _ = free_statement::<MockBackend>(stmt_ptr);
-            let _ = free_connection::<MockBackend>(conn_ptr);
-            let _ = free_environment::<MockBackend>(env_ptr);
+            let _ = free_conn(conn_ptr);
+            let _ = free_env(env_ptr);
         }
     }
 
@@ -1099,12 +1091,12 @@ mod tests {
             let mut stmt_ptr: *mut c_void = std::ptr::null_mut();
             let _ = alloc_statement::<MockBackend>(conn_ptr, &mut stmt_ptr as *mut _);
 
-            let result = free_connection::<MockBackend>(conn_ptr);
+            let result = free_conn(conn_ptr);
             assert_eq!(result, SqlReturn::ERROR);
 
             let _ = free_statement::<MockBackend>(stmt_ptr);
-            let _ = free_connection::<MockBackend>(conn_ptr);
-            let _ = free_environment::<MockBackend>(env_ptr);
+            let _ = free_conn(conn_ptr);
+            let _ = free_env(env_ptr);
         }
     }
 
@@ -1118,33 +1110,35 @@ mod tests {
             let _ = alloc_connection::<MockBackend>(env_ptr, &mut conn_ptr as *mut _);
 
             // Simulate an active connection by setting connection to Some.
-            let conn_handle = as_handle_ref::<ConnectionHandle<MockBackend>>(conn_ptr).unwrap();
-            conn_handle.connection = Some(MockConnection);
+            with_handle::<MockBackend, ConnectionHandle<MockBackend>, _>(conn_ptr, |conn| {
+                conn.connection = Some(MockConnection);
+            });
 
             // Should fail because connection is still open.
-            let result = free_connection::<MockBackend>(conn_ptr);
+            let result = free_conn(conn_ptr);
             assert_eq!(result, SqlReturn::ERROR);
 
             // Clean up: remove connection, then free.
-            let conn_handle = as_handle_ref::<ConnectionHandle<MockBackend>>(conn_ptr).unwrap();
-            conn_handle.connection = None;
-            let _ = free_connection::<MockBackend>(conn_ptr);
-            let _ = free_environment::<MockBackend>(env_ptr);
+            with_handle::<MockBackend, ConnectionHandle<MockBackend>, _>(conn_ptr, |conn| {
+                conn.connection = None;
+            });
+            let _ = free_conn(conn_ptr);
+            let _ = free_env(env_ptr);
         }
     }
 
     #[test]
-    fn as_handle_ref_rejects_wrong_handle_type() {
+    fn wrong_handle_type_is_rejected_as_invalid_handle() {
         // A valid environment handle presented where a statement is expected
-        // must be rejected by the tag check, not silently reinterpreted.
+        // must be rejected by the registry's kind check, not silently
+        // reinterpreted.
         unsafe {
             let mut env_ptr: *mut c_void = std::ptr::null_mut();
             let _ = alloc_environment::<MockBackend>(&mut env_ptr as *mut _);
 
-            let wrong = as_handle_ref::<StatementHandle<MockBackend>>(env_ptr);
-            assert!(matches!(wrong, Err(OdbcError::InvalidHandle)));
+            assert!(!resolves_as::<StatementHandle<MockBackend>>(env_ptr));
 
-            let _ = free_environment::<MockBackend>(env_ptr);
+            let _ = free_env(env_ptr);
         }
     }
 
@@ -1161,7 +1155,7 @@ mod tests {
             assert_eq!(result, SqlReturn::INVALID_HANDLE);
 
             // The environment is untouched and still frees cleanly.
-            assert_eq!(free_environment::<MockBackend>(env_ptr), SqlReturn::SUCCESS);
+            assert_eq!(free_env(env_ptr), SqlReturn::SUCCESS);
         }
     }
 
@@ -1210,8 +1204,8 @@ mod tests {
             assert_eq!(registry::registry().children_of(conn), vec![stmt_b]);
 
             assert_eq!(free_statement::<MockBackend>(stmt_b), SqlReturn::SUCCESS);
-            assert_eq!(free_connection::<MockBackend>(conn), SqlReturn::SUCCESS);
-            assert_eq!(free_environment::<MockBackend>(env), SqlReturn::SUCCESS);
+            assert_eq!(free_conn(conn), SqlReturn::SUCCESS);
+            assert_eq!(free_env(env), SqlReturn::SUCCESS);
         }
     }
 }

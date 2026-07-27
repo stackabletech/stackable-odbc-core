@@ -399,6 +399,24 @@ markers go away and this section becomes the initial-release notes.
   new `Backend::set_txn_isolation`, including one set before connecting, which
   is applied when the connection opens (the same deferral
   `SQL_ATTR_AUTOCOMMIT` already had).
+- `test_support::attach_connection` and `test_support::detach_connection` now
+  hold the connection's lock group for the duration, exactly as an FFI entry
+  point would, and catch a panic instead of letting it unwind out of this
+  crate into the driver's test binary. Signatures are unchanged; a caller
+  only sees this if the closure panics or if it calls one of these while
+  another thread is inside a call on the same connection, in which case it
+  now blocks rather than racing an unguarded read or write of the connection
+  handle.
+- `SQLGetDiagRecW` and `SQLGetDiagFieldW` now hold the queried handle's lock
+  group while reading its diagnostics, so a concurrent call on the same
+  handle can no longer read the diagnostic queue mid-mutation — previously
+  the only two FFI entry points reaching handle state without the group lock.
+  They also gain panic protection: a panic inside either previously unwound
+  across the C ABI (undefined behaviour); it is now caught and reported as
+  `SQL_ERROR`, consistent with every other entry point. Neither change alters
+  their spec-observable behaviour: both still read without clearing the queue
+  or posting a diagnostic for themselves, per the spec's own exception to the
+  clear-at-entry rule for these two functions.
 
 ### Fixed
 

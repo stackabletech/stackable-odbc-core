@@ -5,7 +5,7 @@ use crate::handles::{
     StatementHandle, alloc_connection, alloc_environment, alloc_statement, free_connection,
     free_environment, free_statement,
 };
-use crate::panic::panic_safe_scoped;
+use crate::panic::panic_safe;
 use crate::types::{SqlReturn, free_stmt_option_from_raw, handle_type_from_raw};
 use odbc_sys::{FreeStmtOption, HandleType};
 use std::ffi::c_void;
@@ -77,7 +77,7 @@ pub unsafe fn sql_alloc_handle<B: Backend>(
         input_handle,
         output_handle_ptr,
     );
-    // Wrapped in panic_safe_scoped like every other FFI entry point: allocation
+    // Wrapped in panic_safe like every other FFI entry point: allocation
     // runs Box allocation and backend construction, and a panic must not unwind
     // across the extern "system" boundary (undefined behaviour). input_handle is
     // the new child's parent (null for SQL_HANDLE_ENV, which has none), so this
@@ -87,7 +87,7 @@ pub unsafe fn sql_alloc_handle<B: Backend>(
     // error path, including a caught panic, leaves it null, and only the
     // success paths overwrite it.
     let ret = unsafe {
-        panic_safe_scoped::<B, _>(input_handle, |_scope| {
+        panic_safe::<B, _>(input_handle, |_scope| {
             // Spec HY009: OutputHandlePtr must not be null.
             if output_handle_ptr.is_null() {
                 tracing::error!("SQLAllocHandle: output_handle_ptr is null (HY009)");
@@ -222,30 +222,26 @@ pub unsafe fn sql_free_handle<B: Backend>(handle_type: i16, handle: *mut c_void)
         ht_log,
         handle
     );
-    // Wrapped in panic_safe_scoped like every other FFI entry point: free_connection
+    // Wrapped in panic_safe like every other FFI entry point: free_connection
     // and free_statement drop the backend connection/statement, whose Drop can run
     // arbitrary code (closing sockets, draining residual pages). A panic there must
-    // not unwind across the extern "system" boundary (undefined behaviour). A null
-    // handle is passed to panic_safe_scoped because the handle is being destroyed: the
-    // "cannot free" diagnostics are pushed by the helpers before the tag is
-    // invalidated, and once the handle is freed there is no valid queue to post a
-    // panic diagnostic against (reading it would be use-after-free). free_environment,
-    // free_connection and free_statement do their own registry validation and are not
-    // routed through the scope, so it holds no group here; that is fine, since the
-    // helpers below never touch a handle through the scope.
+    // not unwind across the extern "system" boundary (undefined behaviour). `handle`
+    // itself is passed to panic_safe (rather than null), because `handle` names its
+    // own lock group regardless of whether it turns out to be an environment, a
+    // connection or a statement -- resolving that group is exactly what
+    // `free_environment`/`free_connection` need `scope` for, and what holds the lock
+    // for the duration of `free_statement`'s registry unregister and `Box::from_raw`.
     let ret = unsafe {
-        panic_safe_scoped::<B, _>(std::ptr::null_mut(), |_scope| {
+        panic_safe::<B, _>(handle, |scope| {
             let Some(ht) = handle_type_from_raw(handle_type) else {
                 tracing::error!("SQLFreeHandle: invalid handle_type {}", handle_type);
                 return Ok(SqlReturn::INVALID_HANDLE);
             };
             let ret = match ht {
-                // SAFETY: free_environment validates the tag via as_handle_ref before Box::from_raw.
-                // Unsafe ops in this closure are covered by the outer `unsafe` block.
-                HandleType::Env => free_environment::<B>(handle),
-                // SAFETY: free_connection validates the tag via as_handle_ref before Box::from_raw.
-                HandleType::Dbc => free_connection::<B>(handle),
-                // SAFETY: free_statement validates the tag via as_handle_ref before Box::from_raw.
+                HandleType::Env => free_environment::<B>(handle, scope),
+                HandleType::Dbc => free_connection::<B>(handle, scope),
+                // SAFETY: free_statement does its own registry validation; the
+                // `unsafe` here is covered by the outer `unsafe` block.
                 HandleType::Stmt => free_statement::<B>(handle),
                 HandleType::Desc | HandleType::DbcInfoToken => {
                     // Explicit descriptor and DBC_INFO_TOKEN free: not implemented (matching alloc). Deferred.
@@ -329,7 +325,7 @@ pub unsafe fn sql_free_stmt<B: Backend>(statement_handle: *mut c_void, option: u
             return SqlReturn::ERROR;
         }
     };
-    // Wrapped in panic_safe_scoped like every other FFI entry point: SQL_CLOSE drops
+    // Wrapped in panic_safe like every other FFI entry point: SQL_CLOSE drops
     // the backend statement, and a backend cursor's Drop can run arbitrary code
     // (draining residual pages, for example). A panic there would otherwise
     // unwind across the `extern "system"` boundary, which is undefined behaviour.
@@ -337,7 +333,7 @@ pub unsafe fn sql_free_stmt<B: Backend>(statement_handle: *mut c_void, option: u
     // SAFETY: statement_handle is null or a valid StatementHandle<B> allocated by
     // sql_alloc_handle; kind and group are validated by scope.get inside the closure.
     let ret = unsafe {
-        panic_safe_scoped::<B, _>(statement_handle, |scope| {
+        panic_safe::<B, _>(statement_handle, |scope| {
             let stmt = scope.get::<StatementHandle<B>>(statement_handle)?;
             stmt.diagnostics.clear();
 
@@ -358,8 +354,7 @@ pub unsafe fn sql_free_stmt<B: Backend>(statement_handle: *mut c_void, option: u
 mod tests {
     use super::*;
     use crate::errors::OdbcError;
-    use crate::handles::as_handle_ref;
-    use crate::test_utils::MockBackend;
+    use crate::test_utils::{MockBackend, with_handle};
     use odbc_sys::FreeStmtOption;
 
     use crate::types::SQL_DROP;
@@ -461,7 +456,7 @@ mod tests {
     #[test]
     fn free_null_handle_returns_invalid_handle() {
         // A valid handle type with a null pointer must return INVALID_HANDLE,
-        // not a panic or UB; as_handle_ref checks for null before dereferencing.
+        // not a panic or UB; handle resolution checks for null before dereferencing.
         let ret =
             unsafe { sql_free_handle::<MockBackend>(HandleType::Env as i16, std::ptr::null_mut()) };
         assert_eq!(ret, SqlReturn::INVALID_HANDLE);
@@ -483,15 +478,18 @@ mod tests {
             let ret = sql_free_handle::<MockBackend>(HandleType::Env as i16, env);
             assert_eq!(ret, SqlReturn::ERROR);
             // Spec HY010: verify the diagnostic SQLSTATE is HY010 (function_sequence_error).
-            let env_handle =
-                as_handle_ref::<crate::handles::EnvironmentHandle<MockBackend>>(env).unwrap();
-            let rec = env_handle
-                .diagnostics
-                .get(0)
-                .expect("expected diagnostic record");
-            assert_eq!(
-                rec.sqlstate.as_str(),
-                crate::types::sql_state::FUNCTION_SEQUENCE_ERROR
+            with_handle::<MockBackend, crate::handles::EnvironmentHandle<MockBackend>, _>(
+                env,
+                |env_handle| {
+                    let rec = env_handle
+                        .diagnostics
+                        .get(0)
+                        .expect("expected diagnostic record");
+                    assert_eq!(
+                        rec.sqlstate.as_str(),
+                        crate::types::sql_state::FUNCTION_SEQUENCE_ERROR
+                    );
+                },
             );
             // Clean up properly.
             let _ = sql_free_handle::<MockBackend>(HandleType::Dbc as i16, conn);
@@ -515,19 +513,21 @@ mod tests {
             let mut stmt: *mut c_void = std::ptr::null_mut();
             let _ = sql_alloc_handle::<MockBackend>(HandleType::Stmt as i16, conn, &mut stmt);
 
-            let handle = as_handle_ref::<StatementHandle<MockBackend>>(stmt).unwrap();
-            handle.diagnostics.push(&OdbcError::NotConnected);
-            assert_eq!(handle.diagnostics.len(), 1, "precondition");
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+                handle.diagnostics.push(&OdbcError::NotConnected);
+                assert_eq!(handle.diagnostics.len(), 1, "precondition");
+            });
 
             let ret = sql_free_stmt::<MockBackend>(stmt, FreeStmtOption::Close as u16);
             assert_eq!(ret, SqlReturn::SUCCESS);
 
-            let handle = as_handle_ref::<StatementHandle<MockBackend>>(stmt).unwrap();
-            assert_eq!(
-                handle.diagnostics.len(),
-                0,
-                "stale diagnostic survived SQLFreeStmt"
-            );
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+                assert_eq!(
+                    handle.diagnostics.len(),
+                    0,
+                    "stale diagnostic survived SQLFreeStmt"
+                );
+            });
 
             let _ = sql_free_handle::<MockBackend>(HandleType::Stmt as i16, stmt);
             let _ = sql_free_handle::<MockBackend>(HandleType::Dbc as i16, conn);

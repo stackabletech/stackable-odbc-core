@@ -6,7 +6,7 @@ use crate::backend::Backend;
 use crate::errors::{IntoOdbc, OdbcError};
 use crate::handles::ConnectionHandle;
 use crate::handles::StatementData;
-use crate::panic::panic_safe_scoped;
+use crate::panic::panic_safe;
 use crate::synthetic::SyntheticStatement;
 use crate::types::{
     CREATE_PARAMS_LEN, CatalogResultColumnWidths, ColumnDescriptor, InfoValue, LITERAL_AFFIX_LEN,
@@ -295,9 +295,9 @@ pub unsafe fn sql_get_info_w<B: Backend>(
     );
     // SAFETY: connection_handle is null or a valid ConnectionHandle<B> allocated by
     // sql_alloc_handle. scope.get validates kind and group before any cast, and
-    // panic_safe_scoped catches any panics.
+    // panic_safe catches any panics.
     let ret = unsafe {
-        panic_safe_scoped::<B, _>(connection_handle, |scope| {
+        panic_safe::<B, _>(connection_handle, |scope| {
             let handle = scope.get::<ConnectionHandle<B>>(connection_handle)?;
             handle.diagnostics.clear();
 
@@ -506,9 +506,9 @@ pub unsafe fn sql_get_type_info<B: Backend>(
     // SAFETY: statement_handle is null or a valid StatementHandle<B> allocated by
     // sql_alloc_handle. scope.stmt_with_parent validates kind and group for both
     // the statement and its parent connection before any cast, and
-    // panic_safe_scoped catches any panics.
+    // panic_safe catches any panics.
     let ret = unsafe {
-        panic_safe_scoped::<B, _>(statement_handle, |scope| {
+        panic_safe::<B, _>(statement_handle, |scope| {
             let (handle, conn) = scope.stmt_with_parent::<B>(statement_handle)?;
             handle.diagnostics.clear();
 
@@ -623,9 +623,9 @@ pub unsafe fn sql_get_functions<B: Backend>(
     );
     // SAFETY: connection_handle is null or a valid ConnectionHandle<B> allocated by
     // sql_alloc_handle. scope.get validates kind and group before any cast, and
-    // panic_safe_scoped catches any panics.
+    // panic_safe catches any panics.
     let ret = unsafe {
-        panic_safe_scoped::<B, _>(connection_handle, |scope| {
+        panic_safe::<B, _>(connection_handle, |scope| {
             let handle = scope.get::<ConnectionHandle<B>>(connection_handle)?;
             handle.diagnostics.clear();
 
@@ -761,8 +761,10 @@ pub unsafe fn sql_get_functions<B: Backend>(
 mod tests {
     use super::*;
     use crate::ffi::handle::{sql_alloc_handle, sql_free_handle};
-    use crate::handles::{StatementHandle, as_handle_ref};
-    use crate::test_utils::{MockBackend, MockFunctionsBackend, MockTxnDeleteCloseBackend};
+    use crate::handles::StatementHandle;
+    use crate::test_utils::{
+        MockBackend, MockFunctionsBackend, MockTxnDeleteCloseBackend, with_handle,
+    };
 
     /// Drives `SQLGetFunctions` for the ODBC 2.x `SQL_API_ALL_FUNCTIONS` array.
     fn all_functions_2x<B: Backend>() -> [u16; 100] {
@@ -1036,31 +1038,36 @@ mod tests {
             );
             assert_eq!(ret, SqlReturn::SUCCESS);
 
-            let handle =
-                as_handle_ref::<StatementHandle<MockTypeInfoBackend>>(stmt).expect("valid");
-            let mut seen: Vec<(i16, String)> = Vec::new();
             use crate::backend::StatementBackend as _;
-            let statement = handle.statement.as_mut().expect("result set");
-            while matches!(
-                statement.fetch().expect("fetch"),
-                crate::types::FetchResult::Row
-            ) {
-                let name = match &*statement
-                    .get_data(1, crate::types::CDataType::WChar)
-                    .expect("TYPE_NAME")
-                {
-                    crate::types::ColumnValue::String(s) => s.clone(),
-                    other => panic!("TYPE_NAME was {other:?}"),
-                };
-                let dt = match &*statement
-                    .get_data(2, crate::types::CDataType::SShort)
-                    .expect("DATA_TYPE")
-                {
-                    crate::types::ColumnValue::I16(v) => *v,
-                    other => panic!("DATA_TYPE was {other:?}"),
-                };
-                seen.push((dt, name));
-            }
+            let seen: Vec<(i16, String)> = with_handle::<
+                MockTypeInfoBackend,
+                StatementHandle<MockTypeInfoBackend>,
+                _,
+            >(stmt, |handle| {
+                let mut seen: Vec<(i16, String)> = Vec::new();
+                let statement = handle.statement.as_mut().expect("result set");
+                while matches!(
+                    statement.fetch().expect("fetch"),
+                    crate::types::FetchResult::Row
+                ) {
+                    let name = match &*statement
+                        .get_data(1, crate::types::CDataType::WChar)
+                        .expect("TYPE_NAME")
+                    {
+                        crate::types::ColumnValue::String(s) => s.clone(),
+                        other => panic!("TYPE_NAME was {other:?}"),
+                    };
+                    let dt = match &*statement
+                        .get_data(2, crate::types::CDataType::SShort)
+                        .expect("DATA_TYPE")
+                    {
+                        crate::types::ColumnValue::I16(v) => *v,
+                        other => panic!("DATA_TYPE was {other:?}"),
+                    };
+                    seen.push((dt, name));
+                }
+                seen
+            });
 
             let mut expected = seen.clone();
             expected.sort();
@@ -1099,12 +1106,13 @@ mod tests {
             );
             assert_eq!(ret, SqlReturn::SUCCESS_WITH_INFO, "must report truncation");
 
-            let handle = as_handle_ref::<ConnectionHandle<MockBackend>>(conn).expect("valid");
-            let rec = handle
-                .diagnostics
-                .get(0)
-                .expect("a truncation must leave a diagnostic record");
-            assert_eq!(rec.sqlstate.as_str(), "01004");
+            with_handle::<MockBackend, ConnectionHandle<MockBackend>, _>(conn, |handle| {
+                let rec = handle
+                    .diagnostics
+                    .get(0)
+                    .expect("a truncation must leave a diagnostic record");
+                assert_eq!(rec.sqlstate.as_str(), "01004");
+            });
 
             cleanup(env, conn, stmt);
         }
@@ -1282,8 +1290,9 @@ mod tests {
             assert_eq!(ret, SqlReturn::SUCCESS);
 
             // Verify statement data was set
-            let handle = as_handle_ref::<StatementHandle<MockBackend>>(stmt).unwrap();
-            assert!(handle.statement.is_some());
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+                assert!(handle.statement.is_some());
+            });
 
             let _ = sql_free_handle::<MockBackend>(HandleType::Stmt as i16, stmt);
             let _ = crate::ffi::connect::sql_disconnect::<MockBackend>(conn);

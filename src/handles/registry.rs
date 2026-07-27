@@ -75,14 +75,14 @@ fn decode_token(token: *mut c_void) -> (usize, u32) {
 /// because there is nothing at stake: the state this lock actually guards is
 /// those handle allocations, so a panic while the lock is held mid-mutation
 /// of one can leave it inconsistent. A closure panic on the ordinary
-/// `panic_safe_scoped` path (`panic.rs`) does *not* poison this lock at all:
-/// its `catch_unwind` lives in `panic_safe_scoped`'s own frame, so the unwind
+/// `panic_safe` path (`panic.rs`) does *not* poison this lock at all:
+/// its `catch_unwind` lives in `panic_safe`'s own frame, so the unwind
 /// never reaches the guard held there and it drops normally when that
 /// function returns. The two paths that *can* poison a group lock are
 /// `HandleScope::with_child_group` (`handles/scope.rs`) — whose guard sits
 /// below `catch_unwind`, so a panic inside its nested closure unwinds through
 /// its `drop(guard)` — and a panic inside `push_diagnostic` itself, which runs
-/// outside `catch_unwind` on `panic_safe_scoped`'s error and panic arms.
+/// outside `catch_unwind` on `panic_safe`'s error and panic arms.
 /// Either way, refusing every later call on that connection for the rest of
 /// the process is the worse of the two outcomes available once poisoning has
 /// happened; handing the group to the next caller, who may find a handle
@@ -176,14 +176,13 @@ struct Slot {
 /// own `Registry` and drive its methods (`register`, `resolve`, `group_of`,
 /// and the rest) directly, inside the model closure. That reach stops at this
 /// type's own methods: it does not extend to `alloc_environment`,
-/// `alloc_connection`, `alloc_statement`, the `free_*` functions,
-/// `as_handle_ref`, or `try_get_diagnostic_queue` in `handles::mod`, which
-/// resolve the process-wide singleton via `registry()` below rather than
-/// taking a `Registry` as an argument — see that function's doc comment for
-/// why a model must not call through to it. loom's primitives are also not
-/// const-constructible, so a global static could not have been declared the
-/// way the pre-Task-2 `REGISTRY` was; a type gives loom code a `Registry` it
-/// builds for itself instead.
+/// `alloc_connection`, `alloc_statement`, or the `free_*` functions in
+/// `handles::mod`, which resolve the process-wide singleton via `registry()`
+/// below rather than taking a `Registry` as an argument — see that function's
+/// doc comment for why a model must not call through to it. loom's
+/// primitives are also not const-constructible, so a global static could not
+/// have been declared the way the pre-Task-2 `REGISTRY` was; a type gives
+/// loom code a `Registry` it builds for itself instead.
 pub(crate) struct Registry {
     slots: RwLock<Vec<Slot>>,
 }
@@ -442,10 +441,9 @@ impl Registry {
 /// is not itself a loom-tracked primitive, only the `Registry` it lazily
 /// builds is — but a loom model must never call this function, or anything in
 /// `handles::mod` that resolves it internally (`alloc_environment`,
-/// `alloc_connection`, `alloc_statement`, the `free_*` functions,
-/// `as_handle_ref`, `try_get_diagnostic_queue`). The first thing that goes
-/// wrong is a panic, not a subtler correctness gap: loom's primitives register
-/// with the execution of whichever `loom::model` closure constructs them
+/// `alloc_connection`, `alloc_statement`, the `free_*` functions). The first
+/// thing that goes wrong is a panic, not a subtler correctness gap: loom's
+/// primitives register with the execution of whichever `loom::model` closure constructs them
 /// (`loom::sync::RwLock::new` asserts one exists), so calling
 /// `Registry::new()` — which this function does, lazily, the first time it
 /// runs — outside an active model panics immediately. And even granting an

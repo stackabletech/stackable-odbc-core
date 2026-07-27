@@ -21,7 +21,8 @@ use std::ffi::c_void;
 
 use crate::backend::Backend;
 use crate::errors::OdbcError;
-use crate::handles::{ConnectionHandle, as_handle_ref};
+use crate::handles::ConnectionHandle;
+use crate::types::SqlReturn;
 
 /// Puts `connection` into an allocated connection handle, as though
 /// `SQLDriverConnectW` had succeeded.
@@ -42,6 +43,10 @@ use crate::handles::{ConnectionHandle, as_handle_ref};
 /// involving the backend at all. The second is usually what an offline test
 /// wants.
 ///
+/// Holds `connection_handle`'s group lock for the duration, exactly as an FFI
+/// entry point would, and catches a panic instead of letting it unwind out of
+/// this crate into the driver's test binary.
+///
 /// # Safety
 ///
 /// `connection_handle` must be a connection handle returned by
@@ -50,12 +55,21 @@ pub unsafe fn attach_connection<B: Backend>(
     connection_handle: *mut c_void,
     connection: B::Connection,
 ) -> Result<(), OdbcError> {
-    // SAFETY: the caller guarantees a live connection handle; `as_handle_ref`
-    // validates the token against the registry before producing a reference,
-    // exactly as the FFI entry points do.
-    let handle = unsafe { as_handle_ref::<ConnectionHandle<B>>(connection_handle)? };
-    handle.connection = Some(connection);
-    Ok(())
+    let mut connection = Some(connection);
+    let mut error = None;
+    unsafe {
+        let _ = crate::panic::panic_safe::<B, _>(connection_handle, |scope| {
+            match scope.get::<ConnectionHandle<B>>(connection_handle) {
+                Ok(handle) => handle.connection = connection.take(),
+                Err(err) => error = Some(err),
+            }
+            Ok(SqlReturn::SUCCESS)
+        });
+    }
+    match error {
+        Some(err) => Err(err),
+        None => Ok(()),
+    }
 }
 
 /// Takes the connection back out of a connection handle, without calling
@@ -64,15 +78,31 @@ pub unsafe fn attach_connection<B: Backend>(
 /// Returns `None` when the handle held no connection. After this the handle can
 /// be freed with `SQLFreeHandle`, which otherwise reports `HY010`.
 ///
+/// Holds `connection_handle`'s group lock for the duration, exactly as an FFI
+/// entry point would, and catches a panic instead of letting it unwind out of
+/// this crate into the driver's test binary.
+///
 /// # Safety
 ///
 /// As [`attach_connection`].
 pub unsafe fn detach_connection<B: Backend>(
     connection_handle: *mut c_void,
 ) -> Result<Option<B::Connection>, OdbcError> {
-    // SAFETY: as `attach_connection`.
-    let handle = unsafe { as_handle_ref::<ConnectionHandle<B>>(connection_handle)? };
-    Ok(handle.connection.take())
+    let mut taken = None;
+    let mut error = None;
+    unsafe {
+        let _ = crate::panic::panic_safe::<B, _>(connection_handle, |scope| {
+            match scope.get::<ConnectionHandle<B>>(connection_handle) {
+                Ok(handle) => taken = handle.connection.take(),
+                Err(err) => error = Some(err),
+            }
+            Ok(SqlReturn::SUCCESS)
+        });
+    }
+    match error {
+        Some(err) => Err(err),
+        None => Ok(taken),
+    }
 }
 
 #[cfg(test)]

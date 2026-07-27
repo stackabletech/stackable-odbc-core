@@ -7,7 +7,7 @@ use odbc_sys::ConnectionAttribute;
 use crate::backend::Backend;
 use crate::errors::{IntoOdbc, OdbcError};
 use crate::handles::ConnectionHandle;
-use crate::panic::panic_safe_scoped;
+use crate::panic::panic_safe;
 use crate::types::{
     SQL_AUTOCOMMIT_OFF, SQL_AUTOCOMMIT_ON, SQL_CD_FALSE, SQL_FALSE, SQL_NTS, SqlReturn, SqlState,
 };
@@ -224,7 +224,7 @@ pub unsafe fn sql_set_connect_attr_w<B: Backend>(
     // SAFETY: connection_handle is null or a valid ConnectionHandle<B> allocated by
     // sql_alloc_handle; kind and group are validated by scope.get inside the closure.
     let ret = unsafe {
-        panic_safe_scoped::<B, _>(connection_handle, |scope| {
+        panic_safe::<B, _>(connection_handle, |scope| {
             let conn = scope.get::<ConnectionHandle<B>>(connection_handle)?;
             conn.diagnostics.clear();
 
@@ -455,7 +455,7 @@ pub unsafe fn sql_get_connect_attr_w<B: Backend>(
     // SAFETY: connection_handle is null or a valid ConnectionHandle<B> allocated by
     // sql_alloc_handle; kind and group are validated by scope.get inside the closure.
     let ret = unsafe {
-        panic_safe_scoped::<B, _>(connection_handle, |scope| {
+        panic_safe::<B, _>(connection_handle, |scope| {
             let conn = scope.get::<ConnectionHandle<B>>(connection_handle)?;
             conn.diagnostics.clear();
 
@@ -610,10 +610,9 @@ pub unsafe fn sql_get_connect_attr_w<B: Backend>(
 mod tests {
     use super::*;
     use crate::ffi::handle::{sql_alloc_handle, sql_free_handle};
-    use crate::handles::as_handle_ref;
     use crate::test_utils::{
         MockBackend, MockConnection, MockIsolationBackend, MockIsolationConnection,
-        MockUnappliedIsolationBackend,
+        MockUnappliedIsolationBackend, with_handle,
     };
     use odbc_sys::HandleType;
 
@@ -622,8 +621,8 @@ mod tests {
     ///
     /// The type parameter is load-bearing, not decoration. A handle is a
     /// `ConnectionHandle<B>`, whose `connection: Option<B::Connection>` field
-    /// has a different layout for every backend, while the tag that
-    /// `as_handle_ref` validates is the same for all of them. Allocating as
+    /// has a different layout for every backend, while the tag that handle
+    /// resolution validates is the same for all of them. Allocating as
     /// one backend and calling as another therefore passes the tag check and
     /// then reads uninitialised memory -- undefined behaviour that Miri
     /// catches and a plain `cargo test` does not.
@@ -788,11 +787,12 @@ mod tests {
             );
             assert_eq!(ret, SqlReturn::ERROR, "manual-commit was accepted silently");
 
-            let handle = as_handle_ref::<ConnectionHandle<MockBackend>>(conn).unwrap();
-            assert!(
-                !handle.diagnostics.is_empty(),
-                "no HYC00 diagnostic was recorded"
-            );
+            with_handle::<MockBackend, ConnectionHandle<MockBackend>, _>(conn, |handle| {
+                assert!(
+                    !handle.diagnostics.is_empty(),
+                    "no HYC00 diagnostic was recorded"
+                );
+            });
 
             cleanup(env, conn);
         }
@@ -1041,11 +1041,14 @@ mod tests {
     /// the connection the handle owns. This is what separates "core stored the
     /// value" from "the data source runs at it".
     unsafe fn applied_isolation(conn: *mut c_void) -> u32 {
-        let handle =
-            unsafe { as_handle_ref::<ConnectionHandle<MockIsolationBackend>>(conn) }.unwrap();
-        let connection: &MockIsolationConnection =
-            handle.connection.as_ref().expect("not connected");
-        connection.applied.load(std::sync::atomic::Ordering::SeqCst)
+        with_handle::<MockIsolationBackend, ConnectionHandle<MockIsolationBackend>, _>(
+            conn,
+            |handle| {
+                let connection: &MockIsolationConnection =
+                    handle.connection.as_ref().expect("not connected");
+                connection.applied.load(std::sync::atomic::Ordering::SeqCst)
+            },
+        )
     }
 
     unsafe fn driver_connect<B: Backend>(conn: *mut c_void) -> SqlReturn {

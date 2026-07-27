@@ -6,56 +6,7 @@ use std::panic::AssertUnwindSafe;
 use crate::errors::OdbcError;
 use crate::handles::registry::registry;
 use crate::handles::scope::HandleScope;
-use crate::handles::try_get_diagnostic_queue;
 use crate::types::SqlReturn;
-
-/// Execute `f` at the FFI boundary, catching both `Err` returns and panics.
-///
-/// On success the returned `SqlReturn` is passed through. On an `Err`, the
-/// error is pushed onto the handle's diagnostic queue (if the handle is valid)
-/// and `err.sql_return()` is returned. On a panic, an `OdbcError::Panic`
-/// diagnostic is pushed and `SqlReturn::ERROR` is returned.
-///
-/// [`OdbcError::InvalidHandle`] is the exception: the spec states that when a
-/// function returns `SQL_INVALID_HANDLE` no diagnostic record is posted, since
-/// there is no valid handle to post it against and the application must not
-/// call `SQLGetDiagRec` afterwards. Pushing one would leave a stale record that
-/// the next call on that handle reports.
-/// # Safety
-///
-/// `handle` must be either null or a valid pointer to an ODBC handle previously
-/// allocated by one of the `alloc_*` functions in `handles`.
-#[allow(
-    dead_code,
-    reason = "superseded by panic_safe_scoped; every ffi/ call site has migrated as of task 11, \
-              leaving only this module's own tests as callers, pending removal in a follow-up task"
-)]
-pub unsafe fn panic_safe<B, F>(handle: *mut std::ffi::c_void, f: F) -> SqlReturn
-where
-    B: crate::backend::Backend,
-    F: FnOnce() -> Result<SqlReturn, OdbcError>,
-{
-    match std::panic::catch_unwind(AssertUnwindSafe(f)) {
-        Ok(Ok(ret)) => ret,
-        Ok(Err(err)) => {
-            if !matches!(err, OdbcError::InvalidHandle)
-                && let Ok(queue) = unsafe { try_get_diagnostic_queue::<B>(handle) }
-            {
-                queue.push(&err);
-            }
-            err.sql_return()
-        }
-        Err(_panic) => {
-            let err = OdbcError::Panic {
-                message: "internal driver panic".into(),
-            };
-            if let Ok(queue) = unsafe { try_get_diagnostic_queue::<B>(handle) } {
-                queue.push(&err);
-            }
-            SqlReturn::ERROR
-        }
-    }
-}
 
 /// Execute `f` at the FFI boundary, holding `handle`'s lock group, catching
 /// both `Err` returns and panics.
@@ -85,7 +36,7 @@ where
 ///
 /// `handle` must be either null or a token previously issued by one of the
 /// `alloc_*` functions in [`crate::handles`].
-pub unsafe fn panic_safe_scoped<B, F>(handle: *mut std::ffi::c_void, f: F) -> SqlReturn
+pub unsafe fn panic_safe<B, F>(handle: *mut std::ffi::c_void, f: F) -> SqlReturn
 where
     B: crate::backend::Backend,
     F: FnOnce(&mut HandleScope<'_>) -> Result<SqlReturn, OdbcError>,
@@ -115,12 +66,13 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::MockBackend;
+    use crate::handles::EnvironmentHandle;
+    use crate::test_utils::{MockBackend, with_handle};
 
     #[test]
     fn success_passes_through() {
         let result = unsafe {
-            panic_safe::<MockBackend, _>(std::ptr::null_mut(), || Ok(SqlReturn::SUCCESS))
+            panic_safe::<MockBackend, _>(std::ptr::null_mut(), |_scope| Ok(SqlReturn::SUCCESS))
         };
         assert_eq!(result, SqlReturn::SUCCESS);
     }
@@ -128,7 +80,9 @@ mod tests {
     #[test]
     fn error_returns_sql_error() {
         let result = unsafe {
-            panic_safe::<MockBackend, _>(std::ptr::null_mut(), || Err(OdbcError::NotConnected))
+            panic_safe::<MockBackend, _>(std::ptr::null_mut(), |_scope| {
+                Err(OdbcError::NotConnected)
+            })
         };
         assert_eq!(result, SqlReturn::ERROR);
     }
@@ -136,7 +90,7 @@ mod tests {
     #[test]
     fn panic_is_caught() {
         let result = unsafe {
-            panic_safe::<MockBackend, _>(std::ptr::null_mut(), || {
+            panic_safe::<MockBackend, _>(std::ptr::null_mut(), |_scope| {
                 panic!("test panic");
             })
         };
@@ -146,7 +100,9 @@ mod tests {
     #[test]
     fn invalid_handle_error_returns_invalid_handle() {
         let result = unsafe {
-            panic_safe::<MockBackend, _>(std::ptr::null_mut(), || Err(OdbcError::InvalidHandle))
+            panic_safe::<MockBackend, _>(std::ptr::null_mut(), |_scope| {
+                Err(OdbcError::InvalidHandle)
+            })
         };
         assert_eq!(result, SqlReturn::INVALID_HANDLE);
     }
@@ -164,17 +120,18 @@ mod tests {
                 &mut env,
             );
 
-            let ret = panic_safe::<MockBackend, _>(env, || Err(OdbcError::NotConnected));
+            let ret = panic_safe::<MockBackend, _>(env, |_scope| Err(OdbcError::NotConnected));
             assert_eq!(ret, SqlReturn::ERROR);
 
             // Verify diagnostic was pushed to the handle's queue.
-            let queue = try_get_diagnostic_queue::<MockBackend>(env).unwrap();
-            assert_eq!(queue.len(), 1);
-            let record = queue.get(0).unwrap();
-            assert_eq!(
-                record.sqlstate.as_str(),
-                crate::types::sql_state::CONNECTION_NOT_OPEN
-            );
+            with_handle::<MockBackend, EnvironmentHandle<MockBackend>, _>(env, |handle| {
+                assert_eq!(handle.diagnostics.len(), 1);
+                let record = handle.diagnostics.get(0).unwrap();
+                assert_eq!(
+                    record.sqlstate.as_str(),
+                    crate::types::sql_state::CONNECTION_NOT_OPEN
+                );
+            });
 
             let _ = sql_free_handle::<MockBackend>(HandleType::Env as i16, env);
         }
@@ -196,11 +153,12 @@ mod tests {
                 &mut env,
             );
 
-            let ret = panic_safe::<MockBackend, _>(env, || Err(OdbcError::InvalidHandle));
+            let ret = panic_safe::<MockBackend, _>(env, |_scope| Err(OdbcError::InvalidHandle));
             assert_eq!(ret, SqlReturn::INVALID_HANDLE);
 
-            let queue = try_get_diagnostic_queue::<MockBackend>(env).unwrap();
-            assert_eq!(queue.len(), 0);
+            with_handle::<MockBackend, EnvironmentHandle<MockBackend>, _>(env, |handle| {
+                assert_eq!(handle.diagnostics.len(), 0);
+            });
 
             let _ = sql_free_handle::<MockBackend>(HandleType::Env as i16, env);
         }
@@ -219,20 +177,21 @@ mod tests {
                 &mut env,
             );
 
-            let ret = panic_safe::<MockBackend, _>(env, || {
+            let ret = panic_safe::<MockBackend, _>(env, |_scope| {
                 panic!("test panic for diagnostic");
             });
             assert_eq!(ret, SqlReturn::ERROR);
 
             // Verify panic diagnostic was pushed to the handle's queue.
-            let queue = try_get_diagnostic_queue::<MockBackend>(env).unwrap();
-            assert_eq!(queue.len(), 1);
-            let record = queue.get(0).unwrap();
-            assert_eq!(
-                record.sqlstate.as_str(),
-                crate::types::sql_state::GENERAL_ERROR
-            );
-            assert!(record.message.contains("panic"));
+            with_handle::<MockBackend, EnvironmentHandle<MockBackend>, _>(env, |handle| {
+                assert_eq!(handle.diagnostics.len(), 1);
+                let record = handle.diagnostics.get(0).unwrap();
+                assert_eq!(
+                    record.sqlstate.as_str(),
+                    crate::types::sql_state::GENERAL_ERROR
+                );
+                assert!(record.message.contains("panic"));
+            });
 
             let _ = sql_free_handle::<MockBackend>(HandleType::Env as i16, env);
         }

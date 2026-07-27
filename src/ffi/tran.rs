@@ -8,7 +8,7 @@ use crate::backend::{Backend, StatementBackend};
 use crate::errors::{IntoOdbc, OdbcError};
 use crate::handles::scope::HandleScope;
 use crate::handles::{ConnectionHandle, EnvironmentHandle};
-use crate::panic::panic_safe_scoped;
+use crate::panic::panic_safe;
 use crate::types::{SqlReturn, completion_type_from_raw, handle_type_from_raw};
 
 /// Apply the backend's declared cursor behaviour to every statement on a
@@ -134,7 +134,7 @@ fn apply_cursor_behavior<B: Backend>(
 /// which the two callers need differently:
 ///
 /// - `SQL_HANDLE_DBC` passes `false`: `conn_token` is the same handle
-///   [`crate::panic::panic_safe_scoped`] was given at the top, so its own
+///   [`crate::panic::panic_safe`] was given at the top, so its own
 ///   auto-push already records the failure once when this function's `Err`
 ///   propagates all the way out through `?`; pushing here too would record
 ///   the same failure twice.
@@ -384,7 +384,7 @@ pub unsafe fn sql_end_tran<B: Backend>(
         }
     };
 
-    // Route based on handle type. panic_safe_scoped dispatches diagnostics to
+    // Route based on handle type. panic_safe dispatches diagnostics to
     // the correct queue regardless of whether the handle is an ENV or DBC.
     // SAFETY: handle is null or a valid EnvironmentHandle<B> or ConnectionHandle<B>
     // allocated by sql_alloc_handle; kind and group are validated by scope.get (and,
@@ -394,7 +394,7 @@ pub unsafe fn sql_end_tran<B: Backend>(
     // between the snapshot and here -- this is the crate's only lock-nesting site
     // (environment before connection), so this is the one place that can happen.
     let ret = unsafe {
-        panic_safe_scoped::<B, _>(handle, |scope| {
+        panic_safe::<B, _>(handle, |scope| {
             match handle_type_from_raw(handle_type) {
                 Some(HandleType::Env) => {
                     let env = scope.get::<EnvironmentHandle<B>>(handle)?;
@@ -441,7 +441,7 @@ pub unsafe fn sql_end_tran<B: Backend>(
                             // the environment handle this call received was
                             // valid, so reporting SQL_INVALID_HANDLE for it
                             // would misreport the call, and
-                            // `panic_safe_scoped` pushes no diagnostic for
+                            // `panic_safe` pushes no diagnostic for
                             // that variant, leaving nothing to explain the
                             // failure.
                             Ok(Err(OdbcError::InvalidHandle)) | Err(_) => {
@@ -469,7 +469,7 @@ pub unsafe fn sql_end_tran<B: Backend>(
                         B::cursor_rollback_behavior()
                     };
                     // report_end_tran_failure=false: this scope's own handle
-                    // is `handle` itself, so panic_safe_scoped's auto-push
+                    // is `handle` itself, so panic_safe's auto-push
                     // already records a propagated failure here exactly once
                     // (see end_tran_on_connection's doc comment).
                     match end_tran_on_connection::<B>(scope, handle, commit, behavior, false)? {
@@ -479,7 +479,7 @@ pub unsafe fn sql_end_tran<B: Backend>(
                         // loop above), but a direct SQLEndTran on an
                         // unconnected connection really is a failure, so this
                         // arm turns it back into the `Err` that
-                        // `panic_safe_scoped`'s auto-push records against
+                        // `panic_safe`'s auto-push records against
                         // `handle`.
                         EndTranOutcome::Skipped => Err(OdbcError::NotConnected),
                     }
@@ -496,11 +496,11 @@ pub unsafe fn sql_end_tran<B: Backend>(
 mod tests {
     use super::*;
     use crate::ffi::handle::{sql_alloc_handle, sql_free_handle};
-    use crate::handles::{StatementData, StatementHandle, as_handle_ref};
+    use crate::handles::{StatementData, StatementHandle};
     use crate::synthetic::SyntheticStatement;
     use crate::test_utils::{
         MockBackend, MockFailingCloseBackend, MockFailingCloseStatement, MockTxnCloseBackend,
-        MockTxnDeleteBackend, MockTxnNotConnectedBackend, MockTxnPreserveBackend,
+        MockTxnDeleteBackend, MockTxnNotConnectedBackend, MockTxnPreserveBackend, with_handle,
     };
     use crate::types::{
         ColumnDescriptor, ColumnValue, CompletionType, FetchResult, Nullable, SQL_NTS, SqlDataType,
@@ -631,10 +631,11 @@ mod tests {
         let mut stmt: *mut c_void = std::ptr::null_mut();
         let _ = unsafe { sql_alloc_handle::<B>(HandleType::Stmt as i16, conn, &mut stmt) };
 
-        let handle = unsafe { as_handle_ref::<StatementHandle<B>>(stmt) }.expect("valid stmt");
-        handle.set_result_set(crate::handles::StatementData::Synthetic(one_row_synthetic()));
-        handle.prepared_sql = Some("SELECT 1".to_string());
-        handle.param_count = Some(0);
+        with_handle::<B, StatementHandle<B>, _>(stmt, |handle| {
+            handle.set_result_set(crate::handles::StatementData::Synthetic(one_row_synthetic()));
+            handle.prepared_sql = Some("SELECT 1".to_string());
+            handle.param_count = Some(0);
+        });
 
         (env, conn, stmt)
     }
@@ -677,14 +678,15 @@ mod tests {
         // StatementBackend::close_cursor rather than dropping the statement.
         unsafe {
             let (env, conn, stmt) = alloc_connected_stmt::<MockTxnCloseBackend>("DRIVER=mock;");
-            {
-                let handle =
-                    as_handle_ref::<StatementHandle<MockTxnCloseBackend>>(stmt).expect("valid");
-                handle.set_result_set(StatementData::Synthetic(one_row_synthetic()));
-                let data = handle.statement.as_mut().expect("statement");
-                assert_eq!(data.fetch().expect("fetch"), FetchResult::Row);
-                assert_eq!(data.fetch().expect("fetch"), FetchResult::NoData);
-            }
+            with_handle::<MockTxnCloseBackend, StatementHandle<MockTxnCloseBackend>, _>(
+                stmt,
+                |handle| {
+                    handle.set_result_set(StatementData::Synthetic(one_row_synthetic()));
+                    let data = handle.statement.as_mut().expect("statement");
+                    assert_eq!(data.fetch().expect("fetch"), FetchResult::Row);
+                    assert_eq!(data.fetch().expect("fetch"), FetchResult::NoData);
+                },
+            );
 
             let ret = sql_end_tran::<MockTxnCloseBackend>(
                 HandleType::Dbc as i16,
@@ -693,23 +695,26 @@ mod tests {
             );
             assert_eq!(ret, SqlReturn::SUCCESS);
 
-            let handle =
-                as_handle_ref::<StatementHandle<MockTxnCloseBackend>>(stmt).expect("valid");
-            let data = handle
-                .statement
-                .as_mut()
-                .expect("SQL_CB_CLOSE dropped the statement instead of closing its cursor");
-            assert_eq!(
-                data.fetch().expect("re-fetch"),
-                FetchResult::Row,
-                "SQL_CB_CLOSE did not close the cursor"
+            with_handle::<MockTxnCloseBackend, StatementHandle<MockTxnCloseBackend>, _>(
+                stmt,
+                |handle| {
+                    let data = handle
+                        .statement
+                        .as_mut()
+                        .expect("SQL_CB_CLOSE dropped the statement instead of closing its cursor");
+                    assert_eq!(
+                        data.fetch().expect("re-fetch"),
+                        FetchResult::Row,
+                        "SQL_CB_CLOSE did not close the cursor"
+                    );
+                    assert_eq!(
+                        handle.prepared_sql.as_deref(),
+                        Some("SELECT 1"),
+                        "SQL_CB_CLOSE discarded the access plan"
+                    );
+                    assert_eq!(handle.param_count, Some(0));
+                },
             );
-            assert_eq!(
-                handle.prepared_sql.as_deref(),
-                Some("SELECT 1"),
-                "SQL_CB_CLOSE discarded the access plan"
-            );
-            assert_eq!(handle.param_count, Some(0));
 
             cleanup_connected::<MockTxnCloseBackend>(env, conn, stmt);
         }
@@ -725,15 +730,16 @@ mod tests {
         // says that call is legal in S2.
         unsafe {
             let (env, conn, stmt) = alloc_connected_stmt::<MockTxnCloseBackend>("DRIVER=mock;");
-            {
-                // Undo the helper's cursor-open setup: this test wants the
-                // state the real SQLPrepareW path produces, nothing more.
-                let handle =
-                    as_handle_ref::<StatementHandle<MockTxnCloseBackend>>(stmt).expect("valid");
-                handle.discard_result_set();
-                handle.prepared_sql = None;
-                handle.param_count = None;
-            }
+            // Undo the helper's cursor-open setup: this test wants the
+            // state the real SQLPrepareW path produces, nothing more.
+            with_handle::<MockTxnCloseBackend, StatementHandle<MockTxnCloseBackend>, _>(
+                stmt,
+                |handle| {
+                    handle.discard_result_set();
+                    handle.prepared_sql = None;
+                    handle.param_count = None;
+                },
+            );
 
             let mut sql: Vec<u16> = "SELECT a, b FROM t".encode_utf16().collect();
             sql.push(0);
@@ -751,16 +757,19 @@ mod tests {
             );
             assert_eq!(ret, SqlReturn::SUCCESS);
 
-            let handle =
-                as_handle_ref::<StatementHandle<MockTxnCloseBackend>>(stmt).expect("valid");
-            assert!(
-                handle.statement.is_some(),
-                "SQL_CB_CLOSE dropped a prepared-but-never-executed statement (S2)"
-            );
-            assert_eq!(handle.prepared_sql.as_deref(), Some("SELECT a, b FROM t"));
-            assert!(
-                !handle.cursor_open,
-                "S2 has no cursor open, before or after SQLEndTran"
+            with_handle::<MockTxnCloseBackend, StatementHandle<MockTxnCloseBackend>, _>(
+                stmt,
+                |handle| {
+                    assert!(
+                        handle.statement.is_some(),
+                        "SQL_CB_CLOSE dropped a prepared-but-never-executed statement (S2)"
+                    );
+                    assert_eq!(handle.prepared_sql.as_deref(), Some("SELECT a, b FROM t"));
+                    assert!(
+                        !handle.cursor_open,
+                        "S2 has no cursor open, before or after SQLEndTran"
+                    );
+                },
             );
 
             // The point of keeping the statement: SQLNumResultCols is legal in
@@ -782,14 +791,15 @@ mod tests {
 
     /// Asserts that the statement handle's most recent diagnostic is `24000`.
     unsafe fn assert_invalid_cursor_state<B: crate::backend::Backend>(stmt: *mut c_void) {
-        let handle = unsafe { as_handle_ref::<StatementHandle<B>>(stmt) }.expect("valid");
-        let rec = handle.diagnostics.get(0).expect("a diagnostic record");
-        assert_eq!(
-            rec.sqlstate.as_str(),
-            crate::types::sql_state::INVALID_CURSOR_STATE,
-            "expected 24000, got {}",
-            rec.sqlstate.as_str()
-        );
+        with_handle::<B, StatementHandle<B>, _>(stmt, |handle| {
+            let rec = handle.diagnostics.get(0).expect("a diagnostic record");
+            assert_eq!(
+                rec.sqlstate.as_str(),
+                crate::types::sql_state::INVALID_CURSOR_STATE,
+                "expected 24000, got {}",
+                rec.sqlstate.as_str()
+            );
+        });
     }
 
     #[test]
@@ -867,14 +877,15 @@ mod tests {
         // a cursor is open. After SQL_CB_CLOSE there is none.
         unsafe {
             let (env, conn, stmt) = alloc_connected_stmt::<MockTxnCloseBackend>("DRIVER=mock;");
-            {
-                // The helper also marks the statement prepared, which this
-                // attribute rejects with HY011 for its own (correct) reasons.
-                // Clear it so the test observes the 24000 guard alone.
-                let handle =
-                    as_handle_ref::<StatementHandle<MockTxnCloseBackend>>(stmt).expect("valid");
-                handle.prepared_sql = None;
-            }
+            // The helper also marks the statement prepared, which this
+            // attribute rejects with HY011 for its own (correct) reasons.
+            // Clear it so the test observes the 24000 guard alone.
+            with_handle::<MockTxnCloseBackend, StatementHandle<MockTxnCloseBackend>, _>(
+                stmt,
+                |handle| {
+                    handle.prepared_sql = None;
+                },
+            );
 
             let ret = sql_end_tran::<MockTxnCloseBackend>(
                 HandleType::Dbc as i16,
@@ -908,11 +919,14 @@ mod tests {
             let (env, conn, stmt) = alloc_connected_stmt::<MockFailingCloseBackend>("DRIVER=mock;");
 
             // Swap the synthetic result set for a backend one whose close fails.
-            let handle =
-                as_handle_ref::<StatementHandle<MockFailingCloseBackend>>(stmt).expect("valid");
-            handle.set_result_set(crate::handles::StatementData::Backend(
-                MockFailingCloseStatement,
-            ));
+            with_handle::<MockFailingCloseBackend, StatementHandle<MockFailingCloseBackend>, _>(
+                stmt,
+                |handle| {
+                    handle.set_result_set(crate::handles::StatementData::Backend(
+                        MockFailingCloseStatement,
+                    ));
+                },
+            );
 
             let ret = sql_end_tran::<MockFailingCloseBackend>(
                 HandleType::Dbc as i16,
@@ -927,17 +941,20 @@ mod tests {
 
             // The statement carries the diagnostic, which is where the spec
             // tells an application to look.
-            let handle =
-                as_handle_ref::<StatementHandle<MockFailingCloseBackend>>(stmt).expect("valid");
-            let rec = handle
-                .diagnostics
-                .get(0)
-                .expect("a diagnostic per statement");
-            assert_eq!(rec.sqlstate.as_str(), "08S01");
-            assert!(
-                rec.message.contains("mock close_cursor failure"),
-                "expected the backend's own message, got {:?}",
-                rec.message
+            with_handle::<MockFailingCloseBackend, StatementHandle<MockFailingCloseBackend>, _>(
+                stmt,
+                |handle| {
+                    let rec = handle
+                        .diagnostics
+                        .get(0)
+                        .expect("a diagnostic per statement");
+                    assert_eq!(rec.sqlstate.as_str(), "08S01");
+                    assert!(
+                        rec.message.contains("mock close_cursor failure"),
+                        "expected the backend's own message, got {:?}",
+                        rec.message
+                    );
+                },
             );
 
             cleanup_connected::<MockFailingCloseBackend>(env, conn, stmt);
@@ -982,14 +999,17 @@ mod tests {
             );
             assert_eq!(ret, SqlReturn::SUCCESS);
 
-            let handle =
-                as_handle_ref::<StatementHandle<MockTxnDeleteBackend>>(stmt).expect("valid");
-            assert!(handle.statement.is_none());
-            assert!(
-                handle.prepared_sql.is_none(),
-                "SQL_CB_DELETE kept the access plan"
+            with_handle::<MockTxnDeleteBackend, StatementHandle<MockTxnDeleteBackend>, _>(
+                stmt,
+                |handle| {
+                    assert!(handle.statement.is_none());
+                    assert!(
+                        handle.prepared_sql.is_none(),
+                        "SQL_CB_DELETE kept the access plan"
+                    );
+                    assert!(handle.param_count.is_none());
+                },
             );
-            assert!(handle.param_count.is_none());
 
             cleanup_connected::<MockTxnDeleteBackend>(env, conn, stmt);
         }
@@ -1005,18 +1025,19 @@ mod tests {
         // instead.
         unsafe {
             let (env, conn, stmt) = alloc_connected_stmt::<MockTxnDeleteBackend>("DRIVER=mock;");
-            {
-                let handle =
-                    as_handle_ref::<StatementHandle<MockTxnDeleteBackend>>(stmt).expect("valid");
-                handle.param_count = Some(1);
-                handle.data_at_exec = Some(crate::handles::DataAtExecState {
-                    pending_params: std::collections::VecDeque::new(),
-                    current_param: Some(1),
-                    buffer: vec![0xAB],
-                    collected_values: std::collections::HashMap::new(),
-                    sql: "INSERT INTO t VALUES (?)".to_string(),
-                });
-            }
+            with_handle::<MockTxnDeleteBackend, StatementHandle<MockTxnDeleteBackend>, _>(
+                stmt,
+                |handle| {
+                    handle.param_count = Some(1);
+                    handle.data_at_exec = Some(crate::handles::DataAtExecState {
+                        pending_params: std::collections::VecDeque::new(),
+                        current_param: Some(1),
+                        buffer: vec![0xAB],
+                        collected_values: std::collections::HashMap::new(),
+                        sql: "INSERT INTO t VALUES (?)".to_string(),
+                    });
+                },
+            );
 
             let ret = sql_end_tran::<MockTxnDeleteBackend>(
                 HandleType::Dbc as i16,
@@ -1025,11 +1046,14 @@ mod tests {
             );
             assert_eq!(ret, SqlReturn::SUCCESS);
 
-            let handle =
-                as_handle_ref::<StatementHandle<MockTxnDeleteBackend>>(stmt).expect("valid");
-            assert!(
-                handle.data_at_exec.is_none(),
-                "SQL_CB_DELETE left a data-at-execution sequence pending with no param_count"
+            with_handle::<MockTxnDeleteBackend, StatementHandle<MockTxnDeleteBackend>, _>(
+                stmt,
+                |handle| {
+                    assert!(
+                        handle.data_at_exec.is_none(),
+                        "SQL_CB_DELETE left a data-at-execution sequence pending with no param_count"
+                    );
+                },
             );
 
             cleanup_connected::<MockTxnDeleteBackend>(env, conn, stmt);
@@ -1047,14 +1071,17 @@ mod tests {
             );
             assert_eq!(ret, SqlReturn::SUCCESS);
 
-            let handle =
-                as_handle_ref::<StatementHandle<MockTxnPreserveBackend>>(stmt).expect("valid");
-            assert!(
-                handle.statement.is_some(),
-                "SQL_CB_PRESERVE closed the cursor"
+            with_handle::<MockTxnPreserveBackend, StatementHandle<MockTxnPreserveBackend>, _>(
+                stmt,
+                |handle| {
+                    assert!(
+                        handle.statement.is_some(),
+                        "SQL_CB_PRESERVE closed the cursor"
+                    );
+                    assert_eq!(handle.prepared_sql.as_deref(), Some("SELECT 1"));
+                    assert_eq!(handle.param_count, Some(0));
+                },
             );
-            assert_eq!(handle.prepared_sql.as_deref(), Some("SELECT 1"));
-            assert_eq!(handle.param_count, Some(0));
 
             cleanup_connected::<MockTxnPreserveBackend>(env, conn, stmt);
         }
@@ -1071,10 +1098,13 @@ mod tests {
             );
             assert_eq!(ret, SqlReturn::SUCCESS);
 
-            let handle =
-                as_handle_ref::<StatementHandle<MockTxnDeleteBackend>>(stmt).expect("valid");
-            assert!(handle.statement.is_none());
-            assert!(handle.prepared_sql.is_none());
+            with_handle::<MockTxnDeleteBackend, StatementHandle<MockTxnDeleteBackend>, _>(
+                stmt,
+                |handle| {
+                    assert!(handle.statement.is_none());
+                    assert!(handle.prepared_sql.is_none());
+                },
+            );
 
             cleanup_connected::<MockTxnDeleteBackend>(env, conn, stmt);
         }
@@ -1092,13 +1122,14 @@ mod tests {
                 sql_end_tran::<B>(HandleType::Dbc as i16, conn, CompletionType::Commit as i16);
             assert_eq!(ret, SqlReturn::ERROR);
 
-            let handle = as_handle_ref::<StatementHandle<B>>(stmt).expect("valid");
-            assert!(
-                handle.statement.is_some(),
-                "cursor state destroyed on a failed SQLEndTran"
-            );
-            assert_eq!(handle.prepared_sql.as_deref(), Some("SELECT 1"));
-            assert_eq!(handle.param_count, Some(0));
+            with_handle::<B, StatementHandle<B>, _>(stmt, |handle| {
+                assert!(
+                    handle.statement.is_some(),
+                    "cursor state destroyed on a failed SQLEndTran"
+                );
+                assert_eq!(handle.prepared_sql.as_deref(), Some("SELECT 1"));
+                assert_eq!(handle.param_count, Some(0));
+            });
 
             cleanup_connected::<B>(env, conn, stmt);
         }
@@ -1126,33 +1157,34 @@ mod tests {
         // SQL_RESET_PARAMS exist for it).
         unsafe {
             let (env, conn, stmt) = alloc_connected_stmt::<MockTxnDeleteBackend>("DRIVER=mock;");
-            {
-                let handle =
-                    as_handle_ref::<StatementHandle<MockTxnDeleteBackend>>(stmt).expect("valid");
-                handle.cursor_name = Some("C1".to_string());
-                handle.bindings.insert(
-                    1,
-                    crate::handles::ColumnBinding {
-                        target_type: crate::types::CDataType::SLong,
-                        target_value_ptr: std::ptr::null_mut(),
-                        buffer_length: 4,
-                        str_len_or_ind_ptr: std::ptr::null_mut(),
-                    },
-                );
-                handle.param_bindings.insert(
-                    1,
-                    crate::handles::ParameterBinding {
-                        input_output_type: crate::types::ParamType::Input,
-                        c_type: crate::types::CDataType::SLong,
-                        sql_type: crate::types::SqlDataType::INTEGER,
-                        col_size: 10,
-                        decimal_digits: 0,
-                        value_ptr: std::ptr::null_mut(),
-                        buffer_length: 4,
-                        str_len_or_ind_ptr: std::ptr::null_mut(),
-                    },
-                );
-            }
+            with_handle::<MockTxnDeleteBackend, StatementHandle<MockTxnDeleteBackend>, _>(
+                stmt,
+                |handle| {
+                    handle.cursor_name = Some("C1".to_string());
+                    handle.bindings.insert(
+                        1,
+                        crate::handles::ColumnBinding {
+                            target_type: crate::types::CDataType::SLong,
+                            target_value_ptr: std::ptr::null_mut(),
+                            buffer_length: 4,
+                            str_len_or_ind_ptr: std::ptr::null_mut(),
+                        },
+                    );
+                    handle.param_bindings.insert(
+                        1,
+                        crate::handles::ParameterBinding {
+                            input_output_type: crate::types::ParamType::Input,
+                            c_type: crate::types::CDataType::SLong,
+                            sql_type: crate::types::SqlDataType::INTEGER,
+                            col_size: 10,
+                            decimal_digits: 0,
+                            value_ptr: std::ptr::null_mut(),
+                            buffer_length: 4,
+                            str_len_or_ind_ptr: std::ptr::null_mut(),
+                        },
+                    );
+                },
+            );
 
             let ret = sql_end_tran::<MockTxnDeleteBackend>(
                 HandleType::Dbc as i16,
@@ -1161,20 +1193,23 @@ mod tests {
             );
             assert_eq!(ret, SqlReturn::SUCCESS);
 
-            let handle =
-                as_handle_ref::<StatementHandle<MockTxnDeleteBackend>>(stmt).expect("valid");
-            assert_eq!(
-                handle.cursor_name.as_deref(),
-                Some("C1"),
-                "SQL_CB_DELETE cleared the cursor name"
-            );
-            assert!(
-                handle.bindings.contains_key(&1),
-                "SQL_CB_DELETE cleared the column bindings"
-            );
-            assert!(
-                handle.param_bindings.contains_key(&1),
-                "SQL_CB_DELETE cleared the parameter bindings"
+            with_handle::<MockTxnDeleteBackend, StatementHandle<MockTxnDeleteBackend>, _>(
+                stmt,
+                |handle| {
+                    assert_eq!(
+                        handle.cursor_name.as_deref(),
+                        Some("C1"),
+                        "SQL_CB_DELETE cleared the cursor name"
+                    );
+                    assert!(
+                        handle.bindings.contains_key(&1),
+                        "SQL_CB_DELETE cleared the column bindings"
+                    );
+                    assert!(
+                        handle.param_bindings.contains_key(&1),
+                        "SQL_CB_DELETE cleared the parameter bindings"
+                    );
+                },
             );
 
             cleanup_connected::<MockTxnDeleteBackend>(env, conn, stmt);
@@ -1215,9 +1250,10 @@ mod tests {
             };
             let mut stmt: *mut c_void = std::ptr::null_mut();
             let _ = unsafe { sql_alloc_handle::<B>(HandleType::Stmt as i16, conn, &mut stmt) };
-            let handle = unsafe { as_handle_ref::<crate::handles::StatementHandle<B>>(stmt) }
-                .expect("valid");
-            handle.set_result_set(crate::handles::StatementData::Synthetic(one_row_synthetic()));
+            with_handle::<B, StatementHandle<B>, _>(stmt, |handle| {
+                handle
+                    .set_result_set(crate::handles::StatementData::Synthetic(one_row_synthetic()));
+            });
             (conn, stmt)
         };
 
@@ -1266,22 +1302,27 @@ mod tests {
 
             // The second connection was still processed: SQL_CB_DELETE means
             // its statement is gone.
-            let ok_stmt =
-                as_handle_ref::<crate::handles::StatementHandle<MockTxnDeleteBackend>>(stmt_ok)
-                    .expect("valid");
-            assert!(
-                ok_stmt.statement.is_none(),
-                "the loop stopped at the first failing connection"
+            with_handle::<MockTxnDeleteBackend, StatementHandle<MockTxnDeleteBackend>, _>(
+                stmt_ok,
+                |ok_stmt| {
+                    assert!(
+                        ok_stmt.statement.is_none(),
+                        "the loop stopped at the first failing connection"
+                    );
+                },
             );
 
             // The failing connection carries its own diagnostic, so the
             // application can find out which connection failed.
-            let failed =
-                as_handle_ref::<ConnectionHandle<MockTxnDeleteBackend>>(conn_fail).expect("valid");
-            assert_eq!(
-                failed.diagnostics.len(),
-                1,
-                "no per-connection diagnostic on the failing connection"
+            with_handle::<MockTxnDeleteBackend, ConnectionHandle<MockTxnDeleteBackend>, _>(
+                conn_fail,
+                |failed| {
+                    assert_eq!(
+                        failed.diagnostics.len(),
+                        1,
+                        "no per-connection diagnostic on the failing connection"
+                    );
+                },
             );
 
             free_env_two_conns::<MockTxnDeleteBackend>(env, conn_fail, stmt_fail, conn_ok, stmt_ok);
@@ -1314,13 +1355,17 @@ mod tests {
             );
 
             // The application can still find out which connection failed.
-            let failed = as_handle_ref::<ConnectionHandle<MockTxnNotConnectedBackend>>(conn_fail)
-                .expect("valid");
-            assert_eq!(
-                failed.diagnostics.len(),
-                1,
-                "no per-connection diagnostic on the failing connection"
-            );
+            with_handle::<
+                MockTxnNotConnectedBackend,
+                ConnectionHandle<MockTxnNotConnectedBackend>,
+                _,
+            >(conn_fail, |failed| {
+                assert_eq!(
+                    failed.diagnostics.len(),
+                    1,
+                    "no per-connection diagnostic on the failing connection"
+                );
+            });
 
             free_env_two_conns::<MockTxnNotConnectedBackend>(
                 env, conn_fail, stmt_fail, conn_ok, stmt_ok,
@@ -1340,12 +1385,14 @@ mod tests {
                 CompletionType::Commit as i16,
             );
 
-            let failed_stmt =
-                as_handle_ref::<crate::handles::StatementHandle<MockTxnDeleteBackend>>(stmt_fail)
-                    .expect("valid");
-            assert!(
-                failed_stmt.statement.is_some(),
-                "cursor state destroyed on a connection whose end_tran failed"
+            with_handle::<MockTxnDeleteBackend, StatementHandle<MockTxnDeleteBackend>, _>(
+                stmt_fail,
+                |failed_stmt| {
+                    assert!(
+                        failed_stmt.statement.is_some(),
+                        "cursor state destroyed on a connection whose end_tran failed"
+                    );
+                },
             );
 
             free_env_two_conns::<MockTxnDeleteBackend>(env, conn_fail, stmt_fail, conn_ok, stmt_ok);
@@ -1361,15 +1408,16 @@ mod tests {
         unsafe {
             let (env, conn_fail, stmt_fail, conn_ok, stmt_ok) =
                 alloc_env_two_conns::<MockTxnPreserveBackend>();
-            {
-                let ok = as_handle_ref::<ConnectionHandle<MockTxnPreserveBackend>>(conn_ok)
-                    .expect("valid");
-                ok.diagnostics.push(&OdbcError::general(
-                    "stale record from an earlier call",
-                    SqlState::general_error(),
-                ));
-                assert_eq!(ok.diagnostics.len(), 1);
-            }
+            with_handle::<MockTxnPreserveBackend, ConnectionHandle<MockTxnPreserveBackend>, _>(
+                conn_ok,
+                |ok| {
+                    ok.diagnostics.push(&OdbcError::general(
+                        "stale record from an earlier call",
+                        SqlState::general_error(),
+                    ));
+                    assert_eq!(ok.diagnostics.len(), 1);
+                },
+            );
 
             let ret = sql_end_tran::<MockTxnPreserveBackend>(
                 HandleType::Env as i16,
@@ -1378,13 +1426,16 @@ mod tests {
             );
             assert_eq!(ret, SqlReturn::ERROR, "the first connection still fails");
 
-            let ok =
-                as_handle_ref::<ConnectionHandle<MockTxnPreserveBackend>>(conn_ok).expect("valid");
-            assert_eq!(
-                ok.diagnostics.len(),
-                0,
-                "a stale diagnostic on a connection that committed fine was left in place, \
-                 so SQLGetDiagRec blames the wrong connection"
+            with_handle::<MockTxnPreserveBackend, ConnectionHandle<MockTxnPreserveBackend>, _>(
+                conn_ok,
+                |ok| {
+                    assert_eq!(
+                        ok.diagnostics.len(),
+                        0,
+                        "a stale diagnostic on a connection that committed fine was left in \
+                         place, so SQLGetDiagRec blames the wrong connection"
+                    );
+                },
             );
 
             free_env_two_conns::<MockTxnPreserveBackend>(
@@ -1414,12 +1465,20 @@ mod tests {
             let (env, conn, stmt) = alloc_connected_stmt::<MockTxnCloseBackend>("DRIVER=mock;");
 
             // Open a cursor, so SQL_CB_CLOSE has something to close.
-            let h = as_handle_ref::<StatementHandle<MockTxnCloseBackend>>(stmt).expect("valid");
-            h.set_result_set(StatementData::Synthetic(
-                crate::test_utils::synthetic_result_set(vec![]),
-            ));
-            let h = as_handle_ref::<StatementHandle<MockTxnCloseBackend>>(stmt).expect("valid");
-            assert!(h.cursor_open, "precondition: a cursor is open");
+            with_handle::<MockTxnCloseBackend, StatementHandle<MockTxnCloseBackend>, _>(
+                stmt,
+                |h| {
+                    h.set_result_set(StatementData::Synthetic(
+                        crate::test_utils::synthetic_result_set(vec![]),
+                    ));
+                },
+            );
+            with_handle::<MockTxnCloseBackend, StatementHandle<MockTxnCloseBackend>, _>(
+                stmt,
+                |h| {
+                    assert!(h.cursor_open, "precondition: a cursor is open");
+                },
+            );
 
             let ret = sql_end_tran::<MockTxnCloseBackend>(
                 HandleType::Env as i16,
@@ -1432,9 +1491,13 @@ mod tests {
             // rollback, so the cursor is closed and the statement kept. This
             // is observable only if the environment-level call actually
             // nested into the connection's group and reached its statement.
-            let h = as_handle_ref::<StatementHandle<MockTxnCloseBackend>>(stmt).expect("valid");
-            assert!(!h.cursor_open, "env-level commit must reach the statement");
-            assert!(h.statement.is_some(), "SQL_CB_CLOSE keeps the statement");
+            with_handle::<MockTxnCloseBackend, StatementHandle<MockTxnCloseBackend>, _>(
+                stmt,
+                |h| {
+                    assert!(!h.cursor_open, "env-level commit must reach the statement");
+                    assert!(h.statement.is_some(), "SQL_CB_CLOSE keeps the statement");
+                },
+            );
 
             cleanup_connected::<MockTxnCloseBackend>(env, conn, stmt);
         }
@@ -1444,14 +1507,15 @@ mod tests {
     fn end_tran_dbc_clears_stale_diagnostics() {
         unsafe {
             let (env, conn, stmt) = alloc_connected_stmt::<MockTxnPreserveBackend>("DRIVER=mock;");
-            {
-                let handle =
-                    as_handle_ref::<ConnectionHandle<MockTxnPreserveBackend>>(conn).expect("valid");
-                handle.diagnostics.push(&OdbcError::general(
-                    "stale record from an earlier call",
-                    SqlState::general_error(),
-                ));
-            }
+            with_handle::<MockTxnPreserveBackend, ConnectionHandle<MockTxnPreserveBackend>, _>(
+                conn,
+                |handle| {
+                    handle.diagnostics.push(&OdbcError::general(
+                        "stale record from an earlier call",
+                        SqlState::general_error(),
+                    ));
+                },
+            );
 
             let ret = sql_end_tran::<MockTxnPreserveBackend>(
                 HandleType::Dbc as i16,
@@ -1460,15 +1524,127 @@ mod tests {
             );
             assert_eq!(ret, SqlReturn::SUCCESS);
 
-            let handle =
-                as_handle_ref::<ConnectionHandle<MockTxnPreserveBackend>>(conn).expect("valid");
-            assert_eq!(
-                handle.diagnostics.len(),
-                0,
-                "SQLEndTran did not clear the connection's diagnostics at entry"
+            with_handle::<MockTxnPreserveBackend, ConnectionHandle<MockTxnPreserveBackend>, _>(
+                conn,
+                |handle| {
+                    assert_eq!(
+                        handle.diagnostics.len(),
+                        0,
+                        "SQLEndTran did not clear the connection's diagnostics at entry"
+                    );
+                },
             );
 
             cleanup_connected::<MockTxnPreserveBackend>(env, conn, stmt);
+        }
+    }
+
+    /// `SQLEndTran(SQL_HANDLE_ENV)` must not misreport a connection that is
+    /// freed concurrently, mid-walk, by another thread. This pins the fix at
+    /// `tran.rs:447`: `with_child_group` can resolve a connection's group and
+    /// start waiting for its lock while another thread is inside
+    /// `SQLFreeHandle(SQL_HANDLE_DBC)` for that same connection; once both
+    /// finish, `end_tran_on_connection`'s own `scope.get` sees the
+    /// now-freed connection and returns `Err(InvalidHandle)` *from inside*
+    /// the successfully-acquired child scope -- `Ok(Err(InvalidHandle))`, not
+    /// the `with_child_group`-level `Err(_)` a token that never resolved at
+    /// all would produce. Both must be treated as "connection gone, skip
+    /// it", not folded into `first_err`, or a valid environment handle's
+    /// SQLEndTran would report `SQL_INVALID_HANDLE` for a completely
+    /// unrelated reason.
+    ///
+    /// No loom, no sleeps: the main thread takes the connection's group lock
+    /// directly (the same lock `with_child_group` will try to take), so once
+    /// the worker's call into `sql_end_tran` reaches that lock it
+    /// deterministically blocks rather than racing for it. The main thread
+    /// only frees the connection -- for real, through the same registry
+    /// primitives `free_connection` uses -- once it knows the worker has
+    /// started, and only drops its own guard afterward, so the worker can
+    /// never observe the connection as live once it wakes up. What is not
+    /// fully deterministic is whether the worker has *reached* that lock
+    /// (rather than still being inside its own setup, or -- worse for this
+    /// test -- not even having taken its `children_of` snapshot yet) by the
+    /// time the `mpsc` handshake below returns on the main thread: a single
+    /// round trip is not enough headroom, empirically, since spawning and
+    /// scheduling a new OS thread costs far more than the handful of registry
+    /// lookups `sql_end_tran` performs before reaching the lock. The bounded
+    /// `yield_now` loop buys that headroom without a wall-clock assumption --
+    /// no fixed sleep duration to be too short on a loaded CI runner or too
+    /// long everywhere else -- by repeatedly giving the scheduler the chance
+    /// to run the worker until it does.
+    #[test]
+    fn end_tran_on_an_environment_survives_a_connection_freed_mid_walk() {
+        unsafe {
+            let (env, conn, stmt) = alloc_connected_stmt::<MockTxnCloseBackend>("DRIVER=mock;");
+
+            let group = crate::handles::registry::registry()
+                .group_of(conn)
+                .expect("connection is live");
+            let guard = group.lock();
+
+            let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
+            // *mut c_void is not Send; a token is an opaque integer under the
+            // hood, so round-tripping it through usize is what lets it cross
+            // the thread boundary.
+            let env_addr = env as usize;
+            let worker = std::thread::spawn(move || {
+                started_tx.send(()).expect("main thread still waiting");
+                sql_end_tran::<MockTxnCloseBackend>(
+                    HandleType::Env as i16,
+                    env_addr as *mut c_void,
+                    CompletionType::Commit as i16,
+                )
+            });
+
+            started_rx
+                .recv()
+                .expect("worker thread panicked before starting");
+            // Give the worker the run of the scheduler until it has actually
+            // reached the connection's lock, per the doc comment above.
+            for _ in 0..100_000 {
+                std::thread::yield_now();
+            }
+
+            // Free the connection for real, through the same primitives
+            // `free_connection` uses, while still holding its group lock: the
+            // worker's `with_child_group` either already resolved the group
+            // (and is now blocked on `guard`) or is about to, but either way
+            // it cannot observe the connection as live again once `guard`
+            // drops below.
+            let addr = crate::handles::registry::registry()
+                .unregister(conn, crate::handles::registry::HandleKind::Dbc)
+                .expect("connection was live");
+            drop(Box::from_raw(
+                addr as *mut ConnectionHandle<MockTxnCloseBackend>,
+            ));
+
+            drop(guard);
+            let ret = worker.join().expect("worker thread panicked");
+
+            assert_eq!(
+                ret,
+                SqlReturn::SUCCESS,
+                "a connection freed mid-walk must not turn into an overall SQLEndTran failure"
+            );
+            with_handle::<MockTxnCloseBackend, EnvironmentHandle<MockTxnCloseBackend>, _>(
+                env,
+                |handle| {
+                    assert_eq!(
+                        handle.diagnostics.len(),
+                        0,
+                        "no diagnostic should be posted for a handle-invalidation race"
+                    );
+                },
+            );
+
+            // The connection is already gone; only the statement and
+            // environment remain to be torn down. `B::disconnect` is
+            // deliberately skipped for the same reason `free_connection` was
+            // bypassed above -- this test stands in for an application that
+            // dropped the connection out from under a concurrent call, not
+            // an orderly shutdown.
+            let _ = crate::handles::free_statement_allocation::<MockTxnCloseBackend>(stmt);
+            let _ = sql_free_handle::<MockTxnCloseBackend>(HandleType::Env as i16, env);
         }
     }
 }

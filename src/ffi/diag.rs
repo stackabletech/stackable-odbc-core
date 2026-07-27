@@ -3,7 +3,7 @@
 use std::ffi::c_void;
 
 use crate::backend::Backend;
-use crate::handles::try_get_diagnostic_queue;
+use crate::panic::panic_safe;
 use crate::types::{SqlReturn, handle_type_from_raw};
 use crate::utf16::write_utf16;
 use odbc_sys::HeaderDiagnosticIdentifier;
@@ -86,9 +86,11 @@ unsafe fn write_diag_string(
 /// handle's diagnostic queue. Writes the SQLSTATE to `sql_state`, the native
 /// error code to `native_error`, and the message text to `message_text`.
 ///
-/// This function intentionally does **not** use `panic_safe` because it reads
-/// diagnostics and should not clear them or push new ones on error.
-/// Per spec: "SQLGetDiagRec does not post diagnostic records for itself."
+/// Wrapped in `panic_safe` like every other entry point, for the group lock
+/// and panic safety, but the closure below always returns `Ok` and never
+/// `Err`: this function reads diagnostics and must not clear them or push a
+/// new one on error. Per spec: "SQLGetDiagRec does not post diagnostic
+/// records for itself."
 ///
 /// # Parameters
 ///
@@ -145,80 +147,78 @@ pub unsafe fn sql_get_diag_rec_w<B: Backend>(
         rec_number
     );
 
-    let ret = (|| {
-        // Spec: SQL_ERROR if RecNumber is negative or 0.
-        if rec_number <= 0 {
-            return SqlReturn::ERROR;
-        }
-
-        // Spec: SQL_ERROR if BufferLength is less than zero.
-        if buffer_length < 0 {
-            return SqlReturn::ERROR;
-        }
-
-        // Get diagnostic queue; if the handle is invalid, return INVALID_HANDLE.
-        // SAFETY: handle must be a valid ODBC handle allocated by sql_alloc_handle;
-        // the tag field is validated inside try_get_diagnostic_queue before any cast.
-        let queue = match unsafe { try_get_diagnostic_queue::<B>(handle) } {
-            Ok(q) => q,
-            Err(()) => return SqlReturn::INVALID_HANDLE,
-        };
-        let index = (rec_number - 1) as usize;
-
-        let record = match queue.get(index) {
-            Some(r) => r,
-            None => return SqlReturn::NO_DATA,
-        };
-
-        // Write SQLSTATE: 5 chars + null terminator = 6 u16 values
-        if !sql_state.is_null() {
-            let state_str = record.sqlstate.as_str();
-            let state_wide: Vec<u16> = state_str.encode_utf16().collect();
-            // SAFETY: sql_state is non-null (checked above) and caller guarantees
-            // a buffer of at least 6 u16 values per the ODBC spec for SQLSTATE.
-            // Assembled locally, then copied out byte-wise. `from_raw_parts_mut`
-            // would require `sql_state` to be u16-aligned, which an
-            // application-supplied pointer does not guarantee.
-            let mut buf = [0u16; 6];
-            for (i, &ch) in state_wide.iter().enumerate().take(5) {
-                buf[i] = ch;
+    // SAFETY: handle must be null or a token previously issued by an
+    // `alloc_*` function, per this function's own safety contract.
+    let ret = unsafe {
+        panic_safe::<B, _>(handle, |scope| {
+            // Spec: SQL_ERROR if RecNumber is negative or 0.
+            if rec_number <= 0 {
+                return Ok(SqlReturn::ERROR);
             }
-            // Pad with '0' if shorter than 5 (shouldn't happen with well-formed
-            // states). `.min(5)` because a longer state would otherwise make
-            // this range reversed, which panics.
-            buf[state_wide.len().min(5)..5].fill(b'0' as u16);
-            buf[5] = 0u16; // null terminator
-            // SAFETY: sql_state is non-null (checked above) and the caller
-            // guarantees at least 6 writable u16 values; u8 has alignment 1, so
-            // the byte-wise copy carries no alignment requirement.
-            unsafe {
+
+            // Spec: SQL_ERROR if BufferLength is less than zero.
+            if buffer_length < 0 {
+                return Ok(SqlReturn::ERROR);
+            }
+
+            // Get diagnostic queue; if the handle is invalid, return INVALID_HANDLE.
+            let queue = match scope.diagnostics::<B>(handle) {
+                Some(q) => q,
+                None => return Ok(SqlReturn::INVALID_HANDLE),
+            };
+            let index = (rec_number - 1) as usize;
+
+            let record = match queue.get(index) {
+                Some(r) => r,
+                None => return Ok(SqlReturn::NO_DATA),
+            };
+
+            // Write SQLSTATE: 5 chars + null terminator = 6 u16 values
+            if !sql_state.is_null() {
+                let state_str = record.sqlstate.as_str();
+                let state_wide: Vec<u16> = state_str.encode_utf16().collect();
+                // SAFETY: sql_state is non-null (checked above) and caller guarantees
+                // a buffer of at least 6 u16 values per the ODBC spec for SQLSTATE.
+                // Assembled locally, then copied out byte-wise. `from_raw_parts_mut`
+                // would require `sql_state` to be u16-aligned, which an
+                // application-supplied pointer does not guarantee.
+                let mut buf = [0u16; 6];
+                for (i, &ch) in state_wide.iter().enumerate().take(5) {
+                    buf[i] = ch;
+                }
+                // Pad with '0' if shorter than 5 (shouldn't happen with well-formed
+                // states). `.min(5)` because a longer state would otherwise make
+                // this range reversed, which panics.
+                buf[state_wide.len().min(5)..5].fill(b'0' as u16);
+                buf[5] = 0u16; // null terminator
+                // SAFETY: sql_state is non-null (checked above) and the caller
+                // guarantees at least 6 writable u16 values; u8 has alignment 1, so
+                // the byte-wise copy carries no alignment requirement.
                 std::ptr::copy_nonoverlapping(
                     buf.as_ptr().cast::<u8>(),
                     sql_state.cast::<u8>(),
                     buf.len() * size_of::<u16>(),
                 );
             }
-        }
 
-        // Write native error code
-        if !native_error_ptr.is_null() {
-            // SAFETY: native_error_ptr is non-null (checked above) and caller
-            // guarantees it points to a valid i32 output parameter.
-            unsafe { std::ptr::write_unaligned(native_error_ptr, record.native_error) };
-        }
+            // Write native error code
+            if !native_error_ptr.is_null() {
+                // SAFETY: native_error_ptr is non-null (checked above) and caller
+                // guarantees it points to a valid i32 output parameter.
+                std::ptr::write_unaligned(native_error_ptr, record.native_error);
+            }
 
-        // Write message text via write_utf16, which handles truncation.
-        // SAFETY: message_text is either null (write_utf16 handles that) or a
-        // caller-allocated buffer of at least buffer_length u16 values.
-        unsafe {
-            write_utf16(
+            // Write message text via write_utf16, which handles truncation.
+            // SAFETY: message_text is either null (write_utf16 handles that) or a
+            // caller-allocated buffer of at least buffer_length u16 values.
+            Ok(write_utf16(
                 &record.message,
                 message_text,
                 buffer_length,
                 text_length_ptr,
-            )
-        }
-    })();
+            ))
+        })
+    };
 
     tracing::debug!("SQLGetDiagRecW -> {:?}", ret);
     ret
@@ -242,6 +242,11 @@ pub unsafe fn sql_get_diag_rec_w<B: Backend>(
 /// - `buffer_length`: length of `diag_info` in bytes (for character fields)
 /// - `string_length`: output for the number of bytes available in `diag_info`
 ///
+/// Wrapped in `panic_safe` like every other entry point, for the group lock
+/// and panic safety, but the closure below always returns `Ok`, never `Err`:
+/// this function reads diagnostics and must not clear them or push a new one
+/// on error.
+///
 /// # Spec compliance
 ///
 /// This function does not post diagnostic records for itself; it reports its
@@ -251,11 +256,10 @@ pub unsafe fn sql_get_diag_rec_w<B: Backend>(
 /// - `SQL_SUCCESS_WITH_INFO` — `*DiagInfoPtr` was too small; character data
 ///   was truncated. `*StringLengthPtr` contains the full byte count.
 /// - `SQL_INVALID_HANDLE` — `handle` is not a valid ODBC handle.
-///   - For header fields (SQL_DIAG_NUMBER, SQL_DIAG_RETURNCODE), the handle is deliberately
-///     *not* validated here (diagnostic functions cannot use `panic_safe`, which itself needs
-///     the diagnostic queue, to report their own handle errors). An invalid handle instead
-///     yields `SQL_SUCCESS` with a default value (count 0 / `SQL_SUCCESS`) rather than
-///     `SQL_INVALID_HANDLE`. This is a known, deliberate deviation from the spec.
+///   - For header fields (SQL_DIAG_NUMBER, SQL_DIAG_RETURNCODE), an invalid
+///     handle is deliberately *not* surfaced as `SQL_INVALID_HANDLE`: these two
+///     fields answer with a default value (count 0 / `SQL_SUCCESS`) instead.
+///     This is a known, deliberate deviation from the spec.
 /// - `SQL_ERROR` — one of:
 ///   - `diag_identifier` was not a valid value (driver returns `SQL_NO_DATA`
 ///     for unknown identifiers to avoid corrupting the Driver Manager state;
@@ -299,155 +303,142 @@ pub unsafe fn sql_get_diag_field_w<B: Backend>(
         diag_identifier
     );
 
-    let ret = (|| {
-        // Header fields (rec_number = 0)
-        // SQL_DIAG_NUMBER: number of diagnostic records
-        if diag_identifier == SQL_DIAG_NUMBER {
-            // Per spec, SQL_DIAG_NUMBER should return SQL_INVALID_HANDLE for invalid handles.
-            // Handle validation is skipped here to avoid the chicken-and-egg problem: diag functions
-            // cannot use panic_safe (which uses the diag queue) for their own error reporting.
-            // An invalid handle returns count=0 instead of SQL_INVALID_HANDLE. Deferred.
-            // SAFETY: handle must be a valid ODBC handle; tag validated inside.
-            let count = match unsafe { try_get_diagnostic_queue::<B>(handle) } {
-                Ok(q) => q.len() as i32,
-                Err(()) => 0,
-            };
-            if !diag_info.is_null() {
-                // SAFETY: diag_info is non-null (checked above); caller guarantees
-                // it points to a valid i32 output buffer for SQL_DIAG_NUMBER.
-                unsafe { std::ptr::write_unaligned(diag_info as *mut i32, count) };
-            }
-            if !string_length.is_null() {
-                // SAFETY: string_length is non-null (checked above) and caller
-                // guarantees it is a valid i16 output parameter.
-                unsafe {
-                    std::ptr::write_unaligned(string_length, std::mem::size_of::<i32>() as i16)
+    // SAFETY: handle must be null or a token previously issued by an
+    // `alloc_*` function, per this function's own safety contract.
+    let ret = unsafe {
+        panic_safe::<B, _>(handle, |scope| {
+            // Header fields (rec_number = 0)
+            // SQL_DIAG_NUMBER: number of diagnostic records
+            if diag_identifier == SQL_DIAG_NUMBER {
+                // Per spec, SQL_DIAG_NUMBER should return SQL_INVALID_HANDLE for
+                // invalid handles; this driver deliberately answers count=0
+                // instead (see the doc comment above).
+                let count = match scope.diagnostics::<B>(handle) {
+                    Some(q) => q.len() as i32,
+                    None => 0,
                 };
-            }
-            return SqlReturn::SUCCESS;
-        }
-
-        // SQL_DIAG_RETURNCODE: return code of the last function
-        if diag_identifier == SQL_DIAG_RETURNCODE {
-            // Per spec, SQL_DIAG_RETURNCODE should return SQL_INVALID_HANDLE for invalid handles.
-            // Handle validation is skipped for the same reason as SQL_DIAG_NUMBER above.
-            // We return SUCCESS with the default value. Deferred.
-            if !diag_info.is_null() {
-                // SAFETY: diag_info is non-null (checked above); caller guarantees
-                // it points to a valid i16 output buffer for SQL_DIAG_RETURNCODE.
-                unsafe { std::ptr::write_unaligned(diag_info as *mut i16, SQL_SUCCESS_VALUE) };
-            }
-            if !string_length.is_null() {
-                // SAFETY: string_length is non-null (checked above) and caller
-                // guarantees it is a valid i16 output parameter.
-                unsafe {
-                    std::ptr::write_unaligned(string_length, std::mem::size_of::<i16>() as i16)
-                };
-            }
-            return SqlReturn::SUCCESS;
-        }
-
-        // Record fields: need a valid record number
-        if rec_number <= 0 {
-            return SqlReturn::ERROR;
-        }
-
-        // Spec: SQL_ERROR if BufferLength < 0 for a character string field.
-        // Check conservatively here (before we know the field type) so that
-        // negative buffer lengths are never passed to write_utf16.
-        if buffer_length < 0 {
-            return SqlReturn::ERROR;
-        }
-
-        // SAFETY: handle must be a valid ODBC handle; tag validated inside.
-        let queue = match unsafe { try_get_diagnostic_queue::<B>(handle) } {
-            Ok(q) => q,
-            Err(()) => return SqlReturn::INVALID_HANDLE,
-        };
-
-        let index = (rec_number - 1) as usize;
-        let record = match queue.get(index) {
-            Some(r) => r,
-            None => return SqlReturn::NO_DATA,
-        };
-
-        match diag_identifier {
-            // SQL_DIAG_SQLSTATE
-            SQL_DIAG_SQLSTATE => {
-                let state_str = record.sqlstate.as_str();
-                // SAFETY: diag_info is either null (write_utf16 handles that) or a
-                // caller-allocated buffer of at least buffer_length/2 u16 values.
-                unsafe { write_diag_string(state_str, diag_info, buffer_length, string_length) }
-            }
-            // SQL_DIAG_NATIVE
-            SQL_DIAG_NATIVE => {
                 if !diag_info.is_null() {
                     // SAFETY: diag_info is non-null (checked above); caller guarantees
-                    // it points to a valid i32 output buffer for SQL_DIAG_NATIVE.
-                    unsafe {
-                        std::ptr::write_unaligned(diag_info as *mut i32, record.native_error)
-                    };
+                    // it points to a valid i32 output buffer for SQL_DIAG_NUMBER.
+                    std::ptr::write_unaligned(diag_info as *mut i32, count);
                 }
                 if !string_length.is_null() {
                     // SAFETY: string_length is non-null (checked above) and caller
                     // guarantees it is a valid i16 output parameter.
-                    unsafe {
-                        std::ptr::write_unaligned(string_length, std::mem::size_of::<i32>() as i16)
-                    };
+                    std::ptr::write_unaligned(string_length, std::mem::size_of::<i32>() as i16);
                 }
-                SqlReturn::SUCCESS
+                return Ok(SqlReturn::SUCCESS);
             }
-            // SQL_DIAG_MESSAGE_TEXT
-            SQL_DIAG_MESSAGE_TEXT => {
-                // SAFETY: diag_info is either null (write_utf16 handles that) or a
-                // caller-allocated buffer of at least buffer_length/2 u16 values.
-                unsafe {
+
+            // SQL_DIAG_RETURNCODE: return code of the last function
+            if diag_identifier == SQL_DIAG_RETURNCODE {
+                // Per spec, SQL_DIAG_RETURNCODE should return SQL_INVALID_HANDLE
+                // for invalid handles; this driver deliberately answers with the
+                // default value instead (see the doc comment above).
+                if !diag_info.is_null() {
+                    // SAFETY: diag_info is non-null (checked above); caller guarantees
+                    // it points to a valid i16 output buffer for SQL_DIAG_RETURNCODE.
+                    std::ptr::write_unaligned(diag_info as *mut i16, SQL_SUCCESS_VALUE);
+                }
+                if !string_length.is_null() {
+                    // SAFETY: string_length is non-null (checked above) and caller
+                    // guarantees it is a valid i16 output parameter.
+                    std::ptr::write_unaligned(string_length, std::mem::size_of::<i16>() as i16);
+                }
+                return Ok(SqlReturn::SUCCESS);
+            }
+
+            // Record fields: need a valid record number
+            if rec_number <= 0 {
+                return Ok(SqlReturn::ERROR);
+            }
+
+            // Spec: SQL_ERROR if BufferLength < 0 for a character string field.
+            // Check conservatively here (before we know the field type) so that
+            // negative buffer lengths are never passed to write_utf16.
+            if buffer_length < 0 {
+                return Ok(SqlReturn::ERROR);
+            }
+
+            let queue = match scope.diagnostics::<B>(handle) {
+                Some(q) => q,
+                None => return Ok(SqlReturn::INVALID_HANDLE),
+            };
+
+            let index = (rec_number - 1) as usize;
+            let record = match queue.get(index) {
+                Some(r) => r,
+                None => return Ok(SqlReturn::NO_DATA),
+            };
+
+            Ok(match diag_identifier {
+                // SQL_DIAG_SQLSTATE
+                SQL_DIAG_SQLSTATE => {
+                    let state_str = record.sqlstate.as_str();
+                    // SAFETY: diag_info is either null (write_utf16 handles that) or a
+                    // caller-allocated buffer of at least buffer_length/2 u16 values.
+                    write_diag_string(state_str, diag_info, buffer_length, string_length)
+                }
+                // SQL_DIAG_NATIVE
+                SQL_DIAG_NATIVE => {
+                    if !diag_info.is_null() {
+                        // SAFETY: diag_info is non-null (checked above); caller guarantees
+                        // it points to a valid i32 output buffer for SQL_DIAG_NATIVE.
+                        std::ptr::write_unaligned(diag_info as *mut i32, record.native_error);
+                    }
+                    if !string_length.is_null() {
+                        // SAFETY: string_length is non-null (checked above) and caller
+                        // guarantees it is a valid i16 output parameter.
+                        std::ptr::write_unaligned(string_length, std::mem::size_of::<i32>() as i16);
+                    }
+                    SqlReturn::SUCCESS
+                }
+                // SQL_DIAG_MESSAGE_TEXT
+                SQL_DIAG_MESSAGE_TEXT => {
+                    // SAFETY: diag_info is either null (write_utf16 handles that) or a
+                    // caller-allocated buffer of at least buffer_length/2 u16 values.
                     write_diag_string(&record.message, diag_info, buffer_length, string_length)
                 }
-            }
-            // SQL_DIAG_CLASS_ORIGIN, SQL_DIAG_SUBCLASS_ORIGIN (9),
-            // SQL_DIAG_CONNECTION_NAME (10), SQL_DIAG_SERVER_NAME
-            // Return empty strings (these are optional).
-            SQL_DIAG_CLASS_ORIGIN..=SQL_DIAG_SERVER_NAME => {
-                // SAFETY: diag_info is either null (write_utf16 handles that) or a
-                // caller-allocated buffer of at least buffer_length/2 u16 values.
-                unsafe { write_diag_string("", diag_info, buffer_length, string_length) }
-            }
-            // An arm each, because the spec's Record Fields table types these
-            // two differently: SQL_DIAG_COLUMN_NUMBER is SQLINTEGER and
-            // SQL_DIAG_ROW_NUMBER is SQLLEN. Sharing one four-byte write would
-            // leave the high half of a caller's SQLLEN untouched on a 64-bit
-            // platform.
-            SQL_DIAG_COLUMN_NUMBER => {
-                if !diag_info.is_null() {
-                    // SAFETY: diag_info is non-null (checked above); the caller
-                    // guarantees it points to a valid SQLINTEGER output buffer.
-                    unsafe {
-                        std::ptr::write_unaligned(diag_info as *mut i32, SQL_NO_COLUMN_NUMBER)
-                    };
+                // SQL_DIAG_CLASS_ORIGIN, SQL_DIAG_SUBCLASS_ORIGIN (9),
+                // SQL_DIAG_CONNECTION_NAME (10), SQL_DIAG_SERVER_NAME
+                // Return empty strings (these are optional).
+                SQL_DIAG_CLASS_ORIGIN..=SQL_DIAG_SERVER_NAME => {
+                    // SAFETY: diag_info is either null (write_utf16 handles that) or a
+                    // caller-allocated buffer of at least buffer_length/2 u16 values.
+                    write_diag_string("", diag_info, buffer_length, string_length)
                 }
-                SqlReturn::SUCCESS
-            }
-            SQL_DIAG_ROW_NUMBER => {
-                if !diag_info.is_null() {
-                    // SAFETY: diag_info is non-null (checked above); the caller
-                    // guarantees it points to a valid SQLLEN output buffer.
-                    unsafe {
-                        std::ptr::write_unaligned(diag_info as *mut isize, SQL_NO_ROW_NUMBER)
-                    };
+                // An arm each, because the spec's Record Fields table types these
+                // two differently: SQL_DIAG_COLUMN_NUMBER is SQLINTEGER and
+                // SQL_DIAG_ROW_NUMBER is SQLLEN. Sharing one four-byte write would
+                // leave the high half of a caller's SQLLEN untouched on a 64-bit
+                // platform.
+                SQL_DIAG_COLUMN_NUMBER => {
+                    if !diag_info.is_null() {
+                        // SAFETY: diag_info is non-null (checked above); the caller
+                        // guarantees it points to a valid SQLINTEGER output buffer.
+                        std::ptr::write_unaligned(diag_info as *mut i32, SQL_NO_COLUMN_NUMBER);
+                    }
+                    SqlReturn::SUCCESS
                 }
-                SqlReturn::SUCCESS
-            }
-            // Unknown field — return NO_DATA rather than ERROR
-            _ => {
-                tracing::debug!(
-                    "SQLGetDiagFieldW: unknown diag_identifier {}, returning NO_DATA",
-                    diag_identifier
-                );
-                SqlReturn::NO_DATA
-            }
-        }
-    })();
+                SQL_DIAG_ROW_NUMBER => {
+                    if !diag_info.is_null() {
+                        // SAFETY: diag_info is non-null (checked above); the caller
+                        // guarantees it points to a valid SQLLEN output buffer.
+                        std::ptr::write_unaligned(diag_info as *mut isize, SQL_NO_ROW_NUMBER);
+                    }
+                    SqlReturn::SUCCESS
+                }
+                // Unknown field — return NO_DATA rather than ERROR
+                _ => {
+                    tracing::debug!(
+                        "SQLGetDiagFieldW: unknown diag_identifier {}, returning NO_DATA",
+                        diag_identifier
+                    );
+                    SqlReturn::NO_DATA
+                }
+            })
+        })
+    };
 
     tracing::debug!("SQLGetDiagFieldW -> {:?}", ret);
     ret
@@ -459,7 +450,8 @@ mod tests {
     use odbc_sys::{HandleType, HeaderDiagnosticIdentifier};
 
     use crate::ffi::handle::{sql_alloc_handle, sql_free_handle};
-    use crate::test_utils::MockBackend;
+    use crate::handles::{ConnectionHandle, EnvironmentHandle, StatementHandle};
+    use crate::test_utils::{MockBackend, with_handle};
     use crate::types::sql_state;
 
     #[test]
@@ -504,8 +496,11 @@ mod tests {
             );
 
             // Push an error onto the env diagnostic queue directly
-            let queue = try_get_diagnostic_queue::<MockBackend>(env).unwrap();
-            queue.push(&crate::errors::OdbcError::NotConnected);
+            with_handle::<MockBackend, EnvironmentHandle<MockBackend>, _>(env, |handle| {
+                handle
+                    .diagnostics
+                    .push(&crate::errors::OdbcError::NotConnected);
+            });
 
             let mut state = [0u16; 6];
             let mut native_err: i32 = 0;
@@ -618,8 +613,11 @@ mod tests {
                 &mut env,
             );
 
-            let queue = try_get_diagnostic_queue::<MockBackend>(env).unwrap();
-            queue.push(&crate::errors::OdbcError::NotConnected);
+            with_handle::<MockBackend, EnvironmentHandle<MockBackend>, _>(env, |handle| {
+                handle
+                    .diagnostics
+                    .push(&crate::errors::OdbcError::NotConnected);
+            });
 
             let mut state = [0u16; 6];
             let mut native_err: i32 = 0;
@@ -653,8 +651,11 @@ mod tests {
                 &mut env,
             );
 
-            let queue = try_get_diagnostic_queue::<MockBackend>(env).unwrap();
-            queue.push(&crate::errors::OdbcError::NotConnected);
+            with_handle::<MockBackend, EnvironmentHandle<MockBackend>, _>(env, |handle| {
+                handle
+                    .diagnostics
+                    .push(&crate::errors::OdbcError::NotConnected);
+            });
 
             let mut state = [0u16; 6];
             let mut native_err: i32 = 0;
@@ -693,8 +694,11 @@ mod tests {
                 &mut env,
             );
 
-            let queue = try_get_diagnostic_queue::<MockBackend>(env).unwrap();
-            queue.push(&crate::errors::OdbcError::NotConnected);
+            with_handle::<MockBackend, EnvironmentHandle<MockBackend>, _>(env, |handle| {
+                handle
+                    .diagnostics
+                    .push(&crate::errors::OdbcError::NotConnected);
+            });
 
             let mut native_err: i32 = 0;
             let mut msg_buf = [0u16; DIAG_MSG_BUF_LEN];
@@ -727,8 +731,11 @@ mod tests {
                 &mut env,
             );
 
-            let queue = try_get_diagnostic_queue::<MockBackend>(env).unwrap();
-            queue.push(&crate::errors::OdbcError::NotConnected);
+            with_handle::<MockBackend, EnvironmentHandle<MockBackend>, _>(env, |handle| {
+                handle
+                    .diagnostics
+                    .push(&crate::errors::OdbcError::NotConnected);
+            });
 
             let mut state = [0u16; 6];
             let mut msg_buf = [0u16; DIAG_MSG_BUF_LEN];
@@ -762,8 +769,11 @@ mod tests {
                 &mut env,
             );
 
-            let queue = try_get_diagnostic_queue::<MockBackend>(env).unwrap();
-            queue.push(&crate::errors::OdbcError::NotConnected);
+            with_handle::<MockBackend, EnvironmentHandle<MockBackend>, _>(env, |handle| {
+                handle
+                    .diagnostics
+                    .push(&crate::errors::OdbcError::NotConnected);
+            });
 
             let mut state = [0u16; 6];
             let mut native_err: i32 = 0;
@@ -801,12 +811,19 @@ mod tests {
                 &mut env,
             );
 
-            let queue = try_get_diagnostic_queue::<MockBackend>(env).unwrap();
-            queue.push(&crate::errors::OdbcError::NotConnected); // 08003
-            queue.push(&crate::errors::OdbcError::NoResultSet); // 24000
-            queue.push(&crate::errors::OdbcError::NotImplemented {
-                feature: "test".into(),
-            }); // HYC00
+            with_handle::<MockBackend, EnvironmentHandle<MockBackend>, _>(env, |handle| {
+                handle
+                    .diagnostics
+                    .push(&crate::errors::OdbcError::NotConnected); // 08003
+                handle
+                    .diagnostics
+                    .push(&crate::errors::OdbcError::NoResultSet); // 24000
+                handle
+                    .diagnostics
+                    .push(&crate::errors::OdbcError::NotImplemented {
+                        feature: "test".into(),
+                    }); // HYC00
+            });
 
             let mut state = [0u16; 6];
             let mut native_err: i32 = 0;
@@ -897,8 +914,11 @@ mod tests {
             let mut conn: *mut c_void = std::ptr::null_mut();
             let _ = sql_alloc_handle::<MockBackend>(HandleType::Dbc as i16, env, &mut conn);
 
-            let queue = try_get_diagnostic_queue::<MockBackend>(conn).unwrap();
-            queue.push(&crate::errors::OdbcError::NotConnected);
+            with_handle::<MockBackend, ConnectionHandle<MockBackend>, _>(conn, |handle| {
+                handle
+                    .diagnostics
+                    .push(&crate::errors::OdbcError::NotConnected);
+            });
 
             let mut state = [0u16; 6];
             let mut native_err: i32 = 0;
@@ -940,8 +960,11 @@ mod tests {
             let mut stmt: *mut c_void = std::ptr::null_mut();
             let _ = sql_alloc_handle::<MockBackend>(HandleType::Stmt as i16, conn, &mut stmt);
 
-            let queue = try_get_diagnostic_queue::<MockBackend>(stmt).unwrap();
-            queue.push(&crate::errors::OdbcError::NoResultSet);
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+                handle
+                    .diagnostics
+                    .push(&crate::errors::OdbcError::NoResultSet);
+            });
 
             let mut state = [0u16; 6];
             let mut native_err: i32 = 0;
@@ -1013,8 +1036,11 @@ mod tests {
                 &mut env,
             );
 
-            let queue = try_get_diagnostic_queue::<MockBackend>(env).unwrap();
-            queue.push(&crate::errors::OdbcError::NotConnected);
+            with_handle::<MockBackend, EnvironmentHandle<MockBackend>, _>(env, |handle| {
+                handle
+                    .diagnostics
+                    .push(&crate::errors::OdbcError::NotConnected);
+            });
 
             let mut buf = [0u16; DIAG_MSG_BUF_LEN];
             let ret = sql_get_diag_field_w::<MockBackend>(
@@ -1055,8 +1081,11 @@ mod tests {
                 &mut env,
             );
 
-            let queue = try_get_diagnostic_queue::<MockBackend>(env).unwrap();
-            queue.push(&crate::errors::OdbcError::NotConnected);
+            with_handle::<MockBackend, EnvironmentHandle<MockBackend>, _>(env, |handle| {
+                handle
+                    .diagnostics
+                    .push(&crate::errors::OdbcError::NotConnected);
+            });
 
             let mut buf = [0u16; DIAG_MSG_BUF_LEN];
             let ret = sql_get_diag_field_w::<MockBackend>(
@@ -1085,8 +1114,11 @@ mod tests {
                 &mut env,
             );
 
-            let queue = try_get_diagnostic_queue::<MockBackend>(env).unwrap();
-            queue.push(&crate::errors::OdbcError::NotConnected); // 08003
+            with_handle::<MockBackend, EnvironmentHandle<MockBackend>, _>(env, |handle| {
+                handle
+                    .diagnostics
+                    .push(&crate::errors::OdbcError::NotConnected);
+            }); // 08003
 
             let mut buf = [0u16; 12];
             let mut str_len: i16 = 0;
@@ -1146,8 +1178,11 @@ mod tests {
                 std::ptr::null_mut(),
                 &mut env,
             );
-            let queue = try_get_diagnostic_queue::<MockBackend>(env).unwrap();
-            queue.push(&crate::errors::OdbcError::NotConnected);
+            with_handle::<MockBackend, EnvironmentHandle<MockBackend>, _>(env, |handle| {
+                handle
+                    .diagnostics
+                    .push(&crate::errors::OdbcError::NotConnected);
+            });
 
             // Pre-fill with a value whose high half is non-zero, so a
             // four-byte write leaves evidence.
@@ -1202,8 +1237,11 @@ mod tests {
                 std::ptr::null_mut(),
                 &mut env,
             );
-            let queue = try_get_diagnostic_queue::<MockBackend>(env).unwrap();
-            queue.push(&crate::errors::OdbcError::NotConnected);
+            with_handle::<MockBackend, EnvironmentHandle<MockBackend>, _>(env, |handle| {
+                handle
+                    .diagnostics
+                    .push(&crate::errors::OdbcError::NotConnected);
+            });
 
             let mut value: i32 = 0;
             let mut str_len: i16 = 0;
@@ -1234,8 +1272,11 @@ mod tests {
                 &mut env,
             );
 
-            let queue = try_get_diagnostic_queue::<MockBackend>(env).unwrap();
-            queue.push(&crate::errors::OdbcError::NotConnected);
+            with_handle::<MockBackend, EnvironmentHandle<MockBackend>, _>(env, |handle| {
+                handle
+                    .diagnostics
+                    .push(&crate::errors::OdbcError::NotConnected);
+            });
 
             let mut buf = [0u16; DIAG_MSG_BUF_LEN];
             let ret = sql_get_diag_field_w::<MockBackend>(

@@ -10,7 +10,7 @@ use odbc_sys::HandleType;
 use crate::backend::{Backend, StatementBackend};
 use crate::errors::OdbcError;
 use crate::ffi::handle::{sql_alloc_handle, sql_free_handle};
-use crate::types::{ConnectParams, InfoValue, Nullable, TypeInfoRow};
+use crate::types::{ConnectParams, InfoValue, Nullable, SqlReturn, TypeInfoRow};
 
 // ---------------------------------------------------------------------------
 // Handle allocation helpers
@@ -59,6 +59,27 @@ pub(crate) unsafe fn cleanup_env_conn_stmt(env: *mut c_void, conn: *mut c_void, 
         let _ = sql_free_handle::<MockBackend>(HandleType::Dbc as i16, conn);
         let _ = sql_free_handle::<MockBackend>(HandleType::Env as i16, env);
     }
+}
+
+/// Read or mutate a handle in a test, holding its group lock exactly as an FFI
+/// entry point would.
+///
+/// Tests used to reach handle contents directly. Going through the same gate as
+/// production is what keeps a test from asserting on a state the driver cannot
+/// actually observe.
+pub(crate) fn with_handle<B: Backend, T: crate::handles::HasKind, R>(
+    token: *mut c_void,
+    f: impl FnOnce(&mut T) -> R,
+) -> R {
+    let mut out = None;
+    let ret = unsafe {
+        crate::panic::panic_safe::<B, _>(token, |scope| {
+            out = Some(f(scope.get::<T>(token)?));
+            Ok(SqlReturn::SUCCESS)
+        })
+    };
+    assert_eq!(ret, SqlReturn::SUCCESS, "handle {token:?} was not valid");
+    out.expect("closure ran")
 }
 
 // ---------------------------------------------------------------------------
