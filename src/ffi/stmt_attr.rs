@@ -9,7 +9,8 @@ use crate::errors::OdbcError;
 use crate::handles::{StatementHandle, as_handle_ref};
 use crate::panic::panic_safe;
 use crate::types::{
-    SQL_CURSOR_FORWARD_ONLY, SQL_FALSE, SqlReturn, SqlState, statement_attribute_from_raw,
+    SQL_CURSOR_FORWARD_ONLY, SQL_FALSE, SQL_INSENSITIVE, SqlReturn, SqlState,
+    statement_attribute_from_raw,
 };
 
 // SQL_ATTR_CURSOR_SCROLLABLE values
@@ -25,8 +26,11 @@ const SQL_UB_OFF: usize = 0;
 const SQL_NOSCAN_OFF: usize = 0;
 // SQL_ATTR_ROW_BIND_TYPE values
 const SQL_BIND_BY_COLUMN: usize = 0;
-// SQL_ATTR_CURSOR_SENSITIVITY values
-const SQL_INSENSITIVE: usize = 2;
+// SQL_ATTR_CURSOR_SENSITIVITY uses the shared `SQL_INSENSITIVE` from
+// `types::constants`. A second copy here held the value 2, which `sql.h` gives
+// to SQL_SENSITIVE, so SQLGetStmtAttr(SQL_ATTR_CURSOR_SENSITIVITY) contradicted
+// SQLGetInfo(SQL_CURSOR_SENSITIVITY) for the same statement.
+
 // SQL_ATTR_ROW_ARRAY_SIZE default
 const SQL_ROW_ARRAY_SIZE_DEFAULT: usize = 1;
 // SQL_ATTR_PARAMSET_SIZE default
@@ -524,7 +528,7 @@ pub unsafe fn sql_get_stmt_attr_w<B: Backend>(
                         stmt.attrs
                             .get(&attribute)
                             .copied()
-                            .unwrap_or(SQL_INSENSITIVE) as u32,
+                            .unwrap_or(usize::from(SQL_INSENSITIVE)) as u32,
                     );
                     Ok(SqlReturn::SUCCESS)
                 }
@@ -602,6 +606,35 @@ mod tests {
             let _ = sql_free_handle::<MockBackend>(HandleType::Stmt as i16, stmt);
             let _ = sql_free_handle::<MockBackend>(HandleType::Dbc as i16, conn);
             let _ = sql_free_handle::<MockBackend>(HandleType::Env as i16, env);
+        }
+    }
+
+    #[test]
+    fn cursor_sensitivity_agrees_with_the_value_sqlgetinfo_reports() {
+        // `SQL_ATTR_CURSOR_SENSITIVITY` and `SQL_CURSOR_SENSITIVITY` draw from
+        // the same value set, so a statement must not describe itself two ways.
+        assert_eq!(SQL_INSENSITIVE, 1, "sql.h defines SQL_INSENSITIVE as 1");
+
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+
+            let mut value: u32 = 0;
+            let mut str_len: i32 = 0;
+            let ret = sql_get_stmt_attr_w::<MockBackend>(
+                stmt,
+                StatementAttribute::CursorSensitivity as i32,
+                &mut value as *mut u32 as *mut c_void,
+                0,
+                &mut str_len,
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+            assert_eq!(
+                value,
+                u32::from(SQL_INSENSITIVE),
+                "SQLGetStmtAttr reported a different cursor sensitivity than SQLGetInfo"
+            );
+
+            cleanup(env, conn, stmt);
         }
     }
 
