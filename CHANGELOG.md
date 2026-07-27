@@ -150,8 +150,8 @@ markers go away and this section becomes the initial-release notes.
   there is `SQL_CB_DELETE`, the claim those hooks exist to stop core inventing.
   The third because four catalog functions return an empty result set without
   resolving a connection, and requiring one would add a lookup and an error path
-  to paths that have neither. The rule: a declaration `SQLGetInfo` has to answer
-  without a connection cannot ask for one.
+  to paths that have neither. The general rule behind both: a declaration
+  consumed on a path that has no connection cannot require one.
 
   `default_get_info` and `common_get_info_raw` take `Option<&B::Connection>`
   accordingly. Pre-connect they answer only what is knowable without a data

@@ -439,19 +439,27 @@ pub trait Backend: Sized + Send + Sync + 'static {
     // fixed ignores the argument. Modelling these as associated functions would
     // make a driver pick one answer for every server it ever talks to.
     //
-    // Two kinds of declaration deliberately take no connection:
+    // Exactly three declarations take no connection, for two different
+    // reasons.
     //
-    // - `cursor_commit_behavior` and `cursor_rollback_behavior`, because
-    //   `SQLGetInfo` must answer `SQL_CURSOR_COMMIT_BEHAVIOR` and
-    //   `SQL_CURSOR_ROLLBACK_BEHAVIOR` *before* a connection exists -- the
-    //   Windows Driver Manager queries info types ahead of
-    //   `SQLDriverConnectW`, and falling through to the shape default there
-    //   answers `SQL_CB_DELETE`, which is the exact claim these hooks exist to
-    //   stop core from inventing.
-    // - `catalog_result_column_widths`, for the reason given above it.
+    // `cursor_commit_behavior` and `cursor_rollback_behavior`, because
+    // `SQLGetInfo` must answer `SQL_CURSOR_COMMIT_BEHAVIOR` and
+    // `SQL_CURSOR_ROLLBACK_BEHAVIOR` *before* a connection exists: the Windows
+    // Driver Manager queries info types ahead of `SQLDriverConnectW`, and
+    // falling through to the shape default there answers `SQL_CB_DELETE`,
+    // which is the exact claim these two hooks exist to stop core from
+    // inventing.
     //
-    // The rule those two cases share: a declaration `SQLGetInfo` has to answer
-    // without a connection cannot ask for one. Everything else does.
+    // `catalog_result_column_widths`, for an unrelated reason: it is not an
+    // `SQLGetInfo` answer at all. Four catalog functions (`SQLProcedures`,
+    // `SQLProcedureColumns`, `SQLColumnPrivileges`, `SQLTablePrivileges`)
+    // return an empty result set without resolving a connection, and requiring
+    // one here would put a connection lookup, and an error path, into paths
+    // that have neither.
+    //
+    // The rule all three share is the general one: a declaration consumed on a
+    // path that has no connection cannot require one. Every other capability
+    // here is consumed only once a connection exists, so it takes one.
     // ------------------------------------------------------------------
 
     /// Whether this data source exposes ODBC **catalogs**.
