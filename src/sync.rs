@@ -6,11 +6,6 @@
 //! invisible to loom, so it would silently opt that code out of the proof.
 //! There is no second import path on purpose.
 
-// The handle registry does not import these yet — that migration lands in
-// later tasks. Until the first caller exists, both re-exports are unused by
-// definition; allow it here rather than delete the shim those tasks depend on.
-#![allow(unused_imports)]
-
 #[cfg(loom)]
 pub(crate) use loom::sync::{Arc, Mutex, MutexGuard, RwLock};
 

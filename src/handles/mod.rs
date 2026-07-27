@@ -25,184 +25,19 @@
 //! Manager serialises calls per handle.
 
 use std::ffi::c_void;
-use std::sync::RwLock;
 
 use odbc_sys::AttrOdbcVersion;
 
 use crate::backend::{Backend, StatementBackend};
 use crate::diagnostics::DiagnosticQueue;
 use crate::errors::{IntoOdbc, OdbcError};
+use crate::sync::Arc;
 use crate::types::{ColumnDescriptor, ColumnValue, ConnectParams, FetchResult, SqlReturn, ULen};
 use odbc_sys::{CDataType, ParamType, SqlDataType};
 
-/// Which kind of ODBC handle a registry slot holds.
-///
-/// Replaces the old magic tags. The kind lives in the registry rather than in
-/// the allocation, so checking it never touches the caller's value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HandleKind {
-    /// `SQL_HANDLE_ENV`
-    Env,
-    /// `SQL_HANDLE_DBC`
-    Dbc,
-    /// `SQL_HANDLE_STMT`
-    Stmt,
-    /// `SQL_HANDLE_DESC`
-    Desc,
-}
+pub(crate) mod registry;
 
-/// Bits of a token given to the slot index; the rest hold the generation.
-///
-/// On a 64-bit target this is a 32/32 split: four billion concurrent handles
-/// and four billion reuses of each. On 32-bit — which ODBC very much still has,
-/// since Excel and Access are 32-bit on Windows — it is 16/16, so 65 535
-/// concurrent handles and 65 535 reuses per slot. A slot whose generation would
-/// wrap is retired rather than reused, which keeps the scheme sound at the cost
-/// of the table growing slowly under extreme churn.
-const TOKEN_INDEX_BITS: u32 = usize::BITS / 2;
-
-/// Largest slot index a token can encode.
-const MAX_SLOT_INDEX: usize = (1usize << TOKEN_INDEX_BITS) - 1;
-
-/// Largest generation a token can encode. A slot reaching this is retired.
-const MAX_GENERATION: u32 = MAX_SLOT_INDEX as u32;
-
-/// One entry in the handle registry.
-struct Slot {
-    /// Incremented on every free. A token carrying a different value is stale.
-    generation: u32,
-    /// `None` when the slot is free and available for reuse.
-    kind: Option<HandleKind>,
-    /// Address of the `Box`-allocated handle this crate owns.
-    ///
-    /// Stored as `usize` rather than a raw pointer so `Slot` stays `Send`;
-    /// it is only ever produced by `Box::into_raw` in an `alloc_*` function.
-    addr: usize,
-}
-
-/// The live-handle table.
-///
-/// Read on every FFI call and written only when a handle is allocated or freed,
-/// so it is read-mostly by a wide margin.
-static REGISTRY: RwLock<Vec<Slot>> = RwLock::new(Vec::new());
-
-/// Encode a slot index and generation as the opaque value handed to the
-/// application.
-///
-/// Generations start at 1, so a valid token is never zero and stays
-/// distinguishable from `SQL_NULL_HANDLE`.
-fn encode_token(index: usize, generation: u32) -> *mut c_void {
-    (((generation as usize) << TOKEN_INDEX_BITS) | index) as *mut c_void
-}
-
-/// Split a token back into its slot index and generation.
-fn decode_token(token: *mut c_void) -> (usize, u32) {
-    let raw = token as usize;
-    (raw & MAX_SLOT_INDEX, (raw >> TOKEN_INDEX_BITS) as u32)
-}
-
-/// Recover the registry after a panic poisoned it.
-///
-/// The table is a plain `Vec` of integers; a panic mid-update cannot leave it
-/// in a state that makes the checks below unsound, and refusing every handle
-/// for the life of the process because one call panicked would be far worse
-/// than the alternative.
-macro_rules! registry {
-    (read) => {
-        REGISTRY.read().unwrap_or_else(|e| e.into_inner())
-    };
-    (write) => {
-        REGISTRY.write().unwrap_or_else(|e| e.into_inner())
-    };
-}
-
-/// Resolve a token to the address of a live handle of the expected kind.
-///
-/// Returns `None` for a token that was never issued, was issued for a different
-/// kind, or has been freed — **without dereferencing `token`**.
-fn resolve(token: *mut c_void, expected: HandleKind) -> Option<usize> {
-    if token.is_null() {
-        return None;
-    }
-    let (index, generation) = decode_token(token);
-    let registry = registry!(read);
-    let slot = registry.get(index)?;
-    if slot.generation != generation || slot.kind != Some(expected) {
-        return None;
-    }
-    Some(slot.addr)
-}
-
-/// Resolve a token to `(kind, address)` without knowing its kind in advance.
-///
-/// Used by the diagnostic-queue lookup, which accepts any handle type.
-fn resolve_any(token: *mut c_void) -> Option<(HandleKind, usize)> {
-    if token.is_null() {
-        return None;
-    }
-    let (index, generation) = decode_token(token);
-    let registry = registry!(read);
-    let slot = registry.get(index)?;
-    if slot.generation != generation {
-        return None;
-    }
-    Some((slot.kind?, slot.addr))
-}
-
-/// Register a freshly allocated handle and return its token.
-///
-/// Reuses a free slot when one is available, otherwise appends. Returns `None`
-/// if the table is exhausted, which the caller reports as an allocation
-/// failure rather than handing back an ambiguous token.
-fn register(kind: HandleKind, addr: usize) -> Option<(*mut c_void, u32, u32)> {
-    let mut registry = registry!(write);
-
-    if let Some((index, slot)) = registry
-        .iter_mut()
-        .enumerate()
-        .find(|(_, slot)| slot.kind.is_none() && slot.generation < MAX_GENERATION)
-    {
-        slot.generation += 1;
-        slot.kind = Some(kind);
-        slot.addr = addr;
-        let generation = slot.generation;
-        return Some((encode_token(index, generation), index as u32, generation));
-    }
-
-    let index = registry.len();
-    if index > MAX_SLOT_INDEX {
-        tracing::error!("handle registry exhausted at {index} slots");
-        return None;
-    }
-    registry.push(Slot {
-        generation: 1,
-        kind: Some(kind),
-        addr,
-    });
-    Some((encode_token(index, 1), index as u32, 1))
-}
-
-/// Retire a handle's slot, so every outstanding token for it is rejected.
-///
-/// Returns the address that was registered, or `None` if the token was already
-/// stale — which is what makes a double free a refusal rather than a second
-/// deallocation.
-fn unregister(token: *mut c_void, expected: HandleKind) -> Option<usize> {
-    if token.is_null() {
-        return None;
-    }
-    let (index, generation) = decode_token(token);
-    let mut registry = registry!(write);
-    let slot = registry.get_mut(index)?;
-    if slot.generation != generation || slot.kind != Some(expected) {
-        return None;
-    }
-    slot.kind = None;
-    // Bumped here as well as on reuse so that the token is dead the instant the
-    // handle is freed, not merely once the slot is handed out again.
-    slot.generation = slot.generation.saturating_add(1);
-    Some(slot.addr)
-}
+use registry::{GroupLock, HandleKind, encode_token, registry};
 
 /// SQL_ATTR_NOSCAN = SQL_NOSCAN_ON: the application asks the driver not to scan
 /// SQL for escape sequences.
@@ -604,7 +439,9 @@ impl<B: Backend> StatementHandle<B> {
 /// The caller must ensure the pointer was originally created from a `Box<T>` of the
 /// same type and that no other mutable references to the handle exist.
 pub unsafe fn as_handle_ref<T: HasKind>(token: *mut c_void) -> Result<&'static mut T, OdbcError> {
-    let addr = resolve(token, T::KIND).ok_or(OdbcError::InvalidHandle)?;
+    let addr = registry()
+        .resolve(token, T::KIND)
+        .ok_or(OdbcError::InvalidHandle)?;
     // SAFETY: `addr` came out of the registry, so it was produced by
     // `Box::into_raw` in an `alloc_*` function for a handle of exactly `T::KIND`
     // and has not been freed — freeing clears the slot, and the generation
@@ -630,7 +467,7 @@ pub unsafe fn alloc_environment<B: Backend>(output: *mut *mut c_void) -> SqlRetu
     let ptr = Box::into_raw(handle);
     // SAFETY: `ptr` came from `Box::into_raw` just above and has not been
     // shared, so both the reclaim on failure and the header write are sound.
-    match register(HandleKind::Env, ptr as usize) {
+    match registry().register(HandleKind::Env, ptr as usize, GroupLock::new(), None) {
         Some((token, slot, generation)) => unsafe {
             (*ptr).header = HandleHeader { slot, generation };
             std::ptr::write_unaligned(output, token);
@@ -672,7 +509,12 @@ pub unsafe fn alloc_connection<B: Backend>(
     });
     let ptr = Box::into_raw(handle);
     // SAFETY: as in `alloc_environment`.
-    match register(HandleKind::Dbc, ptr as usize) {
+    match registry().register(
+        HandleKind::Dbc,
+        ptr as usize,
+        GroupLock::new(),
+        Some(env_ptr as usize),
+    ) {
         Some((token, slot, generation)) => unsafe {
             (*ptr).header = HandleHeader { slot, generation };
             env.connections.push(token);
@@ -702,6 +544,12 @@ pub unsafe fn alloc_statement<B: Backend>(
     let conn = match unsafe { as_handle_ref::<ConnectionHandle<B>>(conn_ptr) } {
         Ok(c) => c,
         Err(_) => return SqlReturn::INVALID_HANDLE,
+    };
+    // Statements and their descriptors share the connection's lock. One
+    // acquisition then covers a call that touches a statement and its parent.
+    let group = match registry().group_of(conn_ptr) {
+        Some(g) => g,
+        None => return SqlReturn::INVALID_HANDLE,
     };
     // Owned by the statement: dropping the StatementHandle frees them, so no
     // teardown path can forget to -- do not add a manual free in
@@ -734,20 +582,32 @@ pub unsafe fn alloc_statement<B: Backend>(
     });
     let ptr = Box::into_raw(handle);
     // SAFETY: as in `alloc_environment`.
-    let Some((token, slot, generation)) = register(HandleKind::Stmt, ptr as usize) else {
+    let Some((token, slot, generation)) = registry().register(
+        HandleKind::Stmt,
+        ptr as usize,
+        Arc::clone(&group),
+        Some(conn_ptr as usize),
+    ) else {
         drop(unsafe { Box::from_raw(ptr) });
         return SqlReturn::ERROR;
     };
     unsafe {
         (*ptr).header = HandleHeader { slot, generation };
         // Register the four descriptors now that the statement owns them.
+        // Each shares the statement's group and records the statement as its
+        // parent.
         for desc in [
             std::ptr::from_mut(&mut *(*ptr).app_row_desc),
             std::ptr::from_mut(&mut *(*ptr).app_param_desc),
             std::ptr::from_mut(&mut *(*ptr).imp_row_desc),
             std::ptr::from_mut(&mut *(*ptr).imp_param_desc),
         ] {
-            if let Some((_, dslot, dgen)) = register(HandleKind::Desc, desc as usize) {
+            if let Some((_, dslot, dgen)) = registry().register(
+                HandleKind::Desc,
+                desc as usize,
+                Arc::clone(&group),
+                Some(token as usize),
+            ) {
                 (*desc).header = HandleHeader {
                     slot: dslot,
                     generation: dgen,
@@ -779,7 +639,7 @@ pub unsafe fn free_environment<B: Backend>(handle: *mut c_void) -> SqlReturn {
         ));
         return SqlReturn::ERROR;
     }
-    let Some(addr) = unregister(handle, HandleKind::Env) else {
+    let Some(addr) = registry().unregister(handle, HandleKind::Env) else {
         return SqlReturn::INVALID_HANDLE;
     };
     // SAFETY: `unregister` returned the address this crate registered in
@@ -830,7 +690,7 @@ pub unsafe fn free_connection<B: Backend>(handle: *mut c_void) -> SqlReturn {
     if let Ok(env) = unsafe { as_handle_ref::<EnvironmentHandle<B>>(env_token) } {
         env.connections.retain(|&p| p != handle);
     }
-    let Some(addr) = unregister(handle, HandleKind::Dbc) else {
+    let Some(addr) = registry().unregister(handle, HandleKind::Dbc) else {
         return SqlReturn::INVALID_HANDLE;
     };
     // SAFETY: as in `free_environment`.
@@ -871,7 +731,7 @@ pub unsafe fn free_statement<B: Backend>(handle: *mut c_void) -> SqlReturn {
 ///
 /// `token` must be a live statement handle.
 pub(crate) unsafe fn free_statement_allocation<B: Backend>(token: *mut c_void) -> SqlReturn {
-    let Some(addr) = unregister(token, HandleKind::Stmt) else {
+    let Some(addr) = registry().unregister(token, HandleKind::Stmt) else {
         return SqlReturn::INVALID_HANDLE;
     };
     // SAFETY: `unregister` returned the address registered in
@@ -883,7 +743,7 @@ pub(crate) unsafe fn free_statement_allocation<B: Backend>(token: *mut c_void) -
         &stmt.imp_row_desc,
         &stmt.imp_param_desc,
     ] {
-        unregister(desc.header.token(), HandleKind::Desc);
+        registry().unregister(desc.header.token(), HandleKind::Desc);
     }
     // `stmt` drops here, taking the descriptor allocations with it.
     SqlReturn::SUCCESS
@@ -929,7 +789,7 @@ pub(crate) unsafe fn free_connection_statements<B: Backend>(conn: &mut Connectio
 pub unsafe fn try_get_diagnostic_queue<B: Backend>(
     handle: *mut c_void,
 ) -> Result<&'static mut DiagnosticQueue, ()> {
-    let (kind, addr) = resolve_any(handle).ok_or(())?;
+    let (kind, addr) = registry().resolve_any(handle).ok_or(())?;
     // SAFETY: the registry produced both the kind and the address, so the cast
     // matches what `alloc_*` allocated and the handle is live.
     match kind {
