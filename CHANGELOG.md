@@ -130,6 +130,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `SHAPE_DEFAULT_IS_THE_ANSWER` with the reason, and adding an info type without
   either an arm or an entry fails a test that names it.
 - `SQL_PARC_*`, `SQL_PAS_*` and `SQL_ASYNC_NOTIFICATION_*` constants.
+- **Breaking:** `Backend::identifier_case`, a required capability method for
+  `SQL_IDENTIFIER_CASE`. Required rather than defaulted because no default can
+  be legal: the spec defines `SQL_IC_UPPER` (1) through `SQL_IC_MIXED` (4), and
+  the shape-aware fallback produced `0`. Unlike the capability methods where
+  zero is a substantive claim core could understate, every possible value here
+  is a different assertion about how the data source folds unquoted
+  identifiers, which is what an application reads to decide how to quote the
+  SQL it generates.
 - `default_get_info` takes only the `InfoType`; the catalog column widths come
   from `Backend::catalog_result_column_widths` on the type parameter it already
   has. Both call sites in the sibling drivers passed exactly

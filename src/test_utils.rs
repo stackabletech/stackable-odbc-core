@@ -81,6 +81,10 @@ macro_rules! minimal_capability_decls {
         fn null_collation() -> u16 {
             crate::types::SQL_NC_HIGH
         }
+        // No "minimal" value exists: 0 is not a legal SQL_IDENTIFIER_CASE.
+        fn identifier_case() -> u16 {
+            crate::types::SQL_IC_SENSITIVE
+        }
         fn correlation_name() -> u16 {
             crate::types::SQL_CN_NONE
         }
@@ -252,6 +256,9 @@ impl Backend for MockBackend {
     }
     fn null_collation() -> u16 {
         crate::types::SQL_NC_END // was SQL_NC_HIGH (0), via the shape default
+    }
+    fn identifier_case() -> u16 {
+        crate::types::SQL_IC_UPPER
     }
     fn correlation_name() -> u16 {
         crate::types::SQL_CN_ANY // was SQL_CN_NONE (0)
@@ -618,6 +625,9 @@ impl Backend for MockAltBackend {
     }
     fn group_by() -> u16 {
         crate::types::SQL_GB_NO_RELATION
+    }
+    fn identifier_case() -> u16 {
+        crate::types::SQL_IC_MIXED
     }
     fn null_collation() -> u16 {
         crate::types::SQL_NC_LOW

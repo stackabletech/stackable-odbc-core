@@ -218,6 +218,7 @@ These deliberately are not:
 | `correlation_name` | `SQL_CORRELATION_NAME` (`0` = `SQL_CN_NONE`) |
 | `non_nullable_columns` | `SQL_NON_NULLABLE_COLUMNS` (`0` = `SQL_NNC_NULL`) |
 | `expressions_in_order_by` | `SQL_EXPRESSIONS_IN_ORDERBY` |
+| `identifier_case` | `SQL_IDENTIFIER_CASE` (`SQL_IC_*`); `0` is not a legal value |
 | `sql_conformance` | `SQL_SQL_CONFORMANCE` (`SQL_SC_*`) |
 | `timedate_add_intervals` | `SQL_TIMEDATE_ADD_INTERVALS` (`SQL_FN_TSI_*`) |
 | `timedate_diff_intervals` | `SQL_TIMEDATE_DIFF_INTERVALS` (`SQL_FN_TSI_*`) |

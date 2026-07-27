@@ -486,6 +486,22 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// every backend.
     fn null_collation() -> u16;
 
+    /// How the data source treats *unquoted* identifiers —
+    /// `SQL_IDENTIFIER_CASE` (28), one of the
+    /// [`SQL_IC_*`](crate::types::SQL_IC_UPPER) values.
+    ///
+    /// Required because the shape-aware default cannot produce a legal answer
+    /// here: the spec defines `SQL_IC_UPPER` (1), `SQL_IC_LOWER` (2),
+    /// `SQL_IC_SENSITIVE` (3) and `SQL_IC_MIXED` (4), and `0` is none of them.
+    /// Unlike the capability methods where zero is a substantive claim, there
+    /// is no value core could pick that is merely *understated* -- every choice
+    /// is a different assertion about how the data source folds identifiers,
+    /// and an application uses it to decide how to quote generated SQL.
+    ///
+    /// Distinct from `SQL_QUOTED_IDENTIFIER_CASE`, which describes *quoted*
+    /// identifiers and which [`common_get_info_raw`] answers.
+    fn identifier_case() -> u16;
+
     /// The `SQL_CORRELATION_NAME` (74) support level — one of the
     /// [`SQL_CN_*`](crate::types::SQL_CN_ANY) values.
     ///
@@ -1009,6 +1025,7 @@ pub fn default_get_info<B: Backend>(info_type: crate::types::InfoType) -> Option
         // SQL_TIMEDATE_FUNCTIONS is self-contradictory.
         InfoType::TimedateAddIntervals => Some(InfoValue::U32(B::timedate_add_intervals())),
         InfoType::TimedateDiffIntervals => Some(InfoValue::U32(B::timedate_diff_intervals())),
+        InfoType::IdentifierCase => Some(InfoValue::U16(B::identifier_case())),
         InfoType::OdbcInterfaceConformance => Some(InfoValue::U32(SQL_OIC_CORE)),
         InfoType::AsyncMode => Some(InfoValue::U32(SQL_AM_NONE)),
         InfoType::AsyncDbcFunctions => Some(InfoValue::U32(0)),
@@ -1831,7 +1848,6 @@ mod tests {
         (InfoType::DbmsVer,                    "only the backend knows what it connected to"),
 
         // --- Claims about the data source, understated rather than invented ---
-        (InfoType::IdentifierCase,             "how unquoted identifiers are folded is a data source fact"),
         (InfoType::TransactionCapable,         "whether DDL is transactional is a data source fact"),
         (InfoType::SqlFileUsage,               "whether the driver is single-tier and file-based is a driver fact"),
         (InfoType::SqlQuotedIdentifierCase,    "answered by common_get_info_raw for backends that delegate to it"),
@@ -1985,6 +2001,7 @@ mod tests {
             txn_isolation_options,
             group_by,
             null_collation,
+            identifier_case,
             correlation_name,
             non_nullable_columns,
             expressions_in_order_by,
