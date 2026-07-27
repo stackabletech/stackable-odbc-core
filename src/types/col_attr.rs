@@ -47,12 +47,31 @@ pub fn get_column_attribute(
         Desc::SchemaName => Ok(ColAttrValue::String(desc.schema_name.clone())),
         Desc::CatalogName => Ok(ColAttrValue::String(desc.catalog_name.clone())),
         Desc::LocalTypeName => Ok(ColAttrValue::String(String::new())),
+        Desc::BaseTableName => Ok(ColAttrValue::String(desc.table_name.clone())),
         Desc::LiteralPrefix => Ok(ColAttrValue::String(desc.literal_prefix.clone())),
         Desc::LiteralSuffix => Ok(ColAttrValue::String(desc.literal_suffix.clone())),
 
         // --- Numeric attributes ---
         Desc::Count => Ok(ColAttrValue::Numeric(isize::from(column_count))),
-        Desc::Type | Desc::ConciseType => Ok(ColAttrValue::Numeric(desc.sql_type.0 as isize)),
+        // `SQL_DESC_CONCISE_TYPE` is the concise type; `SQL_DESC_TYPE` is the
+        // *verbose* one, which differs for exactly the datetime and interval
+        // families: the spec has `SQL_DESC_TYPE` report `SQL_DATETIME` or
+        // `SQL_INTERVAL` there, with the concise type moving to
+        // `SQL_DESC_DATETIME_INTERVAL_CODE`. For every other type the two are
+        // the same value.
+        Desc::ConciseType => Ok(ColAttrValue::Numeric(desc.sql_type.0 as isize)),
+        Desc::Type => Ok(ColAttrValue::Numeric(isize::from(verbose_type(
+            desc.sql_type,
+        )))),
+        Desc::DatetimeIntervalCode => Ok(ColAttrValue::Numeric(
+            if verbose_type(desc.sql_type) == desc.sql_type.0 {
+                // Not a datetime or interval type: the spec leaves this field
+                // undefined, and 0 is the value an application tests against.
+                0
+            } else {
+                isize::from(desc.sql_type.0)
+            },
+        )),
         Desc::Precision => Ok(ColAttrValue::Numeric(precision_for(desc))),
         Desc::Length => Ok(ColAttrValue::Numeric(resolve_precision_isize(
             desc.precision,
@@ -93,6 +112,29 @@ pub fn get_column_attribute(
         _ => Err(OdbcError::NotImplemented {
             feature: format!("SQLColAttribute field {:?}", field),
         }),
+    }
+}
+
+/// The *verbose* type for `sql_type`, as `SQL_DESC_TYPE` reports it.
+///
+/// Equal to the concise type for everything except the datetime and interval
+/// families, which the spec collapses to [`SQL_DATETIME`] and [`SQL_INTERVAL`].
+fn verbose_type(sql_type: SqlDataType) -> i16 {
+    use crate::types::{SQL_DATETIME, SQL_INTERVAL};
+    match sql_type.0 {
+        // SQL_TYPE_DATE (91) through SQL_TYPE_TIMESTAMP_WITH_TIMEZONE (95).
+        //
+        // Only the ODBC 3.x concise codes. The 2.x spellings `SQL_DATE` (9),
+        // `SQL_TIME` (10) and `SQL_TIMESTAMP` (11) are deliberately not mapped:
+        // 9 and 10 are the *verbose* SQL_DATETIME and SQL_INTERVAL values
+        // themselves, so treating them as concise datetime types would make
+        // this function ambiguous. Core reports ODBC 3.80, and a descriptor
+        // built with the 3.x codes is what that entails.
+        91..=95 => SQL_DATETIME,
+        // The SQL_INTERVAL_* concise codes, SQL_INTERVAL_YEAR (101) through
+        // SQL_INTERVAL_MINUTE_TO_SECOND (113).
+        101..=113 => SQL_INTERVAL,
+        other => other,
     }
 }
 
@@ -429,6 +471,60 @@ mod tests {
             ColAttrValue::Numeric(n) => assert_eq!(n, 7),
             ColAttrValue::String(_) => panic!("expected numeric"),
         }
+    }
+
+    #[test]
+    fn desc_type_reports_the_verbose_type_for_datetime_columns() {
+        // The spec splits these: SQL_DESC_CONCISE_TYPE keeps SQL_TYPE_TIMESTAMP,
+        // while SQL_DESC_TYPE reports SQL_DATETIME and the concise code moves to
+        // SQL_DESC_DATETIME_INTERVAL_CODE.
+        let desc = ColumnDescriptor::new("ts", SqlDataType::TIMESTAMP);
+        assert_eq!(desc.sql_type.0, 93, "SQL_TYPE_TIMESTAMP");
+
+        assert_eq!(
+            expect_numeric(get_column_attribute(&desc, 5, Desc::Type).unwrap()),
+            isize::from(crate::types::SQL_DATETIME)
+        );
+        assert_eq!(
+            expect_numeric(get_column_attribute(&desc, 5, Desc::ConciseType).unwrap()),
+            93
+        );
+        assert_eq!(
+            expect_numeric(get_column_attribute(&desc, 5, Desc::DatetimeIntervalCode).unwrap()),
+            93
+        );
+    }
+
+    #[test]
+    fn desc_type_and_concise_type_agree_for_an_ordinary_type() {
+        let desc = ColumnDescriptor::new("n", SqlDataType::INTEGER);
+        let verbose = expect_numeric(get_column_attribute(&desc, 5, Desc::Type).unwrap());
+        let concise = expect_numeric(get_column_attribute(&desc, 5, Desc::ConciseType).unwrap());
+        assert_eq!(verbose, concise, "only datetime and interval types differ");
+        assert_eq!(
+            expect_numeric(get_column_attribute(&desc, 5, Desc::DatetimeIntervalCode).unwrap()),
+            0,
+            "a non-datetime column has no interval code"
+        );
+    }
+
+    #[test]
+    fn base_table_name_is_answered_rather_than_reported_unimplemented() {
+        // ODBC 3.x requires a value for every descriptor field; HYC00 here made
+        // an application asking for column provenance treat the whole call as
+        // failed.
+        let desc =
+            ColumnDescriptor::new("c", SqlDataType::INTEGER).with_origin("cat", "sch", "tbl");
+        assert_eq!(
+            expect_string(get_column_attribute(&desc, 5, Desc::BaseTableName).unwrap()),
+            "tbl"
+        );
+        let bare = ColumnDescriptor::new("c", SqlDataType::INTEGER);
+        assert_eq!(
+            expect_string(get_column_attribute(&bare, 5, Desc::BaseTableName).unwrap()),
+            "",
+            "empty when the backend does not track it, not an error"
+        );
     }
 
     #[test]

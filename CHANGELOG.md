@@ -324,6 +324,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `SQLColAttributeW` reports `SQL_DESC_TYPE` as the *verbose* type. The spec
+  splits it from `SQL_DESC_CONCISE_TYPE` for the datetime and interval families:
+  a `SQL_TYPE_TIMESTAMP` column reports `SQL_DATETIME` for the former, `93` for
+  the latter, and `93` again for `SQL_DESC_DATETIME_INTERVAL_CODE`, which is now
+  answered too. Both previously returned the concise type. Only the ODBC 3.x
+  concise codes (91–95, 101–113) are mapped — the 2.x `SQL_DATE` (9) and
+  `SQL_TIME` (10) spellings are the verbose values themselves, so treating them
+  as concise types would be ambiguous.
+- `SQLColAttributeW` answers `SQL_DESC_BASE_TABLE_NAME` from the column
+  descriptor instead of reporting `HYC00`. ODBC 3.x requires a value for every
+  descriptor field, and an application asking about a column's provenance was
+  seeing the whole call fail; it now returns the backend's table name, or an
+  empty string when the backend does not track one.
+- `SQL_DATETIME` and `SQL_INTERVAL` constants.
 - `SyntheticStatement::new` checks that every row carries one value per declared
   column. The descriptors and the row values are built by separate functions for
   each catalog result set — `type_info_columns` against

@@ -52,6 +52,14 @@ pub const SQL_TC_DDL_COMMIT: u32 = 3;
 /// `SQL_TC_DDL_IGNORE` — transactions supported; DDL statements are ignored within transactions.
 pub const SQL_TC_DDL_IGNORE: u32 = 4;
 
+/// `SQL_DATETIME` — the *verbose* type of every datetime SQL type, which is
+/// what `SQL_DESC_TYPE` reports where `SQL_DESC_CONCISE_TYPE` reports
+/// `SQL_TYPE_DATE` / `SQL_TYPE_TIME` / `SQL_TYPE_TIMESTAMP`.
+pub const SQL_DATETIME: i16 = 9;
+/// `SQL_INTERVAL` — the *verbose* type of every interval SQL type, the
+/// counterpart of [`SQL_DATETIME`] for the `SQL_INTERVAL_*` concise types.
+pub const SQL_INTERVAL: i16 = 10;
+
 /// `SQL_PARC_BATCH` — each parameter set in an array produces its own row count.
 pub const SQL_PARC_BATCH: u32 = 1;
 /// `SQL_PARC_NO_BATCH` — one row count covers the whole parameter array.
