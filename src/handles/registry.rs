@@ -309,6 +309,13 @@ impl Registry {
     }
 
     /// The lock group a token belongs to, or `None` if the token is stale.
+    ///
+    /// Kind-agnostic: a caller that also needs to know the token names a
+    /// handle of a specific kind wants [`Self::group_of_kind`] instead.
+    #[allow(
+        dead_code,
+        reason = "no caller until HandleScope (tasks 5-11) needs to join a handle's group without also asserting its kind"
+    )]
     pub(crate) fn group_of(&self, token: *mut c_void) -> Option<Arc<GroupLock>> {
         if token.is_null() {
             return None;
@@ -317,6 +324,32 @@ impl Registry {
         let slots = self.read();
         let slot = slots.get(index)?;
         if slot.generation != generation || slot.kind.is_none() {
+            return None;
+        }
+        Some(Arc::clone(&slot.group))
+    }
+
+    /// The lock group a token belongs to, if it is live **and** of the expected
+    /// kind.
+    ///
+    /// The kind check is what keeps the parentage tree well-formed: a
+    /// connection's parent must be an environment and a statement's a
+    /// connection, or a handle joins a lock group it has no relationship to.
+    /// Folding the check into the same lookup that hands back the group keeps
+    /// validation a single pass over the slot, still without dereferencing
+    /// `token`.
+    pub(crate) fn group_of_kind(
+        &self,
+        token: *mut c_void,
+        expected: HandleKind,
+    ) -> Option<Arc<GroupLock>> {
+        if token.is_null() {
+            return None;
+        }
+        let (index, generation) = decode_token(token);
+        let slots = self.read();
+        let slot = slots.get(index)?;
+        if slot.generation != generation || slot.kind != Some(expected) {
             return None;
         }
         Some(Arc::clone(&slot.group))

@@ -492,10 +492,11 @@ pub unsafe fn alloc_connection<B: Backend>(
     env_ptr: *mut c_void,
     output: *mut *mut c_void,
 ) -> SqlReturn {
-    // Validates that the environment is live without dereferencing it. There
-    // is no list on the environment to push this connection's token onto:
-    // `register` below records the parentage the registry needs.
-    if registry().group_of(env_ptr).is_none() {
+    // Validates that the environment is live and really is an environment,
+    // without dereferencing it. There is no list on the environment to push
+    // this connection's token onto: `register` below records the parentage
+    // the registry needs.
+    if registry().group_of_kind(env_ptr, HandleKind::Env).is_none() {
         return SqlReturn::INVALID_HANDLE;
     }
     let handle = Box::new(ConnectionHandle::<B> {
@@ -542,9 +543,10 @@ pub unsafe fn alloc_statement<B: Backend>(
 ) -> SqlReturn {
     // Statements and their descriptors share the connection's lock. One
     // acquisition then covers a call that touches a statement and its parent.
-    // `group_of` both validates that the connection is live and hands back
-    // the group to join, without dereferencing the parent.
-    let group = match registry().group_of(conn_ptr) {
+    // `group_of_kind` validates that `conn_ptr` is live and really is a
+    // connection, and hands back the group to join, without dereferencing
+    // the parent.
+    let group = match registry().group_of_kind(conn_ptr, HandleKind::Dbc) {
         Some(g) => g,
         None => return SqlReturn::INVALID_HANDLE,
     };
@@ -934,6 +936,69 @@ mod tests {
         }
     }
 
+    /// A connection's parent must be an environment. Passing a live handle of
+    /// any other kind must be rejected, or the new connection joins a lock
+    /// group it has no relationship to and becomes invisible to
+    /// `children_of` of any real environment.
+    #[test]
+    fn alloc_connection_rejects_a_statement_as_parent() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+
+            // A statement already has children of its own: its four
+            // descriptors, whose parent token is the statement. Compare
+            // before/after rather than asserting emptiness, so the test does
+            // not confuse those pre-existing children with a wrongly
+            // registered connection.
+            let children_before = registry::registry().children_of(stmt);
+
+            let mut out: *mut c_void = std::ptr::null_mut();
+            let result = alloc_connection::<MockBackend>(stmt, &mut out as *mut _);
+            assert_eq!(
+                result,
+                SqlReturn::INVALID_HANDLE,
+                "a statement token must not be accepted as a connection's parent environment"
+            );
+            assert!(out.is_null(), "no connection should have been allocated");
+            assert_eq!(
+                registry::registry().children_of(stmt),
+                children_before,
+                "no connection should have been registered under the statement"
+            );
+
+            let _ = free_statement::<MockBackend>(stmt);
+            let _ = free_connection::<MockBackend>(conn);
+            let _ = free_environment::<MockBackend>(env);
+        }
+    }
+
+    /// A statement's parent must be a connection. Passing a live handle of
+    /// any other kind must be rejected, or the new statement joins the wrong
+    /// lock group — exactly the "a connection and its statements share one
+    /// lock" invariant every later task depends on.
+    #[test]
+    fn alloc_statement_rejects_an_environment_as_parent() {
+        unsafe {
+            let mut env_ptr: *mut c_void = std::ptr::null_mut();
+            let _ = alloc_environment::<MockBackend>(&mut env_ptr as *mut _);
+
+            let mut out: *mut c_void = std::ptr::null_mut();
+            let result = alloc_statement::<MockBackend>(env_ptr, &mut out as *mut _);
+            assert_eq!(
+                result,
+                SqlReturn::INVALID_HANDLE,
+                "an environment token must not be accepted as a statement's parent connection"
+            );
+            assert!(out.is_null(), "no statement should have been allocated");
+            assert!(
+                registry::registry().children_of(env_ptr).is_empty(),
+                "no statement should have been registered under the environment"
+            );
+
+            let _ = free_environment::<MockBackend>(env_ptr);
+        }
+    }
+
     #[test]
     fn free_env_with_active_connections_fails() {
         unsafe {
@@ -1114,9 +1179,14 @@ mod tests {
         }
     }
 
-    /// `SQLEndTran` walks an owned snapshot, so a statement freed mid-walk cannot
-    /// shift the sequence under it. When the list was a field of the handle, a
-    /// `push` that reallocated or a `retain` that shifted did exactly that.
+    /// A snapshot already taken from `children_of` is unaffected by a later
+    /// free — trivially true of any by-value `Vec` return, not a guard
+    /// against a `push` that reallocates or a `retain` that shifts, since
+    /// neither exists once the list is not a field to begin with. What can
+    /// still be gotten wrong is the *next* snapshot: this also checks that
+    /// freeing a statement removes it from a subsequent `children_of` call,
+    /// which is the half of "`SQLEndTran` walks an owned snapshot" that is
+    /// not free by construction.
     #[test]
     fn a_statement_freed_during_iteration_cannot_disturb_the_walk() {
         unsafe {

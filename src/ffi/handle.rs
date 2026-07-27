@@ -123,8 +123,10 @@ pub unsafe fn sql_alloc_handle<B: Backend>(
                         );
                         return Ok(SqlReturn::ERROR);
                     }
-                    // SAFETY: input_handle is non-null (checked above); alloc_connection validates
-                    // the tag via as_handle_ref before dereferencing. output_handle_ptr is non-null.
+                    // SAFETY: input_handle is non-null (checked above); alloc_connection looks
+                    // it up in the registry, which validates liveness and that it names an
+                    // environment specifically, without ever dereferencing it. output_handle_ptr
+                    // is non-null.
                     alloc_connection::<B>(input_handle, output_handle_ptr)
                 }
                 HandleType::Stmt => {
@@ -135,8 +137,10 @@ pub unsafe fn sql_alloc_handle<B: Backend>(
                         );
                         return Ok(SqlReturn::ERROR);
                     }
-                    // SAFETY: input_handle is non-null (checked above); alloc_statement validates
-                    // the tag via as_handle_ref before dereferencing. output_handle_ptr is non-null.
+                    // SAFETY: input_handle is non-null (checked above); alloc_statement looks
+                    // it up in the registry, which validates liveness and that it names a
+                    // connection specifically, without ever dereferencing it. output_handle_ptr
+                    // is non-null.
                     alloc_statement::<B>(input_handle, output_handle_ptr)
                 }
                 HandleType::Desc => {
