@@ -166,6 +166,16 @@ fn info_type_default_response<B: Backend>(
         return Ok(value);
     }
 
+    // Core's own typed answers, derived from the backend's capability
+    // declarations. Reached only when nothing above answered, so a backend
+    // still overrides everything here from its own `get_info` or
+    // `get_info_raw`.
+    if let Some(type_id) = crate::types::info_type_from_raw(info_type)
+        && let Some(value) = crate::backend::default_get_info::<B>(type_id)
+    {
+        return Ok(value);
+    }
+
     use crate::types::{
         InfoValueKind, SQL_CONVERT_FUNCTIONS_FIRST, SQL_CONVERT_FUNCTIONS_LAST, SQL_CONVERT_GUID,
         SQL_CONVERT_WCHAR, SQL_CONVERT_WVARCHAR, expected_kind, info_type_from_raw,
@@ -935,6 +945,40 @@ mod tests {
             let _ = crate::ffi::connect::sql_disconnect::<MockTxnDeleteCloseBackend>(conn);
             let _ = sql_free_handle::<MockTxnDeleteCloseBackend>(HandleType::Dbc as i16, conn);
             let _ = sql_free_handle::<MockTxnDeleteCloseBackend>(HandleType::Env as i16, env);
+        }
+    }
+
+    #[test]
+    fn driver_odbc_ver_is_answered_before_the_connection_exists() {
+        // The Windows Driver Manager asks for this one *before*
+        // `SQLDriverConnectW`, and treats an unusable answer as "ODBC 2.x
+        // driver", which blocks 3.x features such as `SQL_C_SBIGINT`.
+        // `MockBackend` implements neither `get_info_pre_connect` nor
+        // `get_info_raw`, so this reaches core's own answer or nothing.
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            // Deliberately NOT connected: this is the pre-connect path.
+
+            let mut buf = [0xEEu16; 32];
+            let mut str_len: i16 = -1;
+            let ret = sql_get_info_w::<MockBackend>(
+                conn,
+                InfoType::DriverOdbcVer as u16,
+                buf.as_mut_ptr() as *mut c_void,
+                64,
+                &mut str_len,
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+
+            let units = (str_len / 2) as usize;
+            let got = String::from_utf16_lossy(&buf[..units]);
+            assert_eq!(
+                got,
+                crate::types::SQL_DRIVER_ODBC_VER_STRING,
+                "pre-connect SQL_DRIVER_ODBC_VER must report core's version, not \"\""
+            );
+
+            cleanup(env, conn, stmt);
         }
     }
 

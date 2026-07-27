@@ -833,13 +833,16 @@ pub trait StatementBackend: Send + Sync {
 /// Backends should call this at the end of their `get_info` match, before the `_ =>` arm,
 /// to avoid duplicating these ~60 arms. Returns `None` for anything driver-specific.
 ///
-/// Generic over the calling backend so that `SQL_CURSOR_COMMIT_BEHAVIOR` can be
-/// derived from [`Backend::cursor_commit_behavior`] -- call it as
-/// `default_get_info::<Self>(info_type, widths)`.
-pub fn default_get_info<B: Backend>(
-    info_type: crate::types::InfoType,
-    widths: &CatalogResultColumnWidths,
-) -> Option<InfoValue> {
+/// Generic over the calling backend so that the answers can be derived from its
+/// own declarations -- call it as `default_get_info::<Self>(info_type)`.
+///
+/// The catalog column widths come from [`Backend::catalog_result_column_widths`]
+/// rather than from a parameter. They are already a `Backend` declaration, and
+/// taking them separately would let a caller hand over widths that disagree with
+/// the ones the same backend reports everywhere else -- which is exactly what
+/// the `SQL_MAX_*_NAME_LEN` group is derived from.
+pub fn default_get_info<B: Backend>(info_type: crate::types::InfoType) -> Option<InfoValue> {
+    let widths = &B::catalog_result_column_widths();
     use crate::types::{
         InfoType, InfoValue, SQL_AM_NONE, SQL_CA1_NEXT, SQL_DRIVER_ODBC_VER_STRING,
         SQL_INSENSITIVE, SQL_MAX_CURSOR_NAME_LEN, SQL_OIC_CORE, SQL_SO_FORWARD_ONLY,
@@ -1224,9 +1227,8 @@ mod tests {
     #[test]
     fn default_get_info_snapshot() {
         for (info_type, expected) in EXPECTED {
-            let actual =
-                default_get_info::<MockBackend>(*info_type, &CatalogResultColumnWidths::default())
-                    .unwrap_or_else(|| panic!("default_get_info returned None for {info_type:?}"));
+            let actual = default_get_info::<MockBackend>(*info_type)
+                .unwrap_or_else(|| panic!("default_get_info returned None for {info_type:?}"));
             match (expected, &actual) {
                 (Expected::Str(s), InfoValue::String(v)) => {
                     assert_eq!(v.as_str(), *s, "wrong value for {info_type:?}")
@@ -1262,10 +1264,7 @@ mod tests {
         use crate::types::{SQL_CB_CLOSE, SQL_CB_DELETE, SQL_CURSOR_ROLLBACK_BEHAVIOR};
 
         assert_eq!(
-            default_get_info::<MockTxnDeleteCloseBackend>(
-                InfoType::CursorCommitBehaviour,
-                &CatalogResultColumnWidths::default(),
-            ),
+            default_get_info::<MockTxnDeleteCloseBackend>(InfoType::CursorCommitBehaviour),
             Some(InfoValue::U16(SQL_CB_DELETE)),
             "SQL_CURSOR_COMMIT_BEHAVIOR ignored Backend::cursor_commit_behavior"
         );
@@ -1282,10 +1281,7 @@ mod tests {
         use crate::types::{SQL_CB_PRESERVE, SQL_CURSOR_ROLLBACK_BEHAVIOR};
 
         assert_eq!(
-            default_get_info::<MockBackend>(
-                InfoType::CursorCommitBehaviour,
-                &CatalogResultColumnWidths::default(),
-            ),
+            default_get_info::<MockBackend>(InfoType::CursorCommitBehaviour),
             Some(InfoValue::U16(SQL_CB_PRESERVE))
         );
         assert_eq!(
@@ -1304,30 +1300,28 @@ mod tests {
     #[test]
     fn catalog_less_backend_reports_the_spec_mandated_empty_catalog_group() {
         use crate::test_utils::MockNoCatalogBackend;
-
-        let widths = CatalogResultColumnWidths::default();
         assert_eq!(
-            default_get_info::<MockNoCatalogBackend>(InfoType::CatalogTerm, &widths),
+            default_get_info::<MockNoCatalogBackend>(InfoType::CatalogTerm),
             Some(InfoValue::String(String::new())),
             "SQL_CATALOG_TERM must be empty when the data source has no catalogs"
         );
         assert_eq!(
-            default_get_info::<MockNoCatalogBackend>(InfoType::CatalogNameSeparator, &widths),
+            default_get_info::<MockNoCatalogBackend>(InfoType::CatalogNameSeparator),
             Some(InfoValue::String(String::new())),
             "SQL_CATALOG_NAME_SEPARATOR must be empty when the data source has no catalogs"
         );
         assert_eq!(
-            default_get_info::<MockNoCatalogBackend>(InfoType::CatalogName, &widths),
+            default_get_info::<MockNoCatalogBackend>(InfoType::CatalogName),
             Some(InfoValue::String("N".into())),
             "SQL_CATALOG_NAME must be \"N\" when the data source has no catalogs"
         );
         assert_eq!(
-            default_get_info::<MockNoCatalogBackend>(InfoType::CatalogLocation, &widths),
+            default_get_info::<MockNoCatalogBackend>(InfoType::CatalogLocation),
             Some(InfoValue::U16(0)),
             "SQL_CATALOG_LOCATION must be 0 when the data source has no catalogs"
         );
         assert_eq!(
-            default_get_info::<MockNoCatalogBackend>(InfoType::CatalogUsage, &widths),
+            default_get_info::<MockNoCatalogBackend>(InfoType::CatalogUsage),
             Some(InfoValue::U32(0)),
             "SQL_CATALOG_USAGE must be 0 when the data source has no catalogs"
         );
@@ -1338,15 +1332,13 @@ mod tests {
     #[test]
     fn schema_less_backend_reports_the_spec_mandated_empty_schema_group() {
         use crate::test_utils::MockNoCatalogBackend;
-
-        let widths = CatalogResultColumnWidths::default();
         assert_eq!(
-            default_get_info::<MockNoCatalogBackend>(InfoType::SchemaTerm, &widths),
+            default_get_info::<MockNoCatalogBackend>(InfoType::SchemaTerm),
             Some(InfoValue::String(String::new())),
             "SQL_SCHEMA_TERM must be empty when the data source has no schemas"
         );
         assert_eq!(
-            default_get_info::<MockNoCatalogBackend>(InfoType::SchemaUsage, &widths),
+            default_get_info::<MockNoCatalogBackend>(InfoType::SchemaUsage),
             Some(InfoValue::U32(0)),
             "SQL_SCHEMA_USAGE must be 0 when the data source has no schemas"
         );
@@ -1357,7 +1349,6 @@ mod tests {
     /// values for the drivers that were already right.
     #[test]
     fn catalog_supporting_backend_keeps_the_sql92_full_terms() {
-        let widths = CatalogResultColumnWidths::default();
         for (info_type, expected) in [
             (InfoType::CatalogTerm, "catalog"),
             (InfoType::SchemaTerm, "schema"),
@@ -1365,7 +1356,7 @@ mod tests {
             (InfoType::CatalogName, "Y"),
         ] {
             assert_eq!(
-                default_get_info::<MockBackend>(info_type, &widths),
+                default_get_info::<MockBackend>(info_type),
                 Some(InfoValue::String(expected.into())),
                 "{info_type:?} changed for a catalog-supporting backend"
             );
@@ -1379,14 +1370,13 @@ mod tests {
     /// rather than overstating a capability it cannot know.
     #[test]
     fn catalog_supporting_backend_leaves_location_and_usage_to_the_backend() {
-        let widths = CatalogResultColumnWidths::default();
         for info_type in [
             InfoType::CatalogLocation,
             InfoType::CatalogUsage,
             InfoType::SchemaUsage,
         ] {
             assert_eq!(
-                default_get_info::<MockBackend>(info_type, &widths),
+                default_get_info::<MockBackend>(info_type),
                 None,
                 "{info_type:?} must be left to the backend when catalogs/schemas exist"
             );
@@ -1399,14 +1389,13 @@ mod tests {
     /// to state the fact instead of inheriting a silent understatement.
     #[test]
     fn alter_table_and_outer_join_capabilities_come_from_the_backend() {
-        let widths = CatalogResultColumnWidths::default();
         assert_eq!(
-            default_get_info::<MockBackend>(InfoType::AlterTable, &widths),
+            default_get_info::<MockBackend>(InfoType::AlterTable),
             Some(InfoValue::U32(MockBackend::alter_table_support())),
             "SQL_ALTER_TABLE ignored Backend::alter_table_support"
         );
         assert_eq!(
-            default_get_info::<MockBackend>(InfoType::OuterJoinCapabilities, &widths),
+            default_get_info::<MockBackend>(InfoType::OuterJoinCapabilities),
             Some(InfoValue::U32(MockBackend::outer_join_capabilities())),
             "SQL_OJ_CAPABILITIES ignored Backend::outer_join_capabilities"
         );
@@ -1443,14 +1432,13 @@ mod tests {
     /// states (see [`Backend::expressions_in_order_by`]), not a shared default.
     #[test]
     fn yn_info_types_default_to_a_value_in_their_value_list() {
-        let widths = CatalogResultColumnWidths::default();
         for info_type in [
             InfoType::MultResultSets,
             InfoType::MaxRowSizeIncludesLong,
             InfoType::NeedLongDataLen,
         ] {
             assert_eq!(
-                default_get_info::<MockBackend>(info_type, &widths),
+                default_get_info::<MockBackend>(info_type),
                 Some(InfoValue::String("N".into())),
                 "{info_type:?} must be \"Y\" or \"N\", never the empty string"
             );
@@ -1464,7 +1452,6 @@ mod tests {
     /// by the backend.
     #[test]
     fn enum_valued_info_types_come_from_the_backend() {
-        let widths = CatalogResultColumnWidths::default();
         for (info_type, actual) in [
             (InfoType::NullCollation, MockBackend::null_collation()),
             (InfoType::CorrelationName, MockBackend::correlation_name()),
@@ -1475,7 +1462,7 @@ mod tests {
             (InfoType::GroupBy, MockBackend::group_by()),
         ] {
             assert_eq!(
-                default_get_info::<MockBackend>(info_type, &widths),
+                default_get_info::<MockBackend>(info_type),
                 Some(InfoValue::U16(actual)),
                 "{info_type:?} ignored its Backend hook"
             );
@@ -1493,14 +1480,13 @@ mod tests {
     /// hard-codes the value this backend happens to declare".
     #[test]
     fn sql_conformance_comes_from_the_backend() {
-        let widths = CatalogResultColumnWidths::default();
         assert_eq!(
-            default_get_info::<MockBackend>(InfoType::SqlConformance, &widths),
+            default_get_info::<MockBackend>(InfoType::SqlConformance),
             Some(InfoValue::U32(SQL_SC_SQL92_ENTRY)),
             "SQL_SQL_CONFORMANCE ignored Backend::sql_conformance"
         );
         assert_eq!(
-            default_get_info::<MockNoCatalogBackend>(InfoType::SqlConformance, &widths),
+            default_get_info::<MockNoCatalogBackend>(InfoType::SqlConformance),
             Some(InfoValue::U32(0)),
             "SQL_SQL_CONFORMANCE is still pinned to SQL_SC_SQL92_ENTRY"
         );
@@ -1519,10 +1505,8 @@ mod tests {
     #[test]
     fn entry_level_conformance_no_longer_contradicts_the_other_info_types() {
         use crate::types::{SQL_CN_ANY, SQL_GB_GROUP_BY_EQUALS_SELECT, SQL_NNC_NON_NULL};
-
-        let widths = CatalogResultColumnWidths::default();
         assert_eq!(
-            default_get_info::<MockBackend>(InfoType::SqlConformance, &widths),
+            default_get_info::<MockBackend>(InfoType::SqlConformance),
             Some(InfoValue::U32(SQL_SC_SQL92_ENTRY)),
         );
         for (info_type, expected, spec) in [
@@ -1543,7 +1527,7 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                default_get_info::<MockBackend>(info_type, &widths),
+                default_get_info::<MockBackend>(info_type),
                 Some(InfoValue::U16(expected)),
                 "an entry-level-conformant driver {spec} for {info_type:?}"
             );
@@ -1554,14 +1538,13 @@ mod tests {
     /// a tool deciding whether to push an expression into `ORDER BY`.
     #[test]
     fn expressions_in_order_by_comes_from_the_backend() {
-        let widths = CatalogResultColumnWidths::default();
         assert_eq!(
-            default_get_info::<MockBackend>(InfoType::ExpressionsInOrderBy, &widths),
+            default_get_info::<MockBackend>(InfoType::ExpressionsInOrderBy),
             Some(InfoValue::String("Y".into())),
             "SQL_EXPRESSIONS_IN_ORDERBY ignored Backend::expressions_in_order_by"
         );
         assert_eq!(
-            default_get_info::<MockNoCatalogBackend>(InfoType::ExpressionsInOrderBy, &widths),
+            default_get_info::<MockNoCatalogBackend>(InfoType::ExpressionsInOrderBy),
             Some(InfoValue::String("N".into())),
             "a backend declaring no ORDER BY expressions must report \"N\", not \"\""
         );
@@ -1574,14 +1557,13 @@ mod tests {
     /// because a data source can legitimately support different units for each.
     #[test]
     fn timedate_interval_bitmaps_come_from_the_backend() {
-        let widths = CatalogResultColumnWidths::default();
         assert_eq!(
-            default_get_info::<MockBackend>(InfoType::TimedateAddIntervals, &widths),
+            default_get_info::<MockBackend>(InfoType::TimedateAddIntervals),
             Some(InfoValue::U32(MockBackend::timedate_add_intervals())),
             "SQL_TIMEDATE_ADD_INTERVALS ignored Backend::timedate_add_intervals"
         );
         assert_eq!(
-            default_get_info::<MockBackend>(InfoType::TimedateDiffIntervals, &widths),
+            default_get_info::<MockBackend>(InfoType::TimedateDiffIntervals),
             Some(InfoValue::U32(MockBackend::timedate_diff_intervals())),
             "SQL_TIMEDATE_DIFF_INTERVALS ignored Backend::timedate_diff_intervals"
         );
@@ -1600,15 +1582,13 @@ mod tests {
     #[test]
     fn txn_isolation_info_types_come_from_the_backend() {
         use crate::types::SQL_TXN_SERIALIZABLE;
-
-        let widths = CatalogResultColumnWidths::default();
         assert_eq!(
-            default_get_info::<MockBackend>(InfoType::DefaultTxnIsolation, &widths),
+            default_get_info::<MockBackend>(InfoType::DefaultTxnIsolation),
             Some(InfoValue::U32(SQL_TXN_SERIALIZABLE)),
             "SQL_DEFAULT_TXN_ISOLATION ignored Backend::default_txn_isolation"
         );
         assert_eq!(
-            default_get_info::<MockBackend>(InfoType::TransactionIsolationProtocol, &widths),
+            default_get_info::<MockBackend>(InfoType::TransactionIsolationProtocol),
             Some(InfoValue::U32(SQL_TXN_SERIALIZABLE)),
             "SQL_TXN_ISOLATION_OPTION ignored Backend::txn_isolation_options"
         );
@@ -1708,8 +1688,8 @@ mod tests {
         let mut stale = Vec::new();
 
         for info_type in crate::conformance::all_info_types() {
-            let mine = default_get_info::<MockBackend>(info_type, &mine_widths);
-            let theirs = default_get_info::<MockAltBackend>(info_type, &alt_widths);
+            let mine = default_get_info::<MockBackend>(info_type);
+            let theirs = default_get_info::<MockAltBackend>(info_type);
             let declared = CORE_FACTS.iter().find(|(t, _)| *t == info_type);
 
             match (mine.is_some() && mine == theirs, declared) {
@@ -1792,16 +1772,23 @@ mod tests {
         );
     }
 
-    /// The five identifier-length info types must follow the supplied widths,
-    /// not a baked-in 128. Before this was plumbed, a driver could report 63
-    /// in its catalog result sets and 128 here, telling an application two
-    /// different things about the same limit.
+    /// The five identifier-length info types follow the backend's declared
+    /// catalog widths, not a baked-in 128, so a driver cannot report 63 in its
+    /// catalog result sets and 128 here -- two different answers about one
+    /// limit.
     #[test]
-    fn max_name_len_info_types_follow_the_supplied_widths() {
-        let widths = CatalogResultColumnWidths {
-            identifier_len: 63,
-            ..CatalogResultColumnWidths::default()
-        };
+    fn max_name_len_info_types_follow_the_backends_declared_widths() {
+        use crate::test_utils::MockAltBackend;
+        // `MockAltBackend` declares 63; the shared default is 128.
+        assert_eq!(
+            MockAltBackend::catalog_result_column_widths().identifier_len,
+            63
+        );
+        assert_eq!(
+            CatalogResultColumnWidths::default().identifier_len,
+            128,
+            "if the shared default were also 63 this test could not tell them apart"
+        );
         for info_type in [
             InfoType::MaxColumnNameLen,
             InfoType::MaxSchemaNameLen,
@@ -1810,9 +1797,9 @@ mod tests {
             InfoType::MaxIdentifierLen,
         ] {
             assert_eq!(
-                default_get_info::<MockBackend>(info_type, &widths),
+                default_get_info::<MockAltBackend>(info_type),
                 Some(InfoValue::U16(63)),
-                "{info_type:?} ignored the supplied identifier_len"
+                "{info_type:?} ignored the backend's declared identifier_len"
             );
         }
     }

@@ -113,6 +113,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `default_get_info` takes only the `InfoType`; the catalog column widths come
+  from `Backend::catalog_result_column_widths` on the type parameter it already
+  has. Both call sites in the sibling drivers passed exactly
+  `B::catalog_result_column_widths()`, and taking the widths separately allowed
+  a caller to supply values disagreeing with what the same backend reports
+  everywhere else — the `SQL_MAX_*_NAME_LEN` group is derived from them.
+- `SQLGetInfoW` consults `default_get_info` as part of its own fallback chain,
+  after `Backend::get_info_raw` and `common_get_info_raw` and before the
+  shape-aware default. It matters most before a connection exists, where there
+  is no `get_info_raw` to consult: the Windows Driver Manager queries
+  `SQL_DRIVER_ODBC_VER` ahead of `SQLDriverConnectW`, and reaching the `String`
+  shape default of `""` there marks the driver as ODBC 2.x, which blocks 3.x
+  features such as `SQL_C_SBIGINT`.
 - **Breaking:** `SqlState`'s byte array is private, and the type derives
   `Clone, Copy, PartialEq, Eq, Hash`. The public field froze `[u8; 5]` as API and
   let a caller build a state that was not five ASCII characters, which made
