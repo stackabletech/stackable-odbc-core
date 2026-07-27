@@ -2,14 +2,23 @@
 # Based on operator-rs conventions.
 # Run: cargo deny check
 
+# Windows is listed because the crate has #[cfg(windows)] code (ConfigDSNW) and
+# README claims it as a first-class target; without it, any Windows-only
+# dependency is never license- or advisory-scanned. macOS is deliberately
+# absent, matching the CI matrix and the platforms the crate claims.
 [graph]
 targets = [
     { triple = "x86_64-unknown-linux-gnu" },
     { triple = "aarch64-unknown-linux-gnu" },
+    { triple = "x86_64-pc-windows-msvc" },
 ]
 
+# Stated explicitly rather than relying on cargo-deny's defaults, which have
+# changed across major versions.
 [advisories]
 yanked = "deny"
+unmaintained = "all"
+ignore = []
 
 [bans]
 multiple-versions = "allow"

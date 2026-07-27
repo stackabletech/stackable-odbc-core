@@ -7,8 +7,13 @@ on:
     - cron: '15 4 * * *'
   workflow_dispatch:
 
+# rustsec/audit-check reports findings by opening a GitHub issue, and records a
+# check run. With contents:read alone it cannot do either, so a new advisory
+# would fail silently and the job's green status would mean nothing.
 permissions:
   contents: read
+  issues: write
+  checks: write
 
 jobs:
   audit:

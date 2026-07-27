@@ -26,7 +26,7 @@ repos:
       - id: cargo-test
         name: cargo-test
         language: system
-        entry: cargo test
+        entry: cargo test --locked
         stages: [pre-commit, pre-merge-commit]
         pass_filenames: false
         files: \.rs$|Cargo\.(toml|lock)
@@ -42,10 +42,23 @@ repos:
       - id: cargo-clippy
         name: cargo-clippy
         language: system
-        entry: cargo clippy --all-targets -- -D warnings
+        entry: cargo clippy --locked --all-targets -- -D warnings
         stages: [pre-commit, pre-merge-commit]
         pass_filenames: false
         files: \.rs$
+
+      # Broken intra-doc links are warnings, not errors, so they reach docs.rs
+      # silently — and docs.rs is this crate's shop window, since a driver
+      # author reads the Backend trait docs before writing any code. -D warnings
+      # promotes them. Runs in well under a second because the dependency graph
+      # is already built by the hooks above.
+      - id: cargo-doc
+        name: cargo-doc
+        language: system
+        entry: env RUSTDOCFLAGS=-Dwarnings cargo doc --locked --no-deps
+        stages: [pre-commit, pre-merge-commit]
+        pass_filenames: false
+        files: \.rs$|Cargo\.(toml|lock)
 
       - id: cargo-sort
         name: cargo-sort
@@ -58,7 +71,7 @@ repos:
       - id: cargo-deny
         name: cargo-deny
         language: system
-        entry: cargo deny check
+        entry: cargo deny --locked check
         stages: [pre-commit, pre-merge-commit]
         pass_filenames: false
         files: Cargo\.(toml|lock)|deny\.toml

@@ -11,18 +11,27 @@ on:
   pull_request:
   merge_group:
 
+# Supersede in-flight runs on the same ref. Never cancel in a merge queue: a
+# cancelled merge_group run reports failure and evicts the PR from the queue.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
   RUST_TOOLCHAIN_VERSION: "1.95.0"
 
 jobs:
-  unit-tests:
-    name: Unit Tests
+  # Formatting, clippy (which is what enforces the unwrap_used / unwrap_in_result
+  # / panic denies from Cargo.toml), cargo-deny and cargo-sort. This lives here
+  # rather than in its own workflow because `needs:` cannot cross workflows, and
+  # a lint gate the required check does not observe is not a gate.
+  pre-commit:
+    name: pre-commit
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      # odbc-sys links against libodbc/libodbcinst, so the unixODBC dev
-      # libraries must be present to link the test binaries (no running Driver
-      # Manager is needed — only the libraries).
+      # The cargo-test pre-commit hook links libodbc via odbc-sys.
       - name: Install host dependencies
         uses: awalsh128/cache-apt-pkgs-action@acb598e5ddbc6f68a970c5da0688d2f3a9f04d05 # v1.6.0
         with:
@@ -32,33 +41,87 @@ jobs:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
-          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install Rust ${{ env.RUST_TOOLCHAIN_VERSION }} toolchain
-        uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b
+        uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b # 1.95.0
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
+          components: rustfmt, clippy
+
+      - name: Setup Rust Cache
+        uses: Swatinem/rust-cache@98c8021b550208e191a6a3145459bfc9fb29c4c0 # v2.8.0
+
+      - name: Install cargo-deny and cargo-sort
+        uses: taiki-e/install-action@97a5807a604e12de3a13b52d868ebecaeeea757c # v2.75.4
+        with:
+          tool: cargo-deny,cargo-sort
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+
+      - uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
+
+  unit-tests:
+    name: Unit Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      # One platform failing should not hide the others: the point of the
+      # matrix is to learn which platforms are broken, not just that one is.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      # odbc-sys links against libodbc/libodbcinst, so the unixODBC dev
+      # libraries must be present to link the test binaries (no running Driver
+      # Manager is needed — only the libraries). Windows needs nothing: odbc32
+      # and odbccp32 ship with the platform SDK on the runner image.
+      - name: Install host dependencies (Linux)
+        if: runner.os == 'Linux'
+        uses: awalsh128/cache-apt-pkgs-action@acb598e5ddbc6f68a970c5da0688d2f3a9f04d05 # v1.6.0
+        with:
+          packages: unixodbc-dev
+          version: ubuntu-latest
+
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install Rust ${{ env.RUST_TOOLCHAIN_VERSION }} toolchain
+        uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b # 1.95.0
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
 
       - name: Setup Rust Cache
         uses: Swatinem/rust-cache@98c8021b550208e191a6a3145459bfc9fb29c4c0 # v2.8.0
 
+      # --locked so CI tests the dependency versions Cargo.lock pins and that
+      # cargo publish would use, and so a Cargo.toml change without a matching
+      # lockfile update fails here instead of drifting.
       - name: Run unit tests
-        run: cargo test
+        run: cargo test --locked
+
+      # Benches are a separate target that `cargo test` does not build, and
+      # benches/fetch_throughput.rs sets harness = false so it is never run as a
+      # test either. Compile it so bench rot cannot merge; do not run it.
+      - name: Compile benchmarks
+        run: cargo build --locked --benches
 
   miri:
     name: Miri (undefined behaviour + leaks)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: [unit-tests]
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
-          token: ${{ secrets.GITHUB_TOKEN }}
 
       # Miri requires a nightly toolchain; it cannot run on the pinned stable
       # version used everywhere else in this workflow.
       - name: Install nightly toolchain with Miri
-        uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b
+        uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b # nightly
         with:
           toolchain: nightly
           components: miri
@@ -83,11 +146,12 @@ jobs:
       - name: Run Miri
         env:
           MIRIFLAGS: -Zmiri-disable-isolation
-        run: cargo +nightly miri test -p stackable-odbc-core --lib -- --skip proptest
+        run: cargo +nightly miri test --locked -p stackable-odbc-core --lib -- --skip proptest
 
   fuzz:
     name: Fuzz (ASAN smoke)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     needs: [unit-tests]
     steps:
       # The fuzz binaries link stackable-odbc-core, which links libodbc.
@@ -100,20 +164,23 @@ jobs:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
-          token: ${{ secrets.GITHUB_TOKEN }}
 
       # cargo-fuzz builds with libFuzzer + AddressSanitizer, which require a
       # nightly toolchain. The fuzz crate is its own Cargo workspace so the
       # pinned stable root build never touches it.
       - name: Install nightly toolchain
-        uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b
+        uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b # nightly
         with:
           toolchain: nightly
 
+      # fuzz/ declares its own [workspace], so its build artifacts land in
+      # fuzz/target, not the root target/. Without this the cache stores an
+      # empty directory and every run rebuilds nightly + ASAN from scratch.
       - name: Setup Rust Cache
         uses: Swatinem/rust-cache@98c8021b550208e191a6a3145459bfc9fb29c4c0 # v2.8.0
         with:
           key: fuzz
+          workspaces: "fuzz -> target"
 
       - name: Install cargo-fuzz
         uses: taiki-e/install-action@97a5807a604e12de3a13b52d868ebecaeeea757c # v2.75.4
@@ -138,17 +205,24 @@ jobs:
     name: Finished Build and Test
     if: always()
     needs:
+      - pre-commit
       - unit-tests
       - miri
       - fuzz
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
+      # Derived from needs.* rather than a hand-written list of job names: a job
+      # added to `needs` above but forgotten here would otherwise be silently
+      # non-blocking, which is exactly how the lint gate went unenforced.
       - name: Check job results
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
         run: |
-          if [[ "${{ needs.unit-tests.result }}" != "success" ]] ||
-             [[ "${{ needs.miri.result }}" != "success" ]] ||
-             [[ "${{ needs.fuzz.result }}" != "success" ]]; then
-            echo "One or more jobs failed"
-            exit 1
-          fi
-          echo "All jobs passed"
+          for result in $RESULTS; do
+            if [[ "$result" != "success" ]]; then
+              echo "One or more jobs did not succeed: $RESULTS"
+              exit 1
+            fi
+          done
+          echo "All jobs passed: $RESULTS"
