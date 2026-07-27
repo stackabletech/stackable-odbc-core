@@ -107,10 +107,6 @@ impl GroupLock {
     }
 
     /// Block until the group is free.
-    #[allow(
-        dead_code,
-        reason = "no caller until the ffi/*.rs migrations (tasks 5-11) acquire a handle's group before touching it"
-    )]
     pub(crate) fn lock(&self) -> MutexGuard<'_, ()> {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -318,10 +314,6 @@ impl Registry {
     ///
     /// Kind-agnostic: a caller that also needs to know the token names a
     /// handle of a specific kind wants [`Self::group_of_kind`] instead.
-    #[allow(
-        dead_code,
-        reason = "no caller until HandleScope (tasks 5-11) needs to join a handle's group without also asserting its kind"
-    )]
     pub(crate) fn group_of(&self, token: *mut c_void) -> Option<Arc<GroupLock>> {
         if token.is_null() {
             return None;

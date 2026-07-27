@@ -8,8 +8,9 @@ use std::ffi::c_void;
 
 use crate::backend::{Backend, StatementBackend};
 use crate::errors::{IntoOdbc, OdbcError};
-use crate::handles::{ConnectionHandle, StatementData, StatementHandle, as_handle_ref};
-use crate::panic::panic_safe;
+use crate::handles::scope::HandleScope;
+use crate::handles::{StatementData, StatementHandle};
+use crate::panic::panic_safe_scoped;
 use crate::synthetic::SyntheticStatement;
 use crate::types::col_attr::{ColAttrValue, get_column_attribute};
 use crate::types::{
@@ -96,11 +97,11 @@ pub unsafe fn sql_tables_w<B: Backend>(
     name_length4: i16,
 ) -> SqlReturn {
     tracing::trace!("SQLTablesW(stmt={:?})", statement_handle);
-    // SAFETY: statement_handle is null or a valid StatementHandle<B>; tag validated inside
-    // panic_safe/as_handle_ref before any dereference occurs.
+    // SAFETY: statement_handle is null or a valid StatementHandle<B>; kind and group
+    // validated by scope.stmt_with_parent inside the closure.
     let ret = unsafe {
-        panic_safe::<B, _>(statement_handle, || {
-            let stmt = as_handle_ref::<StatementHandle<B>>(statement_handle)?;
+        panic_safe_scoped::<B, _>(statement_handle, |scope| {
+            let (stmt, conn) = scope.stmt_with_parent::<B>(statement_handle)?;
             stmt.diagnostics.clear();
 
             let catalog = parse_filter_param(catalog_name, name_length1)?;
@@ -123,9 +124,6 @@ pub unsafe fn sql_tables_w<B: Backend>(
                     SqlState::invalid_cursor_state(),
                 ));
             }
-
-            // Get parent connection via tag-validated traversal.
-            let conn = as_handle_ref::<ConnectionHandle<B>>(stmt.conn)?;
 
             // Spec HY010: Connection must be open.
             let Some(ref connection) = conn.connection else {
@@ -211,11 +209,11 @@ pub unsafe fn sql_columns_w<B: Backend>(
     name_length4: i16,
 ) -> SqlReturn {
     tracing::trace!("SQLColumnsW(stmt={:?})", statement_handle);
-    // SAFETY: statement_handle is null or a valid StatementHandle<B>; tag validated inside
-    // panic_safe/as_handle_ref before any dereference occurs.
+    // SAFETY: statement_handle is null or a valid StatementHandle<B>; kind and group
+    // validated by scope.stmt_with_parent inside the closure.
     let ret = unsafe {
-        panic_safe::<B, _>(statement_handle, || {
-            let stmt = as_handle_ref::<StatementHandle<B>>(statement_handle)?;
+        panic_safe_scoped::<B, _>(statement_handle, |scope| {
+            let (stmt, conn) = scope.stmt_with_parent::<B>(statement_handle)?;
             stmt.diagnostics.clear();
 
             let catalog = parse_filter_param(catalog_name, name_length1)?;
@@ -238,9 +236,6 @@ pub unsafe fn sql_columns_w<B: Backend>(
                     SqlState::invalid_cursor_state(),
                 ));
             }
-
-            // Get parent connection via tag-validated traversal.
-            let conn = as_handle_ref::<ConnectionHandle<B>>(stmt.conn)?;
 
             // Spec HY010: Connection must be open.
             let Some(ref connection) = conn.connection else {
@@ -321,11 +316,11 @@ pub unsafe fn sql_primary_keys_w<B: Backend>(
     name_length3: i16,
 ) -> SqlReturn {
     tracing::debug!("SQLPrimaryKeysW(stmt={:?})", statement_handle);
-    // SAFETY: statement_handle is null or a valid StatementHandle<B>; tag validated inside
-    // panic_safe/as_handle_ref before any dereference occurs.
+    // SAFETY: statement_handle is null or a valid StatementHandle<B>; kind and group
+    // validated by scope.stmt_with_parent inside the closure.
     let ret = unsafe {
-        panic_safe::<B, _>(statement_handle, || {
-            let stmt = as_handle_ref::<StatementHandle<B>>(statement_handle)?;
+        panic_safe_scoped::<B, _>(statement_handle, |scope| {
+            let (stmt, conn) = scope.stmt_with_parent::<B>(statement_handle)?;
             stmt.diagnostics.clear();
 
             if stmt.cursor_open {
@@ -334,8 +329,6 @@ pub unsafe fn sql_primary_keys_w<B: Backend>(
                     SqlState::invalid_cursor_state(),
                 ));
             }
-
-            let conn = as_handle_ref::<ConnectionHandle<B>>(stmt.conn)?;
 
             let Some(ref connection) = conn.connection else {
                 return Err(OdbcError::general(
@@ -436,11 +429,11 @@ pub unsafe fn sql_foreign_keys_w<B: Backend>(
     name_length6: i16,
 ) -> SqlReturn {
     tracing::debug!("SQLForeignKeysW(stmt={:?})", statement_handle);
-    // SAFETY: statement_handle is null or a valid StatementHandle<B>; tag validated inside
-    // panic_safe/as_handle_ref before any dereference occurs.
+    // SAFETY: statement_handle is null or a valid StatementHandle<B>; kind and group
+    // validated by scope.stmt_with_parent inside the closure.
     let ret = unsafe {
-        panic_safe::<B, _>(statement_handle, || {
-            let stmt = as_handle_ref::<StatementHandle<B>>(statement_handle)?;
+        panic_safe_scoped::<B, _>(statement_handle, |scope| {
+            let (stmt, conn) = scope.stmt_with_parent::<B>(statement_handle)?;
             stmt.diagnostics.clear();
 
             if stmt.cursor_open {
@@ -449,8 +442,6 @@ pub unsafe fn sql_foreign_keys_w<B: Backend>(
                     SqlState::invalid_cursor_state(),
                 ));
             }
-
-            let conn = as_handle_ref::<ConnectionHandle<B>>(stmt.conn)?;
 
             let Some(ref connection) = conn.connection else {
                 return Err(OdbcError::general(
@@ -489,14 +480,16 @@ pub unsafe fn sql_foreign_keys_w<B: Backend>(
 ///
 /// Used by catalog functions that return an empty result set (statistics, special columns) instead
 /// of querying the database.
-unsafe fn set_empty_result<B: Backend>(
+///
+/// Called from within a `panic_safe_scoped` closure, which already holds the
+/// group `scope` protects; this function borrows through that same scope
+/// rather than acquiring anything of its own.
+fn set_empty_result<B: Backend>(
+    scope: &mut HandleScope<'_>,
     statement_handle: *mut c_void,
     columns: Vec<ColumnDescriptor>,
 ) -> Result<SqlReturn, OdbcError> {
-    // SAFETY: statement_handle is null or a valid StatementHandle<B>; tag validated by
-    // as_handle_ref before any dereference occurs. This function is only called from
-    // within a panic_safe closure which itself validates the handle.
-    let stmt = unsafe { as_handle_ref::<StatementHandle<B>>(statement_handle)? };
+    let (stmt, conn) = scope.stmt_with_parent::<B>(statement_handle)?;
     stmt.diagnostics.clear();
 
     if stmt.cursor_open {
@@ -506,9 +499,6 @@ unsafe fn set_empty_result<B: Backend>(
         ));
     }
 
-    // SAFETY: stmt.conn is the raw pointer to the parent ConnectionHandle<B> stored when the
-    // StatementHandle was allocated; it remains valid for the lifetime of the statement handle.
-    let conn = unsafe { as_handle_ref::<ConnectionHandle<B>>(stmt.conn)? };
     if conn.connection.is_none() {
         return Err(OdbcError::general(
             "Connection is not open",
@@ -593,11 +583,11 @@ pub unsafe fn sql_statistics_w<B: Backend>(
     );
     let unique_only = unique == SQL_INDEX_UNIQUE;
     tracing::debug!("SQLStatisticsW: unique_only={}", unique_only);
-    // SAFETY: statement_handle is null or a valid StatementHandle<B>; tag validated inside
-    // panic_safe/as_handle_ref before any dereference occurs.
+    // SAFETY: statement_handle is null or a valid StatementHandle<B>; kind and group
+    // validated by scope.stmt_with_parent inside the closure.
     let ret = unsafe {
-        panic_safe::<B, _>(statement_handle, || {
-            let stmt = as_handle_ref::<StatementHandle<B>>(statement_handle)?;
+        panic_safe_scoped::<B, _>(statement_handle, |scope| {
+            let (stmt, conn) = scope.stmt_with_parent::<B>(statement_handle)?;
             stmt.diagnostics.clear();
 
             if stmt.cursor_open {
@@ -607,7 +597,6 @@ pub unsafe fn sql_statistics_w<B: Backend>(
                 ));
             }
 
-            let conn = as_handle_ref::<ConnectionHandle<B>>(stmt.conn)?;
             let Some(ref connection) = conn.connection else {
                 return Err(OdbcError::general(
                     "Connection is not open",
@@ -729,11 +718,11 @@ pub unsafe fn sql_special_columns_w<B: Backend>(
         scope_raw,
         nullable_raw
     );
-    // SAFETY: statement_handle is null or a valid StatementHandle<B>; tag validated inside
-    // panic_safe/as_handle_ref before any dereference occurs.
+    // SAFETY: statement_handle is null or a valid StatementHandle<B>; kind and group
+    // validated by scope.stmt_with_parent inside the closure.
     let ret = unsafe {
-        panic_safe::<B, _>(statement_handle, || {
-            let stmt = as_handle_ref::<StatementHandle<B>>(statement_handle)?;
+        panic_safe_scoped::<B, _>(statement_handle, |scope| {
+            let (stmt, conn) = scope.stmt_with_parent::<B>(statement_handle)?;
             stmt.diagnostics.clear();
 
             if stmt.cursor_open {
@@ -743,7 +732,6 @@ pub unsafe fn sql_special_columns_w<B: Backend>(
                 ));
             }
 
-            let conn = as_handle_ref::<ConnectionHandle<B>>(stmt.conn)?;
             let Some(ref connection) = conn.connection else {
                 return Err(OdbcError::general(
                     "Connection is not open",
@@ -872,13 +860,13 @@ pub unsafe fn sql_describe_col_w<B: Backend>(
         statement_handle,
         column_number
     );
-    // SAFETY: statement_handle is null or a valid StatementHandle<B>; tag validated inside
-    // panic_safe/as_handle_ref before any dereference occurs. Output pointers (data_type_ptr,
+    // SAFETY: statement_handle is null or a valid StatementHandle<B>; kind and group
+    // validated by scope.get inside the closure. Output pointers (data_type_ptr,
     // column_size_ptr, etc.) are checked for null before writing; caller guarantees they point
     // to writable locations if non-null.
     let ret = unsafe {
-        panic_safe::<B, _>(statement_handle, || {
-            let stmt = as_handle_ref::<StatementHandle<B>>(statement_handle)?;
+        panic_safe_scoped::<B, _>(statement_handle, |scope| {
+            let stmt = scope.get::<StatementHandle<B>>(statement_handle)?;
             stmt.diagnostics.clear();
 
             // Spec 07005: No result set.
@@ -1025,13 +1013,13 @@ pub unsafe fn sql_col_attribute_w<B: Backend>(
     string_length_ptr: *mut i16,
     numeric_attribute_ptr: *mut isize,
 ) -> SqlReturn {
-    // SAFETY: statement_handle is null or a valid StatementHandle<B>; tag validated inside
-    // panic_safe/as_handle_ref before any dereference occurs. Output pointers
+    // SAFETY: statement_handle is null or a valid StatementHandle<B>; kind and group
+    // validated by scope.get inside the closure. Output pointers
     // (numeric_attribute_ptr, string_length_ptr, character_attribute_ptr) are checked for null
     // before writing; caller guarantees they point to writable locations if non-null.
     let ret = unsafe {
-        panic_safe::<B, _>(statement_handle, || {
-            let stmt = as_handle_ref::<StatementHandle<B>>(statement_handle)?;
+        panic_safe_scoped::<B, _>(statement_handle, |scope| {
+            let stmt = scope.get::<StatementHandle<B>>(statement_handle)?;
             stmt.diagnostics.clear();
 
             tracing::trace!(
@@ -1225,11 +1213,12 @@ pub unsafe fn sql_procedures_w<B: Backend>(
     _name_length3: i16,
 ) -> SqlReturn {
     tracing::debug!("SQLProceduresW(stmt={:?})", statement_handle);
-    // SAFETY: statement_handle is null or a valid StatementHandle<B>; tag validated inside
-    // panic_safe/as_handle_ref before any dereference occurs.
+    // SAFETY: statement_handle is null or a valid StatementHandle<B>; kind and group
+    // validated by scope.stmt_with_parent inside set_empty_result.
     let ret = unsafe {
-        panic_safe::<B, _>(statement_handle, || {
+        panic_safe_scoped::<B, _>(statement_handle, |scope| {
             set_empty_result::<B>(
+                scope,
                 statement_handle,
                 procedures_columns(&B::catalog_result_column_widths()),
             )
@@ -1333,11 +1322,12 @@ pub unsafe fn sql_procedure_columns_w<B: Backend>(
     _name_length4: i16,
 ) -> SqlReturn {
     tracing::debug!("SQLProcedureColumnsW(stmt={:?})", statement_handle);
-    // SAFETY: statement_handle is null or a valid StatementHandle<B>; tag validated inside
-    // panic_safe/as_handle_ref before any dereference occurs.
+    // SAFETY: statement_handle is null or a valid StatementHandle<B>; kind and group
+    // validated by scope.stmt_with_parent inside set_empty_result.
     let ret = unsafe {
-        panic_safe::<B, _>(statement_handle, || {
+        panic_safe_scoped::<B, _>(statement_handle, |scope| {
             set_empty_result::<B>(
+                scope,
                 statement_handle,
                 procedure_columns_columns(&B::catalog_result_column_widths()),
             )
@@ -1424,11 +1414,12 @@ pub unsafe fn sql_column_privileges_w<B: Backend>(
     _name_length4: i16,
 ) -> SqlReturn {
     tracing::debug!("SQLColumnPrivilegesW(stmt={:?})", statement_handle);
-    // SAFETY: statement_handle is null or a valid StatementHandle<B>; tag validated inside
-    // panic_safe/as_handle_ref before any dereference occurs.
+    // SAFETY: statement_handle is null or a valid StatementHandle<B>; kind and group
+    // validated by scope.stmt_with_parent inside set_empty_result.
     let ret = unsafe {
-        panic_safe::<B, _>(statement_handle, || {
+        panic_safe_scoped::<B, _>(statement_handle, |scope| {
             set_empty_result::<B>(
+                scope,
                 statement_handle,
                 column_privileges_columns(&B::catalog_result_column_widths()),
             )
@@ -1510,11 +1501,12 @@ pub unsafe fn sql_table_privileges_w<B: Backend>(
     _name_length3: i16,
 ) -> SqlReturn {
     tracing::debug!("SQLTablePrivilegesW(stmt={:?})", statement_handle);
-    // SAFETY: statement_handle is null or a valid StatementHandle<B>; tag validated inside
-    // panic_safe/as_handle_ref before any dereference occurs.
+    // SAFETY: statement_handle is null or a valid StatementHandle<B>; kind and group
+    // validated by scope.stmt_with_parent inside set_empty_result.
     let ret = unsafe {
-        panic_safe::<B, _>(statement_handle, || {
+        panic_safe_scoped::<B, _>(statement_handle, |scope| {
             set_empty_result::<B>(
+                scope,
                 statement_handle,
                 table_privileges_columns(&B::catalog_result_column_widths()),
             )
@@ -1527,9 +1519,10 @@ pub unsafe fn sql_table_privileges_w<B: Backend>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ffi::handle::{sql_alloc_handle, sql_free_handle};
+    use crate::ffi::handle::sql_free_handle;
     use crate::ffi::info::type_info_columns;
-    use crate::test_utils::{MockBackend, MockConnection};
+    use crate::handles::{ConnectionHandle, as_handle_ref};
+    use crate::test_utils::{MockBackend, MockConnection, alloc_env_conn_stmt};
     use crate::types::{
         ColumnsResultCol, Desc, ForeignKeysResultCol, Nullable, PrimaryKeysResultCol,
         SQL_BEST_ROWID, SQL_INDEX_ALL, SQL_SCOPE_CURROW, SqlDataType, TablesResultCol,
@@ -1678,20 +1671,6 @@ mod tests {
             assert_eq!(result_set, name);
             assert_eq!(descs.len(), count, "{result_set} column count");
         }
-    }
-
-    /// Helper: allocate env + connection + statement handles.
-    unsafe fn alloc_env_conn_stmt() -> (*mut c_void, *mut c_void, *mut c_void) {
-        let mut env: *mut c_void = std::ptr::null_mut();
-        let _ = unsafe {
-            sql_alloc_handle::<MockBackend>(HandleType::Env as i16, std::ptr::null_mut(), &mut env)
-        };
-        let mut conn: *mut c_void = std::ptr::null_mut();
-        let _ = unsafe { sql_alloc_handle::<MockBackend>(HandleType::Dbc as i16, env, &mut conn) };
-        let mut stmt: *mut c_void = std::ptr::null_mut();
-        let _ =
-            unsafe { sql_alloc_handle::<MockBackend>(HandleType::Stmt as i16, conn, &mut stmt) };
-        (env, conn, stmt)
     }
 
     unsafe fn cleanup(env: *mut c_void, conn: *mut c_void, stmt: *mut c_void) {
