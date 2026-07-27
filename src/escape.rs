@@ -731,29 +731,12 @@ mod tests {
 
     #[test]
     fn nesting_within_the_depth_limit_is_linear_through_the_fn_argument_path() {
-        // Regression: `translate_call` used to translate a call's arguments,
-        // discard the result when the dialect declined the rewrite, and leave
-        // the caller to translate the same span again — doubling the work per
-        // nesting level. `dialect()` declines every call, as
-        // `EscapeDialect::ansi_default` does, so this is the default path for
-        // every driver.
-        //
-        // The sibling test at `MAX_ESCAPE_DEPTH + 1` did not catch it: the
-        // depth error fires on the first descent and propagates straight out,
-        // so it never reaches the doubling. Only a depth *inside* the limit
-        // does, and it has to run to completion.
-        //
-        // At this depth the input is 631 bytes and the old code needed 2^63
-        // translations — measured at 9.5 s for depth 26 and doubling from
-        // there, so it never returned. It now completes in tens of
-        // microseconds. A test that hangs rather than fails is a poor signal,
-        // but the alternative is a wall-clock assertion, which is flakier.
-        let out = translate_escapes(&nested_fn(MAX_ESCAPE_DEPTH - 1), &dialect())
-            .expect("nesting inside the limit must translate");
+        let out = translate_escapes(&nested_fn(MAX_ESCAPE_DEPTH), &dialect())
+            .expect("the deepest accepted nesting must translate");
         assert!(out.contains('x'));
         // Every level is the declined path, so each contributes its remapped
         // name and its parentheses: `upper(` ... `)`.
-        assert_eq!(out.matches("upper(").count(), MAX_ESCAPE_DEPTH - 1);
+        assert_eq!(out.matches("upper(").count(), MAX_ESCAPE_DEPTH);
     }
 
     #[test]
