@@ -360,6 +360,35 @@ markers go away and this section becomes the initial-release notes.
 
 ### Fixed
 
+- `SQLGetDiagFieldW` uses the real values for `SQL_DIAG_COLUMN_NUMBER` and
+  `SQL_DIAG_ROW_NUMBER`. They were hand-written as `12` and `13`; `sqlext.h`
+  defines them as `-1247` and `-1248`. Three things went wrong at once: the real
+  identifiers fell through to the unknown-field arm and returned `SQL_NO_DATA`;
+  `12` is `SQL_DIAG_DYNAMIC_FUNCTION_CODE`, so an application asking which
+  statement had executed was answered `-1`, which is `SQL_DIAG_CREATE_INDEX`,
+  for every statement; and `13` answered a field that does not exist. The
+  identifiers now derive from `odbc_sys::HeaderDiagnosticIdentifier` rather than
+  being restated, which is what the named-constant rule exists to prevent.
+
+  The two fields are also typed differently by the spec — `SQL_DIAG_COLUMN_NUMBER`
+  is `SQLINTEGER`, `SQL_DIAG_ROW_NUMBER` is `SQLLEN` — and shared one arm writing
+  four bytes, so a caller's `SQLLEN` kept its high half on a 64-bit platform.
+
+- `SQLGetStmtAttrW(SQL_ATTR_CURSOR_SENSITIVITY)` no longer contradicts
+  `SQLGetInfoW(SQL_CURSOR_SENSITIVITY)`. A second, private `SQL_INSENSITIVE`
+  held the value `2`, which `sql.h` assigns to `SQL_SENSITIVE`, while
+  `default_get_info` reported the shared constant's `1`. The same statement
+  described its cursor two ways depending on which function was asked.
+
+- `SQLFetch` returns `24000` when the statement was executed but produced no
+  result set. It guarded on `statement.is_some()`, but a statement that
+  produced no result set — an `UPDATE`, ODBC state S4 — keeps its statement and
+  only closes the cursor, as does one that is prepared but not yet executed
+  (S2/S3). Fetching in either state drove the backend instead of refusing. The
+  guard now reads `cursor_open`, which is the state the spec's wording names.
+  `24000` carries no `(DM)` marker in the `SQLFetch` diagnostics table, so it is
+  the driver's to return.
+
 - `SQLPrepareW` no longer discards parameter bindings. `SQLBindParameter`'s
   spec names the only three things that unbind a parameter — another
   `SQLBindParameter`, `SQLFreeStmt(SQL_RESET_PARAMS)`, and `SQLSetDescField`

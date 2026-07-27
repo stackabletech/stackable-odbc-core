@@ -49,9 +49,9 @@ use crate::types::{ColumnValue, FetchResult, SqlReturn, SqlState, fetch_orientat
 /// - 22012 (division by zero): propagated from the backend if the data source reports it.
 /// - 22015 (interval field overflow): returned via `write_column_value`.
 /// - 22018 (invalid character value for cast specification): returned via `write_column_value`.
-/// - 24000 (invalid cursor state): returned as HY010 (function sequence error) when no
-///   statement has been executed; the distinction is academic here since a statement handle
-///   cannot be in an executed-but-no-result-set state.
+/// - 24000 (invalid cursor state): returned when the statement was executed but produced no
+///   result set (ODBC state S4), and when it is prepared but not yet executed (S2/S3). The
+///   row carries no (DM) marker, so the driver owes it.
 /// - 40001 (serialization failure): propagated from the backend.
 /// - 40003 (statement completion unknown): propagated from the backend.
 /// - HY000 (general error): propagated from the backend.
@@ -84,13 +84,36 @@ pub unsafe fn sql_fetch<B: Backend>(statement_handle: *mut c_void) -> SqlReturn 
             let stmt = as_handle_ref::<StatementHandle<B>>(statement_handle)?;
             stmt.diagnostics.clear();
 
-            // Spec HY010: No result set.
+            // Read before the mutable borrow of `stmt.statement` below.
+            let cursor_open = stmt.cursor_open;
+
+            // Spec HY010: the handle was never put in an executed state. Every
+            // sentence of this SQLSTATE's row is (DM)-annotated; the check is
+            // kept as defence in depth for a driver loaded without a Driver
+            // Manager.
             let Some(ref mut statement) = stmt.statement else {
                 return Err(OdbcError::general(
                     "No result set available; statement not executed",
                     SqlState::function_sequence_error(),
                 ));
             };
+
+            // Spec 24000, which carries no (DM) marker and so is the driver's
+            // to return: "The StatementHandle was in an executed state but no
+            // result set was associated with the StatementHandle."
+            //
+            // `statement.is_some()` is not that test. `set_result_set` leaves
+            // `cursor_open` false when the backend reports zero columns -- an
+            // UPDATE, ODBC state S4 -- and `set_prepared_statement` leaves it
+            // false in the prepared states S2/S3. Both kept a statement, so
+            // fetching after an UPDATE, or after SQLPrepare without
+            // SQLExecute, used to drive the backend instead.
+            if !cursor_open {
+                return Err(OdbcError::general(
+                    "No cursor is open on this statement",
+                    SqlState::invalid_cursor_state(),
+                ));
+            }
 
             match statement.fetch()? {
                 FetchResult::Row => {
@@ -470,6 +493,84 @@ mod tests {
             let _ = sql_free_handle::<MockBackend>(HandleType::Stmt as i16, stmt);
             let _ = sql_free_handle::<MockBackend>(HandleType::Dbc as i16, conn);
             let _ = sql_free_handle::<MockBackend>(HandleType::Env as i16, env);
+        }
+    }
+
+    /// Read the SQLSTATE of the statement's first diagnostic record.
+    unsafe fn first_sqlstate(stmt: *mut c_void) -> String {
+        let mut state = [0u16; 6];
+        let mut native: i32 = 0;
+        let mut msg = [0u16; 256];
+        let mut msg_len: i16 = 0;
+        let ret = unsafe {
+            crate::ffi::diag::sql_get_diag_rec_w::<MockBackend>(
+                HandleType::Stmt as i16,
+                stmt,
+                1,
+                state.as_mut_ptr(),
+                &mut native,
+                msg.as_mut_ptr(),
+                msg.len() as i16,
+                &mut msg_len,
+            )
+        };
+        assert_eq!(ret, SqlReturn::SUCCESS, "no diagnostic record was posted");
+        String::from_utf16_lossy(&state[..5])
+    }
+
+    #[test]
+    fn fetch_after_a_statement_with_no_result_set_returns_24000() {
+        // Spec 24000, which carries no (DM) marker: "The StatementHandle was in
+        // an executed state but no result set was associated with the
+        // StatementHandle."
+        //
+        // `MockStatement` reports zero columns, so this stands for an UPDATE:
+        // ODBC state S4, executed with no cursor. The guard used to test
+        // `statement.is_some()`, which is true here, so SQLFetch drove the
+        // backend instead of refusing.
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            let input = "Host=localhost;Port=8080;Database=test;User=me";
+            let wide: Vec<u16> = input.encode_utf16().collect();
+            assert_eq!(
+                crate::ffi::connect::sql_driver_connect_w::<MockBackend>(
+                    conn,
+                    std::ptr::null_mut(),
+                    wide.as_ptr(),
+                    wide.len() as i16,
+                    std::ptr::null_mut(),
+                    0,
+                    std::ptr::null_mut(),
+                    0,
+                ),
+                SqlReturn::SUCCESS
+            );
+
+            let sql = "UPDATE t SET a = 1";
+            let wide: Vec<u16> = sql.encode_utf16().collect();
+            assert_eq!(
+                crate::ffi::execute::sql_prepare_w::<MockBackend>(
+                    stmt,
+                    wide.as_ptr(),
+                    wide.len() as i32
+                ),
+                SqlReturn::SUCCESS
+            );
+
+            // Prepared but not executed: states S2/S3, no cursor.
+            assert_eq!(sql_fetch::<MockBackend>(stmt), SqlReturn::ERROR);
+            assert_eq!(first_sqlstate(stmt), "24000");
+
+            // Executed, produced no result set: state S4, still no cursor.
+            assert_eq!(
+                crate::ffi::execute::sql_execute::<MockBackend>(stmt),
+                SqlReturn::SUCCESS
+            );
+            assert_eq!(sql_fetch::<MockBackend>(stmt), SqlReturn::ERROR);
+            assert_eq!(first_sqlstate(stmt), "24000");
+
+            let _ = crate::ffi::connect::sql_disconnect::<MockBackend>(conn);
+            cleanup(env, conn, stmt);
         }
     }
 
