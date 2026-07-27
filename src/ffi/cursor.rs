@@ -93,7 +93,7 @@ pub unsafe fn sql_num_result_cols<B: Backend>(
                     );
                     i16::MAX
                 });
-                *column_count_ptr = count_i16;
+                std::ptr::write_unaligned(column_count_ptr, count_i16);
             }
 
             Ok(SqlReturn::SUCCESS)
@@ -164,7 +164,7 @@ pub unsafe fn sql_row_count<B: Backend>(
             if !row_count_ptr.is_null() {
                 // SAFETY: row_count_ptr is non-null (checked above) and the
                 // caller guarantees it points to a valid writable isize.
-                *row_count_ptr = row_count;
+                std::ptr::write_unaligned(row_count_ptr, row_count);
             }
 
             Ok(SqlReturn::SUCCESS)

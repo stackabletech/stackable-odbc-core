@@ -806,7 +806,7 @@ pub unsafe fn sql_native_sql_w<B: Backend>(
 
             // Always report the number of characters (excluding null terminator).
             if !text_length2_ptr.is_null() {
-                *text_length2_ptr = wide.len() as i32;
+                std::ptr::write_unaligned(text_length2_ptr, wide.len() as i32);
             }
 
             if !out_statement_text.is_null() && buffer_length > 0 {
@@ -815,8 +815,14 @@ pub unsafe fn sql_native_sql_w<B: Backend>(
                 // SAFETY: out_statement_text is non-null (checked above) and the caller
                 // guarantees it points to a buffer of at least buffer_length u16 elements.
                 // copy_len <= buffer_length - 1 < buffer_length, so add(copy_len) is in bounds.
-                std::ptr::copy_nonoverlapping(wide.as_ptr(), out_statement_text, copy_len);
-                *out_statement_text.add(copy_len) = 0;
+                // Byte-wise, and unaligned for the terminator: the
+                // application's pointer carries no alignment guarantee.
+                std::ptr::copy_nonoverlapping(
+                    wide.as_ptr().cast::<u8>(),
+                    out_statement_text.cast::<u8>(),
+                    copy_len * size_of::<u16>(),
+                );
+                std::ptr::write_unaligned(out_statement_text.add(copy_len), 0);
                 if copy_len < wide.len() {
                     return Ok(SqlReturn::SUCCESS_WITH_INFO);
                 }

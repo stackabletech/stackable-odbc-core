@@ -412,7 +412,7 @@ pub unsafe fn alloc_environment<B: Backend>(output: *mut *mut c_void) -> SqlRetu
     });
     let ptr = Box::into_raw(handle);
     unsafe {
-        *output = ptr as *mut c_void;
+        std::ptr::write_unaligned(output, ptr as *mut c_void);
     }
     SqlReturn::SUCCESS
 }
@@ -447,7 +447,7 @@ pub unsafe fn alloc_connection<B: Backend>(
     let ptr = Box::into_raw(handle);
     env.connections.push(ptr);
     unsafe {
-        *output = ptr as *mut c_void;
+        std::ptr::write_unaligned(output, ptr as *mut c_void);
     }
     SqlReturn::SUCCESS
 }
@@ -498,7 +498,7 @@ pub unsafe fn alloc_statement<B: Backend>(
     let ptr = Box::into_raw(handle);
     conn.statements.push(ptr);
     unsafe {
-        *output = ptr as *mut c_void;
+        std::ptr::write_unaligned(output, ptr as *mut c_void);
     }
     SqlReturn::SUCCESS
 }

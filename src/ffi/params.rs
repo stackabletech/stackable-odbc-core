@@ -235,7 +235,7 @@ pub unsafe fn sql_num_params<B: Backend>(
                     );
                     i16::MAX
                 });
-                *parameter_count_ptr = count_i16;
+                std::ptr::write_unaligned(parameter_count_ptr, count_i16);
             }
 
             Ok(SqlReturn::SUCCESS)
@@ -326,16 +326,16 @@ pub unsafe fn sql_describe_param<B: Backend>(
 
             // Return generic SQL_VARCHAR type info.
             if !data_type_ptr.is_null() {
-                *data_type_ptr = SqlDataType::VARCHAR.0;
+                std::ptr::write_unaligned(data_type_ptr, SqlDataType::VARCHAR.0);
             }
             if !parameter_size_ptr.is_null() {
-                *parameter_size_ptr = SQL_DEFAULT_PARAM_SIZE as ULen;
+                std::ptr::write_unaligned(parameter_size_ptr, SQL_DEFAULT_PARAM_SIZE as ULen);
             }
             if !decimal_digits_ptr.is_null() {
-                *decimal_digits_ptr = 0_i16;
+                std::ptr::write_unaligned(decimal_digits_ptr, 0_i16);
             }
             if !nullable_ptr.is_null() {
-                *nullable_ptr = Nullable::SqlNullable as i16;
+                std::ptr::write_unaligned(nullable_ptr, Nullable::SqlNullable as i16);
             }
 
             Ok(SqlReturn::SUCCESS)
@@ -415,7 +415,7 @@ pub(crate) unsafe fn read_param_value(binding: &ParameterBinding) -> ColumnValue
     // Check indicator for NULL.
     if !binding.str_len_or_ind_ptr.is_null() {
         // SAFETY: str_len_or_ind_ptr is non-null and the caller guarantees it points to a valid isize.
-        let indicator = unsafe { *binding.str_len_or_ind_ptr };
+        let indicator = unsafe { std::ptr::read_unaligned(binding.str_len_or_ind_ptr) };
         if indicator == SQL_NULL_DATA {
             return ColumnValue::Null;
         }
@@ -479,7 +479,7 @@ pub(crate) unsafe fn read_param_value(binding: &ParameterBinding) -> ColumnValue
             } else {
                 // SAFETY: str_len_or_ind_ptr is non-null and the caller guarantees it points
                 // to a valid isize provided by the ODBC caller.
-                let l = unsafe { *binding.str_len_or_ind_ptr };
+                let l = unsafe { std::ptr::read_unaligned(binding.str_len_or_ind_ptr) };
                 if l == SQL_NTS as isize || l < 0 {
                     None
                 } else {
@@ -512,7 +512,7 @@ pub(crate) unsafe fn read_param_value(binding: &ParameterBinding) -> ColumnValue
             } else {
                 // SAFETY: str_len_or_ind_ptr is non-null and the caller guarantees it points
                 // to a valid isize provided by the ODBC caller.
-                let l = unsafe { *binding.str_len_or_ind_ptr };
+                let l = unsafe { std::ptr::read_unaligned(binding.str_len_or_ind_ptr) };
                 if l == SQL_NTS as isize || l < 0 {
                     // Null-terminated: delegate to bounded NTS scan helper.
                     // SAFETY: caller guarantees ptr is a valid, null-terminated UTF-16 string.
@@ -530,8 +530,13 @@ pub(crate) unsafe fn read_param_value(binding: &ParameterBinding) -> ColumnValue
             };
             // SAFETY: value_ptr is non-null and the caller guarantees it points to at least
             // `code_units` valid u16 elements as indicated by str_len_or_ind_ptr.
-            let slice = unsafe { std::slice::from_raw_parts(ptr, code_units) };
-            ColumnValue::String(String::from_utf16_lossy(slice))
+            // Read element-wise: `from_raw_parts` would require `ptr` to be
+            // u16-aligned, and a bound parameter buffer inside a packed
+            // row-wise structure is not.
+            let units: Vec<u16> = (0..code_units)
+                .map(|i| unsafe { std::ptr::read_unaligned(ptr.add(i)) })
+                .collect();
+            ColumnValue::String(String::from_utf16_lossy(&units))
         }
         CDataType::Binary => {
             let ptr = binding.value_ptr as *const u8;
@@ -540,7 +545,7 @@ pub(crate) unsafe fn read_param_value(binding: &ParameterBinding) -> ColumnValue
             } else {
                 // SAFETY: str_len_or_ind_ptr is non-null and the caller guarantees it points
                 // to a valid isize provided by the ODBC caller.
-                let l = unsafe { *binding.str_len_or_ind_ptr };
+                let l = unsafe { std::ptr::read_unaligned(binding.str_len_or_ind_ptr) };
                 if l < 0 {
                     None
                 } else {
@@ -811,7 +816,7 @@ pub(crate) unsafe fn find_data_at_exec_params(
         if let Some(binding) = bindings.get(&i) {
             let is_dae = if !binding.str_len_or_ind_ptr.is_null() {
                 // SAFETY: caller guarantees str_len_or_ind_ptr points to valid memory.
-                let indicator = unsafe { *binding.str_len_or_ind_ptr };
+                let indicator = unsafe { std::ptr::read_unaligned(binding.str_len_or_ind_ptr) };
                 is_data_at_exec(indicator)
             } else {
                 false
@@ -1075,9 +1080,9 @@ pub unsafe fn sql_param_data<B: Backend>(
                 // can identify which parameter is being requested.
                 if !value_ptr_ptr.is_null() {
                     if let Some(binding) = stmt.param_bindings.get(&next_param) {
-                        *value_ptr_ptr = binding.value_ptr;
+                        std::ptr::write_unaligned(value_ptr_ptr, binding.value_ptr);
                     } else {
-                        *value_ptr_ptr = std::ptr::null_mut();
+                        std::ptr::write_unaligned(value_ptr_ptr, std::ptr::null_mut());
                     }
                 }
                 // Put the state back — more params still pending.

@@ -584,11 +584,11 @@ pub unsafe fn sql_get_functions<B: Backend>(
                     // SAFETY: supported_ptr is non-null (checked); caller guarantees it points to a
                     // contiguous array of SQL_API_ODBC3_ALL_FUNCTIONS_SIZE (250) writable u16 values
                     // as required by the ODBC 3.x bitmap spec.
-                    let supported = std::slice::from_raw_parts_mut(
-                        supported_ptr,
-                        SQL_API_ODBC3_ALL_FUNCTIONS_SIZE,
-                    );
-                    supported.fill(0);
+                    // Assembled locally, then copied out byte-wise below.
+                    // `from_raw_parts_mut` would require `supported_ptr` to be
+                    // u16-aligned, which an application-supplied pointer does
+                    // not guarantee.
+                    let mut supported = [0u16; SQL_API_ODBC3_ALL_FUNCTIONS_SIZE];
                     for &func in functions {
                         let fid = func as u16;
                         let idx = (fid / 16) as usize;
@@ -597,6 +597,14 @@ pub unsafe fn sql_get_functions<B: Backend>(
                             supported[idx] |= 1 << bit;
                         }
                     }
+                    // SAFETY: supported_ptr is non-null (checked above) and the
+                    // caller guarantees the documented element count; u8 has
+                    // alignment 1, so this carries no alignment requirement.
+                    std::ptr::copy_nonoverlapping(
+                        supported.as_ptr().cast::<u8>(),
+                        supported_ptr.cast::<u8>(),
+                        supported.len() * size_of::<u16>(),
+                    );
                 }
             } else if function_id == SQL_API_ALL_FUNCTIONS {
                 // ODBC 2.x array: 100 u16 values, array[func_id] = SQL_TRUE/SQL_FALSE.
@@ -626,9 +634,9 @@ pub unsafe fn sql_get_functions<B: Backend>(
                     // SAFETY: supported_ptr is non-null (checked); caller guarantees it points to a
                     // contiguous array of SQL_API_ALL_FUNCTIONS_SIZE (100) writable u16 values.
                     // All index accesses below are bounds-checked against SQL_API_ALL_FUNCTIONS_SIZE.
-                    let supported =
-                        std::slice::from_raw_parts_mut(supported_ptr, SQL_API_ALL_FUNCTIONS_SIZE);
-                    supported.fill(0);
+                    // Assembled locally then copied out, for the same
+                    // alignment reason as the 3.x bitmap above.
+                    let mut supported = [0u16; SQL_API_ALL_FUNCTIONS_SIZE];
                     for &func in functions {
                         let fid = usize::from(func as u16);
                         if fid < SQL_API_ALL_FUNCTIONS_SIZE {
@@ -667,6 +675,16 @@ pub unsafe fn sql_get_functions<B: Backend>(
                         supported[SQL2_TRANSACT] = SQL_FUNC_EXISTS;
                     }
                     // CloseCursor's 2.x equivalent is FreeStmt(SQL_CLOSE) (handled above).
+
+                    // SAFETY: supported_ptr is non-null (checked above) and the
+                    // caller guarantees SQL_API_ALL_FUNCTIONS_SIZE writable u16
+                    // values; u8 has alignment 1, so this carries no alignment
+                    // requirement.
+                    std::ptr::copy_nonoverlapping(
+                        supported.as_ptr().cast::<u8>(),
+                        supported_ptr.cast::<u8>(),
+                        supported.len() * size_of::<u16>(),
+                    );
                 }
             } else {
                 // Single function query: convert to FunctionId for comparison
@@ -680,7 +698,7 @@ pub unsafe fn sql_get_functions<B: Backend>(
                 );
                 if !supported_ptr.is_null() {
                     // SAFETY: non-null checked above; caller guarantees writable u16
-                    *supported_ptr = u16::from(is_supported);
+                    std::ptr::write_unaligned(supported_ptr, u16::from(is_supported));
                 }
             }
 

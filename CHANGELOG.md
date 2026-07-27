@@ -158,6 +158,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Security.** Writes and reads through application-supplied pointers are now
+  unaligned throughout. ODBC applications using row-wise binding pass pointers
+  at arbitrary offsets into a packed buffer, so alignment is never guaranteed —
+  `ffi/metadata.rs` says exactly this and uses unaligned writes for the reason,
+  but 27 other sites did not: `write_utf16` (the shared helper behind most
+  string output), `SQLNativeSqlW`, `SQLNumResultCols`, `SQLRowCount`,
+  `SQLNumParams`, `SQLDescribeParam`, `SQLParamData`, `SQLGetDiagRecW`,
+  `SQLGetDiagFieldW`, `SQLGetConnectAttrW`, `SQLGetEnvAttr`, `SQLGetFunctions`,
+  `SQLAllocHandle`, `SQLAllocConnect`, `SQLAllocStmt`, `SQLNativeSqlW`'s length
+  output, `ConfigDSNW`, and the five parameter length-indicator reads.
+  This was not merely theoretical UB: the standard library's own precondition
+  check fires on a misaligned `copy_nonoverlapping` or `ptr::write`, and it
+  raises a **non-unwinding** panic, which `panic_safe`'s `catch_unwind` cannot
+  contain. Any debug build of a driver would abort the host process. Two of the
+  affected calls were `copy_nonoverlapping` over `u16`, which requires
+  alignment; those now copy byte-wise, where alignment is 1.
+  A second, larger class was `slice::from_raw_parts`, which requires the
+  pointer to be aligned for its pointee type — so building a `&[u16]` over an
+  application buffer was undefined behaviour before a single element was read.
+  Six such sites are fixed: `utf16_to_string` (both the `SQL_NTS` and
+  explicit-length paths), `SQLGetDiagRecW`'s SQLSTATE output, `SQLGetFunctions`'
+  3.x bitmap and 2.x array, `ConfigDSNW`'s attribute parser, and the `SQL_C_WCHAR`
+  parameter read. Each now reads element-wise or assembles into a local buffer
+  and copies out byte-wise. The `u8` cases (`SQL_C_CHAR`, `SQL_C_BINARY`,
+  `write_char`, `write_binary`) were always sound, since `u8` has alignment 1.
+  `SQLGetDiagRecW` additionally no longer panics on a SQLSTATE longer than five
+  characters, where the padding range would previously have been reversed.
+  Existing tests missed all of it because every one passed a naturally aligned
+  `Vec<u16>`. The new tests offset one byte into a `u16`-aligned allocation, so
+  the misalignment is guaranteed on every platform — offsetting into a `Vec<u8>`
+  is not enough, since a byte allocation may already start on an odd address.
+- `parse_attributes_w` (`ConfigDSNW`) bounds its scan for a segment terminator
+  instead of walking memory until it faults, matching `utf16_to_string`'s
+  existing `SQL_NTS` bound.
 - DSN lookup no longer trusts the installer library's returned length.
   `read_dsn_keys` sliced its buffers at the value `SQLGetPrivateProfileStringW`
   returned, checking only that it was positive. unixODBC and odbccp32 have both

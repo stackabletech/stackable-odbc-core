@@ -93,7 +93,7 @@ pub unsafe fn sql_alloc_handle<B: Backend>(
             // Spec: on any error OutputHandlePtr is set to SQL_NULL_HANDLE.
             // SAFETY: output_handle_ptr was verified non-null above. Unsafe ops in
             // this closure are covered by the outer `unsafe` block around panic_safe.
-            *output_handle_ptr = std::ptr::null_mut();
+            std::ptr::write_unaligned(output_handle_ptr, std::ptr::null_mut());
             // Parse handle type. Spec HY092: must be a recognized value.
             let Some(ht) = handle_type_from_raw(handle_type) else {
                 tracing::error!(

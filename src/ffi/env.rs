@@ -191,12 +191,15 @@ pub unsafe fn sql_get_env_attr<B: Backend>(
                     if !value_ptr.is_null() {
                         // SAFETY: non-null checked above; caller guarantees writable i32
                         let out = value_ptr as *mut i32;
-                        *out = env.odbc_version as i32;
+                        std::ptr::write_unaligned(out, env.odbc_version as i32);
                     }
                     // Spec: for integer attributes, write byte size to StringLengthPtr.
                     if !string_length_ptr.is_null() {
                         // SAFETY: non-null checked above; caller guarantees writable i32
-                        *string_length_ptr = std::mem::size_of::<i32>() as i32;
+                        std::ptr::write_unaligned(
+                            string_length_ptr,
+                            std::mem::size_of::<i32>() as i32,
+                        );
                     }
                     Ok(SqlReturn::SUCCESS)
                 }
@@ -205,11 +208,14 @@ pub unsafe fn sql_get_env_attr<B: Backend>(
                     if !value_ptr.is_null() {
                         // SAFETY: non-null checked above; caller guarantees writable i32
                         let out = value_ptr as *mut i32;
-                        *out = SQL_TRUE as i32;
+                        std::ptr::write_unaligned(out, SQL_TRUE as i32);
                     }
                     if !string_length_ptr.is_null() {
                         // SAFETY: non-null checked above; caller guarantees writable i32
-                        *string_length_ptr = std::mem::size_of::<i32>() as i32;
+                        std::ptr::write_unaligned(
+                            string_length_ptr,
+                            std::mem::size_of::<i32>() as i32,
+                        );
                     }
                     Ok(SqlReturn::SUCCESS)
                 }

@@ -2,6 +2,11 @@
 
 use std::collections::HashMap;
 
+/// Longest single DSN attribute segment scanned before giving up, in UTF-16
+/// code units. Mirrors `utf16.rs`'s `MAX_NTS_SCAN`: without a bound, an
+/// attribute list missing its terminator walks memory until it faults.
+const MAX_ATTRIBUTE_SCAN: usize = i16::MAX as usize;
+
 /// Parses a null-separated, double-null terminated ODBC UTF-16 attribute string.
 ///
 /// Each segment is a `Key=Value` pair encoded as UTF-16LE, separated by a single
@@ -21,12 +26,33 @@ pub(crate) unsafe fn parse_attributes_w(ptr: *const u16) -> HashMap<String, Stri
     let mut pos = 0usize;
     loop {
         let start = pos;
-        // Walk to the next null u16
+        // Walk to the next null u16.
+        //
+        // Read unaligned: the pointer comes from the Driver Manager and carries
+        // no alignment guarantee, and an aligned read of a misaligned address
+        // is undefined behaviour — in a debug build the standard library's
+        // precondition check turns it into a non-unwinding abort that
+        // `panic_safe` cannot catch.
+        //
+        // Bounded for the same reason `utf16_to_string` bounds its `SQL_NTS`
+        // scan: an attribute list missing its terminator would otherwise walk
+        // memory until it segfaulted. The bound is per segment, which is far
+        // more than any real DSN attribute.
+        //
         // SAFETY: ptr is non-null (checked above) and caller guarantees it points to
         // a double-null-terminated UTF-16 sequence, so reading ptr.add(pos) is valid
         // until the double-null terminator is reached.
-        while unsafe { *ptr.add(pos) } != 0 {
+        while pos - start < MAX_ATTRIBUTE_SCAN
+            && unsafe { std::ptr::read_unaligned(ptr.add(pos)) } != 0
+        {
             pos += 1;
+        }
+        if pos - start >= MAX_ATTRIBUTE_SCAN {
+            tracing::warn!(
+                "ConfigDSNW: attribute segment exceeded {MAX_ATTRIBUTE_SCAN} code units \
+                 with no terminator; abandoning the rest of the list"
+            );
+            break;
         }
         if pos == start {
             // Empty segment signals end of list
@@ -35,8 +61,12 @@ pub(crate) unsafe fn parse_attributes_w(ptr: *const u16) -> HashMap<String, Stri
         // SAFETY: ptr is non-null and valid (same invariant as above). The slice
         // [start, pos) lies within the same contiguous allocation and does not cross
         // the double-null terminator, so from_raw_parts is safe here.
-        let code_units = unsafe { std::slice::from_raw_parts(ptr.add(start), pos - start) };
-        let segment = String::from_utf16_lossy(code_units);
+        // Read element-wise: `from_raw_parts` would require `ptr` to be
+        // u16-aligned, which a Driver Manager pointer does not guarantee.
+        let code_units: Vec<u16> = (start..pos)
+            .map(|i| unsafe { std::ptr::read_unaligned(ptr.add(i)) })
+            .collect();
+        let segment = String::from_utf16_lossy(&code_units);
         if let Some(eq_pos) = segment.find('=') {
             map.insert(
                 segment[..eq_pos].to_string(),

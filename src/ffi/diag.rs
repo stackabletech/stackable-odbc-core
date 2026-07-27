@@ -166,20 +166,35 @@ pub unsafe fn sql_get_diag_rec_w<B: Backend>(
             let state_wide: Vec<u16> = state_str.encode_utf16().collect();
             // SAFETY: sql_state is non-null (checked above) and caller guarantees
             // a buffer of at least 6 u16 values per the ODBC spec for SQLSTATE.
-            let buf = unsafe { std::slice::from_raw_parts_mut(sql_state, 6) };
+            // Assembled locally, then copied out byte-wise. `from_raw_parts_mut`
+            // would require `sql_state` to be u16-aligned, which an
+            // application-supplied pointer does not guarantee.
+            let mut buf = [0u16; 6];
             for (i, &ch) in state_wide.iter().enumerate().take(5) {
                 buf[i] = ch;
             }
-            // Pad with '0' if shorter than 5 (shouldn't happen with well-formed states)
-            buf[state_wide.len()..5].fill(b'0' as u16);
+            // Pad with '0' if shorter than 5 (shouldn't happen with well-formed
+            // states). `.min(5)` because a longer state would otherwise make
+            // this range reversed, which panics.
+            buf[state_wide.len().min(5)..5].fill(b'0' as u16);
             buf[5] = 0u16; // null terminator
+            // SAFETY: sql_state is non-null (checked above) and the caller
+            // guarantees at least 6 writable u16 values; u8 has alignment 1, so
+            // the byte-wise copy carries no alignment requirement.
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    buf.as_ptr().cast::<u8>(),
+                    sql_state.cast::<u8>(),
+                    buf.len() * size_of::<u16>(),
+                );
+            }
         }
 
         // Write native error code
         if !native_error_ptr.is_null() {
             // SAFETY: native_error_ptr is non-null (checked above) and caller
             // guarantees it points to a valid i32 output parameter.
-            unsafe { *native_error_ptr = record.native_error };
+            unsafe { std::ptr::write_unaligned(native_error_ptr, record.native_error) };
         }
 
         // Write message text via write_utf16, which handles truncation.
@@ -290,12 +305,14 @@ pub unsafe fn sql_get_diag_field_w<B: Backend>(
             if !diag_info.is_null() {
                 // SAFETY: diag_info is non-null (checked above); caller guarantees
                 // it points to a valid i32 output buffer for SQL_DIAG_NUMBER.
-                unsafe { *(diag_info as *mut i32) = count };
+                unsafe { std::ptr::write_unaligned(diag_info as *mut i32, count) };
             }
             if !string_length.is_null() {
                 // SAFETY: string_length is non-null (checked above) and caller
                 // guarantees it is a valid i16 output parameter.
-                unsafe { *string_length = std::mem::size_of::<i32>() as i16 };
+                unsafe {
+                    std::ptr::write_unaligned(string_length, std::mem::size_of::<i32>() as i16)
+                };
             }
             return SqlReturn::SUCCESS;
         }
@@ -308,12 +325,14 @@ pub unsafe fn sql_get_diag_field_w<B: Backend>(
             if !diag_info.is_null() {
                 // SAFETY: diag_info is non-null (checked above); caller guarantees
                 // it points to a valid i16 output buffer for SQL_DIAG_RETURNCODE.
-                unsafe { *(diag_info as *mut i16) = SQL_SUCCESS_VALUE };
+                unsafe { std::ptr::write_unaligned(diag_info as *mut i16, SQL_SUCCESS_VALUE) };
             }
             if !string_length.is_null() {
                 // SAFETY: string_length is non-null (checked above) and caller
                 // guarantees it is a valid i16 output parameter.
-                unsafe { *string_length = std::mem::size_of::<i16>() as i16 };
+                unsafe {
+                    std::ptr::write_unaligned(string_length, std::mem::size_of::<i16>() as i16)
+                };
             }
             return SqlReturn::SUCCESS;
         }
@@ -355,12 +374,16 @@ pub unsafe fn sql_get_diag_field_w<B: Backend>(
                 if !diag_info.is_null() {
                     // SAFETY: diag_info is non-null (checked above); caller guarantees
                     // it points to a valid i32 output buffer for SQL_DIAG_NATIVE.
-                    unsafe { *(diag_info as *mut i32) = record.native_error };
+                    unsafe {
+                        std::ptr::write_unaligned(diag_info as *mut i32, record.native_error)
+                    };
                 }
                 if !string_length.is_null() {
                     // SAFETY: string_length is non-null (checked above) and caller
                     // guarantees it is a valid i16 output parameter.
-                    unsafe { *string_length = std::mem::size_of::<i32>() as i16 };
+                    unsafe {
+                        std::ptr::write_unaligned(string_length, std::mem::size_of::<i32>() as i16)
+                    };
                 }
                 SqlReturn::SUCCESS
             }
@@ -385,7 +408,9 @@ pub unsafe fn sql_get_diag_field_w<B: Backend>(
                 if !diag_info.is_null() {
                     // SAFETY: diag_info is non-null (checked above); caller guarantees
                     // it points to a valid i32 output buffer for column/row number fields.
-                    unsafe { *(diag_info as *mut i32) = SQL_NO_COLUMN_NUMBER };
+                    unsafe {
+                        std::ptr::write_unaligned(diag_info as *mut i32, SQL_NO_COLUMN_NUMBER)
+                    };
                 }
                 SqlReturn::SUCCESS
             }

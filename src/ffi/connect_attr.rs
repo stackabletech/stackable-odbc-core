@@ -451,11 +451,11 @@ pub unsafe fn sql_get_connect_attr_w<B: Backend>(
             let write_u32 = |v: u32| {
                 if !value_ptr.is_null() {
                     // SAFETY: non-null checked above; caller guarantees writable u32
-                    *(value_ptr as *mut u32) = v;
+                    std::ptr::write_unaligned(value_ptr as *mut u32, v);
                 }
                 if !string_length_ptr.is_null() {
                     // SAFETY: non-null checked above; caller guarantees writable i32
-                    *string_length_ptr = std::mem::size_of::<u32>() as i32;
+                    std::ptr::write_unaligned(string_length_ptr, std::mem::size_of::<u32>() as i32);
                 }
             };
 
@@ -570,7 +570,7 @@ pub unsafe fn sql_get_connect_attr_w<B: Backend>(
                     let ret = write_utf16(&s, value_ptr as *mut u16, buf_u16, &mut len_u16);
                     if !string_length_ptr.is_null() {
                         // SAFETY: non-null checked above; caller guarantees writable i32
-                        *string_length_ptr = i32::from(len_u16) * 2; // bytes
+                        std::ptr::write_unaligned(string_length_ptr, i32::from(len_u16) * 2); // bytes
                     }
                     Ok(ret)
                 }
