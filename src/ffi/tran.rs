@@ -435,7 +435,7 @@ mod tests {
         MockTxnDeleteBackend, MockTxnPreserveBackend,
     };
     use crate::types::{
-        ColumnDescriptor, ColumnValue, CompletionType, FetchResult, SQL_NTS, SqlDataType,
+        ColumnDescriptor, ColumnValue, CompletionType, FetchResult, Nullable, SQL_NTS, SqlDataType,
     };
 
     unsafe fn alloc_env_conn() -> (*mut c_void, *mut c_void) {
@@ -594,7 +594,8 @@ mod tests {
                 sql_type: SqlDataType::INTEGER,
                 precision: 10,
                 scale: 0,
-                nullable: true,
+                nullable: Nullable::SqlNullable,
+                ..Default::default()
             }],
             vec![vec![ColumnValue::I32(1)]],
         )

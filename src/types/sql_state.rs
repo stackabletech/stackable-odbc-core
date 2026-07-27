@@ -121,8 +121,56 @@ pub const TIMEOUT_EXPIRED: &str = "HYT00";
 // ---------------------------------------------------------------------------
 
 /// A five-character ODBC diagnostic state code (e.g. `"HY000"`).
-#[derive(Clone)]
-pub struct SqlState(pub [u8; 5]);
+///
+/// The five bytes are private. They were public, which froze `[u8; 5]` as API
+/// and let a driver build a `SqlState` that was not five ASCII characters —
+/// making [`SqlState::as_str`]'s otherwise-unreachable `"?????"` fallback
+/// reachable. Build one with [`SqlState::new`] from a literal, with
+/// `TryFrom<&str>` when the value is not known at compile time, or from one of
+/// the named factory methods.
+///
+/// `PartialEq` is what lets a driver's tests say
+/// `assert_eq!(err.sqlstate(), SqlState::general_error())` rather than
+/// comparing strings.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SqlState([u8; 5]);
+
+/// A string that is not a valid five-character ASCII SQLSTATE.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvalidSqlState {
+    /// The rejected input.
+    pub input: String,
+}
+
+impl fmt::Display for InvalidSqlState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "SQLSTATE must be exactly 5 ASCII characters, got {:?}",
+            self.input
+        )
+    }
+}
+
+impl std::error::Error for InvalidSqlState {}
+
+impl TryFrom<&str> for SqlState {
+    type Error = InvalidSqlState;
+
+    /// The checked constructor, for a SQLSTATE that is not a literal — one read
+    /// from a data source's own error payload, say.
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        if s.len() == 5 && s.is_ascii() {
+            let mut buf = [0u8; 5];
+            buf.copy_from_slice(s.as_bytes());
+            Ok(Self(buf))
+        } else {
+            Err(InvalidSqlState {
+                input: s.to_string(),
+            })
+        }
+    }
+}
 
 impl SqlState {
     /// Creates a `SqlState` from a string slice.
@@ -131,6 +179,8 @@ impl SqlState {
     /// assertion will panic; in release builds shorter strings are zero-padded
     /// (producing an invalid state), so callers must always pass a valid 5-char
     /// SQLSTATE literal. All factory methods on this type satisfy this contract.
+    ///
+    /// Use `SqlState::try_from(s)` instead when `s` is not a literal.
     pub fn new(s: &str) -> Self {
         debug_assert!(
             s.len() == 5 && s.is_ascii(),
@@ -355,6 +405,39 @@ mod tests {
     fn sqlstate_roundtrip() {
         let state = SqlState::new(GENERAL_ERROR);
         assert_eq!(state.as_str(), GENERAL_ERROR);
+    }
+
+    #[test]
+    fn try_from_accepts_a_five_character_ascii_state() {
+        let state = SqlState::try_from("08S01").expect("valid SQLSTATE");
+        assert_eq!(state.as_str(), "08S01");
+    }
+
+    #[test]
+    fn try_from_rejects_anything_that_is_not_five_ascii_characters() {
+        // The reason the byte array is private: each of these used to be
+        // constructible, and each makes `as_str` return its "?????" fallback.
+        for bad in ["", "HY0", "HY0000", "HY00é"] {
+            let err = SqlState::try_from(bad).expect_err("must reject {bad:?}");
+            assert_eq!(err.input, bad);
+        }
+    }
+
+    #[test]
+    fn equality_lets_a_driver_compare_states_without_strings() {
+        // The missing `PartialEq` was why no driver could write
+        // `assert_eq!(err.sqlstate(), SqlState::general_error())`.
+        assert_eq!(SqlState::general_error(), SqlState::new(GENERAL_ERROR));
+        assert_ne!(SqlState::general_error(), SqlState::connection_not_open());
+    }
+
+    #[test]
+    fn states_can_be_hashed_and_used_as_map_keys() {
+        let set: std::collections::HashSet<SqlState> =
+            [SqlState::general_error(), SqlState::general_error()]
+                .into_iter()
+                .collect();
+        assert_eq!(set.len(), 1, "equal states must hash equally");
     }
 
     #[test]

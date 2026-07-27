@@ -5,7 +5,7 @@
 
 use crate::backend::{Backend, StatementBackend};
 use crate::errors::OdbcError;
-use crate::types::{ConnectParams, InfoValue, TypeInfoRow};
+use crate::types::{ConnectParams, InfoValue, Nullable, TypeInfoRow};
 
 // ---------------------------------------------------------------------------
 // Shared types
@@ -148,7 +148,8 @@ pub fn synthetic_result_set(
             sql_type: crate::types::SqlDataType::INTEGER,
             precision: 10,
             scale: 0,
-            nullable: true,
+            nullable: Nullable::SqlNullable,
+            ..Default::default()
         }],
         rows,
     )

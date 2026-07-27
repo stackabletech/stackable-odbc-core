@@ -351,7 +351,15 @@ impl TypeInfoRow {
 
 /// Describes one result-set column: what `SQLDescribeColW` and
 /// `SQLColAttributeW` report to the application.
+///
+/// `#[non_exhaustive]`: `SQLColAttribute` defines many more descriptor fields
+/// than this carries, and each one added would otherwise be a breaking change
+/// for every driver that builds a descriptor with struct-literal syntax. Build
+/// one with [`ColumnDescriptor::new`] and the `with_*` builders, which stay
+/// source-compatible as fields are added. (`..Default::default()` is not an
+/// escape hatch here — `#[non_exhaustive]` forbids that form downstream too.)
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct ColumnDescriptor {
     /// Column alias if present, otherwise the column name.
     pub name: String,
@@ -368,5 +376,129 @@ pub struct ColumnDescriptor {
     pub sql_type: SqlDataType,
     pub precision: u32,
     pub scale: i16,
-    pub nullable: bool,
+    /// Whether the column accepts `NULL` — `SQL_DESC_NULLABLE`.
+    ///
+    /// A [`Nullable`], not a `bool`, because the spec defines *three* values and
+    /// the third is not expressible as a boolean: `SQL_NULLABLE_UNKNOWN` is what
+    /// a driver must report for a computed or outer-joined column whose
+    /// nullability it cannot determine. Reporting `SQL_NO_NULLS` for those, as a
+    /// `bool` forced, tells an application it may omit a NULL check it needs.
+    pub nullable: Nullable,
+    /// `SQL_DESC_SEARCHABLE` — one of [`SQL_PRED_NONE`], [`SQL_PRED_CHAR`],
+    /// [`SQL_PRED_BASIC`] or [`SQL_SEARCHABLE`].
+    ///
+    /// [`SQL_PRED_NONE`]: crate::types::SQL_PRED_NONE
+    /// [`SQL_PRED_CHAR`]: crate::types::SQL_PRED_CHAR
+    /// [`SQL_PRED_BASIC`]: crate::types::SQL_PRED_BASIC
+    /// [`SQL_SEARCHABLE`]: crate::types::SQL_SEARCHABLE
+    pub searchable: i16,
+    /// `SQL_DESC_LITERAL_PREFIX` — the character(s) that open a literal of this
+    /// type, e.g. `'` for a character type or `0x` for binary. Empty when the
+    /// type has no literal form.
+    pub literal_prefix: String,
+    /// `SQL_DESC_LITERAL_SUFFIX` — the closing counterpart of
+    /// `literal_prefix`.
+    pub literal_suffix: String,
+    /// `SQL_DESC_TABLE_NAME` — the table this column came from, empty when the
+    /// backend does not track it or the column is computed.
+    pub table_name: String,
+    /// `SQL_DESC_SCHEMA_NAME` — empty when the data source has no schemas or
+    /// the backend does not track them.
+    pub schema_name: String,
+    /// `SQL_DESC_CATALOG_NAME` — empty when the data source has no catalogs or
+    /// the backend does not track them.
+    pub catalog_name: String,
+}
+
+impl Default for ColumnDescriptor {
+    /// An unnamed column of unknown type, claiming nothing.
+    ///
+    /// Exists so core can extend the struct without rewriting every literal;
+    /// a driver should build descriptors with [`ColumnDescriptor::new`], which
+    /// makes the two fields that matter explicit.
+    fn default() -> Self {
+        Self::new(String::new(), SqlDataType::UNKNOWN_TYPE)
+    }
+}
+
+impl ColumnDescriptor {
+    /// A descriptor for `name` of `sql_type`, with every other field at its
+    /// least-committal value: no declared precision or scale, nullability
+    /// unknown, fully searchable, and no literal or origin information.
+    ///
+    /// `SQL_NULLABLE_UNKNOWN` is the default because it is the only one of the
+    /// three that claims nothing. A backend that knows better says so with
+    /// [`ColumnDescriptor::with_nullable`].
+    pub fn new(name: impl Into<String>, sql_type: SqlDataType) -> Self {
+        Self {
+            name: name.into(),
+            type_name: String::new(),
+            sql_type,
+            precision: 0,
+            scale: 0,
+            nullable: Nullable::SqlNullableUnknown,
+            searchable: crate::types::SQL_SEARCHABLE,
+            literal_prefix: String::new(),
+            literal_suffix: String::new(),
+            table_name: String::new(),
+            schema_name: String::new(),
+            catalog_name: String::new(),
+        }
+    }
+
+    /// Sets the data-source-specific type name (`SQL_DESC_TYPE_NAME`).
+    #[must_use]
+    pub fn with_type_name(mut self, type_name: impl Into<String>) -> Self {
+        self.type_name = type_name.into();
+        self
+    }
+
+    /// Sets the declared precision and scale.
+    #[must_use]
+    pub fn with_precision_scale(mut self, precision: u32, scale: i16) -> Self {
+        self.precision = precision;
+        self.scale = scale;
+        self
+    }
+
+    /// Sets the column's nullability (`SQL_DESC_NULLABLE`).
+    #[must_use]
+    pub fn with_nullable(mut self, nullable: Nullable) -> Self {
+        self.nullable = nullable;
+        self
+    }
+
+    /// Sets how the column may be used in a `WHERE` clause
+    /// (`SQL_DESC_SEARCHABLE`).
+    #[must_use]
+    pub fn with_searchable(mut self, searchable: i16) -> Self {
+        self.searchable = searchable;
+        self
+    }
+
+    /// Sets the literal prefix and suffix for this column's type.
+    #[must_use]
+    pub fn with_literal_affixes(
+        mut self,
+        prefix: impl Into<String>,
+        suffix: impl Into<String>,
+    ) -> Self {
+        self.literal_prefix = prefix.into();
+        self.literal_suffix = suffix.into();
+        self
+    }
+
+    /// Sets the catalog, schema and table the column originates from.
+    #[must_use]
+    pub fn with_origin(
+        mut self,
+        catalog: impl Into<String>,
+        schema: impl Into<String>,
+        table: impl Into<String>,
+    ) -> Self {
+        self.catalog_name = catalog.into();
+        self.schema_name = schema.into();
+        self.table_name = table.into();
+        self
+    }
 }

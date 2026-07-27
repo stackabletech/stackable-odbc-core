@@ -21,7 +21,7 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use odbc_sys::{CDataType, SqlDataType};
 use stackable_odbc_core::backend::StatementBackend;
 use stackable_odbc_core::synthetic::SyntheticStatement;
-use stackable_odbc_core::types::{ColumnDescriptor, ColumnValue, FetchResult};
+use stackable_odbc_core::types::{ColumnDescriptor, ColumnValue, FetchResult, Nullable};
 use std::hint::black_box;
 use std::time::Duration;
 
@@ -126,13 +126,10 @@ fn shape_b_rows(n_rows: usize, s_len: usize) -> Vec<Vec<ColumnValue>> {
 
 fn columns(n: usize) -> Vec<ColumnDescriptor> {
     (0..n)
-        .map(|i| ColumnDescriptor {
-            name: format!("col{i}"),
-            type_name: String::new(),
-            sql_type: SqlDataType::EXT_W_VARCHAR,
-            precision: 255,
-            scale: 0,
-            nullable: true,
+        .map(|i| {
+            ColumnDescriptor::new(format!("col{i}"), SqlDataType::EXT_W_VARCHAR)
+                .with_precision_scale(255, 0)
+                .with_nullable(Nullable::SqlNullable)
         })
         .collect()
 }

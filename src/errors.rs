@@ -156,7 +156,7 @@ impl OdbcError {
             OdbcError::NoResultSet => SqlState::invalid_cursor_state(),
             OdbcError::StringTruncated => SqlState::string_data_right_truncated(),
             OdbcError::FractionalTruncation => SqlState::fractional_truncation(),
-            OdbcError::General { sqlstate, .. } => sqlstate.clone(),
+            OdbcError::General { sqlstate, .. } => *sqlstate,
             OdbcError::Panic { .. } => SqlState::general_error(),
             OdbcError::MissingParameter { .. } => SqlState::general_error(),
         }

@@ -3,7 +3,7 @@
 //! `SQLForeignKeys` must return, as enums that produce the corresponding
 //! [`ColumnDescriptor`]s.
 
-use crate::types::{ColumnDescriptor, SqlDataType};
+use crate::types::{ColumnDescriptor, Nullable, SqlDataType};
 
 /// The data-source-dependent widths of an ODBC catalog result set's columns.
 ///
@@ -114,7 +114,7 @@ pub(crate) const INTEGER_LEN: u32 = 10;
 pub(crate) fn identifier(
     name: &'static str,
     widths: &CatalogResultColumnWidths,
-    nullable: bool,
+    nullable: Nullable,
 ) -> ColumnDescriptor {
     character(name, u32::from(widths.identifier_len), widths, nullable)
 }
@@ -124,7 +124,7 @@ pub(crate) fn character(
     name: &'static str,
     precision: u32,
     widths: &CatalogResultColumnWidths,
-    nullable: bool,
+    nullable: Nullable,
 ) -> ColumnDescriptor {
     ColumnDescriptor {
         name: name.into(),
@@ -133,6 +133,7 @@ pub(crate) fn character(
         precision,
         scale: 0,
         nullable,
+        ..Default::default()
     }
 }
 
@@ -141,7 +142,7 @@ pub(crate) fn fixed_char(
     name: &'static str,
     precision: u32,
     widths: &CatalogResultColumnWidths,
-    nullable: bool,
+    nullable: Nullable,
 ) -> ColumnDescriptor {
     ColumnDescriptor {
         name: name.into(),
@@ -150,11 +151,12 @@ pub(crate) fn fixed_char(
         precision,
         scale: 0,
         nullable,
+        ..Default::default()
     }
 }
 
 /// A `SQL_SMALLINT` column in a catalog result set.
-pub(crate) fn smallint(name: &'static str, nullable: bool) -> ColumnDescriptor {
+pub(crate) fn smallint(name: &'static str, nullable: Nullable) -> ColumnDescriptor {
     ColumnDescriptor {
         name: name.into(),
         type_name: String::new(),
@@ -162,11 +164,12 @@ pub(crate) fn smallint(name: &'static str, nullable: bool) -> ColumnDescriptor {
         precision: SMALLINT_LEN,
         scale: 0,
         nullable,
+        ..Default::default()
     }
 }
 
 /// A `SQL_INTEGER` column in a catalog result set.
-pub(crate) fn integer(name: &'static str, nullable: bool) -> ColumnDescriptor {
+pub(crate) fn integer(name: &'static str, nullable: Nullable) -> ColumnDescriptor {
     ColumnDescriptor {
         name: name.into(),
         type_name: String::new(),
@@ -174,6 +177,7 @@ pub(crate) fn integer(name: &'static str, nullable: bool) -> ColumnDescriptor {
         precision: INTEGER_LEN,
         scale: 0,
         nullable,
+        ..Default::default()
     }
 }
 
@@ -218,11 +222,18 @@ impl TablesResultCol {
     /// always populates them.
     pub fn descriptor(self, widths: &CatalogResultColumnWidths) -> ColumnDescriptor {
         match self {
-            Self::TableCat => identifier(self.name(), widths, true),
-            Self::TableSchem => identifier(self.name(), widths, true),
-            Self::TableName => identifier(self.name(), widths, true),
-            Self::TableType => character(self.name(), TABLE_TYPE_LEN, widths, true),
-            Self::Remarks => character(self.name(), widths.remarks_len, widths, true),
+            Self::TableCat => identifier(self.name(), widths, Nullable::SqlNullable),
+            Self::TableSchem => identifier(self.name(), widths, Nullable::SqlNullable),
+            Self::TableName => identifier(self.name(), widths, Nullable::SqlNullable),
+            Self::TableType => {
+                character(self.name(), TABLE_TYPE_LEN, widths, Nullable::SqlNullable)
+            }
+            Self::Remarks => character(
+                self.name(),
+                widths.remarks_len,
+                widths,
+                Nullable::SqlNullable,
+            ),
         }
     }
 
@@ -300,24 +311,34 @@ impl ColumnsResultCol {
     /// `widths` gives.
     pub fn descriptor(self, widths: &CatalogResultColumnWidths) -> ColumnDescriptor {
         match self {
-            Self::TableCat => identifier(self.name(), widths, true),
-            Self::TableSchem => identifier(self.name(), widths, true),
-            Self::TableName => identifier(self.name(), widths, false),
-            Self::ColumnName => identifier(self.name(), widths, false),
-            Self::DataType => smallint(self.name(), false),
-            Self::TypeName => identifier(self.name(), widths, false),
-            Self::ColumnSize => integer(self.name(), true),
-            Self::BufferLength => integer(self.name(), true),
-            Self::DecimalDigits => smallint(self.name(), true),
-            Self::NumPrecRadix => smallint(self.name(), true),
-            Self::Nullable => smallint(self.name(), false),
-            Self::Remarks => character(self.name(), widths.remarks_len, widths, true),
-            Self::ColumnDef => character(self.name(), widths.remarks_len, widths, true),
-            Self::SqlDataType => smallint(self.name(), false),
-            Self::SqlDatetimeSub => smallint(self.name(), true),
-            Self::CharOctetLength => integer(self.name(), true),
-            Self::OrdinalPosition => integer(self.name(), false),
-            Self::IsNullable => character(self.name(), YES_NO_LEN, widths, true),
+            Self::TableCat => identifier(self.name(), widths, Nullable::SqlNullable),
+            Self::TableSchem => identifier(self.name(), widths, Nullable::SqlNullable),
+            Self::TableName => identifier(self.name(), widths, Nullable::SqlNoNulls),
+            Self::ColumnName => identifier(self.name(), widths, Nullable::SqlNoNulls),
+            Self::DataType => smallint(self.name(), Nullable::SqlNoNulls),
+            Self::TypeName => identifier(self.name(), widths, Nullable::SqlNoNulls),
+            Self::ColumnSize => integer(self.name(), Nullable::SqlNullable),
+            Self::BufferLength => integer(self.name(), Nullable::SqlNullable),
+            Self::DecimalDigits => smallint(self.name(), Nullable::SqlNullable),
+            Self::NumPrecRadix => smallint(self.name(), Nullable::SqlNullable),
+            Self::Nullable => smallint(self.name(), Nullable::SqlNoNulls),
+            Self::Remarks => character(
+                self.name(),
+                widths.remarks_len,
+                widths,
+                Nullable::SqlNullable,
+            ),
+            Self::ColumnDef => character(
+                self.name(),
+                widths.remarks_len,
+                widths,
+                Nullable::SqlNullable,
+            ),
+            Self::SqlDataType => smallint(self.name(), Nullable::SqlNoNulls),
+            Self::SqlDatetimeSub => smallint(self.name(), Nullable::SqlNullable),
+            Self::CharOctetLength => integer(self.name(), Nullable::SqlNullable),
+            Self::OrdinalPosition => integer(self.name(), Nullable::SqlNoNulls),
+            Self::IsNullable => character(self.name(), YES_NO_LEN, widths, Nullable::SqlNullable),
         }
     }
 
@@ -384,12 +405,12 @@ impl PrimaryKeysResultCol {
     /// `widths` gives.
     pub fn descriptor(self, widths: &CatalogResultColumnWidths) -> ColumnDescriptor {
         match self {
-            Self::TableCat => identifier(self.name(), widths, true),
-            Self::TableSchem => identifier(self.name(), widths, true),
-            Self::TableName => identifier(self.name(), widths, false),
-            Self::ColumnName => identifier(self.name(), widths, false),
-            Self::KeySeq => smallint(self.name(), false),
-            Self::PkName => identifier(self.name(), widths, true),
+            Self::TableCat => identifier(self.name(), widths, Nullable::SqlNullable),
+            Self::TableSchem => identifier(self.name(), widths, Nullable::SqlNullable),
+            Self::TableName => identifier(self.name(), widths, Nullable::SqlNoNulls),
+            Self::ColumnName => identifier(self.name(), widths, Nullable::SqlNoNulls),
+            Self::KeySeq => smallint(self.name(), Nullable::SqlNoNulls),
+            Self::PkName => identifier(self.name(), widths, Nullable::SqlNullable),
         }
     }
 
@@ -460,20 +481,20 @@ impl ForeignKeysResultCol {
     /// `widths` gives.
     pub fn descriptor(self, widths: &CatalogResultColumnWidths) -> ColumnDescriptor {
         match self {
-            Self::PkTableCat => identifier(self.name(), widths, true),
-            Self::PkTableSchem => identifier(self.name(), widths, true),
-            Self::PkTableName => identifier(self.name(), widths, false),
-            Self::PkColumnName => identifier(self.name(), widths, false),
-            Self::FkTableCat => identifier(self.name(), widths, true),
-            Self::FkTableSchem => identifier(self.name(), widths, true),
-            Self::FkTableName => identifier(self.name(), widths, false),
-            Self::FkColumnName => identifier(self.name(), widths, false),
-            Self::KeySeq => smallint(self.name(), false),
-            Self::UpdateRule => smallint(self.name(), true),
-            Self::DeleteRule => smallint(self.name(), true),
-            Self::FkName => identifier(self.name(), widths, true),
-            Self::PkName => identifier(self.name(), widths, true),
-            Self::Deferrability => smallint(self.name(), true),
+            Self::PkTableCat => identifier(self.name(), widths, Nullable::SqlNullable),
+            Self::PkTableSchem => identifier(self.name(), widths, Nullable::SqlNullable),
+            Self::PkTableName => identifier(self.name(), widths, Nullable::SqlNoNulls),
+            Self::PkColumnName => identifier(self.name(), widths, Nullable::SqlNoNulls),
+            Self::FkTableCat => identifier(self.name(), widths, Nullable::SqlNullable),
+            Self::FkTableSchem => identifier(self.name(), widths, Nullable::SqlNullable),
+            Self::FkTableName => identifier(self.name(), widths, Nullable::SqlNoNulls),
+            Self::FkColumnName => identifier(self.name(), widths, Nullable::SqlNoNulls),
+            Self::KeySeq => smallint(self.name(), Nullable::SqlNoNulls),
+            Self::UpdateRule => smallint(self.name(), Nullable::SqlNullable),
+            Self::DeleteRule => smallint(self.name(), Nullable::SqlNullable),
+            Self::FkName => identifier(self.name(), widths, Nullable::SqlNullable),
+            Self::PkName => identifier(self.name(), widths, Nullable::SqlNullable),
+            Self::Deferrability => smallint(self.name(), Nullable::SqlNullable),
         }
     }
 
@@ -512,19 +533,29 @@ impl ForeignKeysResultCol {
 /// width rather than the identifier width.
 pub fn statistics_columns(widths: &CatalogResultColumnWidths) -> Vec<ColumnDescriptor> {
     vec![
-        identifier("TABLE_CAT", widths, true),
-        identifier("TABLE_SCHEM", widths, true),
-        identifier("TABLE_NAME", widths, false),
-        smallint("NON_UNIQUE", true),
-        identifier("INDEX_QUALIFIER", widths, true),
-        identifier("INDEX_NAME", widths, true),
-        smallint("TYPE", false),
-        smallint("ORDINAL_POSITION", true),
-        identifier("COLUMN_NAME", widths, true),
-        fixed_char("ASC_OR_DESC", ASC_OR_DESC_LEN, widths, true),
-        integer("CARDINALITY", true),
-        integer("PAGES", true),
-        character("FILTER_CONDITION", widths.remarks_len, widths, true),
+        identifier("TABLE_CAT", widths, Nullable::SqlNullable),
+        identifier("TABLE_SCHEM", widths, Nullable::SqlNullable),
+        identifier("TABLE_NAME", widths, Nullable::SqlNoNulls),
+        smallint("NON_UNIQUE", Nullable::SqlNullable),
+        identifier("INDEX_QUALIFIER", widths, Nullable::SqlNullable),
+        identifier("INDEX_NAME", widths, Nullable::SqlNullable),
+        smallint("TYPE", Nullable::SqlNoNulls),
+        smallint("ORDINAL_POSITION", Nullable::SqlNullable),
+        identifier("COLUMN_NAME", widths, Nullable::SqlNullable),
+        fixed_char(
+            "ASC_OR_DESC",
+            ASC_OR_DESC_LEN,
+            widths,
+            Nullable::SqlNullable,
+        ),
+        integer("CARDINALITY", Nullable::SqlNullable),
+        integer("PAGES", Nullable::SqlNullable),
+        character(
+            "FILTER_CONDITION",
+            widths.remarks_len,
+            widths,
+            Nullable::SqlNullable,
+        ),
     ]
 }
 
@@ -537,14 +568,14 @@ pub fn statistics_columns(widths: &CatalogResultColumnWidths) -> Vec<ColumnDescr
 /// `SQL_ROWVER`.
 pub fn special_columns_columns(widths: &CatalogResultColumnWidths) -> Vec<ColumnDescriptor> {
     vec![
-        smallint("SCOPE", true),
-        identifier("COLUMN_NAME", widths, false),
-        smallint("DATA_TYPE", false),
-        identifier("TYPE_NAME", widths, false),
-        integer("COLUMN_SIZE", true),
-        integer("BUFFER_LENGTH", true),
-        smallint("DECIMAL_DIGITS", true),
-        smallint("PSEUDO_COLUMN", true),
+        smallint("SCOPE", Nullable::SqlNullable),
+        identifier("COLUMN_NAME", widths, Nullable::SqlNoNulls),
+        smallint("DATA_TYPE", Nullable::SqlNoNulls),
+        identifier("TYPE_NAME", widths, Nullable::SqlNoNulls),
+        integer("COLUMN_SIZE", Nullable::SqlNullable),
+        integer("BUFFER_LENGTH", Nullable::SqlNullable),
+        smallint("DECIMAL_DIGITS", Nullable::SqlNullable),
+        smallint("PSEUDO_COLUMN", Nullable::SqlNullable),
     ]
 }
 
@@ -693,7 +724,12 @@ mod tests {
     fn every_sqltables_column_is_nullable() {
         let s = CatalogResultColumnWidths::default();
         for desc in TablesResultCol::all_descriptors(&s) {
-            assert!(desc.nullable, "{} must be nullable", desc.name);
+            assert_eq!(
+                desc.nullable,
+                Nullable::SqlNullable,
+                "{} must be nullable",
+                desc.name
+            );
         }
     }
 }

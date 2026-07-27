@@ -940,12 +940,12 @@ pub unsafe fn sql_describe_col_w<B: Backend>(
 
             // Write nullable_ptr if pointer is non-null.
             if !nullable_ptr.is_null() {
-                let nullable = if desc.nullable {
-                    Nullable::SqlNullable as i16
-                } else {
-                    Nullable::SqlNoNulls as i16
-                };
-                std::ptr::write_unaligned(nullable_ptr, nullable);
+                // Written through as-is. While the descriptor carried a
+                // `bool`, `SQL_NULLABLE_UNKNOWN` could not be reported at all
+                // and a column whose nullability the backend could not
+                // determine was announced as `SQL_NO_NULLS` -- telling the
+                // application it could skip a NULL check it actually needs.
+                std::ptr::write_unaligned(nullable_ptr, desc.nullable as i16);
             }
 
             // Write column name via write_utf16.
@@ -1160,14 +1160,14 @@ pub unsafe fn sql_col_attribute_w<B: Backend>(
 /// applications binding by column number expect.
 pub(crate) fn procedures_columns(widths: &CatalogResultColumnWidths) -> Vec<ColumnDescriptor> {
     vec![
-        identifier("PROCEDURE_CAT", widths, true),
-        identifier("PROCEDURE_SCHEM", widths, true),
-        identifier("PROCEDURE_NAME", widths, false),
-        smallint("NUM_INPUT_PARAMS", true),
-        smallint("NUM_OUTPUT_PARAMS", true),
-        smallint("NUM_RESULT_SETS", true),
-        character("REMARKS", widths.remarks_len, widths, true),
-        smallint("PROCEDURE_TYPE", true),
+        identifier("PROCEDURE_CAT", widths, Nullable::SqlNullable),
+        identifier("PROCEDURE_SCHEM", widths, Nullable::SqlNullable),
+        identifier("PROCEDURE_NAME", widths, Nullable::SqlNoNulls),
+        smallint("NUM_INPUT_PARAMS", Nullable::SqlNullable),
+        smallint("NUM_OUTPUT_PARAMS", Nullable::SqlNullable),
+        smallint("NUM_RESULT_SETS", Nullable::SqlNullable),
+        character("REMARKS", widths.remarks_len, widths, Nullable::SqlNullable),
+        smallint("PROCEDURE_TYPE", Nullable::SqlNullable),
     ]
 }
 
@@ -1248,25 +1248,30 @@ pub(crate) fn procedure_columns_columns(
     widths: &CatalogResultColumnWidths,
 ) -> Vec<ColumnDescriptor> {
     vec![
-        identifier("PROCEDURE_CAT", widths, true),
-        identifier("PROCEDURE_SCHEM", widths, true),
-        identifier("PROCEDURE_NAME", widths, false),
-        identifier("COLUMN_NAME", widths, false),
-        smallint("COLUMN_TYPE", false),
-        smallint("DATA_TYPE", false),
-        identifier("TYPE_NAME", widths, false),
-        integer("COLUMN_SIZE", true),
-        integer("BUFFER_LENGTH", true),
-        smallint("DECIMAL_DIGITS", true),
-        smallint("NUM_PREC_RADIX", true),
-        smallint("NULLABLE", false),
-        character("REMARKS", widths.remarks_len, widths, true),
-        character("COLUMN_DEF", widths.remarks_len, widths, true),
-        smallint("SQL_DATA_TYPE", false),
-        smallint("SQL_DATETIME_SUB", true),
-        integer("CHAR_OCTET_LENGTH", true),
-        integer("ORDINAL_POSITION", false),
-        character("IS_NULLABLE", YES_NO_LEN, widths, true),
+        identifier("PROCEDURE_CAT", widths, Nullable::SqlNullable),
+        identifier("PROCEDURE_SCHEM", widths, Nullable::SqlNullable),
+        identifier("PROCEDURE_NAME", widths, Nullable::SqlNoNulls),
+        identifier("COLUMN_NAME", widths, Nullable::SqlNoNulls),
+        smallint("COLUMN_TYPE", Nullable::SqlNoNulls),
+        smallint("DATA_TYPE", Nullable::SqlNoNulls),
+        identifier("TYPE_NAME", widths, Nullable::SqlNoNulls),
+        integer("COLUMN_SIZE", Nullable::SqlNullable),
+        integer("BUFFER_LENGTH", Nullable::SqlNullable),
+        smallint("DECIMAL_DIGITS", Nullable::SqlNullable),
+        smallint("NUM_PREC_RADIX", Nullable::SqlNullable),
+        smallint("NULLABLE", Nullable::SqlNoNulls),
+        character("REMARKS", widths.remarks_len, widths, Nullable::SqlNullable),
+        character(
+            "COLUMN_DEF",
+            widths.remarks_len,
+            widths,
+            Nullable::SqlNullable,
+        ),
+        smallint("SQL_DATA_TYPE", Nullable::SqlNoNulls),
+        smallint("SQL_DATETIME_SUB", Nullable::SqlNullable),
+        integer("CHAR_OCTET_LENGTH", Nullable::SqlNullable),
+        integer("ORDINAL_POSITION", Nullable::SqlNoNulls),
+        character("IS_NULLABLE", YES_NO_LEN, widths, Nullable::SqlNullable),
     ]
 }
 
@@ -1350,14 +1355,14 @@ pub(crate) fn column_privileges_columns(
     widths: &CatalogResultColumnWidths,
 ) -> Vec<ColumnDescriptor> {
     vec![
-        identifier("TABLE_CAT", widths, true),
-        identifier("TABLE_SCHEM", widths, true),
-        identifier("TABLE_NAME", widths, false),
-        identifier("COLUMN_NAME", widths, false),
-        identifier("GRANTOR", widths, true),
-        identifier("GRANTEE", widths, false),
-        character("PRIVILEGE", PRIVILEGE_LEN, widths, false),
-        character("IS_GRANTABLE", YES_NO_LEN, widths, true),
+        identifier("TABLE_CAT", widths, Nullable::SqlNullable),
+        identifier("TABLE_SCHEM", widths, Nullable::SqlNullable),
+        identifier("TABLE_NAME", widths, Nullable::SqlNoNulls),
+        identifier("COLUMN_NAME", widths, Nullable::SqlNoNulls),
+        identifier("GRANTOR", widths, Nullable::SqlNullable),
+        identifier("GRANTEE", widths, Nullable::SqlNoNulls),
+        character("PRIVILEGE", PRIVILEGE_LEN, widths, Nullable::SqlNoNulls),
+        character("IS_GRANTABLE", YES_NO_LEN, widths, Nullable::SqlNullable),
     ]
 }
 
@@ -1441,13 +1446,13 @@ pub(crate) fn table_privileges_columns(
     widths: &CatalogResultColumnWidths,
 ) -> Vec<ColumnDescriptor> {
     vec![
-        identifier("TABLE_CAT", widths, true),
-        identifier("TABLE_SCHEM", widths, true),
-        identifier("TABLE_NAME", widths, false),
-        identifier("GRANTOR", widths, true),
-        identifier("GRANTEE", widths, false),
-        character("PRIVILEGE", PRIVILEGE_LEN, widths, false),
-        character("IS_GRANTABLE", YES_NO_LEN, widths, true),
+        identifier("TABLE_CAT", widths, Nullable::SqlNullable),
+        identifier("TABLE_SCHEM", widths, Nullable::SqlNullable),
+        identifier("TABLE_NAME", widths, Nullable::SqlNoNulls),
+        identifier("GRANTOR", widths, Nullable::SqlNullable),
+        identifier("GRANTEE", widths, Nullable::SqlNoNulls),
+        character("PRIVILEGE", PRIVILEGE_LEN, widths, Nullable::SqlNoNulls),
+        character("IS_GRANTABLE", YES_NO_LEN, widths, Nullable::SqlNullable),
     ]
 }
 
@@ -1708,7 +1713,8 @@ mod tests {
                 sql_type: SqlDataType::VARCHAR,
                 precision: 10,
                 scale: 0,
-                nullable: true,
+                nullable: Nullable::SqlNullable,
+                ..Default::default()
             }],
             vec![],
         )));

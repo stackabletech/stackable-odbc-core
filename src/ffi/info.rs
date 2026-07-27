@@ -10,7 +10,7 @@ use crate::panic::panic_safe;
 use crate::synthetic::SyntheticStatement;
 use crate::types::{
     CREATE_PARAMS_LEN, CatalogResultColumnWidths, ColumnDescriptor, InfoValue, LITERAL_AFFIX_LEN,
-    SqlDataType, SqlReturn, character, identifier, integer, smallint,
+    Nullable, SqlDataType, SqlReturn, character, identifier, integer, smallint,
 };
 use crate::utf16::write_utf16;
 
@@ -399,25 +399,40 @@ pub unsafe fn sql_get_info_w<B: Backend>(
 /// so take their own spec-independent widths.
 pub(crate) fn type_info_columns(widths: &CatalogResultColumnWidths) -> Vec<ColumnDescriptor> {
     vec![
-        identifier("TYPE_NAME", widths, false),
-        smallint("DATA_TYPE", false),
-        integer("COLUMN_SIZE", true),
-        character("LITERAL_PREFIX", LITERAL_AFFIX_LEN, widths, true),
-        character("LITERAL_SUFFIX", LITERAL_AFFIX_LEN, widths, true),
-        character("CREATE_PARAMS", CREATE_PARAMS_LEN, widths, true),
-        smallint("NULLABLE", false),
-        smallint("CASE_SENSITIVE", false),
-        smallint("SEARCHABLE", false),
-        smallint("UNSIGNED_ATTRIBUTE", true),
-        smallint("FIXED_PREC_SCALE", false),
-        smallint("AUTO_UNIQUE_VALUE", true),
-        identifier("LOCAL_TYPE_NAME", widths, true),
-        smallint("MINIMUM_SCALE", true),
-        smallint("MAXIMUM_SCALE", true),
-        smallint("SQL_DATA_TYPE", false),
-        smallint("SQL_DATETIME_SUB", true),
-        integer("NUM_PREC_RADIX", true),
-        smallint("INTERVAL_PRECISION", true),
+        identifier("TYPE_NAME", widths, Nullable::SqlNoNulls),
+        smallint("DATA_TYPE", Nullable::SqlNoNulls),
+        integer("COLUMN_SIZE", Nullable::SqlNullable),
+        character(
+            "LITERAL_PREFIX",
+            LITERAL_AFFIX_LEN,
+            widths,
+            Nullable::SqlNullable,
+        ),
+        character(
+            "LITERAL_SUFFIX",
+            LITERAL_AFFIX_LEN,
+            widths,
+            Nullable::SqlNullable,
+        ),
+        character(
+            "CREATE_PARAMS",
+            CREATE_PARAMS_LEN,
+            widths,
+            Nullable::SqlNullable,
+        ),
+        smallint("NULLABLE", Nullable::SqlNoNulls),
+        smallint("CASE_SENSITIVE", Nullable::SqlNoNulls),
+        smallint("SEARCHABLE", Nullable::SqlNoNulls),
+        smallint("UNSIGNED_ATTRIBUTE", Nullable::SqlNullable),
+        smallint("FIXED_PREC_SCALE", Nullable::SqlNoNulls),
+        smallint("AUTO_UNIQUE_VALUE", Nullable::SqlNullable),
+        identifier("LOCAL_TYPE_NAME", widths, Nullable::SqlNullable),
+        smallint("MINIMUM_SCALE", Nullable::SqlNullable),
+        smallint("MAXIMUM_SCALE", Nullable::SqlNullable),
+        smallint("SQL_DATA_TYPE", Nullable::SqlNoNulls),
+        smallint("SQL_DATETIME_SUB", Nullable::SqlNullable),
+        integer("NUM_PREC_RADIX", Nullable::SqlNullable),
+        smallint("INTERVAL_PRECISION", Nullable::SqlNullable),
     ]
 }
 

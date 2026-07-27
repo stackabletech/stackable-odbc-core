@@ -97,6 +97,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking:** `SqlState`'s byte array is private, and the type derives
+  `Clone, Copy, PartialEq, Eq, Hash`. The public field froze `[u8; 5]` as API and
+  let a caller build a state that was not five ASCII characters, which made
+  `as_str`'s otherwise-unreachable `"?????"` fallback reachable. `TryFrom<&str>`
+  is the checked constructor for a value not known at compile time. The missing
+  `PartialEq` was why no driver could write
+  `assert_eq!(err.sqlstate(), SqlState::general_error())`.
+- **Breaking:** `ColumnDescriptor::nullable` is a `Nullable`, not a `bool`. The
+  spec defines three values and the third is not expressible as a boolean:
+  `SQL_NULLABLE_UNKNOWN` is what a driver must report for a computed or
+  outer-joined column whose nullability it cannot determine, and `SQLDescribeCol`
+  was reporting those as `SQL_NO_NULLS` — telling an application it could skip a
+  NULL check it needs.
+- **Breaking:** `ColumnDescriptor` is `#[non_exhaustive]` and gains `searchable`,
+  `literal_prefix`, `literal_suffix`, `table_name`, `schema_name` and
+  `catalog_name`. `SQLColAttribute` hard-coded all six; a backend that tracks a
+  column's origin or its type's literal form can now report it, and the previous
+  values remain the defaults. Build descriptors with `ColumnDescriptor::new` and
+  the `with_*` builders, which stay source-compatible as fields are added.
 - **Breaking:** `Backend::Error` is now bounded by
   `Into<OdbcError> + From<OdbcError> + std::error::Error + Send + Sync + 'static`,
   and *every* `Backend` method returns `Result<_, Self::Error>`. Previously

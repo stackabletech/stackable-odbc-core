@@ -9,6 +9,8 @@ use crate::backend::{Backend, StatementBackend};
 use crate::errors::{IntoOdbc, OdbcError};
 use crate::handles::{StatementHandle, as_handle_ref};
 use crate::panic::panic_safe;
+#[cfg(test)]
+use crate::types::Nullable;
 use crate::types::{
     SQL_ADD, SQL_DELETE, SQL_DELETE_BY_BOOKMARK, SQL_FETCH_BY_BOOKMARK, SQL_LOCK_EXCLUSIVE,
     SQL_LOCK_NO_CHANGE, SQL_LOCK_UNLOCK, SQL_POSITION, SQL_REFRESH, SQL_UPDATE,
@@ -814,7 +816,8 @@ mod tests {
                             sql_type: crate::types::SqlDataType(4), // INTEGER
                             precision: 10,
                             scale: 0,
-                            nullable: true,
+                            nullable: Nullable::SqlNullable,
+                            ..Default::default()
                         },
                         crate::types::ColumnDescriptor {
                             name: "col2".into(),
@@ -822,7 +825,8 @@ mod tests {
                             sql_type: crate::types::SqlDataType(12), // VARCHAR
                             precision: 255,
                             scale: 0,
-                            nullable: true,
+                            nullable: Nullable::SqlNullable,
+                            ..Default::default()
                         },
                     ],
                     vec![],
@@ -901,7 +905,8 @@ mod tests {
                         sql_type: crate::types::SqlDataType(4),
                         precision: 10,
                         scale: 0,
-                        nullable: true,
+                        nullable: Nullable::SqlNullable,
+                        ..Default::default()
                     }],
                     vec![
                         vec![crate::types::ColumnValue::I32(1)],

@@ -116,7 +116,7 @@ impl StatementBackend for SyntheticStatement {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::SqlDataType;
+    use crate::types::{Nullable, SqlDataType};
 
     fn test_columns() -> Vec<ColumnDescriptor> {
         vec![ColumnDescriptor {
@@ -125,7 +125,8 @@ mod tests {
             sql_type: SqlDataType::INTEGER,
             precision: 10,
             scale: 0,
-            nullable: true,
+            nullable: Nullable::SqlNullable,
+            ..Default::default()
         }]
     }
 

@@ -7,8 +7,8 @@ use odbc_sys::Desc;
 
 use crate::errors::OdbcError;
 use crate::types::{
-    ColumnDescriptor, SQL_ATTR_READWRITE_UNKNOWN, SQL_FALSE, SQL_NAMED, SQL_SEARCHABLE,
-    SQL_UNNAMED, SqlDataType, resolve_precision_isize,
+    ColumnDescriptor, SQL_ATTR_READWRITE_UNKNOWN, SQL_FALSE, SQL_NAMED, SQL_UNNAMED, SqlDataType,
+    resolve_precision_isize,
 };
 
 /// The result of a column attribute query, either a string or a numeric value.
@@ -40,12 +40,15 @@ pub fn get_column_attribute(
         } else {
             desc.type_name.clone()
         })),
-        Desc::TableName | Desc::SchemaName | Desc::CatalogName => {
-            // We don't track table/schema/catalog per-column — return empty string.
-            Ok(ColAttrValue::String(String::new()))
-        }
+        // Taken from the descriptor. These are empty unless the backend
+        // populated them, which is the same answer core used to hard-code --
+        // but a backend that does track a column's origin can now report it.
+        Desc::TableName => Ok(ColAttrValue::String(desc.table_name.clone())),
+        Desc::SchemaName => Ok(ColAttrValue::String(desc.schema_name.clone())),
+        Desc::CatalogName => Ok(ColAttrValue::String(desc.catalog_name.clone())),
         Desc::LocalTypeName => Ok(ColAttrValue::String(String::new())),
-        Desc::LiteralPrefix | Desc::LiteralSuffix => Ok(ColAttrValue::String(String::new())),
+        Desc::LiteralPrefix => Ok(ColAttrValue::String(desc.literal_prefix.clone())),
+        Desc::LiteralSuffix => Ok(ColAttrValue::String(desc.literal_suffix.clone())),
 
         // --- Numeric attributes ---
         Desc::Count => Ok(ColAttrValue::Numeric(isize::from(column_count))),
@@ -55,7 +58,8 @@ pub fn get_column_attribute(
             desc.precision,
         ))),
         Desc::Scale => Ok(ColAttrValue::Numeric(desc.scale as isize)),
-        Desc::Nullable => Ok(ColAttrValue::Numeric(if desc.nullable { 1 } else { 0 })),
+        // All three spec values, not the two a `bool` could carry.
+        Desc::Nullable => Ok(ColAttrValue::Numeric(desc.nullable as isize)),
         Desc::DisplaySize => Ok(ColAttrValue::Numeric(display_size_for(desc))),
         Desc::OctetLength => Ok(ColAttrValue::Numeric(octet_length_for(desc))),
         Desc::Unsigned => Ok(ColAttrValue::Numeric(if is_unsigned(desc.sql_type) {
@@ -63,7 +67,7 @@ pub fn get_column_attribute(
         } else {
             0
         })),
-        Desc::Searchable => Ok(ColAttrValue::Numeric(SQL_SEARCHABLE as isize)),
+        Desc::Searchable => Ok(ColAttrValue::Numeric(isize::from(desc.searchable))),
         Desc::AutoUniqueValue => Ok(ColAttrValue::Numeric(SQL_FALSE as isize)),
         Desc::Updatable => Ok(ColAttrValue::Numeric(SQL_ATTR_READWRITE_UNKNOWN as isize)),
         Desc::FixedPrecScale => Ok(ColAttrValue::Numeric(SQL_FALSE as isize)),
@@ -365,7 +369,7 @@ fn is_numeric_type(sql_type: SqlDataType) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{ColumnDescriptor, SQL_NAMED, SQL_UNNAMED};
+    use crate::types::{ColumnDescriptor, Nullable, SQL_NAMED, SQL_SEARCHABLE, SQL_UNNAMED};
 
     fn varchar_desc() -> ColumnDescriptor {
         ColumnDescriptor {
@@ -374,7 +378,8 @@ mod tests {
             sql_type: SqlDataType::VARCHAR,
             precision: 255,
             scale: 0,
-            nullable: true,
+            nullable: Nullable::SqlNullable,
+            ..Default::default()
         }
     }
 
@@ -385,7 +390,8 @@ mod tests {
             sql_type: SqlDataType::INTEGER,
             precision: 10,
             scale: 0,
-            nullable: false,
+            nullable: Nullable::SqlNoNulls,
+            ..Default::default()
         }
     }
 
@@ -422,6 +428,69 @@ mod tests {
         match get_column_attribute(&desc, 7, Desc::Count).unwrap() {
             ColAttrValue::Numeric(n) => assert_eq!(n, 7),
             ColAttrValue::String(_) => panic!("expected numeric"),
+        }
+    }
+
+    #[test]
+    fn col_attr_nullable_reports_the_unknown_case_the_bool_could_not() {
+        // The reason `nullable` is an enum: SQL_NULLABLE_UNKNOWN is what the
+        // spec requires for a computed or outer-joined column, and a `bool`
+        // forced it to be reported as SQL_NO_NULLS -- telling an application it
+        // could skip a NULL check it needs.
+        let desc = ColumnDescriptor::new("computed", SqlDataType::INTEGER)
+            .with_nullable(Nullable::SqlNullableUnknown);
+        match get_column_attribute(&desc, 5, Desc::Nullable).unwrap() {
+            ColAttrValue::Numeric(n) => assert_eq!(n, 2),
+            other => panic!("expected numeric, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn col_attr_reads_searchable_from_the_descriptor() {
+        let desc = ColumnDescriptor::new("blob", SqlDataType::EXT_LONG_VAR_BINARY)
+            .with_searchable(crate::types::SQL_PRED_NONE);
+        match get_column_attribute(&desc, 5, Desc::Searchable).unwrap() {
+            ColAttrValue::Numeric(n) => assert_eq!(
+                n,
+                isize::from(crate::types::SQL_PRED_NONE),
+                "a column the backend declared unsearchable was reported as searchable"
+            ),
+            other => panic!("expected numeric, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn col_attr_reads_literal_affixes_and_origin_from_the_descriptor() {
+        let desc = ColumnDescriptor::new("c", SqlDataType::VARCHAR)
+            .with_literal_affixes("'", "'")
+            .with_origin("cat", "sch", "tbl");
+        for (field, expected) in [
+            (Desc::LiteralPrefix, "'"),
+            (Desc::LiteralSuffix, "'"),
+            (Desc::CatalogName, "cat"),
+            (Desc::SchemaName, "sch"),
+            (Desc::TableName, "tbl"),
+        ] {
+            let got = expect_string(get_column_attribute(&desc, 5, field).unwrap());
+            assert_eq!(got, expected, "{field:?} was not read from the descriptor");
+        }
+    }
+
+    #[test]
+    fn col_attr_origin_and_affixes_stay_empty_when_the_backend_declares_none() {
+        // The previous hard-coded behaviour, preserved as the default.
+        let desc = ColumnDescriptor::new("c", SqlDataType::VARCHAR);
+        for field in [
+            Desc::LiteralPrefix,
+            Desc::LiteralSuffix,
+            Desc::CatalogName,
+            Desc::SchemaName,
+            Desc::TableName,
+        ] {
+            assert_eq!(
+                expect_string(get_column_attribute(&desc, 5, field).unwrap()),
+                ""
+            );
         }
     }
 
@@ -488,7 +557,8 @@ mod tests {
             sql_type: SqlDataType::SMALLINT,
             precision: 5,
             scale: 0,
-            nullable: true,
+            nullable: Nullable::SqlNullable,
+            ..Default::default()
         }
     }
 
@@ -499,7 +569,8 @@ mod tests {
             sql_type: SqlDataType::EXT_BIG_INT,
             precision: 19,
             scale: 0,
-            nullable: false,
+            nullable: Nullable::SqlNoNulls,
+            ..Default::default()
         }
     }
 
@@ -510,7 +581,8 @@ mod tests {
             sql_type: SqlDataType::EXT_TINY_INT,
             precision: 3,
             scale: 0,
-            nullable: true,
+            nullable: Nullable::SqlNullable,
+            ..Default::default()
         }
     }
 
@@ -521,7 +593,8 @@ mod tests {
             sql_type: SqlDataType::DOUBLE,
             precision: 15,
             scale: 0,
-            nullable: true,
+            nullable: Nullable::SqlNullable,
+            ..Default::default()
         }
     }
 
@@ -532,7 +605,8 @@ mod tests {
             sql_type: SqlDataType::REAL,
             precision: 7,
             scale: 0,
-            nullable: true,
+            nullable: Nullable::SqlNullable,
+            ..Default::default()
         }
     }
 
@@ -543,7 +617,8 @@ mod tests {
             sql_type: SqlDataType::FLOAT,
             precision: 15,
             scale: 0,
-            nullable: true,
+            nullable: Nullable::SqlNullable,
+            ..Default::default()
         }
     }
 
@@ -554,7 +629,8 @@ mod tests {
             sql_type: SqlDataType::EXT_BIT,
             precision: 1,
             scale: 0,
-            nullable: false,
+            nullable: Nullable::SqlNoNulls,
+            ..Default::default()
         }
     }
 
@@ -565,7 +641,8 @@ mod tests {
             sql_type: SqlDataType::EXT_VAR_BINARY,
             precision: 256,
             scale: 0,
-            nullable: true,
+            nullable: Nullable::SqlNullable,
+            ..Default::default()
         }
     }
 
@@ -576,7 +653,8 @@ mod tests {
             sql_type: SqlDataType::INTEGER,
             precision: 10,
             scale: 0,
-            nullable: false,
+            nullable: Nullable::SqlNoNulls,
+            ..Default::default()
         }
     }
 
@@ -651,7 +729,8 @@ mod tests {
             sql_type: SqlDataType::TIMESTAMP,
             precision: column_size,
             scale,
-            nullable: true,
+            nullable: Nullable::SqlNullable,
+            ..Default::default()
         }
     }
 
@@ -792,7 +871,8 @@ mod tests {
                 sql_type,
                 precision: 10,
                 scale: 2,
-                nullable: true,
+                nullable: Nullable::SqlNullable,
+                ..Default::default()
             };
             let n = expect_numeric(get_column_attribute(&desc, 1, Desc::DisplaySize).unwrap());
             assert_eq!(n, 12, "{sql_type:?} display size must be precision + 2");
@@ -818,7 +898,8 @@ mod tests {
                 sql_type: ty,
                 precision: 50,
                 scale: 0,
-                nullable: true,
+                nullable: Nullable::SqlNullable,
+                ..Default::default()
             };
             let n = expect_numeric(get_column_attribute(&desc, 1, Desc::DisplaySize).unwrap());
             assert_eq!(n, 50, "{ty:?} display size must equal precision");
@@ -900,7 +981,8 @@ mod tests {
                 sql_type,
                 precision: 10,
                 scale: 2,
-                nullable: true,
+                nullable: Nullable::SqlNullable,
+                ..Default::default()
             };
             let n = expect_numeric(get_column_attribute(&desc, 1, Desc::OctetLength).unwrap());
             assert_eq!(
@@ -924,7 +1006,8 @@ mod tests {
                 sql_type,
                 precision,
                 scale: 0,
-                nullable: true,
+                nullable: Nullable::SqlNullable,
+                ..Default::default()
             };
             let n = expect_numeric(get_column_attribute(&desc, 1, Desc::OctetLength).unwrap());
             assert_eq!(n, 6, "{sql_type:?} octet length must be 6, not precision");
@@ -941,7 +1024,8 @@ mod tests {
             sql_type: SqlDataType::TIMESTAMP,
             precision: 32,
             scale: 0,
-            nullable: true,
+            nullable: Nullable::SqlNullable,
+            ..Default::default()
         };
         let n = expect_numeric(get_column_attribute(&desc, 1, Desc::OctetLength).unwrap());
         assert_eq!(n, 16, "TIMESTAMP octet length must be 16, not precision");
@@ -969,7 +1053,8 @@ mod tests {
                 sql_type: ty,
                 precision: 50,
                 scale: 0,
-                nullable: true,
+                nullable: Nullable::SqlNullable,
+                ..Default::default()
             };
             let n = expect_numeric(get_column_attribute(&desc, 1, Desc::OctetLength).unwrap());
             assert_eq!(n, 200, "{ty:?} octet length must be precision * 4");
@@ -1155,7 +1240,8 @@ mod tests {
                 sql_type,
                 precision: 10,
                 scale: 0,
-                nullable: false,
+                nullable: Nullable::SqlNoNulls,
+                ..Default::default()
             };
             let s = expect_string(get_column_attribute(&desc, 1, Desc::TypeName).unwrap());
             assert_eq!(s, expected, "type_name_for({:?})", sql_type);
@@ -1191,7 +1277,8 @@ mod tests {
             sql_type,
             precision: 10,
             scale: 0,
-            nullable: false,
+            nullable: Nullable::SqlNoNulls,
+            ..Default::default()
         }
     }
 
@@ -1202,7 +1289,8 @@ mod tests {
             sql_type: SqlDataType::VARCHAR,
             precision,
             scale: 0,
-            nullable: true,
+            nullable: Nullable::SqlNullable,
+            ..Default::default()
         }
     }
 
@@ -1327,7 +1415,8 @@ mod tests {
             sql_type: SqlDataType::DECIMAL,
             precision: 10,
             scale: 2,
-            nullable: true,
+            nullable: Nullable::SqlNullable,
+            ..Default::default()
         };
         let attr = get_column_attribute(&desc, 1, Desc::TypeName).expect("TypeName is supported");
         assert_eq!(attr, ColAttrValue::String("decimal(10,2)".into()));
@@ -1341,7 +1430,8 @@ mod tests {
             sql_type: SqlDataType::INTEGER,
             precision: 10,
             scale: 0,
-            nullable: true,
+            nullable: Nullable::SqlNullable,
+            ..Default::default()
         };
         let attr = get_column_attribute(&desc, 1, Desc::TypeName).expect("TypeName is supported");
         assert_eq!(attr, ColAttrValue::String("INTEGER".into()));
@@ -1357,7 +1447,8 @@ mod tests {
             sql_type: SqlDataType::UNKNOWN_TYPE,
             precision: 0,
             scale: 0,
-            nullable: true,
+            nullable: Nullable::SqlNullable,
+            ..Default::default()
         };
         let attr = get_column_attribute(&desc, 1, Desc::TypeName).expect("TypeName is supported");
         assert_eq!(attr, ColAttrValue::String(String::new()));
@@ -1379,7 +1470,8 @@ mod tests {
                 sql_type: ty,
                 precision: 10,
                 scale: 2,
-                nullable: true,
+                nullable: Nullable::SqlNullable,
+                ..Default::default()
             };
             let attr = get_column_attribute(&desc, 1, Desc::Unsigned).expect("Unsigned supported");
             assert_eq!(attr, ColAttrValue::Numeric(0), "{ty:?} must report signed");
@@ -1396,7 +1488,8 @@ mod tests {
                 sql_type: ty,
                 precision: 10,
                 scale: 0,
-                nullable: true,
+                nullable: Nullable::SqlNullable,
+                ..Default::default()
             };
             let attr = get_column_attribute(&desc, 1, Desc::Unsigned).expect("Unsigned supported");
             assert_eq!(
