@@ -7,8 +7,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::backend::{Backend, StatementBackend};
 use crate::errors::{IntoOdbc, OdbcError};
-use crate::handles::{StatementHandle, as_handle_ref};
-use crate::panic::panic_safe;
+use crate::handles::StatementHandle;
+use crate::panic::panic_safe_scoped;
 #[cfg(test)]
 use crate::types::Nullable;
 use crate::types::{
@@ -68,12 +68,12 @@ pub unsafe fn sql_num_result_cols<B: Backend>(
         column_count_ptr
     );
     // SAFETY: statement_handle is either null or a valid StatementHandle<B> pointer
-    // previously allocated by sql_alloc_handle. panic_safe validates the handle tag
-    // via as_handle_ref before any cast, and catches any panics. column_count_ptr
+    // previously allocated by sql_alloc_handle. scope.get validates kind and group
+    // before any cast, and panic_safe_scoped catches any panics. column_count_ptr
     // is only written through after a null check inside the closure.
     let ret = unsafe {
-        panic_safe::<B, _>(statement_handle, || {
-            let stmt = as_handle_ref::<StatementHandle<B>>(statement_handle)?;
+        panic_safe_scoped::<B, _>(statement_handle, |scope| {
+            let stmt = scope.get::<StatementHandle<B>>(statement_handle)?;
             stmt.diagnostics.clear();
 
             // Spec HY010: No result set.
@@ -143,12 +143,12 @@ pub unsafe fn sql_row_count<B: Backend>(
 ) -> SqlReturn {
     tracing::debug!("SQLRowCount(stmt={:?})", statement_handle);
     // SAFETY: statement_handle is either null or a valid StatementHandle<B> pointer
-    // previously allocated by sql_alloc_handle. panic_safe validates the handle tag
-    // via as_handle_ref before any cast, and catches any panics. row_count_ptr
+    // previously allocated by sql_alloc_handle. scope.get validates kind and group
+    // before any cast, and panic_safe_scoped catches any panics. row_count_ptr
     // is only written through after a null check inside the closure.
     let ret = unsafe {
-        panic_safe::<B, _>(statement_handle, || {
-            let stmt = as_handle_ref::<StatementHandle<B>>(statement_handle)?;
+        panic_safe_scoped::<B, _>(statement_handle, |scope| {
+            let stmt = scope.get::<StatementHandle<B>>(statement_handle)?;
             stmt.diagnostics.clear();
 
             let row_count = match stmt.statement {
@@ -222,11 +222,11 @@ pub unsafe fn sql_row_count<B: Backend>(
 pub unsafe fn sql_more_results<B: Backend>(statement_handle: *mut c_void) -> SqlReturn {
     tracing::debug!("SQLMoreResults(stmt={:?})", statement_handle);
     // SAFETY: statement_handle is either null or a valid StatementHandle<B> pointer
-    // previously allocated by sql_alloc_handle. panic_safe validates the handle tag
-    // via as_handle_ref before any cast, and catches any panics.
+    // previously allocated by sql_alloc_handle. scope.get validates kind and group
+    // before any cast, and panic_safe_scoped catches any panics.
     let ret = unsafe {
-        panic_safe::<B, _>(statement_handle, || {
-            let stmt = as_handle_ref::<StatementHandle<B>>(statement_handle)?;
+        panic_safe_scoped::<B, _>(statement_handle, |scope| {
+            let stmt = scope.get::<StatementHandle<B>>(statement_handle)?;
             stmt.diagnostics.clear();
             Ok(SqlReturn::NO_DATA)
         })
@@ -271,11 +271,11 @@ pub unsafe fn sql_more_results<B: Backend>(statement_handle: *mut c_void) -> Sql
 pub unsafe fn sql_close_cursor<B: Backend>(statement_handle: *mut c_void) -> SqlReturn {
     tracing::debug!("SQLCloseCursor(stmt={:?})", statement_handle);
     // SAFETY: statement_handle is either null or a valid StatementHandle<B> pointer
-    // previously allocated by sql_alloc_handle. panic_safe validates the handle tag
-    // via as_handle_ref before any cast, and catches any panics.
+    // previously allocated by sql_alloc_handle. scope.get validates kind and group
+    // before any cast, and panic_safe_scoped catches any panics.
     let ret = unsafe {
-        panic_safe::<B, _>(statement_handle, || {
-            let stmt = as_handle_ref::<StatementHandle<B>>(statement_handle)?;
+        panic_safe_scoped::<B, _>(statement_handle, |scope| {
+            let stmt = scope.get::<StatementHandle<B>>(statement_handle)?;
             stmt.diagnostics.clear();
 
             // Spec 24000: No cursor open. A statement that is merely prepared
@@ -329,14 +329,16 @@ pub unsafe fn sql_close_cursor<B: Backend>(statement_handle: *mut c_void) -> Sql
 /// # Safety
 ///
 /// `statement_handle` must point to a valid `StatementHandle<B>`.
+// TODO(task-15): SQLCancel must not take the group lock; rewritten with the
+// cancel token.
 pub unsafe fn sql_cancel<B: Backend>(statement_handle: *mut c_void) -> SqlReturn {
     tracing::debug!("SQLCancel(stmt={:?})", statement_handle);
     // SAFETY: statement_handle is either null or a valid StatementHandle<B> pointer
-    // previously allocated by sql_alloc_handle. panic_safe validates the handle tag
-    // via as_handle_ref before any cast, and catches any panics.
+    // previously allocated by sql_alloc_handle. scope.get validates kind and group
+    // before any cast, and panic_safe_scoped catches any panics.
     let ret = unsafe {
-        panic_safe::<B, _>(statement_handle, || {
-            let stmt = as_handle_ref::<StatementHandle<B>>(statement_handle)?;
+        panic_safe_scoped::<B, _>(statement_handle, |scope| {
+            let stmt = scope.get::<StatementHandle<B>>(statement_handle)?;
             stmt.diagnostics.clear();
 
             // `ref mut`: cancel must clear the statement's streaming state
@@ -413,13 +415,13 @@ pub unsafe fn sql_get_cursor_name_w<B: Backend>(
         buffer_length
     );
     // SAFETY: statement_handle is either null or a valid StatementHandle<B> pointer
-    // previously allocated by sql_alloc_handle. panic_safe validates the handle tag
-    // via as_handle_ref before any cast, and catches any panics. cursor_name and
+    // previously allocated by sql_alloc_handle. scope.get validates kind and group
+    // before any cast, and panic_safe_scoped catches any panics. cursor_name and
     // name_length_ptr are only written through by write_utf16, which performs its
     // own null checks.
     let ret = unsafe {
-        panic_safe::<B, _>(statement_handle, || {
-            let stmt = as_handle_ref::<StatementHandle<B>>(statement_handle)?;
+        panic_safe_scoped::<B, _>(statement_handle, |scope| {
+            let stmt = scope.get::<StatementHandle<B>>(statement_handle)?;
             stmt.diagnostics.clear();
 
             // Auto-generate a cursor name if none has been set.
@@ -490,12 +492,12 @@ pub unsafe fn sql_set_cursor_name_w<B: Backend>(
         name_length
     );
     // SAFETY: statement_handle is either null or a valid StatementHandle<B> pointer
-    // previously allocated by sql_alloc_handle. panic_safe validates the handle tag
-    // via as_handle_ref before any cast, and catches any panics. cursor_name is read
+    // previously allocated by sql_alloc_handle. scope.get validates kind and group
+    // before any cast, and panic_safe_scoped catches any panics. cursor_name is read
     // by utf16_to_string which handles null pointers by returning None.
     let ret = unsafe {
-        panic_safe::<B, _>(statement_handle, || {
-            let stmt = as_handle_ref::<StatementHandle<B>>(statement_handle)?;
+        panic_safe_scoped::<B, _>(statement_handle, |scope| {
+            let stmt = scope.get::<StatementHandle<B>>(statement_handle)?;
             stmt.diagnostics.clear();
 
             // Spec HY009: null pointer.
@@ -589,11 +591,11 @@ pub unsafe fn sql_bulk_operations<B: Backend>(
         operation
     );
     // SAFETY: statement_handle is either null or a valid StatementHandle<B> pointer
-    // previously allocated by sql_alloc_handle. panic_safe validates the handle tag
-    // via as_handle_ref before any cast, and catches any panics.
+    // previously allocated by sql_alloc_handle. scope.get validates kind and group
+    // before any cast, and panic_safe_scoped catches any panics.
     let ret = unsafe {
-        panic_safe::<B, _>(statement_handle, || {
-            let stmt = as_handle_ref::<StatementHandle<B>>(statement_handle)?;
+        panic_safe_scoped::<B, _>(statement_handle, |scope| {
+            let stmt = scope.get::<StatementHandle<B>>(statement_handle)?;
             stmt.diagnostics.clear();
 
             tracing::debug!("SQLBulkOperations(operation={})", operation);
@@ -701,11 +703,11 @@ pub unsafe fn sql_set_pos<B: Backend>(
         lock_type
     );
     // SAFETY: statement_handle is either null or a valid StatementHandle<B> pointer
-    // previously allocated by sql_alloc_handle. panic_safe validates the handle tag
-    // via as_handle_ref before any cast, and catches any panics.
+    // previously allocated by sql_alloc_handle. scope.get validates kind and group
+    // before any cast, and panic_safe_scoped catches any panics.
     let ret = unsafe {
-        panic_safe::<B, _>(statement_handle, || {
-            let stmt = as_handle_ref::<StatementHandle<B>>(statement_handle)?;
+        panic_safe_scoped::<B, _>(statement_handle, |scope| {
+            let stmt = scope.get::<StatementHandle<B>>(statement_handle)?;
             stmt.diagnostics.clear();
 
             tracing::debug!(
@@ -751,6 +753,7 @@ pub unsafe fn sql_set_pos<B: Backend>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::handles::as_handle_ref;
     use crate::test_utils::{MockBackend, alloc_env_conn_stmt, cleanup_env_conn_stmt};
 
     #[test]

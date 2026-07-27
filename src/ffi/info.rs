@@ -4,9 +4,9 @@ use std::ffi::c_void;
 
 use crate::backend::Backend;
 use crate::errors::{IntoOdbc, OdbcError};
+use crate::handles::ConnectionHandle;
 use crate::handles::StatementData;
-use crate::handles::{ConnectionHandle, StatementHandle, as_handle_ref};
-use crate::panic::panic_safe;
+use crate::panic::panic_safe_scoped;
 use crate::synthetic::SyntheticStatement;
 use crate::types::{
     CREATE_PARAMS_LEN, CatalogResultColumnWidths, ColumnDescriptor, InfoValue, LITERAL_AFFIX_LEN,
@@ -294,10 +294,11 @@ pub unsafe fn sql_get_info_w<B: Backend>(
         info_type
     );
     // SAFETY: connection_handle is null or a valid ConnectionHandle<B> allocated by
-    // sql_alloc_handle; tag is validated by as_handle_ref inside the closure.
+    // sql_alloc_handle. scope.get validates kind and group before any cast, and
+    // panic_safe_scoped catches any panics.
     let ret = unsafe {
-        panic_safe::<B, _>(connection_handle, || {
-            let handle = as_handle_ref::<ConnectionHandle<B>>(connection_handle)?;
+        panic_safe_scoped::<B, _>(connection_handle, |scope| {
+            let handle = scope.get::<ConnectionHandle<B>>(connection_handle)?;
             handle.diagnostics.clear();
 
             // Some info types (SQL_DRIVER_ODBC_VER, SQL_DRIVER_NAME, etc.) are
@@ -503,16 +504,16 @@ pub unsafe fn sql_get_type_info<B: Backend>(
         data_type_val
     );
     // SAFETY: statement_handle is null or a valid StatementHandle<B> allocated by
-    // sql_alloc_handle; tag is validated by as_handle_ref inside the closure.
+    // sql_alloc_handle. scope.stmt_with_parent validates kind and group for both
+    // the statement and its parent connection before any cast, and
+    // panic_safe_scoped catches any panics.
     let ret = unsafe {
-        panic_safe::<B, _>(statement_handle, || {
-            let handle = as_handle_ref::<StatementHandle<B>>(statement_handle)?;
+        panic_safe_scoped::<B, _>(statement_handle, |scope| {
+            let (handle, conn) = scope.stmt_with_parent::<B>(statement_handle)?;
             handle.diagnostics.clear();
 
             // The type list is the data source's, so it comes from the
             // statement's connection.
-            let conn_ptr = handle.conn;
-            let conn = as_handle_ref::<crate::handles::ConnectionHandle<B>>(conn_ptr)?;
             let Some(ref connection) = conn.connection else {
                 return Err(OdbcError::general(
                     "Connection is not open",
@@ -621,10 +622,11 @@ pub unsafe fn sql_get_functions<B: Backend>(
         function_id
     );
     // SAFETY: connection_handle is null or a valid ConnectionHandle<B> allocated by
-    // sql_alloc_handle; tag is validated by as_handle_ref inside the closure.
+    // sql_alloc_handle. scope.get validates kind and group before any cast, and
+    // panic_safe_scoped catches any panics.
     let ret = unsafe {
-        panic_safe::<B, _>(connection_handle, || {
-            let handle = as_handle_ref::<ConnectionHandle<B>>(connection_handle)?;
+        panic_safe_scoped::<B, _>(connection_handle, |scope| {
+            let handle = scope.get::<ConnectionHandle<B>>(connection_handle)?;
             handle.diagnostics.clear();
 
             let functions = B::get_functions();
@@ -759,6 +761,7 @@ pub unsafe fn sql_get_functions<B: Backend>(
 mod tests {
     use super::*;
     use crate::ffi::handle::{sql_alloc_handle, sql_free_handle};
+    use crate::handles::{StatementHandle, as_handle_ref};
     use crate::test_utils::{MockBackend, MockFunctionsBackend, MockTxnDeleteCloseBackend};
 
     /// Drives `SQLGetFunctions` for the ODBC 2.x `SQL_API_ALL_FUNCTIONS` array.

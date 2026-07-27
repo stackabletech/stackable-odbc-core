@@ -6,8 +6,8 @@ use odbc_sys::StatementAttribute;
 
 use crate::backend::Backend;
 use crate::errors::OdbcError;
-use crate::handles::{StatementHandle, as_handle_ref};
-use crate::panic::panic_safe;
+use crate::handles::StatementHandle;
+use crate::panic::panic_safe_scoped;
 use crate::types::{
     SQL_CURSOR_FORWARD_ONLY, SQL_FALSE, SQL_INSENSITIVE, SqlReturn, SqlState,
     statement_attribute_from_raw,
@@ -128,10 +128,11 @@ pub unsafe fn sql_set_stmt_attr_w<B: Backend>(
     let attr = statement_attribute_from_raw(attribute);
     tracing::debug!("SQLSetStmtAttrW: attr={:?}", attr);
     // SAFETY: statement_handle is null or a valid StatementHandle<B> allocated by
-    // sql_alloc_handle; tag is validated by as_handle_ref inside the closure.
+    // sql_alloc_handle. scope.get validates kind and group before any cast, and
+    // panic_safe_scoped catches any panics.
     let ret = unsafe {
-        panic_safe::<B, _>(statement_handle, || {
-            let stmt = as_handle_ref::<StatementHandle<B>>(statement_handle)?;
+        panic_safe_scoped::<B, _>(statement_handle, |scope| {
+            let stmt = scope.get::<StatementHandle<B>>(statement_handle)?;
             stmt.diagnostics.clear();
 
             let int_val = value_ptr as usize;
@@ -371,10 +372,11 @@ pub unsafe fn sql_get_stmt_attr_w<B: Backend>(
     let attr = statement_attribute_from_raw(attribute);
     tracing::debug!("SQLGetStmtAttrW: attr={:?}", attr);
     // SAFETY: statement_handle is null or a valid StatementHandle<B> allocated by
-    // sql_alloc_handle; tag is validated by as_handle_ref inside the closure.
+    // sql_alloc_handle. scope.get validates kind and group before any cast, and
+    // panic_safe_scoped catches any panics.
     let ret = unsafe {
-        panic_safe::<B, _>(statement_handle, || {
-            let stmt = as_handle_ref::<StatementHandle<B>>(statement_handle)?;
+        panic_safe_scoped::<B, _>(statement_handle, |scope| {
+            let stmt = scope.get::<StatementHandle<B>>(statement_handle)?;
             stmt.diagnostics.clear();
 
             // Helper: write a u32 to value_ptr and report size.
@@ -586,30 +588,8 @@ pub unsafe fn sql_get_stmt_attr_w<B: Backend>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ffi::handle::{sql_alloc_handle, sql_free_handle};
-    use crate::test_utils::MockBackend;
-    use odbc_sys::HandleType;
-
-    unsafe fn alloc_env_conn_stmt() -> (*mut c_void, *mut c_void, *mut c_void) {
-        let mut env: *mut c_void = std::ptr::null_mut();
-        let _ = unsafe {
-            sql_alloc_handle::<MockBackend>(HandleType::Env as i16, std::ptr::null_mut(), &mut env)
-        };
-        let mut conn: *mut c_void = std::ptr::null_mut();
-        let _ = unsafe { sql_alloc_handle::<MockBackend>(HandleType::Dbc as i16, env, &mut conn) };
-        let mut stmt: *mut c_void = std::ptr::null_mut();
-        let _ =
-            unsafe { sql_alloc_handle::<MockBackend>(HandleType::Stmt as i16, conn, &mut stmt) };
-        (env, conn, stmt)
-    }
-
-    unsafe fn cleanup(env: *mut c_void, conn: *mut c_void, stmt: *mut c_void) {
-        unsafe {
-            let _ = sql_free_handle::<MockBackend>(HandleType::Stmt as i16, stmt);
-            let _ = sql_free_handle::<MockBackend>(HandleType::Dbc as i16, conn);
-            let _ = sql_free_handle::<MockBackend>(HandleType::Env as i16, env);
-        }
-    }
+    use crate::handles::as_handle_ref;
+    use crate::test_utils::{MockBackend, alloc_env_conn_stmt, cleanup_env_conn_stmt};
 
     #[test]
     fn cursor_sensitivity_agrees_with_the_value_sqlgetinfo_reports() {
@@ -636,7 +616,7 @@ mod tests {
                 "SQLGetStmtAttr reported a different cursor sensitivity than SQLGetInfo"
             );
 
-            cleanup(env, conn, stmt);
+            cleanup_env_conn_stmt(env, conn, stmt);
         }
     }
 
@@ -685,7 +665,7 @@ mod tests {
             );
             assert_eq!(out, 1, "substituted value not reported back");
 
-            cleanup(env, conn, stmt);
+            cleanup_env_conn_stmt(env, conn, stmt);
         }
     }
 
@@ -702,7 +682,7 @@ mod tests {
             assert_eq!(ret, SqlReturn::SUCCESS);
             let handle = as_handle_ref::<StatementHandle<MockBackend>>(stmt).unwrap();
             assert_eq!(handle.diagnostics.len(), 0);
-            cleanup(env, conn, stmt);
+            cleanup_env_conn_stmt(env, conn, stmt);
         }
     }
 
@@ -750,7 +730,7 @@ mod tests {
             );
             assert_eq!(out, 1, "substituted value not reported back");
 
-            cleanup(env, conn, stmt);
+            cleanup_env_conn_stmt(env, conn, stmt);
         }
     }
 
@@ -767,7 +747,7 @@ mod tests {
             assert_eq!(ret, SqlReturn::SUCCESS);
             let handle = as_handle_ref::<StatementHandle<MockBackend>>(stmt).unwrap();
             assert_eq!(handle.diagnostics.len(), 0);
-            cleanup(env, conn, stmt);
+            cleanup_env_conn_stmt(env, conn, stmt);
         }
     }
 
@@ -807,7 +787,7 @@ mod tests {
                 "descriptor handles were not distinct"
             );
 
-            cleanup(env, conn, stmt);
+            cleanup_env_conn_stmt(env, conn, stmt);
         }
     }
 
@@ -834,7 +814,7 @@ mod tests {
             assert_eq!(ret, SqlReturn::SUCCESS);
             assert_eq!(val, SQL_CURSOR_FORWARD_ONLY as u32);
 
-            cleanup(env, conn, stmt);
+            cleanup_env_conn_stmt(env, conn, stmt);
         }
     }
 
@@ -877,7 +857,7 @@ mod tests {
                 val as usize, SQL_CURSOR_FORWARD_ONLY,
                 "SQLGetStmtAttr must report the substituted value"
             );
-            cleanup(env, conn, stmt);
+            cleanup_env_conn_stmt(env, conn, stmt);
         }
     }
 
@@ -895,7 +875,7 @@ mod tests {
             );
             assert_eq!(ret, SqlReturn::SUCCESS);
             assert_eq!(val, 0);
-            cleanup(env, conn, stmt);
+            cleanup_env_conn_stmt(env, conn, stmt);
         }
     }
 
@@ -935,7 +915,7 @@ mod tests {
                 val as usize, SQL_NONSCROLLABLE,
                 "SQLGetStmtAttr must report the substituted value"
             );
-            cleanup(env, conn, stmt);
+            cleanup_env_conn_stmt(env, conn, stmt);
         }
     }
 
@@ -961,7 +941,7 @@ mod tests {
             );
             assert_eq!(ret, SqlReturn::SUCCESS);
             assert_eq!(val, 30);
-            cleanup(env, conn, stmt);
+            cleanup_env_conn_stmt(env, conn, stmt);
         }
     }
 
@@ -971,7 +951,7 @@ mod tests {
             let (env, conn, stmt) = alloc_env_conn_stmt();
             let ret = sql_set_stmt_attr_w::<MockBackend>(stmt, 9999, std::ptr::null_mut(), 0);
             assert_eq!(ret, SqlReturn::SUCCESS);
-            cleanup(env, conn, stmt);
+            cleanup_env_conn_stmt(env, conn, stmt);
         }
     }
 
@@ -1007,7 +987,7 @@ mod tests {
                 0,
             );
             assert_eq!(ret, SqlReturn::ERROR);
-            cleanup(env, conn, stmt);
+            cleanup_env_conn_stmt(env, conn, stmt);
         }
     }
 
@@ -1025,7 +1005,7 @@ mod tests {
                 0,
             );
             assert_eq!(ret, SqlReturn::ERROR);
-            cleanup(env, conn, stmt);
+            cleanup_env_conn_stmt(env, conn, stmt);
         }
     }
 
@@ -1057,7 +1037,7 @@ mod tests {
                 std::ptr::null_mut(),
             );
             assert_eq!(ret, SqlReturn::ERROR);
-            cleanup(env, conn, stmt);
+            cleanup_env_conn_stmt(env, conn, stmt);
         }
     }
 }
