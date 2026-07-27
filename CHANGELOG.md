@@ -146,6 +146,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Security.** A parameter's length indicator is no longer trusted over the
+  buffer the application bound. For `SQL_C_CHAR`, `SQL_C_WCHAR` and
+  `SQL_C_BINARY`, `read_param_value` took the byte count solely from
+  `*StrLen_or_IndPtr` and never consulted `BufferLength`, which it already
+  records at `SQLBindParameter` time. An indicator larger than the buffer built
+  a slice over memory past the end of it, and the backend then sent that to the
+  data source — so adjacent process memory could be read back out of a table.
+  The indicator is now clamped to `BufferLength` and the truncation is logged.
+  A non-positive `BufferLength` carries no bound and is left alone, since zero
+  is how an application declares "not applicable".
 - **Security.** Deeply nested escape sequences killed the host process.
   `translate_slice` and `translate_escape` are mutually recursive, one level per
   nested escape, over SQL the application supplies, and had no depth bound —

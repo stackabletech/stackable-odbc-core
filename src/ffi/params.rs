@@ -376,6 +376,35 @@ pub(crate) fn count_params(sql: &str) -> u16 {
 /// Returns `ColumnValue::Null` when the indicator signals `SQL_NULL_DATA`,
 /// when the value pointer is null, or for unsupported C data types.
 ///
+/// Bound an application-supplied length indicator by the buffer the application
+/// actually bound.
+///
+/// `str_len_or_ind_ptr` is written by the application and is not trustworthy on
+/// its own: an indicator larger than the buffer would build a slice over memory
+/// past the end of it, which the backend then sends to the data source.
+/// `buffer_length` is the driver's own record of the buffer's size, taken at
+/// `SQLBindParameter` time, so it is the bound to apply.
+///
+/// A non-positive `buffer_length` carries no bound and is left alone. Zero is
+/// how an application says "not applicable" for a fixed C type, and character
+/// buffers are bound that way too when the indicator is meant to carry the
+/// length; negative values are rejected by the Driver Manager before reaching
+/// the driver.
+fn clamp_to_bound_buffer(byte_len: usize, buffer_length: isize) -> usize {
+    if buffer_length <= 0 {
+        return byte_len;
+    }
+    let bound = buffer_length as usize;
+    if byte_len > bound {
+        tracing::warn!(
+            "read_param_value: length indicator {byte_len} exceeds the bound buffer of {bound} \
+             bytes; clamping to the buffer"
+        );
+        return bound;
+    }
+    byte_len
+}
+
 /// # Safety
 ///
 /// `binding.value_ptr` and `binding.str_len_or_ind_ptr` must point to valid
@@ -454,7 +483,7 @@ pub(crate) unsafe fn read_param_value(binding: &ParameterBinding) -> ColumnValue
                 if l == SQL_NTS as isize || l < 0 {
                     None
                 } else {
-                    Some(l as usize)
+                    Some(clamp_to_bound_buffer(l as usize, binding.buffer_length))
                 }
             };
             let bytes = if let Some(n) = byte_len {
@@ -494,8 +523,9 @@ pub(crate) unsafe fn read_param_value(binding: &ParameterBinding) -> ColumnValue
                     );
                 } else {
                     // Explicit byte length: ODBC reports lengths in bytes for WChar.
+                    // Clamp before halving, because buffer_length is in bytes too.
                     // Divide by 2 because UTF-16 encodes each code unit as exactly 2 bytes.
-                    l as usize / 2
+                    clamp_to_bound_buffer(l as usize, binding.buffer_length) / 2
                 }
             };
             // SAFETY: value_ptr is non-null and the caller guarantees it points to at least
@@ -511,7 +541,11 @@ pub(crate) unsafe fn read_param_value(binding: &ParameterBinding) -> ColumnValue
                 // SAFETY: str_len_or_ind_ptr is non-null and the caller guarantees it points
                 // to a valid isize provided by the ODBC caller.
                 let l = unsafe { *binding.str_len_or_ind_ptr };
-                if l < 0 { None } else { Some(l as usize) }
+                if l < 0 {
+                    None
+                } else {
+                    Some(clamp_to_bound_buffer(l as usize, binding.buffer_length))
+                }
             };
             match byte_len {
                 Some(n) => {
@@ -1650,6 +1684,89 @@ mod tests {
         };
         let val = unsafe { read_param_value(&binding) };
         assert_eq!(val, ColumnValue::String("ab".to_string()));
+    }
+
+    // -----------------------------------------------------------------------
+    // The length indicator is application-supplied and may exceed the buffer
+    // the application itself bound. `buffer_length` is recorded at
+    // SQLBindParameter time and is the driver's own record of how much memory
+    // exists, so it bounds the read: an indicator larger than it would build a
+    // slice over memory past the buffer and hand it to the backend, which
+    // sends it to the data source.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn read_param_value_char_clamps_an_indicator_larger_than_the_bound_buffer() {
+        let s = b"hello";
+        let mut indicator: isize = 65536;
+        let binding = ParameterBinding {
+            input_output_type: odbc_sys::ParamType::Input,
+            c_type: odbc_sys::CDataType::Char,
+            sql_type: odbc_sys::SqlDataType(12),
+            col_size: 5,
+            decimal_digits: 0,
+            value_ptr: s.as_ptr() as *mut std::ffi::c_void,
+            buffer_length: 5,
+            str_len_or_ind_ptr: &mut indicator,
+        };
+        let val = unsafe { read_param_value(&binding) };
+        assert_eq!(val, ColumnValue::String("hello".to_string()));
+    }
+
+    #[test]
+    fn read_param_value_wchar_clamps_an_indicator_larger_than_the_bound_buffer() {
+        let s: Vec<u16> = "hi".encode_utf16().collect();
+        let mut indicator: isize = 65536;
+        let binding = ParameterBinding {
+            input_output_type: odbc_sys::ParamType::Input,
+            c_type: odbc_sys::CDataType::WChar,
+            sql_type: odbc_sys::SqlDataType(12),
+            col_size: 2,
+            decimal_digits: 0,
+            value_ptr: s.as_ptr() as *mut std::ffi::c_void,
+            buffer_length: 4, // two UTF-16 code units
+            str_len_or_ind_ptr: &mut indicator,
+        };
+        let val = unsafe { read_param_value(&binding) };
+        assert_eq!(val, ColumnValue::String("hi".to_string()));
+    }
+
+    #[test]
+    fn read_param_value_binary_clamps_an_indicator_larger_than_the_bound_buffer() {
+        let bytes: [u8; 4] = [0xDE, 0xAD, 0xBE, 0xEF];
+        let mut indicator: isize = 65536;
+        let binding = ParameterBinding {
+            input_output_type: odbc_sys::ParamType::Input,
+            c_type: odbc_sys::CDataType::Binary,
+            sql_type: odbc_sys::SqlDataType::EXT_BINARY,
+            col_size: 4,
+            decimal_digits: 0,
+            value_ptr: bytes.as_ptr() as *mut std::ffi::c_void,
+            buffer_length: 4,
+            str_len_or_ind_ptr: &mut indicator,
+        };
+        let val = unsafe { read_param_value(&binding) };
+        assert_eq!(val, ColumnValue::Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF]));
+    }
+
+    #[test]
+    fn read_param_value_char_ignores_a_zero_buffer_length() {
+        // Zero means the application declared no buffer size, so it carries no
+        // bound. The indicator remains the only length available.
+        let s = b"hello world";
+        let mut indicator: isize = 5;
+        let binding = ParameterBinding {
+            input_output_type: odbc_sys::ParamType::Input,
+            c_type: odbc_sys::CDataType::Char,
+            sql_type: odbc_sys::SqlDataType(12),
+            col_size: 11,
+            decimal_digits: 0,
+            value_ptr: s.as_ptr() as *mut std::ffi::c_void,
+            buffer_length: 0,
+            str_len_or_ind_ptr: &mut indicator,
+        };
+        let val = unsafe { read_param_value(&binding) };
+        assert_eq!(val, ColumnValue::String("hello".to_string()));
     }
 
     #[test]
