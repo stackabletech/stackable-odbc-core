@@ -360,6 +360,42 @@ markers go away and this section becomes the initial-release notes.
 
 ### Fixed
 
+- `SQLGetData` and `SQLFetch` perform the temporal struct conversions the
+  SQL-to-C table requires. `write_column_value` had an arm for each type to its
+  own C struct and nothing else, so four legal conversions fell through to the
+  catch-all and were refused with `07006`:
+
+  - `SQL_TYPE_DATE` → `SQL_C_TYPE_TIMESTAMP` (time fields zeroed)
+  - `SQL_TYPE_TIME` → `SQL_C_TYPE_TIMESTAMP` (date fields set to the current
+    date, fractional seconds zeroed)
+  - `SQL_TYPE_TIMESTAMP` → `SQL_C_TYPE_DATE` (`01S07` if a time was dropped)
+  - `SQL_TYPE_TIMESTAMP` → `SQL_C_TYPE_TIME` (`01S07` if a fraction was
+    dropped; a discarded date is not a truncation)
+
+  pyodbc requests `SQL_C_TYPE_TIMESTAMP` for temporal columns, so every query
+  selecting a bare `DATE` or `TIME` failed, as did the `{fn CURDATE()}`,
+  `{fn CURTIME()}`, `{d '...'}` and `{t '...'}` escapes that resolve to one.
+
+  The cross pairs stay `07006`: the spec's table has no `SQL_C_TYPE_TIME` row
+  for a date, and no `SQL_C_TYPE_DATE` row for a time.
+
+  `ColumnValue::TimestampTz` gains the same three targets. It has no row in the
+  spec's table, but supporting only `SQL_C_TYPE_TIMESTAMP` for it would leave
+  the identical hole, with a zoned column refusing a plain date where an
+  unzoned one succeeds.
+
+  The existing temporal tests all read their values as `SQL_C_CHAR` or
+  `SQL_C_WCHAR`, which take the string-coercion catch-all, so the entire
+  struct-target half of the table was untested. The new test walks the spec's
+  table instead, asserting the illegal pairs are refused as well as that the
+  legal ones succeed.
+
+  Note that `SQL_TYPE_TIME` → `SQL_C_TYPE_TIMESTAMP` makes `write_column_value`
+  read the wall clock, for that one pair only. The spec requires "the current
+  date" without saying in which zone; core uses UTC, because the standard
+  library has no timezone database and a driver-specific answer would differ
+  between backends.
+
 - `SQLGetDiagFieldW` uses the real values for `SQL_DIAG_COLUMN_NUMBER` and
   `SQL_DIAG_ROW_NUMBER`. They were hand-written as `12` and `13`; `sqlext.h`
   defines them as `-1247` and `-1248`. Three things went wrong at once: the real

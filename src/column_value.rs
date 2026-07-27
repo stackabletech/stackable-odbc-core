@@ -199,6 +199,22 @@ pub unsafe fn write_column_value(
             unsafe { write_fixed(target_ptr, len_ind_ptr, ds) }
         }
 
+        // SQL_TYPE_DATE -> SQL_C_TYPE_TIMESTAMP. Legal per the spec's SQL-to-C
+        // table: "The driver sets the time fields of the timestamp structure to
+        // zero." No SQLSTATE — nothing is lost.
+        (ColumnValue::Date { year, month, day }, CDataType::TypeTimestamp) => {
+            let ts = Timestamp {
+                year: *year,
+                month: *month,
+                day: *day,
+                hour: 0,
+                minute: 0,
+                second: 0,
+                fraction: 0,
+            };
+            unsafe { write_fixed(target_ptr, len_ind_ptr, ts) }
+        }
+
         // --- Time ---
         // SQL_TIME_STRUCT has no fraction field: write the whole-second parts,
         // then report 01S07 if a non-zero fraction had to be dropped to fit.
@@ -225,6 +241,38 @@ pub unsafe fn write_column_value(
             Ok(SqlReturn::SUCCESS)
         }
 
+        // SQL_TYPE_TIME -> SQL_C_TYPE_TIMESTAMP. Legal per the spec's SQL-to-C
+        // table: "The date fields of the timestamp structure are set to the
+        // current date, and the fractional seconds field of the timestamp
+        // structure is set to zero."
+        //
+        // The spec lists no SQLSTATE for this row, so a dropped fraction is not
+        // reported here — unlike the SQL_C_TYPE_TIME row above, where the target
+        // has nowhere to put one. Here the target *has* a fraction field and the
+        // spec still says to zero it, which makes it a defined part of the
+        // conversion rather than a truncation.
+        (
+            ColumnValue::Time {
+                hour,
+                minute,
+                second,
+                ..
+            },
+            CDataType::TypeTimestamp,
+        ) => {
+            let (year, month, day) = current_utc_date();
+            let ts = Timestamp {
+                year,
+                month,
+                day,
+                hour: *hour,
+                minute: *minute,
+                second: *second,
+                fraction: 0,
+            };
+            unsafe { write_fixed(target_ptr, len_ind_ptr, ts) }
+        }
+
         // --- Timestamp ---
         (
             ColumnValue::Timestamp {
@@ -248,6 +296,63 @@ pub unsafe fn write_column_value(
                 fraction: *fraction,
             };
             unsafe { write_fixed(target_ptr, len_ind_ptr, ts) }
+        }
+
+        // SQL_TYPE_TIMESTAMP -> SQL_C_TYPE_DATE. Legal per the spec's SQL-to-C
+        // table, which splits on the time portion: zero is `n/a`, non-zero is
+        // `01S07` with "The time portion of the timestamp is truncated."
+        (
+            ColumnValue::Timestamp {
+                year,
+                month,
+                day,
+                hour,
+                minute,
+                second,
+                fraction,
+            },
+            CDataType::TypeDate,
+        ) => {
+            let ds = Date {
+                year: *year,
+                month: *month,
+                day: *day,
+            };
+            unsafe {
+                let _ = write_fixed(target_ptr, len_ind_ptr, ds)?;
+            }
+            if *hour != 0 || *minute != 0 || *second != 0 || *fraction != 0 {
+                return Err(OdbcError::FractionalTruncation);
+            }
+            Ok(SqlReturn::SUCCESS)
+        }
+
+        // SQL_TYPE_TIMESTAMP -> SQL_C_TYPE_TIME. Legal per the spec's SQL-to-C
+        // table: "The date portion of the timestamp is ignored", and the split
+        // is on the *fractional seconds* alone — a discarded date is not a
+        // truncation, so only a non-zero fraction reports `01S07`.
+        (
+            ColumnValue::Timestamp {
+                hour,
+                minute,
+                second,
+                fraction,
+                ..
+            },
+            CDataType::TypeTime,
+        ) => {
+            let ts = Time {
+                hour: *hour,
+                minute: *minute,
+                second: *second,
+            };
+            unsafe {
+                let _ = write_fixed(target_ptr, len_ind_ptr, ts)?;
+            }
+            if *fraction != 0 {
+                return Err(OdbcError::FractionalTruncation);
+            }
+            Ok(SqlReturn::SUCCESS)
         }
 
         // --- TimestampTz → TypeTimestamp ---
@@ -278,6 +383,64 @@ pub unsafe fn write_column_value(
                 fraction: *fraction,
             };
             unsafe { write_fixed(target_ptr, len_ind_ptr, ts) }
+        }
+
+        // TimestampTz narrowed to SQL_C_TYPE_DATE / SQL_C_TYPE_TIME, by analogy
+        // with the `Timestamp` arms above rather than from the SQL-to-C table,
+        // which has no row for a zoned timestamp. Supporting only
+        // SQL_C_TYPE_TIMESTAMP for `TimestampTz` while `Timestamp` supports all
+        // three would leave the same hole this arm family was added to close: an
+        // application asking a zoned column for a plain date would get 07006
+        // where an unzoned one succeeds. The offset is discarded, as it already
+        // is for SQL_C_TYPE_TIMESTAMP.
+        (
+            ColumnValue::TimestampTz {
+                year,
+                month,
+                day,
+                hour,
+                minute,
+                second,
+                fraction,
+                ..
+            },
+            CDataType::TypeDate,
+        ) => {
+            let ds = Date {
+                year: *year,
+                month: *month,
+                day: *day,
+            };
+            unsafe {
+                let _ = write_fixed(target_ptr, len_ind_ptr, ds)?;
+            }
+            if *hour != 0 || *minute != 0 || *second != 0 || *fraction != 0 {
+                return Err(OdbcError::FractionalTruncation);
+            }
+            Ok(SqlReturn::SUCCESS)
+        }
+        (
+            ColumnValue::TimestampTz {
+                hour,
+                minute,
+                second,
+                fraction,
+                ..
+            },
+            CDataType::TypeTime,
+        ) => {
+            let ts = Time {
+                hour: *hour,
+                minute: *minute,
+                second: *second,
+            };
+            unsafe {
+                let _ = write_fixed(target_ptr, len_ind_ptr, ts)?;
+            }
+            if *fraction != 0 {
+                return Err(OdbcError::FractionalTruncation);
+            }
+            Ok(SqlReturn::SUCCESS)
         }
 
         // --- Coercion: any value → Binary ---
@@ -311,6 +474,78 @@ pub unsafe fn write_column_value(
             SqlState::restricted_data_type_attribute_violation(),
         )),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Helper: today's date, for SQL_TYPE_TIME -> SQL_C_TYPE_TIMESTAMP
+// ---------------------------------------------------------------------------
+
+/// Convert a count of days since 1970-01-01 to a proleptic Gregorian date.
+///
+/// Howard Hinnant's `civil_from_days`, which is exact for the whole range this
+/// can produce and needs no calendar dependency. Kept separate from
+/// [`current_utc_date`] so the arithmetic can be tested against known dates
+/// without a clock in the way.
+fn civil_from_days(days: i64) -> (i64, u16, u16) {
+    // Shift the epoch to 0000-03-01, which puts the leap day at the end of the
+    // 400-year era and makes the month arithmetic below branch-free.
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64; // [0, 146_096]
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11], March = 0
+    let day = (doy - (153 * mp + 2) / 5 + 1) as u16; // [1, 31]
+    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u16; // [1, 12]
+    let year = yoe as i64 + era * 400 + i64::from(month <= 2);
+    (year, month, day)
+}
+
+/// Today's date in UTC.
+///
+/// The `SQL_TYPE_TIME` -> `SQL_C_TYPE_TIMESTAMP` conversion requires it: "The
+/// date fields of the timestamp structure are set to the current date, and the
+/// fractional seconds field of the timestamp structure is set to zero."
+///
+/// UTC, not local time. The spec says "the current date" without saying whose,
+/// and the standard library offers no timezone database, so local time is not
+/// implementable here without a dependency. UTC is at least well defined and
+/// the same for every driver built on this crate.
+///
+/// This is the only wall-clock read in the crate, and it makes
+/// [`write_column_value`] impure for exactly one `(value, target_type)` pair.
+/// `clippy.toml` disallows `SystemTime::now` so that a second one has to be
+/// argued for rather than appearing by accident.
+///
+/// A clock set before 1970 is reported truthfully rather than clamped:
+/// `duration_since` fails in that case, but the error carries the distance
+/// backwards, so the date is still recoverable. There is no SQLSTATE for "no
+/// clock" and the conversion owes a date either way, so the only alternative
+/// would be to substitute one — and a wrong date presented as correct is worse
+/// than an unusual one.
+// The single sanctioned wall-clock read in the crate. `clippy.toml` disallows
+// `SystemTime::now` so that a second one has to be argued for rather than
+// appearing by accident; this one is forced by the spec sentence quoted above,
+// which cannot be satisfied from the column value alone.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "SQL_TYPE_TIME -> SQL_C_TYPE_TIMESTAMP is specified as using the current date"
+)]
+fn current_utc_date() -> (i16, u16, u16) {
+    // `try_from` rather than `as`: a clock far enough out to exceed i64 seconds
+    // is nonsense either way, but wrapping it into a negative would turn a date
+    // in the far future into one in the distant past.
+    let secs = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(since_epoch) => i64::try_from(since_epoch.as_secs()).unwrap_or(i64::MAX),
+        // Before 1970. The error carries how far back, so negate it rather than
+        // discarding it and claiming 1970-01-01.
+        Err(before_epoch) => -i64::try_from(before_epoch.duration().as_secs()).unwrap_or(i64::MAX),
+    };
+    let (year, month, day) = civil_from_days(secs.div_euclid(86_400));
+    // `SQL_TIMESTAMP_STRUCT::year` is an i16, so a year outside it cannot be
+    // represented at all; saturate rather than wrap into a plausible-looking
+    // one. Unreachable for any clock that is merely wrong rather than absurd.
+    (i16::try_from(year).unwrap_or(i16::MAX), month, day)
 }
 
 // ---------------------------------------------------------------------------
@@ -3562,5 +3797,318 @@ mod tests {
             err.sqlstate().as_str(),
             crate::types::sql_state::INVALID_DATETIME_FORMAT
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // SQL-to-C conversions for the temporal types.
+    //
+    // These walk the spec's SQL-to-C conversion table rather than the pairs a
+    // particular backend happens to emit. Every earlier temporal test read its
+    // value as SQL_C_CHAR or SQL_C_WCHAR, which take the string-coercion
+    // catch-all, so the whole struct-target half of the table was untested and
+    // four legal conversions were missing without anything noticing.
+    //
+    // Spec: https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/converting-data-from-sql-to-c-data-types
+    // -----------------------------------------------------------------------
+
+    fn a_date() -> ColumnValue {
+        ColumnValue::Date {
+            year: 2026,
+            month: 7,
+            day: 27,
+        }
+    }
+
+    fn a_time(fraction: u32) -> ColumnValue {
+        ColumnValue::Time {
+            hour: 14,
+            minute: 30,
+            second: 45,
+            fraction,
+        }
+    }
+
+    fn a_timestamp(hour: u16, minute: u16, second: u16, fraction: u32) -> ColumnValue {
+        ColumnValue::Timestamp {
+            year: 2026,
+            month: 7,
+            day: 27,
+            hour,
+            minute,
+            second,
+            fraction,
+        }
+    }
+
+    fn a_timestamp_tz(hour: u16, minute: u16, second: u16, fraction: u32) -> ColumnValue {
+        ColumnValue::TimestampTz {
+            year: 2026,
+            month: 7,
+            day: 27,
+            hour,
+            minute,
+            second,
+            fraction,
+            timezone_offset_minutes: 120,
+        }
+    }
+
+    /// Write `value` as `target_type` into a buffer big enough for any of the
+    /// temporal C structs, and hand back the raw bytes with the outcome.
+    unsafe fn convert(
+        value: &ColumnValue,
+        target_type: CDataType,
+    ) -> (Result<SqlReturn, OdbcError>, [u8; 32], isize) {
+        let mut buf = [0u8; 32];
+        let mut ind: isize = 0;
+        let ret = unsafe {
+            write_column_value(
+                value,
+                target_type,
+                buf.as_mut_ptr() as *mut c_void,
+                buf.len() as isize,
+                &mut ind,
+            )
+        };
+        (ret, buf, ind)
+    }
+
+    #[test]
+    fn temporal_conversion_table_matches_the_spec() {
+        // (SQL value, C target, legal?) for every temporal struct target the
+        // spec's three tables define. The illegal pairs matter as much as the
+        // legal ones: a driver that accepted them would silently invent data.
+        let cases: &[(&str, ColumnValue, CDataType, bool)] = &[
+            // SQL to C: Date — SQL_C_TYPE_DATE and SQL_C_TYPE_TIMESTAMP only.
+            ("DATE -> DATE", a_date(), CDataType::TypeDate, true),
+            (
+                "DATE -> TIMESTAMP",
+                a_date(),
+                CDataType::TypeTimestamp,
+                true,
+            ),
+            ("DATE -> TIME", a_date(), CDataType::TypeTime, false),
+            // SQL to C: Time — SQL_C_TYPE_TIME and SQL_C_TYPE_TIMESTAMP only.
+            ("TIME -> TIME", a_time(0), CDataType::TypeTime, true),
+            (
+                "TIME -> TIMESTAMP",
+                a_time(0),
+                CDataType::TypeTimestamp,
+                true,
+            ),
+            ("TIME -> DATE", a_time(0), CDataType::TypeDate, false),
+            // SQL to C: Timestamp — all three.
+            (
+                "TIMESTAMP -> TIMESTAMP",
+                a_timestamp(1, 2, 3, 0),
+                CDataType::TypeTimestamp,
+                true,
+            ),
+            (
+                "TIMESTAMP -> DATE",
+                a_timestamp(0, 0, 0, 0),
+                CDataType::TypeDate,
+                true,
+            ),
+            (
+                "TIMESTAMP -> TIME",
+                a_timestamp(1, 2, 3, 0),
+                CDataType::TypeTime,
+                true,
+            ),
+            // TimestampTz is core's own variant, with no row in the spec's
+            // table. It must still support the same three targets as
+            // Timestamp: a zoned column that refused a plain date where an
+            // unzoned one succeeded would be the same defect again.
+            (
+                "TIMESTAMPTZ -> TIMESTAMP",
+                a_timestamp_tz(1, 2, 3, 0),
+                CDataType::TypeTimestamp,
+                true,
+            ),
+            (
+                "TIMESTAMPTZ -> DATE",
+                a_timestamp_tz(0, 0, 0, 0),
+                CDataType::TypeDate,
+                true,
+            ),
+            (
+                "TIMESTAMPTZ -> TIME",
+                a_timestamp_tz(1, 2, 3, 0),
+                CDataType::TypeTime,
+                true,
+            ),
+        ];
+
+        for (name, value, target, legal) in cases {
+            let (ret, _, _) = unsafe { convert(value, *target) };
+            if *legal {
+                assert!(
+                    ret.is_ok(),
+                    "{name} is legal per the spec but returned {:?}",
+                    ret.as_ref()
+                        .err()
+                        .map(|e| e.sqlstate().as_str().to_string())
+                );
+            } else {
+                let err = ret.expect_err(&format!("{name} is not in the spec's table"));
+                assert_eq!(
+                    err.sqlstate().as_str(),
+                    crate::types::sql_state::RESTRICTED_DATA_TYPE_ATTRIBUTE_VIOLATION,
+                    "{name} must be refused with 07006"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn date_to_timestamp_zeroes_the_time_fields() {
+        // Spec: "The driver sets the time fields of the timestamp structure to
+        // zero." No SQLSTATE — nothing is lost.
+        let (ret, buf, ind) = unsafe { convert(&a_date(), CDataType::TypeTimestamp) };
+        assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
+        assert_eq!(ind, std::mem::size_of::<Timestamp>() as isize);
+
+        let ts = unsafe { std::ptr::read_unaligned(buf.as_ptr() as *const Timestamp) };
+        assert_eq!(
+            ts,
+            Timestamp {
+                year: 2026,
+                month: 7,
+                day: 27,
+                hour: 0,
+                minute: 0,
+                second: 0,
+                fraction: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn time_to_timestamp_uses_todays_date_and_zeroes_the_fraction() {
+        // Spec: "The date fields of the timestamp structure are set to the
+        // current date, and the fractional seconds field of the timestamp
+        // structure is set to zero."
+        //
+        // A non-zero fraction on the way in must not produce 01S07: the spec
+        // lists no SQLSTATE for this row, so zeroing it is part of the defined
+        // conversion rather than a truncation.
+        let (ret, buf, ind) = unsafe { convert(&a_time(123_456_789), CDataType::TypeTimestamp) };
+        assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
+        assert_eq!(ind, std::mem::size_of::<Timestamp>() as isize);
+
+        let ts = unsafe { std::ptr::read_unaligned(buf.as_ptr() as *const Timestamp) };
+        assert_eq!((ts.hour, ts.minute, ts.second), (14, 30, 45));
+        assert_eq!(ts.fraction, 0, "the fraction must be zeroed");
+
+        let (year, month, day) = current_utc_date();
+        assert_eq!((ts.year, ts.month, ts.day), (year, month, day));
+    }
+
+    #[test]
+    fn timestamp_to_date_reports_01s07_only_when_a_time_is_dropped() {
+        // Spec splits this row on the time portion: zero is n/a, non-zero is
+        // 01S07 with "The time portion of the timestamp is truncated."
+        let (ret, buf, ind) = unsafe { convert(&a_timestamp(0, 0, 0, 0), CDataType::TypeDate) };
+        assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
+        assert_eq!(ind, std::mem::size_of::<Date>() as isize);
+        let d = unsafe { std::ptr::read_unaligned(buf.as_ptr() as *const Date) };
+        assert_eq!(
+            d,
+            Date {
+                year: 2026,
+                month: 7,
+                day: 27
+            }
+        );
+
+        // A dropped time, however small, is a truncation.
+        for value in [
+            a_timestamp(1, 0, 0, 0),
+            a_timestamp(0, 1, 0, 0),
+            a_timestamp(0, 0, 1, 0),
+            a_timestamp(0, 0, 0, 1),
+        ] {
+            let (ret, _, _) = unsafe { convert(&value, CDataType::TypeDate) };
+            let err = ret.expect_err("a dropped time portion must be reported");
+            assert_eq!(
+                err.sqlstate().as_str(),
+                crate::types::sql_state::FRACTIONAL_TRUNCATION
+            );
+        }
+    }
+
+    #[test]
+    fn timestamp_to_time_ignores_the_date_but_reports_a_dropped_fraction() {
+        // Spec: "The date portion of the timestamp is ignored", and the row
+        // splits on the fractional seconds alone — so a discarded date is not a
+        // truncation, but a discarded fraction is.
+        let (ret, buf, ind) = unsafe { convert(&a_timestamp(14, 30, 45, 0), CDataType::TypeTime) };
+        assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
+        assert_eq!(ind, std::mem::size_of::<Time>() as isize);
+        let t = unsafe { std::ptr::read_unaligned(buf.as_ptr() as *const Time) };
+        assert_eq!(
+            t,
+            Time {
+                hour: 14,
+                minute: 30,
+                second: 45
+            }
+        );
+
+        let (ret, _, _) = unsafe { convert(&a_timestamp(14, 30, 45, 1), CDataType::TypeTime) };
+        let err = ret.expect_err("a dropped fraction must be reported");
+        assert_eq!(
+            err.sqlstate().as_str(),
+            crate::types::sql_state::FRACTIONAL_TRUNCATION
+        );
+    }
+
+    #[test]
+    fn civil_from_days_matches_known_dates() {
+        // Pins the calendar arithmetic without a clock in the way: epoch,
+        // both sides of a leap day, a century non-leap year, and a date before
+        // the epoch to exercise the negative-era branch.
+        let cases = [
+            (0_i64, (1970_i64, 1_u16, 1_u16)),
+            (-1, (1969, 12, 31)),
+            (59, (1970, 3, 1)),
+            (365, (1971, 1, 1)),
+            // 2000 was a leap year (divisible by 400); 1900 was not.
+            (11_016, (2000, 2, 29)),
+            (11_017, (2000, 3, 1)),
+            (-25_508, (1900, 3, 1)),
+            (20_661, (2026, 7, 27)),
+        ];
+        for (days, expected) in cases {
+            assert_eq!(civil_from_days(days), expected, "days = {days}");
+        }
+    }
+
+    #[test]
+    fn civil_from_days_handles_a_pre_epoch_clock() {
+        // `current_utc_date` cannot be pointed at a fake clock without a clock
+        // abstraction, but the branch that was wrong is the arithmetic, not the
+        // read: a machine whose clock is set before 1970 used to be given
+        // 1970-01-01 because the error carrying the distance backwards was
+        // discarded. These are the day counts that branch produces.
+        assert_eq!(civil_from_days(-1), (1969, 12, 31));
+        assert_eq!(civil_from_days(-365), (1969, 1, 1));
+        assert_eq!(civil_from_days(-719_468), (0, 3, 1));
+        // A negative second count must floor, not truncate toward zero: any
+        // moment on 1969-12-31 is that date, not 1970-01-01.
+        assert_eq!((-1_i64).div_euclid(86_400), -1);
+        assert_eq!((-86_400_i64).div_euclid(86_400), -1);
+        assert_eq!((-86_401_i64).div_euclid(86_400), -2);
+    }
+
+    #[test]
+    fn current_utc_date_is_plausible() {
+        // The clock itself cannot be asserted, but a wrong epoch or a broken
+        // era branch shows up as an absurd year or an out-of-range field.
+        let (year, month, day) = current_utc_date();
+        assert!((2020..=2200).contains(&year), "implausible year {year}");
+        assert!((1..=12).contains(&month), "month out of range: {month}");
+        assert!((1..=31).contains(&day), "day out of range: {day}");
     }
 }

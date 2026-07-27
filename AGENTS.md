@@ -408,6 +408,13 @@ Takes about 110 seconds for 675 tests, with warm build artifacts. Notes:
 - **That figure assumes warm build artifacts.** A run after any source change
   rebuilds the crate under Miri first, which dominates and can take many
   minutes. Budget for that before assuming a run has hung.
+- **`-Zmiri-disable-isolation` is required, not optional.**
+  `column_value::current_utc_date` reads the wall clock, which the
+  `SQL_TYPE_TIME` → `SQL_C_TYPE_TIMESTAMP` conversion needs ("the date fields
+  of the timestamp structure are set to the current date"). Without the flag
+  Miri refuses `SystemTime::now` as an unsupported operation and the test
+  aborts rather than failing an assertion, which reads like a Miri bug rather
+  than a missing flag.
 
 ### Alignment: what Miri does and does not catch
 
