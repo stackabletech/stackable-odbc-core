@@ -5,8 +5,8 @@ use std::ffi::c_void;
 
 use crate::backend::Backend;
 use crate::errors::{IntoOdbc, OdbcError};
-use crate::handles::{ConnectionHandle, as_handle_ref};
-use crate::panic::panic_safe;
+use crate::handles::ConnectionHandle;
+use crate::panic::panic_safe_scoped;
 use crate::types::{ConnectParams, SQL_NTS, SqlReturn, SqlState};
 use crate::utf16::{utf16_to_string, write_utf16};
 
@@ -90,10 +90,10 @@ pub unsafe fn sql_driver_connect_w<B: Backend>(
         string_length1
     );
     // SAFETY: connection_handle is null or a valid ConnectionHandle<B> allocated by
-    // sql_alloc_handle; tag validated by as_handle_ref inside the closure.
+    // sql_alloc_handle; kind and group are validated by scope.get inside the closure.
     let ret = unsafe {
-        panic_safe::<B, _>(connection_handle, || {
-            let handle = as_handle_ref::<ConnectionHandle<B>>(connection_handle)?;
+        panic_safe_scoped::<B, _>(connection_handle, |scope| {
+            let handle = scope.get::<ConnectionHandle<B>>(connection_handle)?;
             handle.diagnostics.clear();
 
             // Spec 08002: Connection already in use.
@@ -239,10 +239,10 @@ pub unsafe fn sql_connect_w<B: Backend>(
         name_length1
     );
     // SAFETY: connection_handle is null or a valid ConnectionHandle<B> allocated by
-    // sql_alloc_handle; tag validated by as_handle_ref inside the closure.
+    // sql_alloc_handle; kind and group are validated by scope.get inside the closure.
     let ret = unsafe {
-        panic_safe::<B, _>(connection_handle, || {
-            let handle = as_handle_ref::<ConnectionHandle<B>>(connection_handle)?;
+        panic_safe_scoped::<B, _>(connection_handle, |scope| {
+            let handle = scope.get::<ConnectionHandle<B>>(connection_handle)?;
             handle.diagnostics.clear();
 
             // Spec 08002: Connection already in use.
@@ -403,10 +403,10 @@ pub unsafe fn sql_browse_connect_w<B: Backend>(
         string_length1
     );
     // SAFETY: connection_handle is null or a valid ConnectionHandle<B> allocated by
-    // sql_alloc_handle; tag validated by as_handle_ref inside the closure.
+    // sql_alloc_handle; kind and group are validated by scope.get inside the closure.
     let ret = unsafe {
-        panic_safe::<B, _>(connection_handle, || {
-            let handle = as_handle_ref::<ConnectionHandle<B>>(connection_handle)?;
+        panic_safe_scoped::<B, _>(connection_handle, |scope| {
+            let handle = scope.get::<ConnectionHandle<B>>(connection_handle)?;
             handle.diagnostics.clear();
 
             // Spec 08002: Connection already in use.
@@ -698,14 +698,14 @@ fn read_dsn_keys(dsn: &str) -> Vec<(String, String)> {
 pub unsafe fn sql_disconnect<B: Backend>(connection_handle: *mut c_void) -> SqlReturn {
     tracing::debug!("SQLDisconnect(conn={:?})", connection_handle);
     // SAFETY: connection_handle is null or a valid ConnectionHandle<B> allocated by
-    // sql_alloc_handle; tag validated by as_handle_ref inside the closure.
+    // sql_alloc_handle; kind and group are validated by scope.get inside the closure.
     // The raw stmt_ptr values children_of(connection_handle) returns are valid
     // Box<StatementHandle<B>> allocations registered at statement creation
     // time; no other owner exists after disconnect, so Box::from_raw is sound
     // here.
     let ret = unsafe {
-        panic_safe::<B, _>(connection_handle, || {
-            let handle = as_handle_ref::<ConnectionHandle<B>>(connection_handle)?;
+        panic_safe_scoped::<B, _>(connection_handle, |scope| {
+            let handle = scope.get::<ConnectionHandle<B>>(connection_handle)?;
             handle.diagnostics.clear();
 
             // Spec 08003: Connection not open.
@@ -718,10 +718,11 @@ pub unsafe fn sql_disconnect<B: Backend>(connection_handle: *mut c_void) -> SqlR
 
             // Spec: "the driver frees those statements and all descriptors that
             // have been explicitly allocated on the connection."
-            // Invalidate and drop all statement handles. We zero the tag first
-            // so that any subsequent access (e.g. application calls SQLFreeHandle
-            // on a stale pointer) will fail the tag check in as_handle_ref and
-            // return SQL_INVALID_HANDLE rather than causing a double-free.
+            // Invalidate and drop all statement handles. free_connection_statements
+            // retires each one's registry slot before dropping its allocation, so
+            // any subsequent access (e.g. application calls SQLFreeHandle on a
+            // stale pointer) fails the registry's validity check and returns
+            // SQL_INVALID_HANDLE rather than causing a double-free.
             // The registry, not the allocation, is what invalidates a handle:
             // the application may still hold the statement tokens and every one
             // of them must now be refused. This also retires the four
@@ -797,13 +798,13 @@ pub unsafe fn sql_native_sql_w<B: Backend>(
 ) -> SqlReturn {
     tracing::debug!("SQLNativeSqlW(conn={:?})", connection_handle);
     // SAFETY: connection_handle is null or a valid ConnectionHandle<B> allocated by
-    // sql_alloc_handle; tag validated by as_handle_ref inside the closure.
+    // sql_alloc_handle; kind and group are validated by scope.get inside the closure.
     // in_statement_text is a valid pointer to text_length1 UTF-16 code units (or
     // null-terminated if text_length1 == SQL_NTS); null checked before dereference.
     // out_statement_text and text_length2_ptr are checked for null before any write.
     let ret = unsafe {
-        panic_safe::<B, _>(connection_handle, || {
-            let conn = as_handle_ref::<ConnectionHandle<B>>(connection_handle)?;
+        panic_safe_scoped::<B, _>(connection_handle, |scope| {
+            let conn = scope.get::<ConnectionHandle<B>>(connection_handle)?;
             conn.diagnostics.clear();
 
             // Spec 08003: Connection not open. Bound rather than tested,

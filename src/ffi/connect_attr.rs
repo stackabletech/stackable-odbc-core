@@ -6,8 +6,8 @@ use odbc_sys::ConnectionAttribute;
 
 use crate::backend::Backend;
 use crate::errors::{IntoOdbc, OdbcError};
-use crate::handles::{ConnectionHandle, as_handle_ref};
-use crate::panic::panic_safe;
+use crate::handles::ConnectionHandle;
+use crate::panic::panic_safe_scoped;
 use crate::types::{
     SQL_AUTOCOMMIT_OFF, SQL_AUTOCOMMIT_ON, SQL_CD_FALSE, SQL_FALSE, SQL_NTS, SqlReturn, SqlState,
 };
@@ -222,10 +222,10 @@ pub unsafe fn sql_set_connect_attr_w<B: Backend>(
     let attr = ConnectionAttribute(attribute);
     tracing::debug!("SQLSetConnectAttrW: attr={:?}", attr);
     // SAFETY: connection_handle is null or a valid ConnectionHandle<B> allocated by
-    // sql_alloc_handle; tag is validated by as_handle_ref inside the closure.
+    // sql_alloc_handle; kind and group are validated by scope.get inside the closure.
     let ret = unsafe {
-        panic_safe::<B, _>(connection_handle, || {
-            let conn = as_handle_ref::<ConnectionHandle<B>>(connection_handle)?;
+        panic_safe_scoped::<B, _>(connection_handle, |scope| {
+            let conn = scope.get::<ConnectionHandle<B>>(connection_handle)?;
             conn.diagnostics.clear();
 
             match attr {
@@ -453,10 +453,10 @@ pub unsafe fn sql_get_connect_attr_w<B: Backend>(
     let attr = ConnectionAttribute(attribute);
     tracing::debug!("SQLGetConnectAttrW: attr={:?}", attr);
     // SAFETY: connection_handle is null or a valid ConnectionHandle<B> allocated by
-    // sql_alloc_handle; tag is validated by as_handle_ref inside the closure.
+    // sql_alloc_handle; kind and group are validated by scope.get inside the closure.
     let ret = unsafe {
-        panic_safe::<B, _>(connection_handle, || {
-            let conn = as_handle_ref::<ConnectionHandle<B>>(connection_handle)?;
+        panic_safe_scoped::<B, _>(connection_handle, |scope| {
+            let conn = scope.get::<ConnectionHandle<B>>(connection_handle)?;
             conn.diagnostics.clear();
 
             // Helper: write a u32 integer value to value_ptr.
