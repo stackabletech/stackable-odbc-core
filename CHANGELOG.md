@@ -360,6 +360,19 @@ markers go away and this section becomes the initial-release notes.
 
 ### Fixed
 
+- `init_logging` no longer aborts the host process when a global `tracing`
+  subscriber already exists. It installed its subscriber with
+  `SubscriberInitExt::init`, which is `try_init().expect(...)`, and
+  `SQLAllocHandle(SQL_HANDLE_ENV, ...)` runs it *before* entering `panic_safe` —
+  so the panic unwound across the `extern "system"` boundary, which is undefined
+  behaviour. It is the first call every ODBC application makes, and losing the
+  race is ordinary: any Rust host that uses `tracing`, or a second driver built
+  on this crate loaded into the same Driver Manager, gets there first. The panic
+  also poisoned the `Once`, so every later call panicked with "Once instance has
+  previously been poisoned", turning one lost race into a permanently dead
+  driver. Installing the subscriber is now best-effort: whichever subscriber got
+  there first is kept and the driver logs nowhere rather than failing.
+
 - Six functions post the `01004` diagnostic record that their
   `SQL_SUCCESS_WITH_INFO` refers to when they truncate a string:
   `SQLGetInfoW`, `SQLGetConnectAttrW`, `SQLDescribeColW`, `SQLColAttributeW`,

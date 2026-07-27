@@ -10,6 +10,19 @@ static INIT: Once = Once::new();
 /// Call this once during driver startup (e.g., in SQLAllocHandle for SQL_HANDLE_ENV).
 /// Subsequent calls are no-ops.
 ///
+/// Installing the subscriber is best-effort. A driver shares its process with
+/// the application that loaded it, and that application may have installed a
+/// global `tracing` subscriber of its own; so may a second driver built on this
+/// crate, loaded into the same Driver Manager. Only one global subscriber can
+/// exist, so this function keeps whichever one got there first and gives up
+/// silently rather than failing.
+///
+/// It must not panic. `SQLAllocHandle(SQL_HANDLE_ENV, ...)` is the first call
+/// every ODBC application makes, and it runs this before entering `panic_safe` —
+/// a panic here would unwind across the `extern "system"` boundary, which is
+/// undefined behaviour, and would poison the `Once` so that every later call
+/// panicked too.
+///
 /// Environment variables:
 /// - `ODBC_LOG_LEVEL`: tracing filter (e.g. "info", "debug", "trace"). Default: "off".
 /// - `ODBC_LOG_FILE`: log file path. Default: stderr.
@@ -47,7 +60,9 @@ pub fn init_logging() {
             let file = options.open(&log_file);
             match file {
                 Ok(file) => {
-                    tracing_subscriber::registry()
+                    // `try_init` rather than `init`: see the note on this
+                    // function. `init` is `try_init().expect(...)`.
+                    let _ = tracing_subscriber::registry()
                         .with(filter)
                         .with(
                             fmt::layer()
@@ -56,11 +71,11 @@ pub fn init_logging() {
                                 .with_span_events(span_events)
                                 .with_writer(std::sync::Mutex::new(file)),
                         )
-                        .init();
+                        .try_init();
                 }
                 Err(_) => {
                     // Fallback to stderr
-                    tracing_subscriber::registry()
+                    let _ = tracing_subscriber::registry()
                         .with(filter)
                         .with(
                             fmt::layer()
@@ -68,11 +83,11 @@ pub fn init_logging() {
                                 .with_span_events(span_events)
                                 .with_writer(std::io::stderr),
                         )
-                        .init();
+                        .try_init();
                 }
             }
         } else {
-            tracing_subscriber::registry()
+            let _ = tracing_subscriber::registry()
                 .with(filter)
                 .with(
                     fmt::layer()
@@ -80,7 +95,7 @@ pub fn init_logging() {
                         .with_span_events(span_events)
                         .with_writer(std::io::stderr),
                 )
-                .init();
+                .try_init();
         }
     });
 }
