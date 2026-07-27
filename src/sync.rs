@@ -11,3 +11,10 @@ pub(crate) use loom::sync::{Arc, Mutex, MutexGuard, RwLock};
 
 #[cfg(not(loom))]
 pub(crate) use std::sync::{Arc, Mutex, MutexGuard, RwLock};
+
+// Not lock-cfg-dependent: loom's `Mutex`/`RwLock` reuse `std::sync::TryLockError`
+// verbatim rather than defining their own (confirmed in loom 0.7.2's own
+// source), so one spelling already covers both configurations. Re-exported
+// here anyway so lock code never has a reason to reach around this module for
+// a piece of the same API.
+pub(crate) use std::sync::TryLockError;

@@ -984,6 +984,54 @@ mod tests {
         }
     }
 
+    /// A statement and its four descriptors share the connection's lock group
+    /// so that one acquisition covers a call touching either — but a
+    /// connection must not share its environment's group, since
+    /// `SQLEndTran(SQL_HANDLE_ENV)` is the only place lock nesting is allowed
+    /// to happen at all.
+    #[test]
+    fn alloc_wires_the_group_hierarchy_correctly() {
+        unsafe {
+            let mut env_ptr: *mut c_void = std::ptr::null_mut();
+            let _ = alloc_environment::<MockBackend>(&mut env_ptr as *mut _);
+            let mut conn_ptr: *mut c_void = std::ptr::null_mut();
+            let _ = alloc_connection::<MockBackend>(env_ptr, &mut conn_ptr as *mut _);
+            let mut stmt_ptr: *mut c_void = std::ptr::null_mut();
+            let _ = alloc_statement::<MockBackend>(conn_ptr, &mut stmt_ptr as *mut _);
+
+            let env_group = registry().group_of(env_ptr).expect("live");
+            let conn_group = registry().group_of(conn_ptr).expect("live");
+            let stmt_group = registry().group_of(stmt_ptr).expect("live");
+
+            assert!(
+                !Arc::ptr_eq(&env_group, &conn_group),
+                "a connection must not share its environment's lock group"
+            );
+            assert!(
+                Arc::ptr_eq(&conn_group, &stmt_group),
+                "a statement must share its connection's lock group"
+            );
+
+            let stmt = as_handle_ref::<StatementHandle<MockBackend>>(stmt_ptr).expect("live");
+            for desc_token in [
+                stmt.app_row_desc.token(),
+                stmt.app_param_desc.token(),
+                stmt.imp_row_desc.token(),
+                stmt.imp_param_desc.token(),
+            ] {
+                let desc_group = registry().group_of(desc_token).expect("live");
+                assert!(
+                    Arc::ptr_eq(&desc_group, &stmt_group),
+                    "each descriptor must share its statement's lock group"
+                );
+            }
+
+            let _ = free_statement::<MockBackend>(stmt_ptr);
+            let _ = free_connection::<MockBackend>(conn_ptr);
+            let _ = free_environment::<MockBackend>(env_ptr);
+        }
+    }
+
     #[test]
     fn free_connection_with_active_statements_fails() {
         unsafe {

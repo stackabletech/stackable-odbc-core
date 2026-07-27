@@ -7,8 +7,12 @@
 
 use std::any::Any;
 use std::ffi::c_void;
+// Deliberately `std::sync::Arc`, not `crate::sync::Arc`: see `Slot::cancel`
+// below for why this one field is the exception to importing locks from
+// `crate::sync`.
+use std::sync::Arc as StdArc;
 
-use crate::sync::{Arc, Mutex, MutexGuard, RwLock};
+use crate::sync::{Arc, Mutex, MutexGuard, RwLock, TryLockError};
 
 /// Which kind of ODBC handle a registry slot holds.
 ///
@@ -64,9 +68,22 @@ fn decode_token(token: *mut c_void) -> (usize, u32) {
 /// why there is no lock ordering to get wrong outside `SQLEndTran(SQL_HANDLE_ENV)`.
 ///
 /// It contains `()` deliberately: the handles live in their own `Box`
-/// allocations, and this is a lock *token*, not a container. That is also why
-/// recovering from poisoning is uncontroversial here — there is no data inside
-/// to have been left half-written by a panic.
+/// allocations outside the mutex, so this is a lock *token*, not a container
+/// for the state it protects.
+///
+/// Recovery from poisoning stays enabled here, and deliberately so, not
+/// because there is nothing at stake: the state this lock actually guards is
+/// those handle allocations, so a panic while the lock is held mid-mutation
+/// of one can leave it inconsistent. Poisoning happens when the guard drops
+/// during unwinding — *before* `panic_safe` (`panic.rs`) runs its
+/// `catch_unwind` and reports `SQL_ERROR` to the application, so the caller
+/// already saw the call fail. Refusing every later call on that connection
+/// for the rest of the process is the worse of the two outcomes available
+/// once that has happened; handing the group to the next caller, who may
+/// find a handle still recovering from the failed call, is the lesser one.
+/// The payload being `()` does not make recovering *safe* — it only means
+/// there is no half-written value of a real type sitting in the guard for
+/// that next caller to read out.
 pub(crate) struct GroupLock {
     #[allow(
         dead_code,
@@ -103,8 +120,8 @@ impl GroupLock {
     pub(crate) fn try_lock(&self) -> Option<MutexGuard<'_, ()>> {
         match self.inner.try_lock() {
             Ok(guard) => Some(guard),
-            Err(std::sync::TryLockError::Poisoned(e)) => Some(e.into_inner()),
-            Err(std::sync::TryLockError::WouldBlock) => None,
+            Err(TryLockError::Poisoned(e)) => Some(e.into_inner()),
+            Err(TryLockError::WouldBlock) => None,
         }
     }
 }
@@ -123,7 +140,8 @@ struct Slot {
     /// The lock guarding this handle. Shared with the whole group.
     group: Arc<GroupLock>,
     /// Token of the parent handle: the environment for a connection, the
-    /// connection for a statement or descriptor, `None` for an environment.
+    /// connection for a statement, the statement for a descriptor. `None` for
+    /// an environment, which has no parent.
     ///
     /// A `usize` for the same reason `addr` is one — `Slot` must stay `Send`.
     /// A token is an encoded index and generation rather than an address, so
@@ -135,7 +153,16 @@ struct Slot {
     /// StatementHandle` asserts exclusive access to every field: a concurrent
     /// read from `SQLCancel` would be undefined behaviour no matter which field
     /// it touched.
-    cancel: Option<Arc<dyn Any + Send + Sync>>,
+    ///
+    /// `std::sync::Arc`, deliberately not `crate::sync::Arc`: this is a
+    /// refcounted payload, not a lock, so instrumenting it under loom would
+    /// buy nothing for the lock discipline `crate::sync` exists to model —
+    /// and loom's `Arc` cannot even hold one, since it has no
+    /// `CoerceUnsized` impl (loom's own docs carry a `compile_fail` doctest
+    /// for exactly this, pointing at `Arc::from_std` as the escape hatch).
+    /// `Arc::new(x) as Arc<dyn Any + Send + Sync>` — the coercion `set_cancel`
+    /// callers rely on — only exists for `std::sync::Arc`.
+    cancel: Option<StdArc<dyn Any + Send + Sync>>,
 }
 
 /// The live-handle table.
@@ -143,10 +170,18 @@ struct Slot {
 /// Read on every FFI call and written only when a handle is allocated or
 /// freed, so it is read-mostly by a wide margin.
 ///
-/// A type rather than a bare static so that a loom model can construct its own
-/// and drive this code directly. loom's primitives are not const-constructible,
-/// so a global static would have put the real implementation out of loom's
-/// reach and left the models replicating it instead of proving it.
+/// A type rather than a bare static so that a loom model can construct its
+/// own `Registry` and drive its methods (`register`, `resolve`, `group_of`,
+/// and the rest) directly, inside the model closure. That reach stops at this
+/// type's own methods: it does not extend to `alloc_environment`,
+/// `alloc_connection`, `alloc_statement`, the `free_*` functions,
+/// `as_handle_ref`, or `try_get_diagnostic_queue` in `handles::mod`, which
+/// resolve the process-wide singleton via `registry()` below rather than
+/// taking a `Registry` as an argument — see that function's doc comment for
+/// why a model must not call through to it. loom's primitives are also not
+/// const-constructible, so a global static could not have been declared the
+/// way the pre-Task-2 `REGISTRY` was; a type gives loom code a `Registry` it
+/// builds for itself instead.
 pub(crate) struct Registry {
     slots: RwLock<Vec<Slot>>,
 }
@@ -315,7 +350,7 @@ impl Registry {
         dead_code,
         reason = "no caller until Backend::CancelToken (task 13) gives statements something to store here"
     )]
-    pub(crate) fn set_cancel(&self, token: *mut c_void, cancel: Arc<dyn Any + Send + Sync>) {
+    pub(crate) fn set_cancel(&self, token: *mut c_void, cancel: StdArc<dyn Any + Send + Sync>) {
         if token.is_null() {
             return;
         }
@@ -339,7 +374,7 @@ impl Registry {
         dead_code,
         reason = "no caller until SQLCancel (task 15) reads the token stored by set_cancel"
     )]
-    pub(crate) fn cancel_of(&self, token: *mut c_void) -> Option<Arc<dyn Any + Send + Sync>> {
+    pub(crate) fn cancel_of(&self, token: *mut c_void) -> Option<StdArc<dyn Any + Send + Sync>> {
         if token.is_null() {
             return None;
         }
@@ -378,14 +413,21 @@ impl Registry {
 ///
 /// Defined the same way whether or not loom is enabled — `std::sync::OnceLock`
 /// is not itself a loom-tracked primitive, only the `Registry` it lazily
-/// builds is — but a loom model must never call this function. loom's own
-/// primitives register with the execution of whichever `loom::model` closure
-/// constructs them, while a `static` runs its construction exactly once for
-/// the life of the process. loom replays its closure many times to explore
-/// interleavings, so a model reaching this instance would hand its second
-/// replay a `Registry` still wired to the first replay's execution. A loom
-/// model calls `Registry::new()` directly inside the closure instead, the way
-/// this module's own tests do.
+/// builds is — but a loom model must never call this function, or anything in
+/// `handles::mod` that resolves it internally (`alloc_environment`,
+/// `alloc_connection`, `alloc_statement`, the `free_*` functions,
+/// `as_handle_ref`, `try_get_diagnostic_queue`). The first thing that goes
+/// wrong is a panic, not a subtler correctness gap: loom's primitives register
+/// with the execution of whichever `loom::model` closure constructs them
+/// (`loom::sync::RwLock::new` asserts one exists), so calling
+/// `Registry::new()` — which this function does, lazily, the first time it
+/// runs — outside an active model panics immediately. And even granting an
+/// active model for that first call, a `static` still only runs its
+/// construction once for the life of the process, while loom replays the same
+/// closure many times to explore interleavings; every replay after the first
+/// would be handed a `Registry` still wired to that first replay's now-defunct
+/// execution. A loom model must build its own `Registry::new()` inside the
+/// closure instead, never reaching for this one.
 pub(crate) fn registry() -> &'static Registry {
     static REGISTRY: std::sync::OnceLock<Registry> = std::sync::OnceLock::new();
     REGISTRY.get_or_init(Registry::new)
@@ -492,7 +534,7 @@ mod tests {
             .register(HandleKind::Stmt, 0x1000, GroupLock::new(), None)
             .expect("registered");
 
-        let token: Arc<dyn Any + Send + Sync> = Arc::new(42u32);
+        let token: StdArc<dyn Any + Send + Sync> = StdArc::new(42u32);
         reg.set_cancel(stmt, token);
 
         let held = reg.cancel_of(stmt).expect("token stored");
@@ -516,5 +558,88 @@ mod tests {
         reg.unregister(token, HandleKind::Dbc).expect("was live");
         assert!(reg.resolve(token, HandleKind::Dbc).is_none());
         assert!(reg.group_of(token).is_none());
+    }
+
+    /// A slot handed back out after a free must not carry over its previous
+    /// occupant's lock group, parent, or cancel token — otherwise a handle
+    /// allocated into a reused slot could end up sharing a lock, or a cancel
+    /// token, with a completely unrelated handle that used to live there.
+    #[test]
+    fn a_reused_slot_inherits_nothing_from_its_previous_occupant() {
+        let reg = Registry::new();
+        let (old_parent, _, _) = reg
+            .register(HandleKind::Env, 0x9000, GroupLock::new(), None)
+            .expect("registered");
+
+        let old_group = GroupLock::new();
+        let (first, _, _) = reg
+            .register(
+                HandleKind::Dbc,
+                0x1000,
+                Arc::clone(&old_group),
+                Some(old_parent as usize),
+            )
+            .expect("registered");
+        reg.set_cancel(first, StdArc::new(1u32));
+        reg.unregister(first, HandleKind::Dbc).expect("was live");
+
+        // The table's only free slot is the one just retired, so this reuses
+        // it rather than appending a new one.
+        let (second, _, _) = reg
+            .register(HandleKind::Dbc, 0x2000, GroupLock::new(), None)
+            .expect("registered");
+
+        let stored_group = reg.group_of(second).expect("live");
+        assert!(
+            !Arc::ptr_eq(&stored_group, &old_group),
+            "a reused slot must not keep its previous occupant's lock group"
+        );
+        assert!(
+            reg.cancel_of(second).is_none(),
+            "a reused slot must not keep its previous occupant's cancel token"
+        );
+        assert!(
+            !reg.children_of(old_parent).contains(&second),
+            "a reused slot must not keep its previous occupant's parent"
+        );
+    }
+
+    /// `SQLCancel`'s whole spec behaviour rests on this returning `Some` when
+    /// no other thread is inside the connection.
+    #[test]
+    fn try_lock_succeeds_when_the_group_is_free() {
+        let group = GroupLock::new();
+        assert!(
+            group.try_lock().is_some(),
+            "an uncontended group must be lockable without blocking"
+        );
+    }
+
+    /// The other half of `SQLCancel`'s spec behaviour: `try_lock` must not
+    /// succeed while another thread is inside the connection.
+    #[test]
+    fn try_lock_fails_while_another_thread_holds_the_lock() {
+        let group = GroupLock::new();
+        let (holding_tx, holding_rx) = std::sync::mpsc::channel::<()>();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+
+        let holder = Arc::clone(&group);
+        let handle = std::thread::spawn(move || {
+            let _guard = holder.lock();
+            holding_tx.send(()).expect("main thread still waiting");
+            release_rx.recv().expect("main thread still running");
+        });
+
+        holding_rx
+            .recv()
+            .expect("worker thread panicked before locking");
+        assert!(
+            group.try_lock().is_none(),
+            "try_lock must not succeed while another thread holds the lock"
+        );
+        release_tx
+            .send(())
+            .expect("worker thread still waiting to release");
+        handle.join().expect("worker thread panicked");
     }
 }
