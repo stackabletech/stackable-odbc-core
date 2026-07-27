@@ -66,6 +66,11 @@ impl DiagnosticQueue {
     }
 
     /// Returns `true` if there are no pending diagnostic records.
+    ///
+    /// Used by tests rather than by core itself, and kept because a `len`
+    /// without an `is_empty` is the shape clippy's `len_without_is_empty`
+    /// exists to prevent.
+    #[allow(dead_code, reason = "companion to len(); exercised by tests")]
     pub fn is_empty(&self) -> bool {
         self.records.is_empty()
     }

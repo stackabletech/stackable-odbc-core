@@ -135,7 +135,7 @@ macro_rules! minimal_capability_decls {
 /// A one-column synthetic result set carrying `rows`.
 ///
 /// Tests that need a statement with a genuinely open cursor must go through
-/// [`crate::handles::StatementHandle::set_result_set`], which derives
+/// `StatementHandle::set_result_set`, which derives
 /// `cursor_open` from the column count — a zero-column result set opens no
 /// cursor, because that is what an `UPDATE` produces.
 pub fn synthetic_result_set(
@@ -986,6 +986,105 @@ mock_txn_backend!(
     commit = crate::types::CursorBehavior::Delete,
     rollback = crate::types::CursorBehavior::Close
 );
+
+// ---------------------------------------------------------------------------
+// A backend that declares functions
+// ---------------------------------------------------------------------------
+
+/// Declares a realistic ODBC 3.x function list, so `SQLGetFunctions` actually
+/// executes its bitmap and 2.x-mapping arms.
+///
+/// `MockBackend::get_functions` returns an empty slice, which meant every
+/// existing `SQLGetFunctions` test walked a loop with no iterations and no
+/// mapping arm ever ran -- the gap that let `SQLGetConnectOption` sit at the
+/// wrong index in the 2.x array.
+pub struct MockFunctionsBackend;
+
+impl Backend for MockFunctionsBackend {
+    type Connection = MockConnection;
+    type Statement = MockStatement;
+    type Error = MockError;
+
+    fn connect(_: &ConnectParams) -> Result<MockConnection, MockError> {
+        Ok(MockConnection)
+    }
+    fn disconnect(_: &mut MockConnection) -> Result<(), MockError> {
+        Ok(())
+    }
+    fn exec_direct(_: &MockConnection, _: &str) -> Result<MockStatement, MockError> {
+        Err(MockError)
+    }
+    fn prepare(_: &MockConnection, _: &str) -> Result<MockStatement, MockError> {
+        Ok(MockStatement)
+    }
+    fn execute(
+        _: &MockConnection,
+        _: &mut MockStatement,
+        _: &[crate::types::ColumnValue],
+    ) -> Result<crate::types::ExecuteOutcome, MockError> {
+        Ok(crate::types::ExecuteOutcome::default())
+    }
+    fn get_info(_: &MockConnection, _: crate::types::InfoType) -> Result<InfoValue, MockError> {
+        Err(MockError)
+    }
+    fn get_functions() -> &'static [crate::function_id::FunctionId] {
+        use crate::function_id::FunctionId as F;
+        &[
+            F::AllocHandle,
+            F::FreeHandle,
+            F::GetConnectAttr,
+            F::SetConnectAttr,
+            F::GetStmtAttr,
+            F::SetStmtAttr,
+            F::GetDiagRec,
+            F::EndTran,
+            F::ExecDirect,
+            F::Fetch,
+        ]
+    }
+    fn get_type_info() -> &'static [TypeInfoRow] {
+        &[]
+    }
+    fn tables(
+        _: &MockConnection,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+    ) -> Result<MockStatement, MockError> {
+        Err(MockError)
+    }
+    fn columns(
+        _: &MockConnection,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+    ) -> Result<MockStatement, MockError> {
+        Err(MockError)
+    }
+
+    fn supports_catalogs() -> bool {
+        false
+    }
+    fn supports_schemas() -> bool {
+        false
+    }
+    fn alter_table_support() -> u32 {
+        0
+    }
+    fn outer_join_capabilities() -> u32 {
+        0
+    }
+    fn default_txn_isolation() -> u32 {
+        0
+    }
+    fn txn_isolation_options() -> u32 {
+        0
+    }
+
+    minimal_capability_decls!();
+}
 
 // ---------------------------------------------------------------------------
 // A backend whose cursor close fails

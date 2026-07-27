@@ -11,6 +11,17 @@ readme = "README.md"
 keywords = ["odbc", "database", "driver", "ffi", "sql"]
 categories = ["database", "external-ffi-bindings", "api-bindings"]
 
+[features]
+# Test support for driver crates: the `conformance` module, which drives
+# `SQLGetInfoW` through the real C ABI to check an info type's return shape.
+#
+# Default-off because it is test code. Compiled unconditionally it lands in
+# every driver's production binary, and it reaches an `unreachable!()` through a
+# public `unsafe fn` taking a caller-supplied `u16` -- a panic path a shipped
+# driver has no reason to carry. Driver test suites enable it under
+# `[dev-dependencies]`.
+test-support = []
+
 [dependencies]
 odbc-sys = "0.31"
 snafu = "0.9"

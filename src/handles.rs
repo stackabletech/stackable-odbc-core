@@ -222,9 +222,6 @@ pub struct DescriptorHandle {
 
 impl HasKind for DescriptorHandle {
     const KIND: HandleKind = HandleKind::Desc;
-    fn header(&self) -> &HandleHeader {
-        &self.header
-    }
 }
 
 impl DescriptorHandle {
@@ -275,9 +272,6 @@ impl HandleHeader {
 pub trait HasKind {
     /// Which kind of ODBC handle this type is.
     const KIND: HandleKind;
-
-    /// Access to the header, so `free_*` can find the handle's slot.
-    fn header(&self) -> &HandleHeader;
 }
 
 /// Top-level ODBC environment handle (`SQL_HANDLE_ENV`).
@@ -308,9 +302,6 @@ pub struct EnvironmentHandle<B: Backend> {
 
 impl<B: Backend> HasKind for EnvironmentHandle<B> {
     const KIND: HandleKind = HandleKind::Env;
-    fn header(&self) -> &HandleHeader {
-        &self.header
-    }
 }
 
 /// ODBC connection handle (`SQL_HANDLE_DBC`).
@@ -344,9 +335,6 @@ pub struct ConnectionHandle<B: Backend> {
 
 impl<B: Backend> HasKind for ConnectionHandle<B> {
     const KIND: HandleKind = HandleKind::Dbc;
-    fn header(&self) -> &HandleHeader {
-        &self.header
-    }
 }
 
 /// Wraps either a real backend statement or a driver-synthesized in-memory
@@ -435,7 +423,16 @@ unsafe impl Send for ColumnBinding {}
 unsafe impl Sync for ColumnBinding {}
 
 /// Parameter binding information stored by `SQLBindParameter`.
+///
+/// `sql_type`, `col_size` and `decimal_digits` are recorded but not yet read.
+/// They are exactly what `SQLDescribeParam` has to report back, and dropping
+/// them would mean `SQLBindParameter` discarding the only copy of what the
+/// application declared. Kept deliberately, not by oversight.
 #[derive(Debug)]
+#[allow(
+    dead_code,
+    reason = "recorded for SQLDescribeParam, which does not read them yet"
+)]
 pub struct ParameterBinding {
     /// Whether this is an input, output, or input/output parameter.
     pub input_output_type: ParamType,
@@ -549,9 +546,6 @@ pub struct StatementHandle<B: Backend> {
 
 impl<B: Backend> HasKind for StatementHandle<B> {
     const KIND: HandleKind = HandleKind::Stmt;
-    fn header(&self) -> &HandleHeader {
-        &self.header
-    }
 }
 
 impl<B: Backend> StatementHandle<B> {

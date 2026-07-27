@@ -8,6 +8,14 @@ use crate::errors::OdbcError;
 use crate::types::SqlState;
 
 /// Per-backend escape-translation rules.
+///
+/// `#[non_exhaustive]`: an all-public, exhaustive struct that every driver is
+/// told to construct. Adding `rewrite_scalar_fn` was already one silent
+/// breaking change (commit `886007b`, labelled `feat:`); it cost nothing only
+/// because nothing was released. Start from [`EscapeDialect::ansi_default`] and
+/// apply the `with_*` builders, which stay source-compatible as rules are
+/// added.
+#[non_exhaustive]
 pub struct EscapeDialect {
     /// Identifier-quote open→close pairs copied verbatim, e.g. `('"','"')`,
     /// `('`','`')`, `('[',']')`.
@@ -49,6 +57,44 @@ pub struct EscapeDialect {
 }
 
 impl EscapeDialect {
+    /// Replaces the identifier-quote pairs copied verbatim by the scanner.
+    #[must_use]
+    pub fn with_identifier_quotes(mut self, quotes: &'static [(char, char)]) -> Self {
+        self.identifier_quotes = quotes;
+        self
+    }
+
+    /// Sets the cheap scalar-function rename, which sees only the name.
+    #[must_use]
+    pub fn with_remap_scalar_fn(mut self, f: fn(&str) -> Option<&'static str>) -> Self {
+        self.remap_scalar_fn = f;
+        self
+    }
+
+    /// Sets the full scalar-function rewrite, which sees the arguments too.
+    #[must_use]
+    pub fn with_rewrite_scalar_fn(
+        mut self,
+        f: fn(name: &str, args: &str) -> Option<String>,
+    ) -> Self {
+        self.rewrite_scalar_fn = f;
+        self
+    }
+
+    /// Sets the `{d}`, `{t}` and `{ts}` literal renderers.
+    #[must_use]
+    pub fn with_datetime_renderers(
+        mut self,
+        date: fn(&str) -> String,
+        time: fn(&str) -> String,
+        timestamp: fn(&str) -> String,
+    ) -> Self {
+        self.render_date = date;
+        self.render_time = time;
+        self.render_timestamp = timestamp;
+        self
+    }
+
     /// Neutral ANSI dialect: `"`-quoted identifiers, no scalar remap,
     /// `DATE '…'`/`TIME '…'`/`TIMESTAMP '…'` literals. Used as the `Backend`
     /// default for backends that do not override `escape_dialect`.

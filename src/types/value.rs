@@ -243,6 +243,7 @@ pub enum ColumnValue {
 
 /// One row of the `SQLGetTypeInfo` result set: a data type the driver exposes.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct TypeInfoRow {
     pub type_name: &'static str,
     pub data_type: SqlDataType,

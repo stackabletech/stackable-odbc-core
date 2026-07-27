@@ -633,18 +633,6 @@ pub unsafe fn sql_get_functions<B: Backend>(
                 // a function is supported (SQL_TRUE = 1).
                 const SQL_FUNC_EXISTS: u16 = 1;
 
-                // ODBC 2.x deprecated function IDs for the SQL_API_ALL_FUNCTIONS array.
-                // These are not present in FunctionId (which uses ODBC 3.x IDs) and are
-                // not defined in odbc-sys, so we define them as local constants here.
-                const SQL2_ERROR: usize = 10; // SQLError
-                const SQL2_FREE_CONNECT: usize = 14; // SQLFreeConnect
-                const SQL2_FREE_ENV: usize = 15; // SQLFreeEnv
-                const SQL2_TRANSACT: usize = 23; // SQLTransact
-                const SQL2_GET_CONNECT_OPTION: usize = 30; // SQLGetConnectOption
-                const SQL2_GET_STMT_OPTION: usize = 46; // SQLGetStmtOption
-                const SQL2_SET_CONNECT_OPTION: usize = 50; // SQLSetConnectOption
-                const SQL2_SET_STMT_OPTION: usize = 51; // SQLSetStmtOption
-
                 if !supported_ptr.is_null() {
                     // SAFETY: supported_ptr is non-null (checked); caller guarantees it points to a
                     // contiguous array of SQL_API_ALL_FUNCTIONS_SIZE (100) writable u16 values.
@@ -668,26 +656,26 @@ pub unsafe fn sql_get_functions<B: Backend>(
                         // FreeConnect (2.x ID 14), FreeEnv (15), FreeStmt (16)
                         // FreeStmt is already in the list; 14/15 are deprecated
                         // but the DM may check them.
-                        supported[SQL2_FREE_CONNECT] = SQL_FUNC_EXISTS;
-                        supported[SQL2_FREE_ENV] = SQL_FUNC_EXISTS;
+                        supported[usize::from(F::FreeConnect as u16)] = SQL_FUNC_EXISTS;
+                        supported[usize::from(F::FreeEnv as u16)] = SQL_FUNC_EXISTS;
                     }
                     if functions.contains(&F::GetConnectAttr) {
-                        supported[SQL2_GET_CONNECT_OPTION] = SQL_FUNC_EXISTS;
+                        supported[usize::from(F::GetConnectOption as u16)] = SQL_FUNC_EXISTS;
                     }
                     if functions.contains(&F::SetConnectAttr) {
-                        supported[SQL2_SET_CONNECT_OPTION] = SQL_FUNC_EXISTS;
+                        supported[usize::from(F::SetConnectOption as u16)] = SQL_FUNC_EXISTS;
                     }
                     if functions.contains(&F::GetStmtAttr) {
-                        supported[SQL2_GET_STMT_OPTION] = SQL_FUNC_EXISTS;
+                        supported[usize::from(F::GetStmtOption as u16)] = SQL_FUNC_EXISTS;
                     }
                     if functions.contains(&F::SetStmtAttr) {
-                        supported[SQL2_SET_STMT_OPTION] = SQL_FUNC_EXISTS;
+                        supported[usize::from(F::SetStmtOption as u16)] = SQL_FUNC_EXISTS;
                     }
                     if functions.contains(&F::GetDiagRec) {
-                        supported[SQL2_ERROR] = SQL_FUNC_EXISTS;
+                        supported[usize::from(F::Error as u16)] = SQL_FUNC_EXISTS;
                     }
                     if functions.contains(&F::EndTran) {
-                        supported[SQL2_TRANSACT] = SQL_FUNC_EXISTS;
+                        supported[usize::from(F::Transact as u16)] = SQL_FUNC_EXISTS;
                     }
                     // CloseCursor's 2.x equivalent is FreeStmt(SQL_CLOSE) (handled above).
 
@@ -728,7 +716,58 @@ pub unsafe fn sql_get_functions<B: Backend>(
 mod tests {
     use super::*;
     use crate::ffi::handle::{sql_alloc_handle, sql_free_handle};
-    use crate::test_utils::{MockBackend, MockTxnDeleteCloseBackend};
+    use crate::test_utils::{MockBackend, MockFunctionsBackend, MockTxnDeleteCloseBackend};
+
+    /// Drives `SQLGetFunctions` for the ODBC 2.x `SQL_API_ALL_FUNCTIONS` array.
+    fn all_functions_2x<B: Backend>() -> [u16; 100] {
+        let mut buf = [0u16; 100];
+        unsafe {
+            // Allocated inline rather than via `alloc_env_and_conn`, which is
+            // fixed to `MockBackend`. `SQLGetFunctions` needs only an allocated
+            // connection, not a connected one.
+            let mut env: *mut c_void = std::ptr::null_mut();
+            let _ = sql_alloc_handle::<B>(HandleType::Env as i16, std::ptr::null_mut(), &mut env);
+            let mut conn: *mut c_void = std::ptr::null_mut();
+            let _ = sql_alloc_handle::<B>(HandleType::Dbc as i16, env, &mut conn);
+
+            let ret = sql_get_functions::<B>(conn, 0, buf.as_mut_ptr());
+            assert_eq!(ret, crate::types::SqlReturn::SUCCESS);
+            let _ = sql_free_handle::<B>(HandleType::Dbc as i16, conn);
+            let _ = sql_free_handle::<B>(HandleType::Env as i16, env);
+        }
+        buf
+    }
+
+    #[test]
+    fn all_functions_2x_marks_the_deprecated_equivalents_at_their_spec_ids() {
+        use crate::function_id::FunctionId as F;
+        let buf = all_functions_2x::<MockFunctionsBackend>();
+
+        // SQLGetConnectOption is 42. It was recorded at 30 -- an unassigned
+        // slot -- so the Windows DM, which dispatches from this array, was told
+        // a function the driver exports did not exist.
+        for (id, label) in [
+            (F::GetConnectOption, "SQLGetConnectOption"),
+            (F::SetConnectOption, "SQLSetConnectOption"),
+            (F::GetStmtOption, "SQLGetStmtOption"),
+            (F::SetStmtOption, "SQLSetStmtOption"),
+            (F::Error, "SQLError"),
+            (F::Transact, "SQLTransact"),
+            (F::FreeConnect, "SQLFreeConnect"),
+            (F::FreeEnv, "SQLFreeEnv"),
+        ] {
+            assert_eq!(
+                buf[id as usize], 1,
+                "{label} (id {}) not marked present in the 2.x array",
+                id as u16
+            );
+        }
+
+        assert_eq!(
+            buf[30], 0,
+            "slot 30 is not an assigned SQL_API_* id and must stay clear"
+        );
+    }
     use crate::types::{
         InfoType, SQL_CB_CLOSE, SQL_CB_DELETE, SQL_CURSOR_COMMIT_BEHAVIOR,
         SQL_CURSOR_ROLLBACK_BEHAVIOR,

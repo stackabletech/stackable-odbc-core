@@ -31,6 +31,7 @@ use crate::types::{ColumnDescriptor, Nullable, SqlDataType};
 /// Supply a non-default value by overriding
 /// [`crate::backend::Backend::catalog_result_column_widths`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct CatalogResultColumnWidths {
     /// Width of an identifier column (`TABLE_CAT`, `TABLE_SCHEM`,
     /// `TABLE_NAME`, `COLUMN_NAME`, `TYPE_NAME`, `PK_NAME`, `FK_NAME`).
@@ -64,6 +65,30 @@ pub struct CatalogResultColumnWidths {
 /// instead of restating `128` as an unrelated literal that could silently
 /// drift from the struct's actual default.
 pub const DEFAULT_IDENTIFIER_LEN: u16 = 128;
+
+impl CatalogResultColumnWidths {
+    /// Sets the width of an identifier column.
+    #[must_use]
+    pub fn with_identifier_len(mut self, len: u16) -> Self {
+        self.identifier_len = len;
+        self
+    }
+
+    /// Sets the width of a `REMARKS` column.
+    #[must_use]
+    pub fn with_remarks_len(mut self, len: u32) -> Self {
+        self.remarks_len = len;
+        self
+    }
+
+    /// Sets the SQL types used for variable- and fixed-width character columns.
+    #[must_use]
+    pub fn with_char_sql_types(mut self, variable: SqlDataType, fixed: SqlDataType) -> Self {
+        self.char_sql_type = variable;
+        self.fixed_char_sql_type = fixed;
+        self
+    }
+}
 
 impl Default for CatalogResultColumnWidths {
     fn default() -> Self {

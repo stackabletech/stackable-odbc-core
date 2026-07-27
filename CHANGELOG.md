@@ -17,6 +17,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   every driver's native code previously reached the application as `0`, and the
   diagnostic message now includes the whole causal chain rather than only its
   outermost link.
+- `FunctionId` gains the 16 `SQL_API_*` ids it was missing (`SQLError`,
+  `SQLFreeConnect`, `SQLFreeEnv`, `SQLSetParam`, `SQLTransact`,
+  `SQLGetConnectOption`, `SQLGetStmtOption`, `SQLSetConnectOption`,
+  `SQLSetStmtOption`, `SQLExtendedFetch`, `SQLParamOptions`,
+  `SQLSetScrollOptions`, `SQLDrivers`, `SQLAllocHandleStd`, `SQLBindParam`,
+  `SQLCopyDesc`) and is now `#[non_exhaustive]`. A test pins every value against
+  `sql.h`/`sqlext.h` and round-trips `function_id_from_raw` — every other enum in
+  the crate had such a test; this one did not.
+- `test-support`, a default-off feature gating the `conformance` module. It is
+  test code that was compiled into every driver's production binary, and it
+  reaches an `unreachable!()` through a public `unsafe fn` taking a
+  caller-supplied `u16`. Driver test suites enable it under `[dev-dependencies]`.
+- `pub use odbc_sys;`. `odbc-sys` is a public dependency appearing in trait
+  signatures, but was not re-exported, so a driver declared its own with nothing
+  pinning it to core's version — and two versions of a `#[repr(C)]` enum are two
+  different types to the compiler.
 - `Backend::sensitive_connect_keywords`, naming the connection-string keywords
   whose values must never be logged, plus
   `ConnectParams::declare_sensitive_keywords` which the generic FFI entry points
@@ -116,6 +132,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   column's origin or its type's literal form can now report it, and the previous
   values remain the defaults. Build descriptors with `ColumnDescriptor::new` and
   the `with_*` builders, which stay source-compatible as fields are added.
+- **Breaking:** `EscapeDialect`, `TypeInfoRow`, `CatalogResultColumnWidths` and
+  `FunctionId` are `#[non_exhaustive]`, with `with_*` builders on the first
+  three. `EscapeDialect` is the cautionary case: adding `rewrite_scalar_fn` to
+  it was already a silent breaking change (commit `886007b`, labelled `feat:`),
+  which cost nothing only because nothing was released.
+- **Breaking:** the `handles`, `panic` and `diagnostics` modules are
+  `pub(crate)`. Nothing outside the crate needs them — `forward_ffi!` references
+  only `$crate::ffi` and `$crate::types` — and leaving them public froze
+  `StatementHandle`'s 17 fields as API for nothing. Making them private also
+  surfaced genuinely dead code that being `pub` had masked: `HasKind::header`,
+  implemented four times and called zero, is removed.
 - **Breaking:** `Backend::Error` is now bounded by
   `Into<OdbcError> + From<OdbcError> + std::error::Error + Send + Sync + 'static`,
   and *every* `Backend` method returns `Result<_, Self::Error>`. Previously
@@ -248,6 +275,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `SQL_ATTR_AUTOCOMMIT` already had).
 
 ### Fixed
+
+- `SQLGetFunctions`' ODBC 2.x `SQL_API_ALL_FUNCTIONS` array recorded
+  `SQLGetConnectOption` at index 30 instead of its spec value 42. Slot 30 is not
+  an assigned `SQL_API_*` id, so the Windows Driver Manager — which builds its
+  dispatch table from this array — was told the driver did not support a
+  function it exports, while a meaningless slot was marked present. The array is
+  now filled from named `FunctionId` values rather than constants transcribed by
+  hand at the call site, which is how the wrong number got in. No test covered
+  this: `MockBackend::get_functions` returns an empty slice, so every existing
+  `SQLGetFunctions` test walked a loop with no iterations.
 
 - **Security.** A handle is no longer a pointer, so validating one no longer
   dereferences an untrusted value. Handles were validated by reading a magic tag
