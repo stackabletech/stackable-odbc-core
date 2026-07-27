@@ -78,11 +78,19 @@ impl StatementBackend for SyntheticStatement {
         Ok(Cow::Borrowed(&self.rows[row_idx][col_idx - 1]))
     }
 
-    fn column_count(&self) -> u16 {
-        self.columns.len() as u16
+    fn column_count(&self) -> i16 {
+        i16::try_from(self.columns.len()).unwrap_or_else(|_| {
+            tracing::warn!(
+                "synthetic result set has {} columns, more than SQLSMALLINT can report; \
+                 clamping to {}",
+                self.columns.len(),
+                i16::MAX
+            );
+            i16::MAX
+        })
     }
 
-    fn describe_col(&self, col: u16) -> Result<ColumnDescriptor, OdbcError> {
+    fn describe_col(&self, col: u16) -> Result<Cow<'_, ColumnDescriptor>, OdbcError> {
         let idx = col as usize;
         if idx == 0 || idx > self.columns.len() {
             return Err(OdbcError::general(
@@ -90,18 +98,18 @@ impl StatementBackend for SyntheticStatement {
                 SqlState::general_error(),
             ));
         }
-        // PERF: Clones ColumnDescriptor (including the name String) on every
-        // describe_col() call. Called once per column during SQLDescribeCol /
-        // SQLColAttribute, not a per-row hot path, so impact is minor.
-        Ok(self.columns[idx - 1].clone())
+        // Borrowed: the descriptors are owned by this statement and outlive the
+        // call, so neither the name nor the type name is cloned any more.
+        Ok(Cow::Borrowed(&self.columns[idx - 1]))
     }
 
-    fn row_count(&self) -> Option<usize> {
-        Some(self.rows.len())
+    fn row_count(&self) -> Option<i64> {
+        Some(i64::try_from(self.rows.len()).unwrap_or(i64::MAX))
     }
 
-    fn close_cursor(&mut self) {
+    fn close_cursor(&mut self) -> Result<(), OdbcError> {
         self.cursor = -1;
+        Ok(())
     }
 }
 
@@ -156,7 +164,8 @@ mod tests {
         let mut stmt = SyntheticStatement::new(test_columns(), rows);
 
         let _ = stmt.fetch().expect("fetch");
-        stmt.close_cursor();
+        stmt.close_cursor()
+            .expect("synthetic close_cursor is infallible");
         // After close, fetch should start from the beginning again.
         assert_eq!(stmt.fetch().expect("re-fetch"), FetchResult::Row);
     }

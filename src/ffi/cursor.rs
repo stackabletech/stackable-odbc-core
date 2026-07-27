@@ -85,15 +85,11 @@ pub unsafe fn sql_num_result_cols<B: Backend>(
             if !column_count_ptr.is_null() {
                 // SAFETY: column_count_ptr is non-null (checked above) and the
                 // caller guarantees it points to a valid writable i16.
-                let count = statement.column_count();
-                let count_i16 = i16::try_from(count).unwrap_or_else(|_| {
-                    tracing::warn!(
-                        "SQLNumResultCols: column count {} exceeds i16::MAX; clamping to i16::MAX",
-                        count
-                    );
-                    i16::MAX
-                });
-                std::ptr::write_unaligned(column_count_ptr, count_i16);
+                // No narrowing here any more: `column_count` is already the
+                // `SQLSMALLINT` the ABI writes, so a backend that cannot express
+                // its count has to say so where it knows the real number,
+                // instead of core clamping a value it cannot interpret.
+                std::ptr::write_unaligned(column_count_ptr, statement.column_count());
             }
 
             Ok(SqlReturn::SUCCESS)
@@ -155,8 +151,19 @@ pub unsafe fn sql_row_count<B: Backend>(
 
             let row_count = match stmt.statement {
                 Some(ref statement) => match statement.row_count() {
-                    Some(n) => n as isize,
-                    None => -1, // unknown
+                    // A backend that knows the count but cannot determine it
+                    // reports `Some(SQL_NO_TOTAL)` itself; core does not
+                    // second-guess a value it was given.
+                    Some(n) => isize::try_from(n).unwrap_or_else(|_| {
+                        tracing::warn!(
+                            "SQLRowCount: row count {n} does not fit SQLLEN on this target; \
+                             reporting -1 (not available)"
+                        );
+                        -1
+                    }),
+                    // Not applicable to this statement — distinct from the
+                    // backend saying it could not work the count out.
+                    None => -1,
                 },
                 None => 0, // no statement executed
             };

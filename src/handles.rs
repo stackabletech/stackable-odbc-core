@@ -386,30 +386,30 @@ impl<B: Backend> StatementBackend for StatementData<B> {
         }
     }
 
-    fn column_count(&self) -> u16 {
+    fn column_count(&self) -> i16 {
         match self {
             StatementData::Backend(s) => s.column_count(),
             StatementData::Synthetic(s) => s.column_count(),
         }
     }
 
-    fn describe_col(&self, col: u16) -> Result<ColumnDescriptor, OdbcError> {
+    fn describe_col(&self, col: u16) -> Result<std::borrow::Cow<'_, ColumnDescriptor>, OdbcError> {
         match self {
             StatementData::Backend(s) => s.describe_col(col).into_odbc(),
             StatementData::Synthetic(s) => s.describe_col(col),
         }
     }
 
-    fn row_count(&self) -> Option<usize> {
+    fn row_count(&self) -> Option<i64> {
         match self {
             StatementData::Backend(s) => s.row_count(),
             StatementData::Synthetic(s) => s.row_count(),
         }
     }
 
-    fn close_cursor(&mut self) {
+    fn close_cursor(&mut self) -> Result<(), OdbcError> {
         match self {
-            StatementData::Backend(s) => s.close_cursor(),
+            StatementData::Backend(s) => s.close_cursor().into_odbc(),
             StatementData::Synthetic(s) => s.close_cursor(),
         }
     }

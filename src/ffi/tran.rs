@@ -54,11 +54,11 @@ use crate::types::{SqlReturn, SqlState, completion_type_from_raw, handle_type_fr
 unsafe fn apply_cursor_behavior<B: Backend>(
     conn: &mut ConnectionHandle<B>,
     behavior: crate::types::CursorBehavior,
-) {
+) -> Result<(), OdbcError> {
     use crate::types::CursorBehavior;
 
     if behavior == CursorBehavior::Preserve {
-        return;
+        return Ok(());
     }
 
     tracing::debug!(
@@ -66,6 +66,8 @@ unsafe fn apply_cursor_behavior<B: Backend>(
         behavior,
         conn.statements.len()
     );
+
+    let mut first_close_err: Option<OdbcError> = None;
 
     for &stmt_ptr in &conn.statements {
         // SAFETY: stmt_ptr was registered by sql_alloc_handle and remains valid
@@ -79,8 +81,17 @@ unsafe fn apply_cursor_behavior<B: Backend>(
         if behavior == CursorBehavior::Close {
             // Close the cursor but keep the statement: footnote [2] leaves the
             // prepared states S2/S3 unchanged.
-            if let Some(statement) = stmt.statement.as_mut() {
-                statement.close_cursor();
+            if let Some(statement) = stmt.statement.as_mut()
+                && let Err(e) = statement.close_cursor()
+            {
+                // Recorded and carried, not swallowed: under SQL_CB_CLOSE this
+                // call *is* the cursor close the application was promised. The
+                // loop still runs to completion so the remaining statements are
+                // not left in a worse state than the one that failed, and the
+                // first failure is what SQLEndTran reports.
+                tracing::warn!("SQLEndTran: close_cursor failed: {e}");
+                stmt.diagnostics.push(&e);
+                first_close_err.get_or_insert(e);
             }
             stmt.cursor_open = false;
         } else {
@@ -90,6 +101,11 @@ unsafe fn apply_cursor_behavior<B: Backend>(
             stmt.param_count = None;
             stmt.data_at_exec = None;
         }
+    }
+
+    match first_close_err {
+        Some(e) => Err(e),
+        None => Ok(()),
     }
 }
 
@@ -346,7 +362,15 @@ pub unsafe fn sql_end_tran<B: Backend>(
                                 // SAFETY: conn.statements holds live StatementHandle<B>
                                 // allocations; tags are validated inside. This call is
                                 // within the outer `unsafe { panic_safe(...) }` closure.
-                                apply_cursor_behavior::<B>(conn, behavior);
+                                //
+                                // The transaction itself ended, but under
+                                // SQL_CB_CLOSE a failure here means a cursor the
+                                // application was promised would close did not.
+                                // It joins the same per-connection reporting as
+                                // a failed end_tran.
+                                if let Err(e) = apply_cursor_behavior::<B>(conn, behavior) {
+                                    first_err.get_or_insert(e);
+                                }
                             }
                             Err(e) => {
                                 // Spec: "To determine which connection or
@@ -383,7 +407,13 @@ pub unsafe fn sql_end_tran<B: Backend>(
                     };
                     // SAFETY: conn.statements holds live StatementHandle<B>
                     // allocations; tags are validated inside.
-                    apply_cursor_behavior::<B>(conn, behavior);
+                    //
+                    // Propagated: the commit or rollback succeeded, but under
+                    // SQL_CB_CLOSE this is the call that closes the cursors, and
+                    // reporting SQL_SUCCESS for a close that failed would tell
+                    // the application its cursors are gone when they are not.
+                    // The diagnostic was already pushed per statement.
+                    apply_cursor_behavior::<B>(conn, behavior)?;
                     Ok(SqlReturn::SUCCESS)
                 }
                 _ => Err(OdbcError::InvalidHandle),
@@ -401,7 +431,8 @@ mod tests {
     use crate::handles::{StatementData, StatementHandle};
     use crate::synthetic::SyntheticStatement;
     use crate::test_utils::{
-        MockBackend, MockTxnCloseBackend, MockTxnDeleteBackend, MockTxnPreserveBackend,
+        MockBackend, MockFailingCloseBackend, MockFailingCloseStatement, MockTxnCloseBackend,
+        MockTxnDeleteBackend, MockTxnPreserveBackend,
     };
     use crate::types::{
         ColumnDescriptor, ColumnValue, CompletionType, FetchResult, SQL_NTS, SqlDataType,
@@ -795,6 +826,51 @@ mod tests {
             );
 
             cleanup_connected::<MockTxnCloseBackend>(env, conn, stmt);
+        }
+    }
+
+    #[test]
+    fn end_tran_reports_a_failed_cursor_close_rather_than_success() {
+        // Under SQL_CB_CLOSE, `close_cursor` is the only thing that closes the
+        // cursor. If it fails, the application's cursors are still open, and
+        // reporting SQL_SUCCESS would tell it the opposite.
+        unsafe {
+            let (env, conn, stmt) = alloc_connected_stmt::<MockFailingCloseBackend>("DRIVER=mock;");
+
+            // Swap the synthetic result set for a backend one whose close fails.
+            let handle =
+                as_handle_ref::<StatementHandle<MockFailingCloseBackend>>(stmt).expect("valid");
+            handle.set_result_set(crate::handles::StatementData::Backend(
+                MockFailingCloseStatement,
+            ));
+
+            let ret = sql_end_tran::<MockFailingCloseBackend>(
+                HandleType::Dbc as i16,
+                conn,
+                CompletionType::Commit as i16,
+            );
+            assert_eq!(
+                ret,
+                SqlReturn::ERROR,
+                "SQLEndTran reported success though the cursor close failed"
+            );
+
+            // The statement carries the diagnostic, which is where the spec
+            // tells an application to look.
+            let handle =
+                as_handle_ref::<StatementHandle<MockFailingCloseBackend>>(stmt).expect("valid");
+            let rec = handle
+                .diagnostics
+                .get(0)
+                .expect("a diagnostic per statement");
+            assert_eq!(rec.sqlstate.as_str(), "08S01");
+            assert!(
+                rec.message.contains("mock close_cursor failure"),
+                "expected the backend's own message, got {:?}",
+                rec.message
+            );
+
+            cleanup_connected::<MockFailingCloseBackend>(env, conn, stmt);
         }
     }
 

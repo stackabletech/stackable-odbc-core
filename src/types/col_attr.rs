@@ -27,7 +27,7 @@ pub enum ColAttrValue {
 /// `field` is the ODBC descriptor field identifier.
 pub fn get_column_attribute(
     desc: &ColumnDescriptor,
-    column_count: u16,
+    column_count: i16,
     field: Desc,
 ) -> Result<ColAttrValue, OdbcError> {
     match field {
@@ -48,7 +48,7 @@ pub fn get_column_attribute(
         Desc::LiteralPrefix | Desc::LiteralSuffix => Ok(ColAttrValue::String(String::new())),
 
         // --- Numeric attributes ---
-        Desc::Count => Ok(ColAttrValue::Numeric(column_count as isize)),
+        Desc::Count => Ok(ColAttrValue::Numeric(isize::from(column_count))),
         Desc::Type | Desc::ConciseType => Ok(ColAttrValue::Numeric(desc.sql_type.0 as isize)),
         Desc::Precision => Ok(ColAttrValue::Numeric(precision_for(desc))),
         Desc::Length => Ok(ColAttrValue::Numeric(resolve_precision_isize(

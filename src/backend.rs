@@ -752,14 +752,30 @@ pub trait StatementBackend: Send + Sync {
     /// Returns the number of columns in the result set.
     ///
     /// Called by `SQLNumResultColsW`. Returns 0 if no result set is active.
-    fn column_count(&self) -> u16 {
+    ///
+    /// `i16` because that is what the ABI is: `SQLNumResultCols` writes through
+    /// a `SQLSMALLINT *`. Returning `u16` let a backend name a count the driver
+    /// then could not report, and pushed a fallible narrowing into core for a
+    /// value the backend already knew was out of range.
+    fn column_count(&self) -> i16 {
         0
     }
 
     /// Returns metadata for column `col` (1-based).
     ///
     /// Called by `SQLDescribeColW`.
-    fn describe_col(&self, _col: u16) -> Result<ColumnDescriptor, Self::Error> {
+    ///
+    /// Returns a [`Cow`](std::borrow::Cow) for the same reason
+    /// [`StatementBackend::get_data`] does: a backend holding its column
+    /// descriptors in memory — which most do, since the result set's shape is
+    /// known once — can hand back a borrow instead of cloning a
+    /// `ColumnDescriptor` and its two `String`s on every call. `SQLColAttribute`
+    /// calls this once per column per attribute, so an application walking the
+    /// metadata of a wide result set was paying for a clone each time.
+    fn describe_col(
+        &self,
+        _col: u16,
+    ) -> Result<std::borrow::Cow<'_, ColumnDescriptor>, Self::Error> {
         Err(OdbcError::NotImplemented {
             feature: "describe_col".into(),
         }
@@ -770,7 +786,13 @@ pub trait StatementBackend: Send + Sync {
     ///
     /// Called by `SQLRowCountW`. Returns `None` if not applicable (e.g. for SELECT
     /// statements or when no statement has been executed).
-    fn row_count(&self) -> Option<usize> {
+    ///
+    /// `i64` because `SQLRowCount` writes through a `SQLLEN *`, which is signed
+    /// and 64-bit on a 64-bit build. The signedness is load-bearing: the spec
+    /// defines `SQL_NO_TOTAL` (`-1`) for "the driver cannot determine the count",
+    /// which is a different answer from `None`'s "not applicable to this
+    /// statement", and `usize` could express neither.
+    fn row_count(&self) -> Option<i64> {
         None
     }
 
@@ -789,7 +811,21 @@ pub trait StatementBackend: Send + Sync {
     /// statement alive under `SQL_CB_CLOSE` (the transition table leaves a
     /// prepared-but-unexecuted statement unchanged), so this method is the only
     /// thing that actually closes the cursor.
-    fn close_cursor(&mut self) {}
+    /// Closes the open cursor, discarding any unread rows, and leaves the
+    /// statement prepared.
+    ///
+    /// Fallible because for a networked data source this is a round trip that
+    /// can fail: it is where a driver tells the server to drop a partially-read
+    /// result set. Under [`crate::types::CursorBehavior::Close`] it is the
+    /// *only* thing that closes the cursor during `SQLEndTran`, so a failure
+    /// here means the application's `SQL_CB_CLOSE` contract was not honoured and
+    /// must not be reported as success.
+    ///
+    /// The default is `Ok(())`, which is correct only for a backend whose
+    /// cursors need no teardown. See [`Backend::cursor_commit_behavior`].
+    fn close_cursor(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
 }
 
 /// Default values for `InfoType` variants that are **identical** across all drivers.

@@ -845,9 +845,9 @@ macro_rules! mock_txn_backend {
         impl Backend for $name {
             type Connection = MockTxnConnection;
             type Statement = MockStatement;
-            /// `OdbcError` rather than `OdbcError`: `end_tran` below constructs a
-            /// real error with a message and SQLSTATE, and routing that through
-            /// `OdbcError` would collapse it to `NotImplemented`. Using
+            /// `OdbcError` rather than `MockError`: `end_tran` below constructs
+            /// a real error with a message and SQLSTATE, and routing that
+            /// through `MockError` would collapse it to `NotImplemented`. Using
             /// `OdbcError` directly also exercises the case of a backend whose
             /// error type simply *is* core's -- which the bounds allow, since
             /// `OdbcError` converts to and from itself.
@@ -985,3 +985,128 @@ mock_txn_backend!(
     commit = crate::types::CursorBehavior::Delete,
     rollback = crate::types::CursorBehavior::Close
 );
+
+// ---------------------------------------------------------------------------
+// A backend whose cursor close fails
+// ---------------------------------------------------------------------------
+
+/// A statement whose `close_cursor` fails, standing for a networked data source
+/// where closing a partially-read result set is a round trip that can fail.
+///
+/// It reports one column so `set_result_set` treats it as having an open
+/// cursor, which is what makes `SQL_CB_CLOSE` reach `close_cursor` at all.
+pub struct MockFailingCloseStatement;
+
+impl StatementBackend for MockFailingCloseStatement {
+    type Error = OdbcError;
+
+    fn column_count(&self) -> i16 {
+        1
+    }
+
+    fn close_cursor(&mut self) -> Result<(), OdbcError> {
+        Err(OdbcError::general(
+            "mock close_cursor failure",
+            crate::types::SqlState::communication_link_failure(),
+        ))
+    }
+}
+
+/// Declares `SQL_CB_CLOSE` and hands out statements that cannot close.
+///
+/// Exists so a test can prove `SQLEndTran` does not report success when the
+/// only thing that closes the cursor under `SQL_CB_CLOSE` has failed.
+pub struct MockFailingCloseBackend;
+
+impl Backend for MockFailingCloseBackend {
+    type Connection = MockConnection;
+    type Statement = MockFailingCloseStatement;
+    type Error = OdbcError;
+
+    fn connect(_: &ConnectParams) -> Result<MockConnection, OdbcError> {
+        Ok(MockConnection)
+    }
+    fn disconnect(_: &mut MockConnection) -> Result<(), OdbcError> {
+        Ok(())
+    }
+    fn exec_direct(_: &MockConnection, _: &str) -> Result<MockFailingCloseStatement, OdbcError> {
+        Ok(MockFailingCloseStatement)
+    }
+    fn prepare(_: &MockConnection, _: &str) -> Result<MockFailingCloseStatement, OdbcError> {
+        Ok(MockFailingCloseStatement)
+    }
+    fn execute(
+        _: &MockConnection,
+        _: &mut MockFailingCloseStatement,
+        _: &[crate::types::ColumnValue],
+    ) -> Result<crate::types::ExecuteOutcome, OdbcError> {
+        Ok(crate::types::ExecuteOutcome::default())
+    }
+    fn get_info(_: &MockConnection, _: crate::types::InfoType) -> Result<InfoValue, OdbcError> {
+        Err(OdbcError::NotImplemented {
+            feature: "get_info".into(),
+        })
+    }
+    fn get_functions() -> &'static [crate::function_id::FunctionId] {
+        &[]
+    }
+    fn get_type_info() -> &'static [TypeInfoRow] {
+        &[]
+    }
+    fn tables(
+        _: &MockConnection,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+    ) -> Result<MockFailingCloseStatement, OdbcError> {
+        Err(OdbcError::NotImplemented {
+            feature: "tables".into(),
+        })
+    }
+    fn columns(
+        _: &MockConnection,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+    ) -> Result<MockFailingCloseStatement, OdbcError> {
+        Err(OdbcError::NotImplemented {
+            feature: "columns".into(),
+        })
+    }
+
+    // Must succeed, or the default `NotImplemented` would fail SQLEndTran
+    // before it ever reaches the cursor close this mock exists to exercise.
+    fn end_tran(_: &MockConnection, _commit: bool) -> Result<(), OdbcError> {
+        Ok(())
+    }
+
+    fn cursor_commit_behavior() -> crate::types::CursorBehavior {
+        crate::types::CursorBehavior::Close
+    }
+    fn cursor_rollback_behavior() -> crate::types::CursorBehavior {
+        crate::types::CursorBehavior::Close
+    }
+
+    fn supports_catalogs() -> bool {
+        false
+    }
+    fn supports_schemas() -> bool {
+        false
+    }
+    fn alter_table_support() -> u32 {
+        0
+    }
+    fn outer_join_capabilities() -> u32 {
+        0
+    }
+    fn default_txn_isolation() -> u32 {
+        crate::types::SQL_TXN_SERIALIZABLE
+    }
+    fn txn_isolation_options() -> u32 {
+        crate::types::SQL_TXN_SERIALIZABLE
+    }
+
+    minimal_capability_decls!();
+}

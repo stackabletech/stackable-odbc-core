@@ -114,6 +114,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `OdbcError`. The fetch path is the hottest error path in the crate, and it was
   the one place a driver still had to flatten its error into a string. A driver
   may use one type for both traits.
+- **Breaking:** `StatementBackend::close_cursor` returns
+  `Result<(), Self::Error>` instead of `()`. For a networked data source this is
+  a round trip that can fail, and under `SQL_CB_CLOSE` it is the *only* thing
+  that closes the cursor during `SQLEndTran` — which previously reported
+  `SQL_SUCCESS` whatever happened. A failure is now recorded on the statement's
+  own diagnostic queue, where the spec tells the application to look, and
+  `SQLEndTran` reports it. Every statement is still visited, so one failure does
+  not strand the rest.
+- **Breaking:** `StatementBackend::column_count` returns `i16` instead of `u16`,
+  matching the `SQLSMALLINT *` that `SQLNumResultCols` writes through. Core no
+  longer clamps a value it cannot interpret; a backend that cannot express its
+  count says so where it knows the real number.
+- **Breaking:** `StatementBackend::row_count` returns `Option<i64>` instead of
+  `Option<usize>`. `SQLRowCount` writes through a signed `SQLLEN *`, and the
+  signedness is load-bearing: `SQL_NO_TOTAL` (`-1`, "cannot be determined") is a
+  different answer from `None` ("not applicable to this statement"), and
+  `usize` could express neither.
+- **Breaking:** `StatementBackend::describe_col` returns
+  `Cow<'_, ColumnDescriptor>` instead of `ColumnDescriptor`, matching `get_data`.
+  A backend holding its descriptors in memory no longer clones one and its two
+  `String`s on every call, which `SQLColAttribute` makes once per column per
+  attribute.
 - A `disconnect` that fails while unwinding a half-open connection is now logged
   rather than silently discarded. Core could not report it before, because
   `Backend::Error` carried no `Debug` or `Display` bound. A failure here can
