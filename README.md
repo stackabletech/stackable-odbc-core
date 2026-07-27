@@ -31,17 +31,51 @@ Adding a new database backend requires three steps:
    stackable-odbc-core = "0.0.1"
    ```
 
-2. **Implement the `Backend` trait** in `backend.rs`:
+2. **Implement the `Backend` and `StatementBackend` traits** in `backend.rs`:
 
-   ```rust
+   ```rust,ignore
    use stackable_odbc_core::backend::{Backend, StatementBackend};
+   use stackable_odbc_core::errors::OdbcError;
+   use stackable_odbc_core::types::ConnectParams;
 
    pub struct XyzBackend;
+   pub struct XyzConnection;
+   pub struct XyzStatement;
+
+   #[derive(Debug, snafu::Snafu)]
+   pub enum XyzError { /* ... */ }
+
+   // `Backend::Error` needs both directions: core converts a backend error into
+   // a diagnostic, and a defaulted trait body constructs one and names
+   // `Self::Error`.
+   impl From<XyzError> for OdbcError { /* map to a SQLSTATE */ }
+   impl From<OdbcError> for XyzError { /* wrap */ }
 
    impl Backend for XyzBackend {
-       // implement connect, disconnect, etc.
+       type Connection = XyzConnection;
+       type Statement = XyzStatement;
+       type Error = XyzError;
+
+       fn connect(params: &ConnectParams) -> Result<XyzConnection, XyzError> { todo!() }
+       // ...and the rest of the required items: see below.
+   }
+
+   impl StatementBackend for XyzStatement {
+       type Error = XyzError;
+       // every method is defaulted; override the ones this backend supports
    }
    ```
+
+   The sketch above is deliberately incomplete — `Backend` has 3 associated
+   types and 35 required methods, most of them one-line *capability
+   declarations* (`supports_catalogs`, `identifier_case`, `sql_conformance`, …).
+   They are required rather than defaulted because each states a falsifiable
+   fact about the data source that core cannot know, and a wrong default is
+   invisible: the compiler asking is the point. `StatementBackend` has one
+   associated type and no required methods.
+
+   The compiler lists exactly what is missing, so the practical route is to
+   write the three associated types and let `cargo check` drive the rest.
 
 3. **Generate the FFI entry points** in `lib.rs` using the `forward_ffi!` macro:
 
@@ -50,7 +84,8 @@ Adding a new database backend requires three steps:
    ```
 
    This single line expands to 73 `#[unsafe(no_mangle)] pub unsafe extern
-   "system"` C ABI entry points (72 `SQL*` functions plus `ConfigDSNW`), each
+   "system"` C ABI entry points (72 `SQL*` functions, plus `ConfigDSNW` on
+   Windows), each
    forwarding to the corresponding generic implementation in `stackable-odbc-core`.
 
 When adding a new ODBC function to the framework later, add one entry to

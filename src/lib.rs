@@ -3,8 +3,9 @@
 //! `stackable-odbc-core` provides the database-independent half of an ODBC driver. A
 //! concrete driver crate implements the [`backend::Backend`] and
 //! [`backend::StatementBackend`] traits, then calls the
-//! [`forward_ffi!`](macro@forward_ffi) macro to generate all 73 C ABI entry
-//! points (72 `SQL*` functions plus `ConfigDSNW`) automatically.
+//! [`forward_ffi!`](macro@forward_ffi) macro to generate the C ABI entry points
+//! automatically: 72 `SQL*` functions, plus `ConfigDSNW` on Windows, where the
+//! installer library calls it to configure a DSN.
 //!
 //! # Call flow
 //!
@@ -25,10 +26,19 @@
 //! internally synchronized — the ODBC Driver Manager serializes concurrent
 //! calls to the same handle.
 //!
-//! # Unicode only
+//! # Unicode
 //!
-//! Only the Wide (W-suffix) ODBC functions are exported. The Driver Manager
-//! translates ANSI application calls to Wide calls automatically.
+//! Every ODBC function that takes or returns a string is exported **only** in
+//! its Wide (`W`-suffix) form — `SQLDriverConnectW`, `SQLGetInfoW`,
+//! `SQLDescribeColW` and so on. The Driver Manager translates an ANSI
+//! application's calls into those automatically, so there is no ANSI variant to
+//! write.
+//!
+//! Most exported entry points are *not* `W`-suffixed, because most ODBC
+//! functions take no strings at all: `SQLAllocHandle`, `SQLFetch`,
+//! `SQLBindCol`, `SQLEndTran` and 36 others have a single spelling that serves
+//! both. Of the 72 `SQL*` functions `forward_ffi!` generates, 32 are `W` forms
+//! and 40 have no encoding in their signature to vary.
 
 /// The `odbc-sys` version this crate was built against.
 ///

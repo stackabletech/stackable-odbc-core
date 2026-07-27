@@ -66,7 +66,7 @@ pub trait Backend: Sized + Send + Sync + 'static {
 
     /// Closes an existing connection and releases associated resources.
     ///
-    /// Called by `SQLDisconnectW`.
+    /// Called by `SQLDisconnect`.
     fn disconnect(conn: &mut Self::Connection) -> Result<(), Self::Error>;
 
     /// Executes a SQL statement directly without preparation.
@@ -83,7 +83,7 @@ pub trait Backend: Sized + Send + Sync + 'static {
 
     /// Executes a previously prepared statement with the given parameter values.
     ///
-    /// Called by `SQLExecuteW`. `params` contains one [`ColumnValue`] per bound
+    /// Called by `SQLExecute`. `params` contains one [`ColumnValue`] per bound
     /// parameter, in bind order (the assembled *input* values).
     ///
     /// Returns an [`ExecuteOutcome`]. Backends without output-parameter support
@@ -176,7 +176,7 @@ pub trait Backend: Sized + Send + Sync + 'static {
 
     /// Returns the list of ODBC functions supported by this driver.
     ///
-    /// Called by `SQLGetFunctionsW`. The returned slice must contain one
+    /// Called by `SQLGetFunctions`. The returned slice must contain one
     /// [`FunctionId`](crate::function_id::FunctionId) entry
     /// per exported FFI function. `stackable-odbc-core` maps 3.x IDs to their 2.x equivalents
     /// automatically for the legacy function array.
@@ -291,7 +291,7 @@ pub trait Backend: Sized + Send + Sync + 'static {
 
     /// Cancels an in-progress statement.
     ///
-    /// Called by `SQLCancelW`. Takes `&mut` because implementations must clear
+    /// Called by `SQLCancel`. Takes `&mut` because implementations must clear
     /// streaming state (e.g. `next_uri`) after a server-side cancel to prevent
     /// `close_cursor`/`Drop` from trying to drain a cancelled query, which
     /// would fail and leave the connection pool's TCP socket dirty.
@@ -737,7 +737,7 @@ pub trait StatementBackend: Send + Sync {
 
     /// Advances the cursor to the next row.
     ///
-    /// Called by `SQLFetchW`. Returns [`FetchResult::Row`] if a row is available,
+    /// Called by `SQLFetch`. Returns [`FetchResult::Row`] if a row is available,
     /// [`FetchResult::NoData`] when the result set is exhausted.
     fn fetch(&mut self) -> Result<FetchResult, Self::Error> {
         Err(OdbcError::NotImplemented {
@@ -748,7 +748,7 @@ pub trait StatementBackend: Send + Sync {
 
     /// Retrieves the value of column `col` (1-based) from the current row.
     ///
-    /// Called by `SQLGetDataW`. The value is converted to `target_type` as requested by
+    /// Called by `SQLGetData`. The value is converted to `target_type` as requested by
     /// the application.
     ///
     /// Returns a [`Cow`](std::borrow::Cow) so that backends which cache rows in memory can hand
@@ -767,7 +767,7 @@ pub trait StatementBackend: Send + Sync {
 
     /// Returns the number of columns in the result set.
     ///
-    /// Called by `SQLNumResultColsW`. Returns 0 if no result set is active.
+    /// Called by `SQLNumResultCols`. Returns 0 if no result set is active.
     ///
     /// `i16` because that is what the ABI is: `SQLNumResultCols` writes through
     /// a `SQLSMALLINT *`. Returning `u16` let a backend name a count the driver
@@ -800,7 +800,7 @@ pub trait StatementBackend: Send + Sync {
 
     /// Returns the number of rows affected by the last DML statement.
     ///
-    /// Called by `SQLRowCountW`. Returns `None` if not applicable (e.g. for SELECT
+    /// Called by `SQLRowCount`. Returns `None` if not applicable (e.g. for SELECT
     /// statements or when no statement has been executed).
     ///
     /// `i64` because `SQLRowCount` writes through a `SQLLEN *`, which is signed
@@ -817,7 +817,7 @@ pub trait StatementBackend: Send + Sync {
     /// Called by `SQLEndTran` for a backend that declares
     /// [`crate::types::CursorBehavior::Close`] from
     /// [`Backend::cursor_commit_behavior`] / [`Backend::cursor_rollback_behavior`].
-    /// That is its only caller: `SQLCloseCursorW` and `SQLFreeStmt(SQL_CLOSE)`
+    /// That is its only caller: `SQLCloseCursor` and `SQLFreeStmt(SQL_CLOSE)`
     /// discard the whole backend statement instead, so there is nothing left
     /// for this method to close.
     /// The statement handle remains valid and may be re-executed.
