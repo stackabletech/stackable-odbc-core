@@ -74,16 +74,22 @@ fn decode_token(token: *mut c_void) -> (usize, u32) {
 /// Recovery from poisoning stays enabled here, and deliberately so, not
 /// because there is nothing at stake: the state this lock actually guards is
 /// those handle allocations, so a panic while the lock is held mid-mutation
-/// of one can leave it inconsistent. Poisoning happens when the guard drops
-/// during unwinding — *before* `panic_safe` (`panic.rs`) runs its
-/// `catch_unwind` and reports `SQL_ERROR` to the application, so the caller
-/// already saw the call fail. Refusing every later call on that connection
-/// for the rest of the process is the worse of the two outcomes available
-/// once that has happened; handing the group to the next caller, who may
-/// find a handle still recovering from the failed call, is the lesser one.
-/// The payload being `()` does not make recovering *safe* — it only means
-/// there is no half-written value of a real type sitting in the guard for
-/// that next caller to read out.
+/// of one can leave it inconsistent. A closure panic on the ordinary
+/// `panic_safe_scoped` path (`panic.rs`) does *not* poison this lock at all:
+/// its `catch_unwind` lives in `panic_safe_scoped`'s own frame, so the unwind
+/// never reaches the guard held there and it drops normally when that
+/// function returns. The two paths that *can* poison a group lock are
+/// `HandleScope::with_child_group` (`handles/scope.rs`) — whose guard sits
+/// below `catch_unwind`, so a panic inside its nested closure unwinds through
+/// its `drop(guard)` — and a panic inside `push_diagnostic` itself, which runs
+/// outside `catch_unwind` on `panic_safe_scoped`'s error and panic arms.
+/// Either way, refusing every later call on that connection for the rest of
+/// the process is the worse of the two outcomes available once poisoning has
+/// happened; handing the group to the next caller, who may find a handle
+/// still recovering from the failed call, is the lesser one. The payload
+/// being `()` does not make recovering *safe* — it only means there is no
+/// half-written value of a real type sitting in the guard for that next
+/// caller to read out.
 pub(crate) struct GroupLock {
     #[allow(
         dead_code,

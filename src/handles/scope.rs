@@ -1,9 +1,14 @@
 //! Access to handle contents, gated on holding the owning connection's lock.
 //!
-//! A `HandleScope` is the only way to obtain `&mut` to a handle, and the only
-//! way to obtain a `HandleScope` is to be inside [`panic_safe_scoped`]. That is
-//! what makes "the group lock is held" a fact the compiler checks rather than a
-//! rule a comment states.
+//! A `HandleScope` is the only way to obtain `&mut` to a handle. The only way
+//! to obtain one is through the two callers of the `pub(crate)`
+//! `HandleScope::new` in this crate — [`panic_safe_scoped`], which builds the
+//! outermost scope for an FFI call, and [`HandleScope::with_child_group`],
+//! which builds a nested scope for the one legitimate case of holding two
+//! groups at once. Both lock the group immediately before constructing the
+//! scope and tie its lifetime to that lock (see [`HandleScope::new`]), which
+//! is what makes "the group lock is held" a fact the compiler checks rather
+//! than a rule a comment states.
 //!
 //! [`panic_safe_scoped`]: crate::panic::panic_safe_scoped
 
@@ -14,31 +19,48 @@ use crate::backend::Backend;
 use crate::errors::OdbcError;
 use crate::handles::registry::{GroupLock, registry};
 use crate::handles::{ConnectionHandle, EnvironmentHandle, HasKind, StatementHandle};
-use crate::sync::Arc;
+use crate::sync::{Arc, MutexGuard};
 
 /// Proof that the caller holds one lock group, and the gateway to the handles
 /// inside it.
 ///
-/// The lifetime `'a` is the guard's: a `&mut` handle obtained from a scope
-/// cannot outlive the lock that makes it sound. A `HandleScope` is
-/// constructible only from [`Self::new`], which is `pub(crate)` and called
-/// from exactly one place — [`panic_safe_scoped`] — so every scope in
-/// existence corresponds to a held group lock (or, for a null handle, to
-/// nothing needing one).
+/// `HandleScope::new` is `pub(crate)`, with exactly two callers in this crate:
+/// [`panic_safe_scoped`], which builds the outermost scope for an FFI call,
+/// and [`Self::with_child_group`], which builds a nested scope for the one
+/// legitimate case of holding two groups at once. Both lock the group
+/// immediately before constructing the scope and pass a borrow of that lock
+/// as `new`'s `guard` parameter, which is what ties the lifetime `'a` to it:
+/// a `HandleScope<'a>` cannot be constructed, returned, or used once its
+/// originating guard is gone, so a live `HandleScope` always corresponds to a
+/// held group lock — or, for a null handle, to nothing needing one.
 ///
 /// [`panic_safe_scoped`]: crate::panic::panic_safe_scoped
 pub struct HandleScope<'a> {
     /// The group whose lock the caller holds, or `None` for a call that
     /// arrived with `SQL_NULL_HANDLE` and so has nothing to protect.
     group: Option<Arc<GroupLock>>,
-    /// Ties `'a` to the guard living in the caller's frame.
+    /// Ties `'a` to the guard borrowed in [`Self::new`].
     _guard: PhantomData<&'a ()>,
 }
 
 impl<'a> HandleScope<'a> {
-    /// Construct a scope for a held group. `pub(crate)` so that
-    /// `panic_safe_scoped` is the only place that can claim to hold a lock.
-    pub(crate) fn new(group: Option<Arc<GroupLock>>) -> Self {
+    /// Construct a scope for a held group.
+    ///
+    /// `guard` is a borrow of the `MutexGuard` the caller is already holding
+    /// for `group` (or `None`, for the null-handle case with nothing locked);
+    /// its lifetime is what `'a` on the returned scope is unified with, so the
+    /// borrow checker — not just a doc comment — refuses a `HandleScope` that
+    /// outlives the lock it claims to hold. `guard`'s value is never read:
+    /// this scope reaches handles through the registry, not through the
+    /// guard, so the parameter exists purely to carry the lifetime.
+    ///
+    /// `pub(crate)` so that only this module's two callers can claim to hold
+    /// a lock.
+    pub(crate) fn new(
+        group: Option<Arc<GroupLock>>,
+        guard: Option<&'a MutexGuard<'_, ()>>,
+    ) -> Self {
+        let _ = guard;
         Self {
             group,
             _guard: PhantomData,
@@ -78,9 +100,20 @@ impl<'a> HandleScope<'a> {
 
     /// Borrow a statement and its parent connection together.
     ///
-    /// Sound because the two are different [`HandleKind`]s and therefore
-    /// different allocations: no aliasing is possible. They share one group, so
-    /// this needs no second acquisition.
+    /// Sound because **neither handle is reachable from the other**: `conn` is
+    /// an opaque token (`*mut c_void`), not a typed pointer the compiler could
+    /// follow from `&mut StatementHandle` to reborrow the connection, and
+    /// `ConnectionHandle` holds no field pointing at its statements at all —
+    /// parentage lives in the registry (`Registry::children_of`), not in
+    /// either handle struct. Different [`HandleKind`]s alone would not be
+    /// enough to justify this: `StatementHandle` owns four
+    /// `Box<DescriptorHandle>` fields that *are* reachable through its own
+    /// `&mut`, so a hypothetical `stmt_with_desc` built the same way would
+    /// alias under Stacked/Tree Borrows despite the two addresses differing
+    /// and `debug_assert_ne!` seeing nothing wrong — this combinator only
+    /// exists for the one pair that is actually mutually unreachable.
+    ///
+    /// They share one group, so this needs no second acquisition.
     ///
     /// [`HandleKind`]: crate::handles::registry::HandleKind
     #[allow(
@@ -104,15 +137,24 @@ impl<'a> HandleScope<'a> {
             std::ptr::from_mut(conn)
         };
         // A statement and a connection are different `HandleKind`s, hence
-        // different `Box` allocations from different `alloc_*` calls: the two
-        // addresses below can never be equal, so handing out both `&mut`s at
-        // once cannot alias.
+        // different `Box` allocations from different `alloc_*` calls, so these
+        // addresses can never be equal. This only pins the weaker fact that
+        // they are literally different allocations -- the reason the two
+        // references cannot alias is that neither handle is reachable from the
+        // other (see the doc comment above), which distinct addresses alone
+        // would not establish.
         debug_assert_ne!(stmt_addr as usize, conn_addr as usize);
         // SAFETY: both addresses came from `get`, which validated each token
         // against the registry and confirmed it belongs to the group this
-        // scope holds. Distinct `HandleKind`s guarantee distinct allocations
-        // (see the `debug_assert_ne!` above), so the two references cannot
-        // alias.
+        // scope holds, so neither is stale or foreign. The second `get` call
+        // takes `&mut self`, but `self` is just `{ group, _guard: PhantomData }`
+        // -- it holds no pointer into either handle's memory -- so reborrowing
+        // it to make that call touches nothing `stmt_addr` points at.
+        // `stmt_addr` itself was produced by casting `addr as *mut T` inside
+        // the *first* `get` call, never derived from `self`, so it carries no
+        // provenance tying it to `self` for a later reborrow of `self` to
+        // invalidate. Combined with neither handle being reachable from the
+        // other, the two `&mut`s below cannot alias.
         Ok(unsafe { (&mut *stmt_addr, &mut *conn_addr) })
     }
 
@@ -126,6 +168,20 @@ impl<'a> HandleScope<'a> {
     /// Closure-shaped so the child's guard lives in this function's frame; a
     /// version returning a `HandleScope` would have to own its guard alongside
     /// the `Arc` it borrows from, which is not expressible without `unsafe`.
+    ///
+    /// `token` must name a group *different* from the one this scope already
+    /// holds: `crate::sync::Mutex` is not reentrant, so locking the same group
+    /// twice deadlocks the calling thread forever, with no diagnostic and no
+    /// `SqlReturn`. A token from the already-held group (e.g. the scope's own
+    /// token, or a statement belonging to a connection whose group this scope
+    /// holds) is caught two ways: a `debug_assert!` panics immediately in a
+    /// debug build — which `panic_safe_scoped`'s `catch_unwind` turns into a
+    /// normal `SQL_ERROR`, never a hang — and, since re-entering a group one
+    /// already holds is logically a no-op, an early return runs `f` directly
+    /// against this scope instead of relocking. The early return is what
+    /// actually removes the deadlock once `debug_assertions` are compiled out;
+    /// the assertion exists only to make the mistake loud during development
+    /// instead of silently degrading to a no-op.
     #[allow(
         dead_code,
         reason = "no caller until SQLEndTran(SQL_HANDLE_ENV) migrates (task 11) and needs to hold a child connection's group while inside the environment's"
@@ -135,9 +191,18 @@ impl<'a> HandleScope<'a> {
         token: *mut c_void,
         f: impl FnOnce(&mut HandleScope<'_>) -> R,
     ) -> Result<R, OdbcError> {
+        let already_held = self.holds(token);
+        debug_assert!(
+            !already_held,
+            "with_child_group called with a token from the group this scope already holds; \
+             crate::sync::Mutex is not reentrant, so this would deadlock in a release build"
+        );
+        if already_held {
+            return Ok(f(self));
+        }
         let group = registry().group_of(token).ok_or(OdbcError::InvalidHandle)?;
         let guard = group.lock();
-        let mut child = HandleScope::new(Some(Arc::clone(&group)));
+        let mut child = HandleScope::new(Some(Arc::clone(&group)), Some(&guard));
         let result = f(&mut child);
         drop(guard);
         Ok(result)
@@ -231,12 +296,18 @@ mod tests {
             assert_eq!(ret, SqlReturn::SUCCESS);
 
             // `SQLDisconnect` frees every statement on the connection as part
-            // of tearing it down, so `stmt` is already gone by the time
-            // `cleanup_env_conn_stmt` reaches it; `free_connection` would
+            // of tearing it down, so `stmt` is already gone (a stale token, not
+            // a double-free -- `unregister` returns `None` before any
+            // `Box::from_raw`) by the time `cleanup_env_conn_stmt` reaches it;
+            // pass null in its place rather than the now-stale `stmt` value, so
+            // this call site does not contradict `cleanup_env_conn_stmt`'s
+            // documented "must be live" precondition. `free_connection` would
             // otherwise refuse to free a still-connected connection (HY010),
-            // leaking its registry slot.
-            let _ = crate::ffi::connect::sql_disconnect::<MockBackend>(conn);
-            cleanup_env_conn_stmt(env, conn, stmt);
+            // leaking its registry slot, so assert the disconnect actually
+            // succeeded rather than silently leaking on a future regression.
+            let disconnect_ret = crate::ffi::connect::sql_disconnect::<MockBackend>(conn);
+            assert_eq!(disconnect_ret, SqlReturn::SUCCESS);
+            cleanup_env_conn_stmt(env, conn, std::ptr::null_mut());
         }
     }
 
@@ -250,6 +321,26 @@ mod tests {
             })
         };
         assert_eq!(ret, SqlReturn::SUCCESS);
+    }
+
+    /// The other half of the null-handle case: a scope holding no group must
+    /// still refuse a token from a real, live group -- `holds` must treat "no
+    /// group held" as "nothing is reachable," not as "anything goes."
+    #[test]
+    fn a_null_handle_scope_still_refuses_a_live_token() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            let ret = panic_safe_scoped::<MockBackend, _>(std::ptr::null_mut(), |scope| {
+                let result = scope.get::<ConnectionHandle<MockBackend>>(conn);
+                assert!(
+                    matches!(result, Err(OdbcError::InvalidHandle)),
+                    "a scope holding no group must not reach any live handle"
+                );
+                Ok(SqlReturn::SUCCESS)
+            });
+            assert_eq!(ret, SqlReturn::SUCCESS);
+            cleanup_env_conn_stmt(env, conn, stmt);
+        }
     }
 
     /// A panic inside the closure releases the group rather than wedging every
@@ -269,6 +360,63 @@ mod tests {
                 Ok(SqlReturn::SUCCESS)
             });
             assert_eq!(ret, SqlReturn::SUCCESS);
+            cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
+    /// `with_child_group`'s primary use (Task 11's `SQLEndTran(SQL_HANDLE_ENV)`):
+    /// nest a second, distinct group's lock inside a scope that already holds
+    /// a different one, and reach the child group's own handle through the
+    /// nested scope. This is the interface's only correctness test; the two
+    /// tests below cover the deadlock guard.
+    #[test]
+    fn with_child_group_locks_a_distinct_group_and_reaches_its_handle() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            let ret = panic_safe_scoped::<MockBackend, _>(env, |scope| {
+                let reached = scope.with_child_group(conn, |child| {
+                    child.get::<ConnectionHandle<MockBackend>>(conn).is_ok()
+                })?;
+                assert!(
+                    reached,
+                    "the nested scope must be able to reach the child group's own handle"
+                );
+                // The outer scope's own group is still held and usable
+                // afterward -- with_child_group must not have released it.
+                scope.get::<EnvironmentHandle<MockBackend>>(env)?;
+                Ok(SqlReturn::SUCCESS)
+            });
+            assert_eq!(ret, SqlReturn::SUCCESS);
+            cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
+    /// `crate::sync::Mutex` is not reentrant, so passing a token from the
+    /// group this scope already holds would deadlock the calling thread
+    /// forever, with no diagnostic and no `SqlReturn` -- exactly the hazard
+    /// `with_child_group`'s guard exists to close. In a debug build the
+    /// `debug_assert!` fires first; `panic_safe_scoped`'s `catch_unwind`
+    /// catches it and reports `SQL_ERROR`, never a hang. This test is
+    /// therefore debug-build-only: with `debug_assertions` off, the
+    /// `if self.holds(token)` early return takes over instead and this same
+    /// call returns `SqlReturn::SUCCESS` -- not exercised here, since every
+    /// verification command for this crate runs a debug build.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn with_child_group_on_the_scope_s_own_group_is_caught_not_deadlocked() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            let ret = panic_safe_scoped::<MockBackend, _>(env, |scope| {
+                // `env` belongs to the group `scope` already holds.
+                let _ = scope.with_child_group(env, |_| ());
+                Ok(SqlReturn::SUCCESS)
+            });
+            assert_eq!(
+                ret,
+                SqlReturn::ERROR,
+                "the debug_assert! must be caught by panic_safe_scoped's catch_unwind, not left \
+                 to unwind into a hang or a process abort"
+            );
             cleanup_env_conn_stmt(env, conn, stmt);
         }
     }

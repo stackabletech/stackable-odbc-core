@@ -64,10 +64,13 @@ where
 /// scope holding no group.
 ///
 /// On an `Err`, the error is pushed onto the handle's diagnostic queue through
-/// the scope this function still holds — no second acquisition. On a panic, an
-/// [`OdbcError::Panic`] diagnostic is pushed and `SqlReturn::ERROR` is
-/// returned; the guard is released by unwinding, so the connection stays
-/// usable.
+/// the scope this function still holds — no second acquisition. On a panic,
+/// `catch_unwind` catches inside *this function's own frame*, so the unwind
+/// never reaches `_guard`: it is untouched by the panic and stays held while
+/// an [`OdbcError::Panic`] diagnostic is pushed through that same scope, then
+/// releases normally when this function returns and `_guard` drops. That is
+/// what makes the diagnostic push on this path sound rather than an unguarded
+/// mutation of the handle.
 ///
 /// [`OdbcError::InvalidHandle`] is the exception: the spec posts no diagnostic
 /// record alongside `SQL_INVALID_HANDLE`, since there is no valid handle to
@@ -84,7 +87,7 @@ where
 {
     let group = registry().group_of(handle);
     let _guard = group.as_ref().map(|g| g.lock());
-    let mut scope = HandleScope::new(group.clone());
+    let mut scope = HandleScope::new(group.clone(), _guard.as_ref());
 
     match std::panic::catch_unwind(AssertUnwindSafe(|| f(&mut scope))) {
         Ok(Ok(ret)) => ret,

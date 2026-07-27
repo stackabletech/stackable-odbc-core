@@ -42,10 +42,17 @@ pub(crate) unsafe fn alloc_env_conn_stmt() -> (*mut c_void, *mut c_void, *mut c_
 /// Free a statement, connection and environment allocated by
 /// [`alloc_env_conn_stmt`], in child-before-parent order.
 ///
+/// Any of the three may instead be `SQL_NULL_HANDLE` (null) for "already torn
+/// down by other means, nothing to do here" -- e.g. a test that disconnected
+/// the connection itself, which frees its statements as a side effect. The
+/// underlying `sql_free_handle` calls reject null without dereferencing it, so
+/// this degrades to a no-op rather than freeing anything twice.
+///
 /// # Safety
 ///
-/// `env`, `conn` and `stmt` must be live tokens from `alloc_env_conn_stmt` (or
-/// otherwise valid `MockBackend` handles) that have not already been freed.
+/// Each of `env`, `conn` and `stmt` that is *not* null must be a live token
+/// from `alloc_env_conn_stmt` (or an otherwise valid `MockBackend` handle)
+/// that has not already been freed.
 pub(crate) unsafe fn cleanup_env_conn_stmt(env: *mut c_void, conn: *mut c_void, stmt: *mut c_void) {
     unsafe {
         let _ = sql_free_handle::<MockBackend>(HandleType::Stmt as i16, stmt);
