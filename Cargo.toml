@@ -16,13 +16,13 @@ license = "Apache-2.0"
 # compiles it from the tarball. Publishing is this one line, flipped
 # deliberately, plus credentials.
 publish = false
-description = "Database-independent framework for building ODBC drivers in Rust: protocol logic, handle management, UTF-16 marshalling, diagnostics, and the generic ODBC FFI entry points."
 repository = "https://github.com/stackabletech/stackable-odbc-core"
+homepage = "https://github.com/stackabletech/stackable-odbc-core"
+documentation = "https://docs.rs/stackable-odbc-core"
+description = "Database-independent framework for building ODBC drivers in Rust: protocol logic, handle management, UTF-16 marshalling, diagnostics, and the generic ODBC FFI entry points."
 readme = "README.md"
 keywords = ["odbc", "database", "driver", "ffi", "sql"]
 categories = ["database", "external-ffi-bindings", "api-bindings"]
-documentation = "https://docs.rs/stackable-odbc-core"
-homepage = "https://github.com/stackabletech/stackable-odbc-core"
 
 # What does NOT go in the published tarball.
 #
