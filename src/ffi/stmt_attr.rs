@@ -521,19 +521,19 @@ pub unsafe fn sql_get_stmt_attr_w<B: Backend>(
                 // Descriptor handle attrs: return the allocated descriptor handles.
                 // The Windows DM requires these to build its CLI dispatch table.
                 Some(StatementAttribute::AppRowDesc) => {
-                    write_ptr(std::ptr::from_ref(&*stmt.app_row_desc) as usize);
+                    write_ptr(stmt.app_row_desc.token() as usize);
                     Ok(SqlReturn::SUCCESS)
                 }
                 Some(StatementAttribute::AppParamDesc) => {
-                    write_ptr(std::ptr::from_ref(&*stmt.app_param_desc) as usize);
+                    write_ptr(stmt.app_param_desc.token() as usize);
                     Ok(SqlReturn::SUCCESS)
                 }
                 Some(StatementAttribute::ImpRowDesc) => {
-                    write_ptr(std::ptr::from_ref(&*stmt.imp_row_desc) as usize);
+                    write_ptr(stmt.imp_row_desc.token() as usize);
                     Ok(SqlReturn::SUCCESS)
                 }
                 Some(StatementAttribute::ImpParamDesc) => {
-                    write_ptr(std::ptr::from_ref(&*stmt.imp_param_desc) as usize);
+                    write_ptr(stmt.imp_param_desc.token() as usize);
                     Ok(SqlReturn::SUCCESS)
                 }
 

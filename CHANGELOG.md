@@ -89,6 +89,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking:** the `handles` module's tag-based validation is replaced by a
+  generational handle registry (see `Fixed`). `HasTag` becomes `HasKind`, with
+  `const KIND: HandleKind` in place of `const TAG: u32` and a `header()`
+  accessor in place of `invalidate_tag()`; `HandleHeader` now records a slot and
+  generation rather than a tag. `ConnectionHandle::env`, `StatementHandle::conn`,
+  `EnvironmentHandle::connections` and `ConnectionHandle::statements` hold
+  tokens rather than addresses.
+  No application or Driver Manager sees any difference — `SQLHANDLE` is opaque
+  to both — and `forward_ffi!`'s exported signatures are unchanged, so a driver
+  crate needs no edit unless it reached into these internals, which nothing in
+  the FFI surface requires. The module is slated to become `pub(crate)`, which
+  would make this representation private for good.
 - `SQL_CURSOR_COMMIT_BEHAVIOR` and `SQL_CURSOR_ROLLBACK_BEHAVIOR` now report
   `SQL_CB_PRESERVE` instead of `SQL_CB_DELETE`, and are derived from
   `Backend::cursor_commit_behavior` / `Backend::cursor_rollback_behavior`
@@ -158,6 +170,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Security.** A handle is no longer a pointer, so validating one no longer
+  dereferences an untrusted value. Handles were validated by reading a magic tag
+  out of the allocation they pointed at, which can only ever catch a live handle
+  of the *wrong type*: a freed handle was a use-after-free read, and a value
+  that was never a pointer was an immediate segfault — a test passing `0x1234`
+  as a handle crashed the process with SIGSEGV. Zeroing the tag before
+  `Box::from_raw` on `SQLDisconnect` did not help, because the note was written
+  into memory that was then handed back to the allocator; it appeared to work
+  only because allocators do not usually reuse those bytes at once.
+  A handle is now an opaque token pairing a slot index with a generation
+  counter, and validation is a bounds check plus two integer comparisons against
+  a table this crate owns, touching no application memory at all. Nothing in
+  ODBC requires a handle to be an address: it is `void*` to the application and
+  the Driver Manager only hands it back. Freeing bumps the slot's generation, so
+  every outstanding token is permanently rejected — including after the slot is
+  reused, which closes the recycled-address double free as well. A double free
+  is now refused rather than performed.
+  Descriptor handles handed out by `SQLGetStmtAttrW` get their own slots, so the
+  addresses previously returned — which dangled the moment the owning statement
+  was freed — are gone. This was latent only because nothing yet accepts
+  `SQL_HANDLE_DESC`.
+  Measured cost of the added `RwLock` read: **3.4 ns** per validation, or about
+  34 ms across a 1M-row by 10-column fetch. The existing fetch benchmark could
+  not measure this, since it drives `SyntheticStatement` directly and never
+  crosses the FFI boundary.
+  The one case no scheme can defend is an application freeing a handle on one
+  thread while another is mid-call on it; ODBC forbids that and the Driver
+  Manager serialises calls per handle.
 - **Security.** Writes and reads through application-supplied pointers are now
   unaligned throughout. ODBC applications using row-wise binding pass pointers
   at arbitrary offsets into a packed buffer, so alignment is never guaranteed —

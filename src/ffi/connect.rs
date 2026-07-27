@@ -5,7 +5,7 @@ use std::ffi::c_void;
 
 use crate::backend::Backend;
 use crate::errors::OdbcError;
-use crate::handles::{ConnectionHandle, HasTag, as_handle_ref};
+use crate::handles::{ConnectionHandle, as_handle_ref};
 use crate::panic::panic_safe;
 use crate::types::{ConnectParams, SQL_NTS, SqlReturn, SqlState};
 use crate::utf16::{utf16_to_string, write_utf16};
@@ -677,11 +677,11 @@ pub unsafe fn sql_disconnect<B: Backend>(connection_handle: *mut c_void) -> SqlR
             // so that any subsequent access (e.g. application calls SQLFreeHandle
             // on a stale pointer) will fail the tag check in as_handle_ref and
             // return SQL_INVALID_HANDLE rather than causing a double-free.
-            for &stmt_ptr in &handle.statements {
-                (*stmt_ptr).invalidate_tag();
-                let _ = Box::from_raw(stmt_ptr);
-            }
-            handle.statements.clear();
+            // The registry, not the allocation, is what invalidates a handle:
+            // the application may still hold the statement tokens and every one
+            // of them must now be refused. This also retires the four
+            // descriptor slots each statement owns.
+            crate::handles::free_connection_statements::<B>(handle);
 
             Ok(SqlReturn::SUCCESS)
         })

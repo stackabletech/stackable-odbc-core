@@ -1,7 +1,31 @@
 //! ODBC handle types (environment, connection, statement), their allocation
-//! and free routines, and tag validation at the FFI boundary.
+//! and free routines, and handle validation at the FFI boundary.
+//!
+//! # Why handles are not pointers
+//!
+//! A handle arrives from the C boundary as an untrusted `*mut c_void`. The
+//! obvious validation — store a magic tag in the allocation and compare it —
+//! cannot work, because reading that tag *is* a dereference of the untrusted
+//! value. It catches a live handle of the wrong type and nothing else: a freed
+//! handle is a use-after-free read, and a value that was never a pointer is an
+//! immediate segfault.
+//!
+//! So a handle is not an address. It is an opaque token pairing a slot index
+//! with a generation counter, and validation is a bounds check plus two integer
+//! comparisons against a table this crate owns — with no access to
+//! application-supplied memory at all. Nothing in ODBC requires otherwise: a
+//! `SQLHANDLE` is `void*` to the application, and the Driver Manager only ever
+//! hands it back.
+//!
+//! Freeing bumps the slot's generation, so every outstanding token for that
+//! slot is permanently rejected, including after the slot is reused.
+//!
+//! The one case no scheme can defend is an application freeing a handle on one
+//! thread while another is mid-call on it. ODBC forbids that and the Driver
+//! Manager serialises calls per handle.
 
 use std::ffi::c_void;
+use std::sync::RwLock;
 
 use odbc_sys::AttrOdbcVersion;
 
@@ -11,10 +35,174 @@ use crate::errors::OdbcError;
 use crate::types::{ColumnDescriptor, ColumnValue, ConnectParams, FetchResult, SqlReturn, ULen};
 use odbc_sys::{CDataType, ParamType, SqlDataType};
 
-const ENV_TAG: u32 = 0x4F44_4245; // "ODBE"
-const DBC_TAG: u32 = 0x4F44_4243; // "ODBC"
-const STMT_TAG: u32 = 0x4F44_4253; // "ODBS"
-const DESC_TAG: u32 = 0x4F44_4244; // "ODBD"
+/// Which kind of ODBC handle a registry slot holds.
+///
+/// Replaces the old magic tags. The kind lives in the registry rather than in
+/// the allocation, so checking it never touches the caller's value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandleKind {
+    /// `SQL_HANDLE_ENV`
+    Env,
+    /// `SQL_HANDLE_DBC`
+    Dbc,
+    /// `SQL_HANDLE_STMT`
+    Stmt,
+    /// `SQL_HANDLE_DESC`
+    Desc,
+}
+
+/// Bits of a token given to the slot index; the rest hold the generation.
+///
+/// On a 64-bit target this is a 32/32 split: four billion concurrent handles
+/// and four billion reuses of each. On 32-bit — which ODBC very much still has,
+/// since Excel and Access are 32-bit on Windows — it is 16/16, so 65 535
+/// concurrent handles and 65 535 reuses per slot. A slot whose generation would
+/// wrap is retired rather than reused, which keeps the scheme sound at the cost
+/// of the table growing slowly under extreme churn.
+const TOKEN_INDEX_BITS: u32 = usize::BITS / 2;
+
+/// Largest slot index a token can encode.
+const MAX_SLOT_INDEX: usize = (1usize << TOKEN_INDEX_BITS) - 1;
+
+/// Largest generation a token can encode. A slot reaching this is retired.
+const MAX_GENERATION: u32 = MAX_SLOT_INDEX as u32;
+
+/// One entry in the handle registry.
+struct Slot {
+    /// Incremented on every free. A token carrying a different value is stale.
+    generation: u32,
+    /// `None` when the slot is free and available for reuse.
+    kind: Option<HandleKind>,
+    /// Address of the `Box`-allocated handle this crate owns.
+    ///
+    /// Stored as `usize` rather than a raw pointer so `Slot` stays `Send`;
+    /// it is only ever produced by `Box::into_raw` in an `alloc_*` function.
+    addr: usize,
+}
+
+/// The live-handle table.
+///
+/// Read on every FFI call and written only when a handle is allocated or freed,
+/// so it is read-mostly by a wide margin.
+static REGISTRY: RwLock<Vec<Slot>> = RwLock::new(Vec::new());
+
+/// Encode a slot index and generation as the opaque value handed to the
+/// application.
+///
+/// Generations start at 1, so a valid token is never zero and stays
+/// distinguishable from `SQL_NULL_HANDLE`.
+fn encode_token(index: usize, generation: u32) -> *mut c_void {
+    (((generation as usize) << TOKEN_INDEX_BITS) | index) as *mut c_void
+}
+
+/// Split a token back into its slot index and generation.
+fn decode_token(token: *mut c_void) -> (usize, u32) {
+    let raw = token as usize;
+    (raw & MAX_SLOT_INDEX, (raw >> TOKEN_INDEX_BITS) as u32)
+}
+
+/// Recover the registry after a panic poisoned it.
+///
+/// The table is a plain `Vec` of integers; a panic mid-update cannot leave it
+/// in a state that makes the checks below unsound, and refusing every handle
+/// for the life of the process because one call panicked would be far worse
+/// than the alternative.
+macro_rules! registry {
+    (read) => {
+        REGISTRY.read().unwrap_or_else(|e| e.into_inner())
+    };
+    (write) => {
+        REGISTRY.write().unwrap_or_else(|e| e.into_inner())
+    };
+}
+
+/// Resolve a token to the address of a live handle of the expected kind.
+///
+/// Returns `None` for a token that was never issued, was issued for a different
+/// kind, or has been freed — **without dereferencing `token`**.
+fn resolve(token: *mut c_void, expected: HandleKind) -> Option<usize> {
+    if token.is_null() {
+        return None;
+    }
+    let (index, generation) = decode_token(token);
+    let registry = registry!(read);
+    let slot = registry.get(index)?;
+    if slot.generation != generation || slot.kind != Some(expected) {
+        return None;
+    }
+    Some(slot.addr)
+}
+
+/// Resolve a token to `(kind, address)` without knowing its kind in advance.
+///
+/// Used by the diagnostic-queue lookup, which accepts any handle type.
+fn resolve_any(token: *mut c_void) -> Option<(HandleKind, usize)> {
+    if token.is_null() {
+        return None;
+    }
+    let (index, generation) = decode_token(token);
+    let registry = registry!(read);
+    let slot = registry.get(index)?;
+    if slot.generation != generation {
+        return None;
+    }
+    Some((slot.kind?, slot.addr))
+}
+
+/// Register a freshly allocated handle and return its token.
+///
+/// Reuses a free slot when one is available, otherwise appends. Returns `None`
+/// if the table is exhausted, which the caller reports as an allocation
+/// failure rather than handing back an ambiguous token.
+fn register(kind: HandleKind, addr: usize) -> Option<(*mut c_void, u32, u32)> {
+    let mut registry = registry!(write);
+
+    if let Some((index, slot)) = registry
+        .iter_mut()
+        .enumerate()
+        .find(|(_, slot)| slot.kind.is_none() && slot.generation < MAX_GENERATION)
+    {
+        slot.generation += 1;
+        slot.kind = Some(kind);
+        slot.addr = addr;
+        let generation = slot.generation;
+        return Some((encode_token(index, generation), index as u32, generation));
+    }
+
+    let index = registry.len();
+    if index > MAX_SLOT_INDEX {
+        tracing::error!("handle registry exhausted at {index} slots");
+        return None;
+    }
+    registry.push(Slot {
+        generation: 1,
+        kind: Some(kind),
+        addr,
+    });
+    Some((encode_token(index, 1), index as u32, 1))
+}
+
+/// Retire a handle's slot, so every outstanding token for it is rejected.
+///
+/// Returns the address that was registered, or `None` if the token was already
+/// stale — which is what makes a double free a refusal rather than a second
+/// deallocation.
+fn unregister(token: *mut c_void, expected: HandleKind) -> Option<usize> {
+    if token.is_null() {
+        return None;
+    }
+    let (index, generation) = decode_token(token);
+    let mut registry = registry!(write);
+    let slot = registry.get_mut(index)?;
+    if slot.generation != generation || slot.kind != Some(expected) {
+        return None;
+    }
+    slot.kind = None;
+    // Bumped here as well as on reuse so that the token is dead the instant the
+    // handle is freed, not merely once the slot is handed out again.
+    slot.generation = slot.generation.saturating_add(1);
+    Some(slot.addr)
+}
 
 /// SQL_ATTR_NOSCAN = SQL_NOSCAN_ON: the application asks the driver not to scan
 /// SQL for escape sequences.
@@ -32,10 +220,22 @@ pub struct DescriptorHandle {
     header: HandleHeader,
 }
 
-impl HasTag for DescriptorHandle {
-    const TAG: u32 = DESC_TAG;
-    fn invalidate_tag(&mut self) {
-        self.header.invalidate();
+impl HasKind for DescriptorHandle {
+    const KIND: HandleKind = HandleKind::Desc;
+    fn header(&self) -> &HandleHeader {
+        &self.header
+    }
+}
+
+impl DescriptorHandle {
+    /// The token `SQLGetStmtAttrW` hands to the application for this
+    /// descriptor.
+    ///
+    /// Handing out its address instead would give the application a value that
+    /// could never be validated, and that would dangle the moment the owning
+    /// statement was freed.
+    pub fn token(&self) -> *mut c_void {
+        self.header.token()
     }
 }
 
@@ -45,31 +245,39 @@ impl HasTag for DescriptorHandle {
 ///
 /// Must be `#[repr(C)]` and the first field so that we can read it from an
 /// untyped pointer without knowing the concrete handle type.
+/// First field of every handle struct.
+///
+/// Records where the handle sits in the registry so that freeing it does not
+/// need an address-to-slot search. It is *not* used to validate anything: the
+/// registry is the sole authority, and it is consulted without touching the
+/// caller's value. See the module docs.
 #[repr(C)]
 pub struct HandleHeader {
-    /// Identifies the handle type; zeroed on free to catch use-after-free.
-    pub tag: u32,
-}
-
-/// A handle type that carries a compile-time tag for FFI validation.
-///
-/// Every handle stores a [`HandleHeader`] tag as its first field, and
-/// `as_handle_ref` checks it against `TAG` before dereferencing a raw pointer
-/// from the C boundary.
-pub trait HasTag {
-    /// The tag value stamped into this handle type's header.
-    const TAG: u32;
-
-    /// Zero the handle tag, making subsequent `as_handle_ref` calls return
-    /// `INVALID_HANDLE`. Used when freeing handles to prevent use-after-free
-    /// if the application holds a stale pointer.
-    fn invalidate_tag(&mut self);
+    slot: u32,
+    generation: u32,
 }
 
 impl HandleHeader {
-    fn invalidate(&mut self) {
-        self.tag = 0;
+    /// Written into a handle before it is registered. Generation 0 is never
+    /// issued, so a handle still carrying this has no valid token.
+    const PLACEHOLDER: Self = Self {
+        slot: 0,
+        generation: 0,
+    };
+
+    /// The token that was handed to the application for this handle.
+    fn token(&self) -> *mut c_void {
+        encode_token(self.slot as usize, self.generation)
     }
+}
+
+/// A handle type that can be looked up in the registry.
+pub trait HasKind {
+    /// Which kind of ODBC handle this type is.
+    const KIND: HandleKind;
+
+    /// Access to the header, so `free_*` can find the handle's slot.
+    fn header(&self) -> &HandleHeader;
 }
 
 /// Top-level ODBC environment handle (`SQL_HANDLE_ENV`).
@@ -87,14 +295,21 @@ impl HandleHeader {
 pub struct EnvironmentHandle<B: Backend> {
     header: HandleHeader,
     pub odbc_version: AttrOdbcVersion,
-    pub connections: Vec<*mut ConnectionHandle<B>>,
+    /// Tokens of child connections, not addresses: everything outside this
+    /// module deals in tokens, so they can be revalidated after any free.
+    pub connections: Vec<*mut c_void>,
+    /// `EnvironmentHandle` no longer names `B` in any field now that child
+    /// handles are tokens, but it must stay generic: `as_handle_ref::<T>` keys
+    /// on the concrete type, and an environment allocated for one backend must
+    /// not resolve as another's.
+    _backend: std::marker::PhantomData<fn() -> B>,
     pub diagnostics: DiagnosticQueue,
 }
 
-impl<B: Backend> HasTag for EnvironmentHandle<B> {
-    const TAG: u32 = ENV_TAG;
-    fn invalidate_tag(&mut self) {
-        self.header.invalidate();
+impl<B: Backend> HasKind for EnvironmentHandle<B> {
+    const KIND: HandleKind = HandleKind::Env;
+    fn header(&self) -> &HandleHeader {
+        &self.header
     }
 }
 
@@ -112,9 +327,10 @@ impl<B: Backend> HasTag for EnvironmentHandle<B> {
 #[repr(C)]
 pub struct ConnectionHandle<B: Backend> {
     header: HandleHeader,
-    pub env: *mut EnvironmentHandle<B>,
+    pub env: *mut c_void,
     pub connection: Option<B::Connection>,
-    pub statements: Vec<*mut StatementHandle<B>>,
+    /// Tokens of child statements. See `EnvironmentHandle::connections`.
+    pub statements: Vec<*mut c_void>,
     pub diagnostics: DiagnosticQueue,
     /// Integer/pointer-valued connection attributes set via `SQLSetConnectAttr`.
     /// Values are stored as `usize` (pointer-sized). Defaults are applied at read time.
@@ -126,10 +342,10 @@ pub struct ConnectionHandle<B: Backend> {
     pub browse_request: Option<ConnectParams>,
 }
 
-impl<B: Backend> HasTag for ConnectionHandle<B> {
-    const TAG: u32 = DBC_TAG;
-    fn invalidate_tag(&mut self) {
-        self.header.invalidate();
+impl<B: Backend> HasKind for ConnectionHandle<B> {
+    const KIND: HandleKind = HandleKind::Dbc;
+    fn header(&self) -> &HandleHeader {
+        &self.header
     }
 }
 
@@ -285,7 +501,7 @@ unsafe impl Sync for DataAtExecState {}
 #[repr(C)]
 pub struct StatementHandle<B: Backend> {
     header: HandleHeader,
-    pub conn: *mut ConnectionHandle<B>,
+    pub conn: *mut c_void,
     pub statement: Option<StatementData<B>>,
     /// Whether a cursor is currently open on this statement (ODBC states
     /// S5-S7). Set when an execution produces a result set, cleared when that
@@ -323,10 +539,10 @@ pub struct StatementHandle<B: Backend> {
     pub imp_param_desc: Box<DescriptorHandle>,
 }
 
-impl<B: Backend> HasTag for StatementHandle<B> {
-    const TAG: u32 = STMT_TAG;
-    fn invalidate_tag(&mut self) {
-        self.header.invalidate();
+impl<B: Backend> HasKind for StatementHandle<B> {
+    const KIND: HandleKind = HandleKind::Stmt;
+    fn header(&self) -> &HandleHeader {
+        &self.header
     }
 }
 
@@ -385,15 +601,13 @@ impl<B: Backend> StatementHandle<B> {
 ///
 /// The caller must ensure the pointer was originally created from a `Box<T>` of the
 /// same type and that no other mutable references to the handle exist.
-pub unsafe fn as_handle_ref<T: HasTag>(ptr: *mut c_void) -> Result<&'static mut T, OdbcError> {
-    if ptr.is_null() {
-        return Err(OdbcError::InvalidHandle);
-    }
-    let header = unsafe { &*(ptr as *const HandleHeader) };
-    if header.tag != T::TAG {
-        return Err(OdbcError::InvalidHandle);
-    }
-    Ok(unsafe { &mut *(ptr as *mut T) })
+pub unsafe fn as_handle_ref<T: HasKind>(token: *mut c_void) -> Result<&'static mut T, OdbcError> {
+    let addr = resolve(token, T::KIND).ok_or(OdbcError::InvalidHandle)?;
+    // SAFETY: `addr` came out of the registry, so it was produced by
+    // `Box::into_raw` in an `alloc_*` function for a handle of exactly `T::KIND`
+    // and has not been freed — freeing clears the slot, and the generation
+    // check above rejects any token issued before that.
+    Ok(unsafe { &mut *(addr as *mut T) })
 }
 
 /// Allocate a new environment handle and write it to `output`.
@@ -405,16 +619,26 @@ pub unsafe fn as_handle_ref<T: HasTag>(ptr: *mut c_void) -> Result<&'static mut 
 /// is non-null before calling this function.
 pub unsafe fn alloc_environment<B: Backend>(output: *mut *mut c_void) -> SqlReturn {
     let handle = Box::new(EnvironmentHandle::<B> {
-        header: HandleHeader { tag: ENV_TAG },
+        header: HandleHeader::PLACEHOLDER,
         odbc_version: AttrOdbcVersion::Odbc3,
         connections: Vec::new(),
         diagnostics: DiagnosticQueue::new(),
+        _backend: std::marker::PhantomData,
     });
     let ptr = Box::into_raw(handle);
-    unsafe {
-        std::ptr::write_unaligned(output, ptr as *mut c_void);
+    // SAFETY: `ptr` came from `Box::into_raw` just above and has not been
+    // shared, so both the reclaim on failure and the header write are sound.
+    match register(HandleKind::Env, ptr as usize) {
+        Some((token, slot, generation)) => unsafe {
+            (*ptr).header = HandleHeader { slot, generation };
+            std::ptr::write_unaligned(output, token);
+            SqlReturn::SUCCESS
+        },
+        None => {
+            drop(unsafe { Box::from_raw(ptr) });
+            SqlReturn::ERROR
+        }
     }
-    SqlReturn::SUCCESS
 }
 
 /// Allocate a new connection handle, register it with the parent environment,
@@ -435,8 +659,8 @@ pub unsafe fn alloc_connection<B: Backend>(
         Err(_) => return SqlReturn::INVALID_HANDLE,
     };
     let handle = Box::new(ConnectionHandle::<B> {
-        header: HandleHeader { tag: DBC_TAG },
-        env: env_ptr as *mut EnvironmentHandle<B>,
+        header: HandleHeader::PLACEHOLDER,
+        env: env_ptr,
         connection: None,
         statements: Vec::new(),
         diagnostics: DiagnosticQueue::new(),
@@ -445,11 +669,19 @@ pub unsafe fn alloc_connection<B: Backend>(
         browse_request: None,
     });
     let ptr = Box::into_raw(handle);
-    env.connections.push(ptr);
-    unsafe {
-        std::ptr::write_unaligned(output, ptr as *mut c_void);
+    // SAFETY: as in `alloc_environment`.
+    match register(HandleKind::Dbc, ptr as usize) {
+        Some((token, slot, generation)) => unsafe {
+            (*ptr).header = HandleHeader { slot, generation };
+            env.connections.push(token);
+            std::ptr::write_unaligned(output, token);
+            SqlReturn::SUCCESS
+        },
+        None => {
+            drop(unsafe { Box::from_raw(ptr) });
+            SqlReturn::ERROR
+        }
     }
-    SqlReturn::SUCCESS
 }
 
 /// Allocate a new statement handle, register it with the parent connection,
@@ -472,14 +704,17 @@ pub unsafe fn alloc_statement<B: Backend>(
     // Owned by the statement: dropping the StatementHandle frees them, so no
     // teardown path can forget to -- do not add a manual free in
     // disconnect/free-handle paths.
+    // Each descriptor gets its own registry slot: `SQLGetStmtAttrW` hands
+    // these out to the application, so they need tokens of their own or the
+    // application would receive a raw address it could not be validated from.
     let alloc_desc = || {
         Box::new(DescriptorHandle {
-            header: HandleHeader { tag: DESC_TAG },
+            header: HandleHeader::PLACEHOLDER,
         })
     };
     let handle = Box::new(StatementHandle::<B> {
-        header: HandleHeader { tag: STMT_TAG },
-        conn: conn_ptr as *mut ConnectionHandle<B>,
+        header: HandleHeader::PLACEHOLDER,
+        conn: conn_ptr,
         statement: None,
         cursor_open: false,
         prepared_sql: None,
@@ -496,9 +731,29 @@ pub unsafe fn alloc_statement<B: Backend>(
         imp_param_desc: alloc_desc(),
     });
     let ptr = Box::into_raw(handle);
-    conn.statements.push(ptr);
+    // SAFETY: as in `alloc_environment`.
+    let Some((token, slot, generation)) = register(HandleKind::Stmt, ptr as usize) else {
+        drop(unsafe { Box::from_raw(ptr) });
+        return SqlReturn::ERROR;
+    };
     unsafe {
-        std::ptr::write_unaligned(output, ptr as *mut c_void);
+        (*ptr).header = HandleHeader { slot, generation };
+        // Register the four descriptors now that the statement owns them.
+        for desc in [
+            std::ptr::from_mut(&mut *(*ptr).app_row_desc),
+            std::ptr::from_mut(&mut *(*ptr).app_param_desc),
+            std::ptr::from_mut(&mut *(*ptr).imp_row_desc),
+            std::ptr::from_mut(&mut *(*ptr).imp_param_desc),
+        ] {
+            if let Some((_, dslot, dgen)) = register(HandleKind::Desc, desc as usize) {
+                (*desc).header = HandleHeader {
+                    slot: dslot,
+                    generation: dgen,
+                };
+            }
+        }
+        conn.statements.push(token);
+        std::ptr::write_unaligned(output, token);
     }
     SqlReturn::SUCCESS
 }
@@ -522,8 +777,12 @@ pub unsafe fn free_environment<B: Backend>(handle: *mut c_void) -> SqlReturn {
         ));
         return SqlReturn::ERROR;
     }
-    env.invalidate_tag();
-    let _ = unsafe { Box::from_raw(handle as *mut EnvironmentHandle<B>) };
+    let Some(addr) = unregister(handle, HandleKind::Env) else {
+        return SqlReturn::INVALID_HANDLE;
+    };
+    // SAFETY: `unregister` returned the address this crate registered in
+    // `alloc_environment`, and retired the slot, so no other call can obtain it.
+    drop(unsafe { Box::from_raw(addr as *mut EnvironmentHandle<B>) });
     SqlReturn::SUCCESS
 }
 
@@ -565,13 +824,15 @@ pub unsafe fn free_connection<B: Backend>(handle: *mut c_void) -> SqlReturn {
     // Remove from parent environment's connection list.
     // Use as_handle_ref for tag validation: if the parent was already freed,
     // we skip removal rather than dereferencing freed memory.
-    let env_ptr = conn.env as *mut c_void;
-    if let Ok(env) = unsafe { as_handle_ref::<EnvironmentHandle<B>>(env_ptr) } {
-        let conn_typed = handle as *mut ConnectionHandle<B>;
-        env.connections.retain(|&p| p != conn_typed);
+    let env_token = conn.env;
+    if let Ok(env) = unsafe { as_handle_ref::<EnvironmentHandle<B>>(env_token) } {
+        env.connections.retain(|&p| p != handle);
     }
-    conn.invalidate_tag();
-    let _ = unsafe { Box::from_raw(handle as *mut ConnectionHandle<B>) };
+    let Some(addr) = unregister(handle, HandleKind::Dbc) else {
+        return SqlReturn::INVALID_HANDLE;
+    };
+    // SAFETY: as in `free_environment`.
+    drop(unsafe { Box::from_raw(addr as *mut ConnectionHandle<B>) });
     SqlReturn::SUCCESS
 }
 
@@ -590,16 +851,57 @@ pub unsafe fn free_statement<B: Backend>(handle: *mut c_void) -> SqlReturn {
     // Remove from parent connection's statement list.
     // Use as_handle_ref for tag validation: if the parent was already freed,
     // we skip removal rather than dereferencing freed memory.
-    let conn_ptr = stmt.conn as *mut c_void;
-    if let Ok(conn) = unsafe { as_handle_ref::<ConnectionHandle<B>>(conn_ptr) } {
-        let stmt_typed = handle as *mut StatementHandle<B>;
-        conn.statements.retain(|&p| p != stmt_typed);
+    let conn_token = stmt.conn;
+    if let Ok(conn) = unsafe { as_handle_ref::<ConnectionHandle<B>>(conn_token) } {
+        conn.statements.retain(|&p| p != handle);
     }
-    // The descriptor handles are owned Boxes; dropping the StatementHandle
-    // below frees them.
-    stmt.invalidate_tag();
-    let _ = unsafe { Box::from_raw(handle as *mut StatementHandle<B>) };
+    unsafe { free_statement_allocation::<B>(handle) }
+}
+
+/// Retire a statement's registry slot and those of its four descriptors, then
+/// drop the allocation.
+///
+/// Split out so that `SQLDisconnect`, which frees a connection's statements
+/// without going through `free_statement`, cannot forget the descriptor slots.
+/// Leaking them would be invisible until the registry grew unboundedly.
+///
+/// # Safety
+///
+/// `token` must be a live statement handle.
+pub(crate) unsafe fn free_statement_allocation<B: Backend>(token: *mut c_void) -> SqlReturn {
+    let Some(addr) = unregister(token, HandleKind::Stmt) else {
+        return SqlReturn::INVALID_HANDLE;
+    };
+    // SAFETY: `unregister` returned the address registered in
+    // `alloc_statement` and retired the slot.
+    let stmt = unsafe { Box::from_raw(addr as *mut StatementHandle<B>) };
+    for desc in [
+        &stmt.app_row_desc,
+        &stmt.app_param_desc,
+        &stmt.imp_row_desc,
+        &stmt.imp_param_desc,
+    ] {
+        unregister(desc.header.token(), HandleKind::Desc);
+    }
+    // `stmt` drops here, taking the descriptor allocations with it.
     SqlReturn::SUCCESS
+}
+
+/// Free every statement allocated on a connection, retiring their registry
+/// slots and their descriptors'.
+///
+/// `SQLDisconnect` must free the connection's statements per the spec. This
+/// lives here so no caller has to reach into a handle's header to reconstruct
+/// its token, and so the descriptor slots cannot be forgotten on that path.
+///
+/// # Safety
+///
+/// `conn.statements` must hold addresses registered by [`alloc_statement`].
+pub(crate) unsafe fn free_connection_statements<B: Backend>(conn: &mut ConnectionHandle<B>) {
+    for token in std::mem::take(&mut conn.statements) {
+        // SAFETY: the caller guarantees these are live statement handles.
+        let _ = unsafe { free_statement_allocation::<B>(token) };
+    }
 }
 
 /// Try to obtain a mutable reference to the diagnostic queue of any handle type.
@@ -625,24 +927,15 @@ pub unsafe fn free_statement<B: Backend>(handle: *mut c_void) -> SqlReturn {
 pub unsafe fn try_get_diagnostic_queue<B: Backend>(
     handle: *mut c_void,
 ) -> Result<&'static mut DiagnosticQueue, ()> {
-    if handle.is_null() {
-        return Err(());
-    }
-    let header = unsafe { &*(handle as *const HandleHeader) };
-    match header.tag {
-        ENV_TAG => {
-            let env = unsafe { &mut *(handle as *mut EnvironmentHandle<B>) };
-            Ok(&mut env.diagnostics)
-        }
-        DBC_TAG => {
-            let conn = unsafe { &mut *(handle as *mut ConnectionHandle<B>) };
-            Ok(&mut conn.diagnostics)
-        }
-        STMT_TAG => {
-            let stmt = unsafe { &mut *(handle as *mut StatementHandle<B>) };
-            Ok(&mut stmt.diagnostics)
-        }
-        _ => Err(()),
+    let (kind, addr) = resolve_any(handle).ok_or(())?;
+    // SAFETY: the registry produced both the kind and the address, so the cast
+    // matches what `alloc_*` allocated and the handle is live.
+    match kind {
+        HandleKind::Env => Ok(unsafe { &mut (*(addr as *mut EnvironmentHandle<B>)).diagnostics }),
+        HandleKind::Dbc => Ok(unsafe { &mut (*(addr as *mut ConnectionHandle<B>)).diagnostics }),
+        HandleKind::Stmt => Ok(unsafe { &mut (*(addr as *mut StatementHandle<B>)).diagnostics }),
+        // Descriptors carry no diagnostic queue of their own.
+        HandleKind::Desc => Err(()),
     }
 }
 
@@ -650,6 +943,115 @@ pub unsafe fn try_get_diagnostic_queue<B: Backend>(
 mod tests {
     use super::*;
     use crate::test_utils::{MockBackend, MockConnection};
+
+    // -----------------------------------------------------------------------
+    // Handle validation
+    //
+    // A handle arrives from the C boundary as an untrusted value. Deciding
+    // whether it is valid by *dereferencing* it — which is what reading a tag
+    // out of its header does — can only ever catch a wrong-typed pointer that
+    // is still live. It cannot catch a freed one, and on a value that was never
+    // a pointer at all it is an immediate segfault.
+    //
+    // These tests state the requirement: validation must reach a verdict
+    // without touching the address.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_value_that_was_never_a_handle_is_rejected() {
+        // Not a pointer at all. Reading a header from it must never be
+        // attempted.
+        let bogus = 0x1234_usize as *mut c_void;
+        let result = unsafe { as_handle_ref::<EnvironmentHandle<MockBackend>>(bogus) };
+        assert!(result.is_err(), "a non-handle value must be rejected");
+    }
+
+    #[test]
+    fn a_freed_handle_is_rejected() {
+        unsafe {
+            let mut env_ptr: *mut c_void = std::ptr::null_mut();
+            let _ = alloc_environment::<MockBackend>(&mut env_ptr as *mut _);
+            assert_eq!(free_environment::<MockBackend>(env_ptr), SqlReturn::SUCCESS);
+
+            // The application still holds the old value.
+            let result = as_handle_ref::<EnvironmentHandle<MockBackend>>(env_ptr);
+            assert!(result.is_err(), "a freed handle must be rejected");
+        }
+    }
+
+    #[test]
+    fn a_freed_handle_is_rejected_even_after_its_slot_is_reused() {
+        unsafe {
+            let mut first: *mut c_void = std::ptr::null_mut();
+            let _ = alloc_environment::<MockBackend>(&mut first as *mut _);
+            let _ = free_environment::<MockBackend>(first);
+
+            // The next allocation is very likely to take the slot just freed.
+            let mut second: *mut c_void = std::ptr::null_mut();
+            let _ = alloc_environment::<MockBackend>(&mut second as *mut _);
+
+            let stale = as_handle_ref::<EnvironmentHandle<MockBackend>>(first);
+            assert!(
+                stale.is_err(),
+                "the old handle must not be revived by a reused slot"
+            );
+            assert!(as_handle_ref::<EnvironmentHandle<MockBackend>>(second).is_ok());
+
+            let _ = free_environment::<MockBackend>(second);
+        }
+    }
+
+    #[test]
+    fn freeing_a_handle_twice_is_rejected_the_second_time() {
+        unsafe {
+            let mut env_ptr: *mut c_void = std::ptr::null_mut();
+            let _ = alloc_environment::<MockBackend>(&mut env_ptr as *mut _);
+            assert_eq!(free_environment::<MockBackend>(env_ptr), SqlReturn::SUCCESS);
+            assert_eq!(
+                free_environment::<MockBackend>(env_ptr),
+                SqlReturn::INVALID_HANDLE,
+                "a double free must be refused, not performed"
+            );
+        }
+    }
+
+    #[test]
+    fn a_statement_is_rejected_after_its_connection_frees_it() {
+        unsafe {
+            let mut env_ptr: *mut c_void = std::ptr::null_mut();
+            let _ = alloc_environment::<MockBackend>(&mut env_ptr as *mut _);
+            let mut conn_ptr: *mut c_void = std::ptr::null_mut();
+            let _ = alloc_connection::<MockBackend>(env_ptr, &mut conn_ptr as *mut _);
+            let mut stmt_ptr: *mut c_void = std::ptr::null_mut();
+            let _ = alloc_statement::<MockBackend>(conn_ptr, &mut stmt_ptr as *mut _);
+
+            assert!(as_handle_ref::<StatementHandle<MockBackend>>(stmt_ptr).is_ok());
+
+            let _ = free_statement::<MockBackend>(stmt_ptr);
+            assert!(
+                as_handle_ref::<StatementHandle<MockBackend>>(stmt_ptr).is_err(),
+                "a freed statement must be rejected"
+            );
+
+            let _ = free_connection::<MockBackend>(conn_ptr);
+            let _ = free_environment::<MockBackend>(env_ptr);
+        }
+    }
+
+    #[test]
+    fn a_handle_of_the_wrong_type_is_rejected() {
+        unsafe {
+            let mut env_ptr: *mut c_void = std::ptr::null_mut();
+            let _ = alloc_environment::<MockBackend>(&mut env_ptr as *mut _);
+
+            // A real, live handle — but asked for as the wrong type.
+            assert!(as_handle_ref::<ConnectionHandle<MockBackend>>(env_ptr).is_err());
+            assert!(as_handle_ref::<StatementHandle<MockBackend>>(env_ptr).is_err());
+            assert!(as_handle_ref::<EnvironmentHandle<MockBackend>>(env_ptr).is_ok());
+
+            let _ = free_environment::<MockBackend>(env_ptr);
+        }
+    }
 
     #[test]
     fn alloc_and_free_environment() {
@@ -776,30 +1178,6 @@ mod tests {
             assert!(matches!(wrong, Err(OdbcError::InvalidHandle)));
 
             let _ = free_environment::<MockBackend>(env_ptr);
-        }
-    }
-
-    #[test]
-    fn as_handle_ref_rejects_invalidated_tag() {
-        // Freeing a handle zeroes its tag (see `invalidate_tag`), so a stale
-        // pointer to it is rejected rather than dereferenced as a live handle.
-        // We invalidate the tag directly to exercise that check without a real
-        // use-after-free (which would be undefined behaviour).
-        unsafe {
-            let mut env_ptr: *mut c_void = std::ptr::null_mut();
-            let _ = alloc_environment::<MockBackend>(&mut env_ptr as *mut _);
-
-            let env = as_handle_ref::<EnvironmentHandle<MockBackend>>(env_ptr).unwrap();
-            env.invalidate_tag();
-
-            let stale = as_handle_ref::<EnvironmentHandle<MockBackend>>(env_ptr);
-            assert!(matches!(stale, Err(OdbcError::InvalidHandle)));
-
-            // The tag is now 0, so `free_environment` would also reject it;
-            // reclaim the still-live allocation directly to avoid a leak.
-            drop(Box::from_raw(
-                env_ptr as *mut EnvironmentHandle<MockBackend>,
-            ));
         }
     }
 

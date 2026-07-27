@@ -142,7 +142,7 @@ pub unsafe fn sql_exec_direct_w<B: Backend>(
             }
 
             // Get parent connection via tag-validated traversal.
-            let conn = as_handle_ref::<ConnectionHandle<B>>(stmt.conn as *mut c_void)?;
+            let conn = as_handle_ref::<ConnectionHandle<B>>(stmt.conn)?;
 
             // Spec HY010: Connection must be open.
             let Some(ref connection) = conn.connection else {
@@ -325,7 +325,7 @@ pub unsafe fn sql_prepare_w<B: Backend>(
             let param_count = crate::ffi::params::count_params(&sql);
 
             // Get parent connection.
-            let conn_ptr = stmt.conn as *mut c_void;
+            let conn_ptr = stmt.conn;
             let conn = as_handle_ref::<ConnectionHandle<B>>(conn_ptr)?;
             let Some(ref connection) = conn.connection else {
                 return Err(OdbcError::general(
@@ -469,7 +469,7 @@ pub unsafe fn sql_execute<B: Backend>(statement_handle: *mut c_void) -> SqlRetur
             // SAFETY: caller guarantees all bound buffer pointers remain valid.
             let params = crate::ffi::params::collect_params(&stmt.param_bindings, param_count)?;
 
-            let conn_ptr = stmt.conn as *mut c_void;
+            let conn_ptr = stmt.conn;
             let conn = as_handle_ref::<ConnectionHandle<B>>(conn_ptr)?;
             let Some(ref connection) = conn.connection else {
                 return Err(OdbcError::general(

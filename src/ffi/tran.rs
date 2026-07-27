@@ -70,9 +70,8 @@ unsafe fn apply_cursor_behavior<B: Backend>(
     for &stmt_ptr in &conn.statements {
         // SAFETY: stmt_ptr was registered by sql_alloc_handle and remains valid
         // while the connection handle is alive; the tag is validated here.
-        let Ok(stmt) = (unsafe {
-            as_handle_ref::<crate::handles::StatementHandle<B>>(stmt_ptr as *mut c_void)
-        }) else {
+        let Ok(stmt) = (unsafe { as_handle_ref::<crate::handles::StatementHandle<B>>(stmt_ptr) })
+        else {
             tracing::warn!("SQLEndTran: skipping statement with an invalid tag");
             continue;
         };
@@ -302,32 +301,31 @@ pub unsafe fn sql_end_tran<B: Backend>(
                     for conn_ptr in conn_ptrs {
                         // SAFETY: conn_ptr was registered by sql_alloc_handle and
                         // remains valid while the environment handle is alive.
-                        let conn =
-                            match as_handle_ref::<ConnectionHandle<B>>(conn_ptr as *mut c_void) {
-                                Ok(conn) => conn,
-                                Err(_) => {
-                                    tracing::warn!(
-                                        "SQLEndTran: connection {:?} failed tag validation",
-                                        conn_ptr
-                                    );
-                                    // Not `OdbcError::InvalidHandle`: the input
-                                    // handle was valid, so returning
-                                    // SQL_INVALID_HANDLE would misreport the
-                                    // call — and `panic_safe` pushes no
-                                    // diagnostic for that variant, leaving
-                                    // nothing to explain the failure. This is a
-                                    // corrupt entry in the environment's own
-                                    // connection list, i.e. a general error.
-                                    first_err.get_or_insert_with(|| {
-                                        OdbcError::general(
-                                            "Environment holds a connection entry that failed \
+                        let conn = match as_handle_ref::<ConnectionHandle<B>>(conn_ptr) {
+                            Ok(conn) => conn,
+                            Err(_) => {
+                                tracing::warn!(
+                                    "SQLEndTran: connection {:?} failed tag validation",
+                                    conn_ptr
+                                );
+                                // Not `OdbcError::InvalidHandle`: the input
+                                // handle was valid, so returning
+                                // SQL_INVALID_HANDLE would misreport the
+                                // call — and `panic_safe` pushes no
+                                // diagnostic for that variant, leaving
+                                // nothing to explain the failure. This is a
+                                // corrupt entry in the environment's own
+                                // connection list, i.e. a general error.
+                                first_err.get_or_insert_with(|| {
+                                    OdbcError::general(
+                                        "Environment holds a connection entry that failed \
                                              handle validation",
-                                            SqlState::general_error(),
-                                        )
-                                    });
-                                    continue;
-                                }
-                            };
+                                        SqlState::general_error(),
+                                    )
+                                });
+                                continue;
+                            }
+                        };
 
                         // Spec: clear diagnostics at the start of each ODBC
                         // call. Done per visited connection too, before

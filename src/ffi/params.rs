@@ -1106,7 +1106,7 @@ pub unsafe fn sql_param_data<B: Backend>(
             }
 
             // Get parent connection.
-            let conn_ptr = stmt.conn as *mut c_void;
+            let conn_ptr = stmt.conn;
             let conn = as_handle_ref::<ConnectionHandle<B>>(conn_ptr)?;
             let Some(ref connection) = conn.connection else {
                 return Err(OdbcError::general(

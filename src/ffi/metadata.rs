@@ -125,7 +125,7 @@ pub unsafe fn sql_tables_w<B: Backend>(
             }
 
             // Get parent connection via tag-validated traversal.
-            let conn = as_handle_ref::<ConnectionHandle<B>>(stmt.conn as *mut c_void)?;
+            let conn = as_handle_ref::<ConnectionHandle<B>>(stmt.conn)?;
 
             // Spec HY010: Connection must be open.
             let Some(ref connection) = conn.connection else {
@@ -240,7 +240,7 @@ pub unsafe fn sql_columns_w<B: Backend>(
             }
 
             // Get parent connection via tag-validated traversal.
-            let conn = as_handle_ref::<ConnectionHandle<B>>(stmt.conn as *mut c_void)?;
+            let conn = as_handle_ref::<ConnectionHandle<B>>(stmt.conn)?;
 
             // Spec HY010: Connection must be open.
             let Some(ref connection) = conn.connection else {
@@ -335,7 +335,7 @@ pub unsafe fn sql_primary_keys_w<B: Backend>(
                 ));
             }
 
-            let conn = as_handle_ref::<ConnectionHandle<B>>(stmt.conn as *mut c_void)?;
+            let conn = as_handle_ref::<ConnectionHandle<B>>(stmt.conn)?;
 
             let Some(ref connection) = conn.connection else {
                 return Err(OdbcError::general(
@@ -449,7 +449,7 @@ pub unsafe fn sql_foreign_keys_w<B: Backend>(
                 ));
             }
 
-            let conn = as_handle_ref::<ConnectionHandle<B>>(stmt.conn as *mut c_void)?;
+            let conn = as_handle_ref::<ConnectionHandle<B>>(stmt.conn)?;
 
             let Some(ref connection) = conn.connection else {
                 return Err(OdbcError::general(
@@ -506,7 +506,7 @@ unsafe fn set_empty_result<B: Backend>(
 
     // SAFETY: stmt.conn is the raw pointer to the parent ConnectionHandle<B> stored when the
     // StatementHandle was allocated; it remains valid for the lifetime of the statement handle.
-    let conn = unsafe { as_handle_ref::<ConnectionHandle<B>>(stmt.conn as *mut c_void)? };
+    let conn = unsafe { as_handle_ref::<ConnectionHandle<B>>(stmt.conn)? };
     if conn.connection.is_none() {
         return Err(OdbcError::general(
             "Connection is not open",
@@ -605,7 +605,7 @@ pub unsafe fn sql_statistics_w<B: Backend>(
                 ));
             }
 
-            let conn = as_handle_ref::<ConnectionHandle<B>>(stmt.conn as *mut c_void)?;
+            let conn = as_handle_ref::<ConnectionHandle<B>>(stmt.conn)?;
             let Some(ref connection) = conn.connection else {
                 return Err(OdbcError::general(
                     "Connection is not open",
@@ -737,7 +737,7 @@ pub unsafe fn sql_special_columns_w<B: Backend>(
                 ));
             }
 
-            let conn = as_handle_ref::<ConnectionHandle<B>>(stmt.conn as *mut c_void)?;
+            let conn = as_handle_ref::<ConnectionHandle<B>>(stmt.conn)?;
             let Some(ref connection) = conn.connection else {
                 return Err(OdbcError::general(
                     "Connection is not open",
