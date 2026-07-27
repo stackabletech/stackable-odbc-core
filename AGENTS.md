@@ -153,13 +153,13 @@ in `connect` is where `08001` legitimately originates.
 
 - **Always use `odbc-sys` types** where they exist: `HandleType`, `SqlReturn`, `CDataType`, `SqlDataType`, `InfoType`, `Desc`, `FreeStmtOption`, `AttrOdbcVersion`, `EnvironmentAttribute`, `Len`, `Pointer`, `WChar`, etc. For primitive parameters where odbc-sys 0.29 removed the type aliases (e.g. the old `SmallInt`), use the Rust primitives directly (`i16`, `u16`, `i32`).
 - **Never redefine** enums, structs, or constants that `odbc-sys` already provides. Before defining a new constant or enum, check `odbc-sys` first. If it's there, use it.
-- **Add driver-side extensions** in `stackable-odbc-core` -- since orphan rules prevent `impl TryFrom<i16> for odbc_sys::HandleType`, use standalone conversion functions like `fn handle_type_from_raw(v: i16) -> Option<HandleType>`
+- **Add driver-side extensions** in `stackable-odbc-core` — since orphan rules prevent `impl TryFrom<i16> for odbc_sys::HandleType`, use standalone conversion functions like `fn handle_type_from_raw(v: i16) -> Option<HandleType>`
 - **Keep our own types** only for things `odbc-sys` doesn't have: `ConnectParams`, `ColumnValue`, `ColumnDescriptor`, `FetchResult`, `InfoValue`, `SqlState`, `DiagnosticQueue`, `TypeInfoRow`, `OdbcError`
-- **ODBC function IDs** (`SQL_API_*` values) are NOT in `odbc-sys`. They live in `src/function_id.rs` as the `FunctionId` enum (sourced from `/usr/include/sql.h` and `sqlext.h`). Always use `FunctionId::ExecDirect` etc. -- never raw numeric IDs. Convert with `function_id_from_raw(u16) -> Option<FunctionId>`.
+- **ODBC function IDs** (`SQL_API_*` values) are NOT in `odbc-sys`. They live in `src/function_id.rs` as the `FunctionId` enum (sourced from `/usr/include/sql.h` and `sqlext.h`). Always use `FunctionId::ExecDirect` etc. — never raw numeric IDs. Convert with `function_id_from_raw(u16) -> Option<FunctionId>`.
 
 ## Converting raw values to strongly typed enums
 
-Raw integers from the ODBC C ABI must be converted to strongly typed Rust enums **as early as possible** -- at the FFI boundary, before any logic runs.
+Raw integers from the ODBC C ABI must be converted to strongly typed Rust enums **as early as possible** — at the FFI boundary, before any logic runs.
 
 ```rust
 // GOOD: fallible conversion, handles unknown values gracefully

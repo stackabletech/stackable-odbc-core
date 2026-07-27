@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+This crate has not been published. Everything below is part of its first
+release, and the baseline it is measured against is the `stackable-odbc-rs`
+monorepo that `stackable-odbc-core` was extracted from — not any released
+version of this crate.
+
+Entries marked **Breaking** are therefore not breaking changes in the semver
+sense; nothing published is affected. They mark a difference from that monorepo
+baseline that a driver built against it has to act on when it moves to this
+crate, which is what the two sibling drivers are doing. At the 0.1.0 cut these
+markers go away and this section becomes the initial-release notes.
+
 ### Added
 
 - `OdbcError::with_native_error` and `OdbcError::with_source`, plus the
