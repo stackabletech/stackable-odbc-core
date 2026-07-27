@@ -77,8 +77,13 @@ pub unsafe fn sql_set_env_attr<B: Backend>(
             let env = as_handle_ref::<EnvironmentHandle<B>>(environment_handle)?;
 
             // Spec HY010: "An application can call SQLSetEnvAttr only if no
-            // connection handle is allocated on the environment."
-            if !env.connections.is_empty() {
+            // connection handle is allocated on the environment." The
+            // registry, not a field of this handle, is the source of truth
+            // for whether any connection still names it as parent.
+            if !crate::handles::registry::registry()
+                .children_of(environment_handle)
+                .is_empty()
+            {
                 return Err(OdbcError::general(
                     "Cannot set environment attribute: connections already allocated",
                     crate::types::SqlState::function_sequence_error(),

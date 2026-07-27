@@ -115,18 +115,18 @@ pub trait HasKind {
 /// The Driver Manager calls `SQLSetEnvAttr(SQL_ATTR_ODBC_VERSION)` before
 /// allocating any connections.
 ///
-/// `connections` tracks child connection handles as raw pointers because ODBC
-/// controls the lifecycle (not Rust ownership). The Driver Manager holds these
-/// pointers externally and passes them back to us on subsequent calls.
+/// Child connections are not tracked here: the registry records each
+/// connection's parent at `register` time, so `Registry::children_of` answers
+/// "which connections belong to this environment" without this type carrying
+/// a list of its own. A caller that needs the list gets an owned snapshot from
+/// the registry, which is what keeps `SQLEndTran(SQL_HANDLE_ENV)` from ever
+/// needing to hold this handle's lock and a child connection's at once.
 ///
 /// Must be `#[repr(C)]` so that `HandleHeader` is at offset 0 for tag validation.
 #[repr(C)]
 pub struct EnvironmentHandle<B: Backend> {
     header: HandleHeader,
     pub odbc_version: AttrOdbcVersion,
-    /// Tokens of child connections, not addresses: everything outside this
-    /// module deals in tokens, so they can be revalidated after any free.
-    pub connections: Vec<*mut c_void>,
     /// No field names `B`, since child handles are tokens rather than typed
     /// pointers, but the struct must stay generic: `as_handle_ref::<T>` keys on
     /// the concrete type, and an environment allocated for one backend must not
@@ -147,7 +147,9 @@ impl<B: Backend> HasKind for EnvironmentHandle<B> {
 ///
 /// `env` is a raw pointer back to the parent environment. Raw because ODBC
 /// controls the lifecycle: the environment outlives all its connections.
-/// `statements` tracks child statement handles the same way.
+///
+/// Child statements are not tracked here, for the same reason
+/// `EnvironmentHandle` carries no connection list: see its doc comment.
 ///
 /// Must be `#[repr(C)]` so that `HandleHeader` is at offset 0 for tag validation.
 #[repr(C)]
@@ -155,8 +157,6 @@ pub struct ConnectionHandle<B: Backend> {
     header: HandleHeader,
     pub env: *mut c_void,
     pub connection: Option<B::Connection>,
-    /// Tokens of child statements. See `EnvironmentHandle::connections`.
-    pub statements: Vec<*mut c_void>,
     pub diagnostics: DiagnosticQueue,
     /// Integer/pointer-valued connection attributes set via `SQLSetConnectAttr`.
     /// Values are stored as `usize` (pointer-sized). Defaults are applied at read time.
@@ -460,7 +460,6 @@ pub unsafe fn alloc_environment<B: Backend>(output: *mut *mut c_void) -> SqlRetu
     let handle = Box::new(EnvironmentHandle::<B> {
         header: HandleHeader::PLACEHOLDER,
         odbc_version: AttrOdbcVersion::Odbc3,
-        connections: Vec::new(),
         diagnostics: DiagnosticQueue::new(),
         _backend: std::marker::PhantomData,
     });
@@ -493,15 +492,16 @@ pub unsafe fn alloc_connection<B: Backend>(
     env_ptr: *mut c_void,
     output: *mut *mut c_void,
 ) -> SqlReturn {
-    let env = match unsafe { as_handle_ref::<EnvironmentHandle<B>>(env_ptr) } {
-        Ok(e) => e,
-        Err(_) => return SqlReturn::INVALID_HANDLE,
-    };
+    // Validates that the environment is live without dereferencing it. There
+    // is no list on the environment to push this connection's token onto:
+    // `register` below records the parentage the registry needs.
+    if registry().group_of(env_ptr).is_none() {
+        return SqlReturn::INVALID_HANDLE;
+    }
     let handle = Box::new(ConnectionHandle::<B> {
         header: HandleHeader::PLACEHOLDER,
         env: env_ptr,
         connection: None,
-        statements: Vec::new(),
         diagnostics: DiagnosticQueue::new(),
         attrs: std::collections::HashMap::new(),
         attr_strings: std::collections::HashMap::new(),
@@ -517,7 +517,6 @@ pub unsafe fn alloc_connection<B: Backend>(
     ) {
         Some((token, slot, generation)) => unsafe {
             (*ptr).header = HandleHeader { slot, generation };
-            env.connections.push(token);
             std::ptr::write_unaligned(output, token);
             SqlReturn::SUCCESS
         },
@@ -541,12 +540,10 @@ pub unsafe fn alloc_statement<B: Backend>(
     conn_ptr: *mut c_void,
     output: *mut *mut c_void,
 ) -> SqlReturn {
-    let conn = match unsafe { as_handle_ref::<ConnectionHandle<B>>(conn_ptr) } {
-        Ok(c) => c,
-        Err(_) => return SqlReturn::INVALID_HANDLE,
-    };
     // Statements and their descriptors share the connection's lock. One
     // acquisition then covers a call that touches a statement and its parent.
+    // `group_of` both validates that the connection is live and hands back
+    // the group to join, without dereferencing the parent.
     let group = match registry().group_of(conn_ptr) {
         Some(g) => g,
         None => return SqlReturn::INVALID_HANDLE,
@@ -614,7 +611,6 @@ pub unsafe fn alloc_statement<B: Backend>(
                 };
             }
         }
-        conn.statements.push(token);
         std::ptr::write_unaligned(output, token);
     }
     SqlReturn::SUCCESS
@@ -632,7 +628,10 @@ pub unsafe fn free_environment<B: Backend>(handle: *mut c_void) -> SqlReturn {
         Ok(e) => e,
         Err(_) => return SqlReturn::INVALID_HANDLE,
     };
-    if !env.connections.is_empty() {
+    // Spec HY010: "cannot free an environment with active connections." The
+    // registry, not a field on this handle, is the source of truth for
+    // whether any connection still names it as parent.
+    if !registry().children_of(handle).is_empty() {
         env.diagnostics.push(&OdbcError::general(
             "Cannot free environment with active connections",
             crate::types::SqlState::function_sequence_error(),
@@ -656,8 +655,6 @@ pub unsafe fn free_environment<B: Backend>(handle: *mut c_void) -> SqlReturn {
 /// - The connection is still open (HY010: SQLDisconnect must be called first)
 /// - There are still active statements (HY010)
 ///
-/// Removes itself from the parent environment's connection list on success.
-///
 /// # Safety
 ///
 /// `handle` must point to a valid `ConnectionHandle<B>` previously allocated
@@ -675,20 +672,17 @@ pub unsafe fn free_connection<B: Backend>(handle: *mut c_void) -> SqlReturn {
         ));
         return SqlReturn::ERROR;
     }
-    // Spec HY010: All statements must be freed first.
-    if !conn.statements.is_empty() {
+    // Spec HY010: all statements must be freed first. Reading this from the
+    // registry rather than a field of this handle means freeing a connection
+    // never needs to reach its parent environment at all — the only place
+    // in the crate allowed to acquire a connection's lock and an
+    // environment's is `SQLEndTran(SQL_HANDLE_ENV)`, and only in that order.
+    if !registry().children_of(handle).is_empty() {
         conn.diagnostics.push(&OdbcError::general(
             "Cannot free connection with active statements",
             crate::types::SqlState::function_sequence_error(),
         ));
         return SqlReturn::ERROR;
-    }
-    // Remove from parent environment's connection list.
-    // Use as_handle_ref for tag validation: if the parent was already freed,
-    // we skip removal rather than dereferencing freed memory.
-    let env_token = conn.env;
-    if let Ok(env) = unsafe { as_handle_ref::<EnvironmentHandle<B>>(env_token) } {
-        env.connections.retain(|&p| p != handle);
     }
     let Some(addr) = registry().unregister(handle, HandleKind::Dbc) else {
         return SqlReturn::INVALID_HANDLE;
@@ -698,25 +692,16 @@ pub unsafe fn free_connection<B: Backend>(handle: *mut c_void) -> SqlReturn {
     SqlReturn::SUCCESS
 }
 
-/// Free a statement handle. Removes itself from the parent connection's
-/// statement list.
+/// Free a statement handle.
 ///
 /// # Safety
 ///
 /// `handle` must point to a valid `StatementHandle<B>` previously allocated
 /// by [`alloc_statement`].
 pub unsafe fn free_statement<B: Backend>(handle: *mut c_void) -> SqlReturn {
-    let stmt = match unsafe { as_handle_ref::<StatementHandle<B>>(handle) } {
-        Ok(s) => s,
-        Err(_) => return SqlReturn::INVALID_HANDLE,
-    };
-    // Remove from parent connection's statement list.
-    // Use as_handle_ref for tag validation: if the parent was already freed,
-    // we skip removal rather than dereferencing freed memory.
-    let conn_token = stmt.conn;
-    if let Ok(conn) = unsafe { as_handle_ref::<ConnectionHandle<B>>(conn_token) } {
-        conn.statements.retain(|&p| p != handle);
-    }
+    // `free_statement_allocation` retires this slot, which is the whole job:
+    // parentage lives in the registry, not in a list on the parent
+    // connection, so there is nothing else to remove the statement from.
     unsafe { free_statement_allocation::<B>(handle) }
 }
 
@@ -756,12 +741,18 @@ pub(crate) unsafe fn free_statement_allocation<B: Backend>(token: *mut c_void) -
 /// lives here so no caller has to reach into a handle's header to reconstruct
 /// its token, and so the descriptor slots cannot be forgotten on that path.
 ///
+/// Takes the connection's token rather than `&mut ConnectionHandle<B>`: the
+/// statement list is an owned snapshot from the registry, not a field to
+/// drain, so nothing here needs a mutable borrow of the connection at all.
+///
 /// # Safety
 ///
-/// `conn.statements` must hold addresses registered by [`alloc_statement`].
-pub(crate) unsafe fn free_connection_statements<B: Backend>(conn: &mut ConnectionHandle<B>) {
-    for token in std::mem::take(&mut conn.statements) {
-        // SAFETY: the caller guarantees these are live statement handles.
+/// `conn_token` must be a live connection handle.
+pub(crate) unsafe fn free_connection_statements<B: Backend>(conn_token: *mut c_void) {
+    for token in registry().children_of(conn_token) {
+        // SAFETY: `children_of` returns live tokens registered by
+        // `alloc_statement`; a token freed between the snapshot and here is
+        // rejected by `unregister` rather than freed twice.
         let _ = unsafe { free_statement_allocation::<B>(token) };
     }
 }
@@ -1105,6 +1096,51 @@ mod tests {
 
             // The environment is untouched and still frees cleanly.
             assert_eq!(free_environment::<MockBackend>(env_ptr), SqlReturn::SUCCESS);
+        }
+    }
+
+    /// Allocates an environment, a connection on it, and a statement on the
+    /// connection, wiring all three token levels together for tests that
+    /// need the full hierarchy.
+    unsafe fn alloc_env_conn_stmt() -> (*mut c_void, *mut c_void, *mut c_void) {
+        unsafe {
+            let mut env: *mut c_void = std::ptr::null_mut();
+            let _ = alloc_environment::<MockBackend>(&mut env as *mut _);
+            let mut conn: *mut c_void = std::ptr::null_mut();
+            let _ = alloc_connection::<MockBackend>(env, &mut conn as *mut _);
+            let mut stmt: *mut c_void = std::ptr::null_mut();
+            let _ = alloc_statement::<MockBackend>(conn, &mut stmt as *mut _);
+            (env, conn, stmt)
+        }
+    }
+
+    /// `SQLEndTran` walks an owned snapshot, so a statement freed mid-walk cannot
+    /// shift the sequence under it. When the list was a field of the handle, a
+    /// `push` that reallocated or a `retain` that shifted did exactly that.
+    #[test]
+    fn a_statement_freed_during_iteration_cannot_disturb_the_walk() {
+        unsafe {
+            let (env, conn, stmt_a) = alloc_env_conn_stmt();
+            let mut out: *mut c_void = std::ptr::null_mut();
+            assert_eq!(
+                alloc_statement::<MockBackend>(conn, &mut out),
+                SqlReturn::SUCCESS
+            );
+            let stmt_b = out;
+
+            let snapshot = registry::registry().children_of(conn);
+            assert_eq!(snapshot.len(), 2);
+
+            // Free one while "iterating" the snapshot.
+            assert_eq!(free_statement::<MockBackend>(stmt_a), SqlReturn::SUCCESS);
+
+            // The snapshot is unchanged; the registry has moved on.
+            assert_eq!(snapshot.len(), 2);
+            assert_eq!(registry::registry().children_of(conn), vec![stmt_b]);
+
+            assert_eq!(free_statement::<MockBackend>(stmt_b), SqlReturn::SUCCESS);
+            assert_eq!(free_connection::<MockBackend>(conn), SqlReturn::SUCCESS);
+            assert_eq!(free_environment::<MockBackend>(env), SqlReturn::SUCCESS);
         }
     }
 }

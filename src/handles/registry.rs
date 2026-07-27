@@ -327,10 +327,6 @@ impl Registry {
     /// Owned, not borrowed: a caller iterating this while another call frees a
     /// child is the shape that made `SQLEndTran` unsound when the list was a
     /// field of the handle.
-    #[allow(
-        dead_code,
-        reason = "no caller until a later task derives EnvironmentHandle::connections and ConnectionHandle::statements from this instead of a handle field"
-    )]
     pub(crate) fn children_of(&self, token: *mut c_void) -> Vec<*mut c_void> {
         if token.is_null() {
             return Vec::new();

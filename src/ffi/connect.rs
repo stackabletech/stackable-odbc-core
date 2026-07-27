@@ -699,9 +699,10 @@ pub unsafe fn sql_disconnect<B: Backend>(connection_handle: *mut c_void) -> SqlR
     tracing::debug!("SQLDisconnect(conn={:?})", connection_handle);
     // SAFETY: connection_handle is null or a valid ConnectionHandle<B> allocated by
     // sql_alloc_handle; tag validated by as_handle_ref inside the closure.
-    // The raw stmt_ptr values in handle.statements are valid Box<StatementHandle<B>>
-    // allocations registered at statement creation time; no other owner exists after
-    // disconnect, so Box::from_raw is sound here.
+    // The raw stmt_ptr values children_of(connection_handle) returns are valid
+    // Box<StatementHandle<B>> allocations registered at statement creation
+    // time; no other owner exists after disconnect, so Box::from_raw is sound
+    // here.
     let ret = unsafe {
         panic_safe::<B, _>(connection_handle, || {
             let handle = as_handle_ref::<ConnectionHandle<B>>(connection_handle)?;
@@ -725,7 +726,7 @@ pub unsafe fn sql_disconnect<B: Backend>(connection_handle: *mut c_void) -> SqlR
             // the application may still hold the statement tokens and every one
             // of them must now be refused. This also retires the four
             // descriptor slots each statement owns.
-            crate::handles::free_connection_statements::<B>(handle);
+            crate::handles::free_connection_statements::<B>(connection_handle);
 
             Ok(SqlReturn::SUCCESS)
         })
@@ -1287,11 +1288,11 @@ mod tests {
             assert_eq!(ret, SqlReturn::SUCCESS);
 
             // Connection handle should now have no statements.
-            let handle = crate::handles::as_handle_ref::<
-                crate::handles::ConnectionHandle<MockBackend>,
-            >(conn)
-            .unwrap();
-            assert!(handle.statements.is_empty());
+            assert!(
+                crate::handles::registry::registry()
+                    .children_of(conn)
+                    .is_empty()
+            );
 
             let _ = sql_free_handle::<MockBackend>(HandleType::Dbc as i16, conn);
             let _ = sql_free_handle::<MockBackend>(HandleType::Env as i16, env);

@@ -49,10 +49,9 @@ use crate::types::{SqlReturn, SqlState, completion_type_from_raw, handle_type_fr
 ///
 /// # Safety
 ///
-/// The raw pointers in `conn.statements` must be valid `StatementHandle<B>`
-/// allocations registered by `sql_alloc_handle` and still alive.
+/// `conn_token` must be a live connection handle.
 unsafe fn apply_cursor_behavior<B: Backend>(
-    conn: &mut ConnectionHandle<B>,
+    conn_token: *mut c_void,
     behavior: crate::types::CursorBehavior,
 ) -> Result<(), OdbcError> {
     use crate::types::CursorBehavior;
@@ -61,15 +60,19 @@ unsafe fn apply_cursor_behavior<B: Backend>(
         return Ok(());
     }
 
+    // An owned snapshot: freeing a statement mid-walk cannot shift the
+    // sequence under this loop, because there is no shared list to shift.
+    let statements = crate::handles::registry::registry().children_of(conn_token);
+
     tracing::debug!(
         "SQLEndTran: applying {:?} to {} statement(s)",
         behavior,
-        conn.statements.len()
+        statements.len()
     );
 
     let mut first_close_err: Option<OdbcError> = None;
 
-    for &stmt_ptr in &conn.statements {
+    for stmt_ptr in statements {
         // SAFETY: stmt_ptr was registered by sql_alloc_handle and remains valid
         // while the connection handle is alive; the tag is validated here.
         let Ok(stmt) = (unsafe { as_handle_ref::<crate::handles::StatementHandle<B>>(stmt_ptr) })
@@ -287,7 +290,7 @@ pub unsafe fn sql_end_tran<B: Backend>(
     // correct queue regardless of whether the handle is an ENV or DBC.
     // SAFETY: handle is null or a valid EnvironmentHandle<B> or ConnectionHandle<B>
     // allocated by sql_alloc_handle; the tag is validated by as_handle_ref inside
-    // the closure. conn_ptr values in env.connections are valid ConnectionHandle<B>
+    // the closure. conn_ptr values from children_of are valid ConnectionHandle<B>
     // pointers registered during sql_alloc_handle and still alive while the env lives.
     let ret = unsafe {
         panic_safe::<B, _>(handle, || {
@@ -302,9 +305,7 @@ pub unsafe fn sql_end_tran<B: Backend>(
                         B::cursor_rollback_behavior()
                     };
 
-                    // Snapshot the pointer list so no borrow of `env` is held
-                    // across the `&mut ConnectionHandle` borrows below.
-                    let conn_ptrs: Vec<_> = env.connections.clone();
+                    let conn_ptrs = crate::handles::registry::registry().children_of(handle);
 
                     // Spec: "the driver will attempt to commit or roll back
                     // transactions ... on all connections that are in a
@@ -359,16 +360,17 @@ pub unsafe fn sql_end_tran<B: Backend>(
 
                         match B::end_tran(connection, commit).into_odbc() {
                             Ok(()) => {
-                                // SAFETY: conn.statements holds live StatementHandle<B>
-                                // allocations; tags are validated inside. This call is
-                                // within the outer `unsafe { panic_safe(...) }` closure.
+                                // SAFETY: children_of(conn_ptr) holds live
+                                // StatementHandle<B> allocations; tags are
+                                // validated inside. This call is within the
+                                // outer `unsafe { panic_safe(...) }` closure.
                                 //
                                 // The transaction itself ended, but under
                                 // SQL_CB_CLOSE a failure here means a cursor the
                                 // application was promised would close did not.
                                 // It joins the same per-connection reporting as
                                 // a failed end_tran.
-                                if let Err(e) = apply_cursor_behavior::<B>(conn, behavior) {
+                                if let Err(e) = apply_cursor_behavior::<B>(conn_ptr, behavior) {
                                     first_err.get_or_insert(e);
                                 }
                             }
@@ -405,7 +407,7 @@ pub unsafe fn sql_end_tran<B: Backend>(
                     } else {
                         B::cursor_rollback_behavior()
                     };
-                    // SAFETY: conn.statements holds live StatementHandle<B>
+                    // SAFETY: children_of(handle) holds live StatementHandle<B>
                     // allocations; tags are validated inside.
                     //
                     // Propagated: the commit or rollback succeeded, but under
@@ -413,7 +415,7 @@ pub unsafe fn sql_end_tran<B: Backend>(
                     // reporting SQL_SUCCESS for a close that failed would tell
                     // the application its cursors are gone when they are not.
                     // The diagnostic was already pushed per statement.
-                    apply_cursor_behavior::<B>(conn, behavior)?;
+                    apply_cursor_behavior::<B>(handle, behavior)?;
                     Ok(SqlReturn::SUCCESS)
                 }
                 _ => Err(OdbcError::InvalidHandle),
