@@ -9,8 +9,8 @@ use odbc_sys::SqlDataType;
 use crate::{
     backend::{Backend, StatementBackend},
     errors::{IntoOdbc, OdbcError},
-    handles::{ConnectionHandle, ParameterBinding, StatementHandle, as_handle_ref},
-    panic::panic_safe,
+    handles::{ParameterBinding, StatementHandle},
+    panic::panic_safe_scoped,
     types::{
         ColumnValue, Nullable, SQL_DATA_AT_EXEC, SQL_DEFAULT_PARAM_SIZE,
         SQL_LEN_DATA_AT_EXEC_OFFSET, SQL_NTS, SQL_NULL_DATA, SqlReturn, SqlState, ULen,
@@ -115,10 +115,10 @@ pub unsafe fn sql_bind_parameter<B: Backend>(
         sql_type
     );
     // SAFETY: statement_handle is a valid *mut StatementHandle<B> as required by the caller
-    // (enforced by the handle tag check inside as_handle_ref).
+    // (kind and group validated by scope.get inside the closure).
     let ret = unsafe {
-        panic_safe::<B, _>(statement_handle, || {
-            let stmt = as_handle_ref::<StatementHandle<B>>(statement_handle)?;
+        panic_safe_scoped::<B, _>(statement_handle, |scope| {
+            let stmt = scope.get::<StatementHandle<B>>(statement_handle)?;
             stmt.diagnostics.clear();
 
             // Spec: parameter number must be >= 1 (07009).
@@ -214,10 +214,10 @@ pub unsafe fn sql_num_params<B: Backend>(
 ) -> SqlReturn {
     tracing::debug!("SQLNumParams(stmt={:?})", statement_handle);
     // SAFETY: statement_handle is a valid *mut StatementHandle<B> as required by the caller
-    // (enforced by the handle tag check inside as_handle_ref).
+    // (kind and group validated by scope.get inside the closure).
     let ret = unsafe {
-        panic_safe::<B, _>(statement_handle, || {
-            let stmt = as_handle_ref::<StatementHandle<B>>(statement_handle)?;
+        panic_safe_scoped::<B, _>(statement_handle, |scope| {
+            let stmt = scope.get::<StatementHandle<B>>(statement_handle)?;
             stmt.diagnostics.clear();
 
             let count = stmt.param_count.ok_or_else(|| {
@@ -300,10 +300,10 @@ pub unsafe fn sql_describe_param<B: Backend>(
         parameter_number
     );
     // SAFETY: statement_handle is a valid *mut StatementHandle<B> as required by the caller
-    // (enforced by the handle tag check inside as_handle_ref).
+    // (kind and group validated by scope.get inside the closure).
     let ret = unsafe {
-        panic_safe::<B, _>(statement_handle, || {
-            let stmt = as_handle_ref::<StatementHandle<B>>(statement_handle)?;
+        panic_safe_scoped::<B, _>(statement_handle, |scope| {
+            let stmt = scope.get::<StatementHandle<B>>(statement_handle)?;
             stmt.diagnostics.clear();
 
             // Spec: HY010 — no SQL has been prepared.
@@ -908,12 +908,12 @@ pub unsafe fn sql_put_data<B: Backend>(
         data_ptr,
         str_len_or_ind
     );
-    // SAFETY: statement_handle is null or a valid StatementHandle<B>; tag validated inside
-    // panic_safe/as_handle_ref before any dereference occurs. data_ptr is checked for null
+    // SAFETY: statement_handle is null or a valid StatementHandle<B>; kind and group
+    // validated by scope.get inside the closure. data_ptr is checked for null
     // before use and is valid for the specified length per the caller's contract.
     let ret = unsafe {
-        panic_safe::<B, _>(statement_handle, || {
-            let stmt = as_handle_ref::<StatementHandle<B>>(statement_handle)?;
+        panic_safe_scoped::<B, _>(statement_handle, |scope| {
+            let stmt = scope.get::<StatementHandle<B>>(statement_handle)?;
             stmt.diagnostics.clear();
 
             // Spec HY010: must be in DAE state.
@@ -1041,13 +1041,13 @@ pub unsafe fn sql_param_data<B: Backend>(
         statement_handle,
         value_ptr_ptr
     );
-    // SAFETY: statement_handle is null or a valid StatementHandle<B>; tag validated inside
-    // panic_safe/as_handle_ref before any dereference occurs. value_ptr_ptr is checked for
+    // SAFETY: statement_handle is null or a valid StatementHandle<B>; kind and group
+    // validated by scope.stmt_with_parent inside the closure. value_ptr_ptr is checked for
     // null before write. Bound parameter buffer pointers in param_bindings were registered
     // via SQLBindParameter under the caller's guarantee that they remain valid.
     let ret = unsafe {
-        panic_safe::<B, _>(statement_handle, || {
-            let stmt = as_handle_ref::<StatementHandle<B>>(statement_handle)?;
+        panic_safe_scoped::<B, _>(statement_handle, |scope| {
+            let (stmt, conn) = scope.stmt_with_parent::<B>(statement_handle)?;
             // Spec: do NOT clear diagnostics; SQLParamData can return diagnostics from the
             // eventual execution.
 
@@ -1105,9 +1105,6 @@ pub unsafe fn sql_param_data<B: Backend>(
                 );
             }
 
-            // Get parent connection.
-            let conn_ptr = stmt.conn;
-            let conn = as_handle_ref::<ConnectionHandle<B>>(conn_ptr)?;
             let Some(ref connection) = conn.connection else {
                 return Err(OdbcError::general(
                     "Connection is not open",
@@ -1115,17 +1112,12 @@ pub unsafe fn sql_param_data<B: Backend>(
                 ));
             };
 
-            // Re-acquire stmt after conn borrow (different allocation — no aliasing).
-            let stmt = as_handle_ref::<StatementHandle<B>>(statement_handle)?;
-
             // If statement was closed (e.g. SQLFreeStmt(SQL_CLOSE)), re-prepare.
             if stmt.statement.is_none() {
                 let prepared = B::prepare(connection, &sql).into_odbc()?;
-                let stmt = as_handle_ref::<StatementHandle<B>>(statement_handle)?;
                 stmt.set_prepared_statement(crate::handles::StatementData::Backend(prepared));
             }
 
-            let stmt = as_handle_ref::<StatementHandle<B>>(statement_handle)?;
             let stmt_data = stmt.statement.as_mut().ok_or_else(|| {
                 OdbcError::general("No prepared statement", SqlState::function_sequence_error())
             })?;
@@ -1143,7 +1135,6 @@ pub unsafe fn sql_param_data<B: Backend>(
             }
 
             // A cursor is open only if the execution produced columns.
-            let stmt = as_handle_ref::<StatementHandle<B>>(statement_handle)?;
             stmt.cursor_open = stmt
                 .statement
                 .as_ref()
@@ -1162,26 +1153,10 @@ mod tests {
 
     use super::*;
     use crate::{
-        ffi::{
-            execute::sql_prepare_w,
-            handle::{sql_alloc_handle, sql_free_handle},
-        },
-        test_utils::MockBackend,
+        ffi::{execute::sql_prepare_w, handle::sql_free_handle},
+        test_utils::{MockBackend, alloc_env_conn_stmt},
         types::{CDataType, ParamType},
     };
-
-    unsafe fn alloc_env_conn_stmt() -> (*mut c_void, *mut c_void, *mut c_void) {
-        let mut env: *mut c_void = std::ptr::null_mut();
-        let _ = unsafe {
-            sql_alloc_handle::<MockBackend>(HandleType::Env as i16, std::ptr::null_mut(), &mut env)
-        };
-        let mut conn: *mut c_void = std::ptr::null_mut();
-        let _ = unsafe { sql_alloc_handle::<MockBackend>(HandleType::Dbc as i16, env, &mut conn) };
-        let mut stmt: *mut c_void = std::ptr::null_mut();
-        let _ =
-            unsafe { sql_alloc_handle::<MockBackend>(HandleType::Stmt as i16, conn, &mut stmt) };
-        (env, conn, stmt)
-    }
 
     unsafe fn cleanup(env: *mut c_void, conn: *mut c_void, stmt: *mut c_void) {
         unsafe {
