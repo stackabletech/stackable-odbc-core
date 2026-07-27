@@ -2,10 +2,10 @@
 
 use crate::backend::Backend;
 use crate::handles::{
-    StatementHandle, alloc_connection, alloc_environment, alloc_statement, as_handle_ref,
-    free_connection, free_environment, free_statement,
+    StatementHandle, alloc_connection, alloc_environment, alloc_statement, free_connection,
+    free_environment, free_statement,
 };
-use crate::panic::panic_safe;
+use crate::panic::panic_safe_scoped;
 use crate::types::{SqlReturn, free_stmt_option_from_raw, handle_type_from_raw};
 use odbc_sys::{FreeStmtOption, HandleType};
 use std::ffi::c_void;
@@ -77,14 +77,17 @@ pub unsafe fn sql_alloc_handle<B: Backend>(
         input_handle,
         output_handle_ptr,
     );
-    // Wrapped in panic_safe like every other FFI entry point: allocation runs Box
-    // allocation and backend construction, and a panic must not unwind across the
-    // extern "system" boundary (undefined behaviour). The output handle does not
-    // exist yet, so a null handle is passed to panic_safe; the output pointer is
-    // set to SQL_NULL_HANDLE up front so every error path, including a caught
-    // panic, leaves it null, and only the success paths overwrite it.
+    // Wrapped in panic_safe_scoped like every other FFI entry point: allocation
+    // runs Box allocation and backend construction, and a panic must not unwind
+    // across the extern "system" boundary (undefined behaviour). input_handle is
+    // the new child's parent (null for SQL_HANDLE_ENV, which has none), so this
+    // holds exactly the group the registration below joins -- SQL_HANDLE_DBC
+    // locks the environment, SQL_HANDLE_STMT locks the connection, and neither
+    // nests. The output pointer is set to SQL_NULL_HANDLE up front so every
+    // error path, including a caught panic, leaves it null, and only the
+    // success paths overwrite it.
     let ret = unsafe {
-        panic_safe::<B, _>(std::ptr::null_mut(), || {
+        panic_safe_scoped::<B, _>(input_handle, |_scope| {
             // Spec HY009: OutputHandlePtr must not be null.
             if output_handle_ptr.is_null() {
                 tracing::error!("SQLAllocHandle: output_handle_ptr is null (HY009)");
@@ -219,16 +222,19 @@ pub unsafe fn sql_free_handle<B: Backend>(handle_type: i16, handle: *mut c_void)
         ht_log,
         handle
     );
-    // Wrapped in panic_safe like every other FFI entry point: free_connection and
-    // free_statement drop the backend connection/statement, whose Drop can run
+    // Wrapped in panic_safe_scoped like every other FFI entry point: free_connection
+    // and free_statement drop the backend connection/statement, whose Drop can run
     // arbitrary code (closing sockets, draining residual pages). A panic there must
     // not unwind across the extern "system" boundary (undefined behaviour). A null
-    // handle is passed to panic_safe because the handle is being destroyed: the
+    // handle is passed to panic_safe_scoped because the handle is being destroyed: the
     // "cannot free" diagnostics are pushed by the helpers before the tag is
     // invalidated, and once the handle is freed there is no valid queue to post a
-    // panic diagnostic against (reading it would be use-after-free).
+    // panic diagnostic against (reading it would be use-after-free). free_environment,
+    // free_connection and free_statement do their own registry validation and are not
+    // routed through the scope, so it holds no group here; that is fine, since the
+    // helpers below never touch a handle through the scope.
     let ret = unsafe {
-        panic_safe::<B, _>(std::ptr::null_mut(), || {
+        panic_safe_scoped::<B, _>(std::ptr::null_mut(), |_scope| {
             let Some(ht) = handle_type_from_raw(handle_type) else {
                 tracing::error!("SQLFreeHandle: invalid handle_type {}", handle_type);
                 return Ok(SqlReturn::INVALID_HANDLE);
@@ -323,16 +329,16 @@ pub unsafe fn sql_free_stmt<B: Backend>(statement_handle: *mut c_void, option: u
             return SqlReturn::ERROR;
         }
     };
-    // Wrapped in panic_safe like every other FFI entry point: SQL_CLOSE drops
+    // Wrapped in panic_safe_scoped like every other FFI entry point: SQL_CLOSE drops
     // the backend statement, and a backend cursor's Drop can run arbitrary code
     // (draining residual pages, for example). A panic there would otherwise
     // unwind across the `extern "system"` boundary, which is undefined behaviour.
     //
     // SAFETY: statement_handle is null or a valid StatementHandle<B> allocated by
-    // sql_alloc_handle; the tag is validated by as_handle_ref inside the closure.
+    // sql_alloc_handle; kind and group are validated by scope.get inside the closure.
     let ret = unsafe {
-        panic_safe::<B, _>(statement_handle, || {
-            let stmt = as_handle_ref::<StatementHandle<B>>(statement_handle)?;
+        panic_safe_scoped::<B, _>(statement_handle, |scope| {
+            let stmt = scope.get::<StatementHandle<B>>(statement_handle)?;
             stmt.diagnostics.clear();
 
             match opt {
@@ -352,6 +358,7 @@ pub unsafe fn sql_free_stmt<B: Backend>(statement_handle: *mut c_void, option: u
 mod tests {
     use super::*;
     use crate::errors::OdbcError;
+    use crate::handles::as_handle_ref;
     use crate::test_utils::MockBackend;
     use odbc_sys::FreeStmtOption;
 

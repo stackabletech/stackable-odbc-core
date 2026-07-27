@@ -195,11 +195,6 @@ impl<'a> HandleScope<'a> {
         // would hang the application thread with no diagnostic and no
         // SqlReturn. The one legitimate nesting is environment-then-
         // connection, where the groups differ.
-        // Re-entering a group this scope already holds is a no-op, not a
-        // nested acquisition: the lock is not reentrant, so taking it again
-        // would hang the application thread with no diagnostic and no
-        // SqlReturn. The one legitimate nesting is environment-then-
-        // connection, where the groups differ.
         if self.holds(token) {
             tracing::warn!(
                 "with_child_group: token is already in the held group; not re-acquiring"
