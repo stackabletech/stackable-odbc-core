@@ -113,6 +113,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `SQLGetInfoW` answers ten more info types instead of letting them reach the
+  shape-aware default. `SQL_GETDATA_EXTENSIONS` reports
+  `SQL_GD_ANY_COLUMN | SQL_GD_ANY_ORDER | SQL_GD_BOUND`, which is what core's
+  fetch actually supports; `SQL_LIKE_ESCAPE_CLAUSE` reports `"Y"`, which is what
+  `escape.rs`'s `{escape}` translation implements; `SQL_OUTER_JOINS` is derived
+  from `Backend::outer_join_capabilities` so the two cannot disagree; and the
+  batch, parameter-array, async and pooling group all report what core's
+  synchronous, single-parameter-set implementation does. `""` and `0` were not
+  legal values for several of these.
+- The `default_get_info` guard test also checks info types with **no** arm.
+  Previously it compared only the answers that existed, so a type answered
+  nowhere reached the shape-aware default (`0` or `""`) with nothing naming that
+  as intended — bypassing the "a claim about the data source must be declared"
+  design entirely. The 24 that legitimately take the default are now listed in
+  `SHAPE_DEFAULT_IS_THE_ANSWER` with the reason, and adding an info type without
+  either an arm or an entry fails a test that names it.
+- `SQL_PARC_*`, `SQL_PAS_*` and `SQL_ASYNC_NOTIFICATION_*` constants.
 - `default_get_info` takes only the `InfoType`; the catalog column widths come
   from `Backend::catalog_result_column_widths` on the type parameter it already
   has. Both call sites in the sibling drivers passed exactly

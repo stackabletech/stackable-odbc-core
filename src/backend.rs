@@ -844,8 +844,10 @@ pub trait StatementBackend: Send + Sync {
 pub fn default_get_info<B: Backend>(info_type: crate::types::InfoType) -> Option<InfoValue> {
     let widths = &B::catalog_result_column_widths();
     use crate::types::{
-        InfoType, InfoValue, SQL_AM_NONE, SQL_CA1_NEXT, SQL_DRIVER_ODBC_VER_STRING,
-        SQL_INSENSITIVE, SQL_MAX_CURSOR_NAME_LEN, SQL_OIC_CORE, SQL_SO_FORWARD_ONLY,
+        InfoType, InfoValue, SQL_AM_NONE, SQL_ASYNC_NOTIFICATION_NOT_CAPABLE, SQL_CA1_NEXT,
+        SQL_DRIVER_ODBC_VER_STRING, SQL_GD_ANY_COLUMN, SQL_GD_ANY_ORDER, SQL_GD_BOUND,
+        SQL_INSENSITIVE, SQL_MAX_CURSOR_NAME_LEN, SQL_OIC_CORE, SQL_PARC_NO_BATCH,
+        SQL_PAS_NO_SELECT, SQL_SO_FORWARD_ONLY,
     };
     match info_type {
         // --- String types identical in all drivers ---
@@ -1010,6 +1012,44 @@ pub fn default_get_info<B: Backend>(info_type: crate::types::InfoType) -> Option
         InfoType::OdbcInterfaceConformance => Some(InfoValue::U32(SQL_OIC_CORE)),
         InfoType::AsyncMode => Some(InfoValue::U32(SQL_AM_NONE)),
         InfoType::AsyncDbcFunctions => Some(InfoValue::U32(0)),
+
+        // --- Facts about core's own implementation ---
+        //
+        // `SQLGetData` here can read any column, in any order, bound or not:
+        // `sql_get_data` checks neither column order nor binding state.
+        // `SQL_GD_BLOCK` is deliberately absent -- it describes reading a row
+        // from a block cursor, and `sql_set_stmt_attr_w` substitutes 1 back for
+        // any `SQL_ATTR_ROW_ARRAY_SIZE`, so no multi-row rowset can exist.
+        InfoType::GetDataExtensions => Some(InfoValue::U32(
+            SQL_GD_ANY_COLUMN | SQL_GD_ANY_ORDER | SQL_GD_BOUND,
+        )),
+        // `escape.rs` implements the `{escape}` sequence, and its translation
+        // is what an application is asking about here.
+        InfoType::LikeEscapeClause => Some(InfoValue::String("Y".into())),
+        // Core executes one parameter set and one statement per execute:
+        // `sql_set_stmt_attr_w` refuses any `SQL_ATTR_PARAMSET_SIZE` other
+        // than 1, so no batch or parameter-array rowset can be produced.
+        InfoType::BatchSupport => Some(InfoValue::U32(0)),
+        InfoType::BatchRowCount => Some(InfoValue::U32(0)),
+        InfoType::ParamArrayRowCounts => Some(InfoValue::U32(SQL_PARC_NO_BATCH)),
+        InfoType::ParamArraySelects => Some(InfoValue::U32(SQL_PAS_NO_SELECT)),
+        // The `Backend` trait is synchronous, so there is no asynchronous
+        // execution to describe and nothing to notify about.
+        InfoType::MaxAsyncConcurrentStatements => Some(InfoValue::U32(0)),
+        InfoType::AsyncNotification => Some(InfoValue::U32(SQL_ASYNC_NOTIFICATION_NOT_CAPABLE)),
+        // Core owns no connection pool.
+        InfoType::DriverAwarePoolingSupported => Some(InfoValue::U32(0)),
+        // Whether the data source supports outer joins at all is already stated
+        // by `outer_join_capabilities`; deriving it here keeps the two from
+        // contradicting each other.
+        InfoType::OuterJoins => Some(InfoValue::String(
+            if B::outer_join_capabilities() != 0 {
+                "Y"
+            } else {
+                "N"
+            }
+            .into(),
+        )),
         // --- Cursor attributes (all zero except ForwardOnly1) ---
         InfoType::DynamicCursorAttributes1 => Some(InfoValue::U32(0)),
         InfoType::DynamicCursorAttributes2 => Some(InfoValue::U32(0)),
@@ -1613,48 +1653,211 @@ mod tests {
     #[rustfmt::skip]
     const CORE_FACTS: &[(InfoType, &str)] = &[
         // --- Facts about core's own implementation ---
-        (InfoType::ScrollOptions,                "core's fetch is forward-only"),
-        (InfoType::CursorSensitivity,            "forward-only cursors cannot see other transactions' changes"),
-        (InfoType::ForwardOnlyCursorAttributes1, "the fetch operations core implements"),
-        (InfoType::ForwardOnlyCursorAttributes2, "core implements none of these"),
-        (InfoType::DynamicCursorAttributes1,     "core has no dynamic cursor"),
-        (InfoType::DynamicCursorAttributes2,     "core has no dynamic cursor"),
-        (InfoType::KeysetCursorAttributes1,      "core has no keyset cursor"),
-        (InfoType::KeysetCursorAttributes2,      "core has no keyset cursor"),
-        (InfoType::StaticCursorAttributes1,      "core has no static cursor"),
-        (InfoType::StaticCursorAttributes2,      "core has no static cursor"),
-        (InfoType::AsyncMode,                    "the Backend trait is synchronous"),
-        (InfoType::AsyncDbcFunctions,            "the Backend trait is synchronous"),
-        (InfoType::MultResultSets,               "sql_more_results always returns SQL_NO_DATA"),
-        (InfoType::NeedLongDataLen,              "core's data-at-execution path never needs the length up front"),
-        (InfoType::OdbcInterfaceConformance,     "describes the FFI surface core exports"),
-        (InfoType::DriverOdbcVer,                "describes the FFI surface core exports"),
-        (InfoType::XopenCliYear,                 "driver-level identity, not a data-source property"),
-        (InfoType::MaxCursorNameLen,             "a cursor name is an ODBC-level convention core owns"),
-        (InfoType::DescribeParameter,            "core's SQLDescribeParam always answers, generically"),
-        (InfoType::MaxRowSizeIncludesLong,       "follows from SQL_MAX_ROW_SIZE being 'unknown'"),
+        (
+            InfoType::GetDataExtensions,
+            "sql_get_data checks neither column order nor binding state, and no block cursor can exist",
+        ),
+        (
+            InfoType::LikeEscapeClause,
+            "escape.rs implements the {escape} sequence core is being asked about",
+        ),
+        (
+            InfoType::BatchSupport,
+            "core executes one statement per execute",
+        ),
+        (
+            InfoType::BatchRowCount,
+            "core executes one statement per execute",
+        ),
+        (
+            InfoType::ParamArrayRowCounts,
+            "sql_set_stmt_attr_w refuses any SQL_ATTR_PARAMSET_SIZE but 1",
+        ),
+        (
+            InfoType::ParamArraySelects,
+            "sql_set_stmt_attr_w refuses any SQL_ATTR_PARAMSET_SIZE but 1",
+        ),
+        (
+            InfoType::MaxAsyncConcurrentStatements,
+            "the Backend trait is synchronous",
+        ),
+        (
+            InfoType::AsyncNotification,
+            "the Backend trait is synchronous",
+        ),
+        (
+            InfoType::DriverAwarePoolingSupported,
+            "core owns no connection pool",
+        ),
+        (InfoType::ScrollOptions, "core's fetch is forward-only"),
+        (
+            InfoType::CursorSensitivity,
+            "forward-only cursors cannot see other transactions' changes",
+        ),
+        (
+            InfoType::ForwardOnlyCursorAttributes1,
+            "the fetch operations core implements",
+        ),
+        (
+            InfoType::ForwardOnlyCursorAttributes2,
+            "core implements none of these",
+        ),
+        (
+            InfoType::DynamicCursorAttributes1,
+            "core has no dynamic cursor",
+        ),
+        (
+            InfoType::DynamicCursorAttributes2,
+            "core has no dynamic cursor",
+        ),
+        (
+            InfoType::KeysetCursorAttributes1,
+            "core has no keyset cursor",
+        ),
+        (
+            InfoType::KeysetCursorAttributes2,
+            "core has no keyset cursor",
+        ),
+        (
+            InfoType::StaticCursorAttributes1,
+            "core has no static cursor",
+        ),
+        (
+            InfoType::StaticCursorAttributes2,
+            "core has no static cursor",
+        ),
+        (InfoType::AsyncMode, "the Backend trait is synchronous"),
+        (
+            InfoType::AsyncDbcFunctions,
+            "the Backend trait is synchronous",
+        ),
+        (
+            InfoType::MultResultSets,
+            "sql_more_results always returns SQL_NO_DATA",
+        ),
+        (
+            InfoType::NeedLongDataLen,
+            "core's data-at-execution path never needs the length up front",
+        ),
+        (
+            InfoType::OdbcInterfaceConformance,
+            "describes the FFI surface core exports",
+        ),
+        (
+            InfoType::DriverOdbcVer,
+            "describes the FFI surface core exports",
+        ),
+        (
+            InfoType::XopenCliYear,
+            "driver-level identity, not a data-source property",
+        ),
+        (
+            InfoType::MaxCursorNameLen,
+            "a cursor name is an ODBC-level convention core owns",
+        ),
+        (
+            InfoType::DescribeParameter,
+            "core's SQLDescribeParam always answers, generically",
+        ),
+        (
+            InfoType::MaxRowSizeIncludesLong,
+            "follows from SQL_MAX_ROW_SIZE being 'unknown'",
+        ),
         // --- Limits: the spec defines 0 as "no limit or unknown" ---
-        (InfoType::MaxDriverConnections,         "0 = no limit"),
-        (InfoType::MaxConcurrentActivities,      "0 = no limit"),
-        (InfoType::ActiveEnvironments,           "0 = no limit"),
-        (InfoType::MaxColumnsInGroupBy,          "0 = no limit or unknown"),
-        (InfoType::MaxColumnsInIndex,            "0 = no limit or unknown"),
-        (InfoType::MaxColumnsInOrderBy,          "0 = no limit or unknown"),
-        (InfoType::MaxColumnsInSelect,           "0 = no limit or unknown"),
-        (InfoType::MaxColumnsInTable,            "0 = no limit or unknown"),
-        (InfoType::MaxTablesInSelect,            "0 = no limit or unknown"),
-        (InfoType::MaxUserNameLen,               "0 = no limit or unknown"),
-        (InfoType::MaxIndexSize,                 "0 = no limit or unknown"),
-        (InfoType::MaxRowSize,                   "0 = no limit or unknown"),
-        (InfoType::MaxStatementLen,              "0 = no limit or unknown"),
+        (InfoType::MaxDriverConnections, "0 = no limit"),
+        (InfoType::MaxConcurrentActivities, "0 = no limit"),
+        (InfoType::ActiveEnvironments, "0 = no limit"),
+        (InfoType::MaxColumnsInGroupBy, "0 = no limit or unknown"),
+        (InfoType::MaxColumnsInIndex, "0 = no limit or unknown"),
+        (InfoType::MaxColumnsInOrderBy, "0 = no limit or unknown"),
+        (InfoType::MaxColumnsInSelect, "0 = no limit or unknown"),
+        (InfoType::MaxColumnsInTable, "0 = no limit or unknown"),
+        (InfoType::MaxTablesInSelect, "0 = no limit or unknown"),
+        (InfoType::MaxUserNameLen, "0 = no limit or unknown"),
+        (InfoType::MaxIndexSize, "0 = no limit or unknown"),
+        (InfoType::MaxRowSize, "0 = no limit or unknown"),
+        (InfoType::MaxStatementLen, "0 = no limit or unknown"),
         // --- No per-backend answer to give ---
-        (InfoType::DataSourceName,               "the DM supplies the DSN; core has none"),
-        (InfoType::ServerName,                   "carried in the connection string, not known here"),
-        (InfoType::UserName,                     "carried in the connection string, not known here"),
-        (InfoType::SpecialCharacters,            "empty understates; a backend with any overrides"),
-        (InfoType::CollationSeq,                 "unknown, and the spec allows empty"),
-        (InfoType::AccessibleProcedures,         "core exports no procedure support of its own"),
-        (InfoType::Integrity,                    "core implements no integrity-enhancement grammar"),
+        (
+            InfoType::DataSourceName,
+            "the DM supplies the DSN; core has none",
+        ),
+        (
+            InfoType::ServerName,
+            "carried in the connection string, not known here",
+        ),
+        (
+            InfoType::UserName,
+            "carried in the connection string, not known here",
+        ),
+        (
+            InfoType::SpecialCharacters,
+            "empty understates; a backend with any overrides",
+        ),
+        (InfoType::CollationSeq, "unknown, and the spec allows empty"),
+        (
+            InfoType::AccessibleProcedures,
+            "core exports no procedure support of its own",
+        ),
+        (
+            InfoType::Integrity,
+            "core implements no integrity-enhancement grammar",
+        ),
+    ];
+
+    /// Info types with no arm in [`default_get_info`], where reaching the
+    /// shape-aware default in `info_type_default_response` is the intended
+    /// outcome rather than an oversight.
+    ///
+    /// Two kinds qualify, and neither is "core decided the data source's
+    /// answer":
+    ///
+    /// - **Driver identity.** Core has no name or version to give; only the
+    ///   driver does, and the Windows DM path documented in AGENTS.md requires
+    ///   it to supply them through `get_info_pre_connect`.
+    /// - **Capability bitmaps a backend must claim for itself.** `0` reads as
+    ///   "supports none of these", which is the only honest answer core can
+    ///   give for a backend that has said nothing -- overstating here is what
+    ///   makes a BI tool push down SQL the data source then rejects. Several
+    ///   are also genuinely *per-connection* (a server version can gate them),
+    ///   which a static capability method could not express; those belong in
+    ///   `Backend::get_info`, which runs first and takes a connection.
+    #[rustfmt::skip]
+    const SHAPE_DEFAULT_IS_THE_ANSWER: &[(InfoType, &str)] = &[
+        // --- Driver and data source identity ---
+        (InfoType::DriverName,                 "only the driver knows its own name"),
+        (InfoType::DriverVer,                  "only the driver knows its own version"),
+        (InfoType::DbmsName,                   "only the backend knows what it connected to"),
+        (InfoType::DbmsVer,                    "only the backend knows what it connected to"),
+
+        // --- Claims about the data source, understated rather than invented ---
+        (InfoType::IdentifierCase,             "how unquoted identifiers are folded is a data source fact"),
+        (InfoType::TransactionCapable,         "whether DDL is transactional is a data source fact"),
+        (InfoType::SqlFileUsage,               "whether the driver is single-tier and file-based is a driver fact"),
+        (InfoType::SqlQuotedIdentifierCase,    "answered by common_get_info_raw for backends that delegate to it"),
+
+        // --- Scalar-function bitmaps: claiming one core cannot honour makes a
+        //     BI tool emit a function the data source rejects ---
+        (InfoType::NumericFunctions,           "the backend owns its scalar function set"),
+        (InfoType::StringFunctions,            "the backend owns its scalar function set"),
+        (InfoType::SystemFunctions,            "the backend owns its scalar function set"),
+        (InfoType::TimedateFunctions,          "the backend owns its scalar function set"),
+        (InfoType::AggregateFunctions,         "the backend owns its aggregate function set"),
+
+        // --- SQL-92 grammar bitmaps. Several are per-connection in practice
+        //     (Trino gates MATCH/UNIQUE on the coordinator version), so they
+        //     belong in Backend::get_info, which takes a connection ---
+        (InfoType::Sql92Predicates,            "per-connection in at least one driver; belongs in get_info"),
+        (InfoType::Sql92RelationalJoinOperators, "per-connection in at least one driver; belongs in get_info"),
+        (InfoType::Sql92DatetimeFunctions,     "the backend owns its SQL-92 grammar support"),
+        (InfoType::Sql92NumericValueFunctions, "the backend owns its SQL-92 grammar support"),
+        (InfoType::Sql92StringFunctions,       "the backend owns its SQL-92 grammar support"),
+        (InfoType::Sql92ValueExpressions,      "the backend owns its SQL-92 grammar support"),
+        (InfoType::Sql92RowValueConstructor,   "the backend owns its SQL-92 grammar support"),
+        (InfoType::Sql92ForeignKeyDeleteRule,  "referential actions are a data source fact"),
+        (InfoType::Sql92ForeignKeyUpdateRule,  "referential actions are a data source fact"),
+        (InfoType::Sql92Grant,                 "the backend owns its privilege model"),
+        (InfoType::Sql92Revoke,                "the backend owns its privilege model"),
     ];
 
     /// Classifies every info type `default_get_info` answers by asking one
@@ -1686,6 +1889,7 @@ mod tests {
         );
         let mut undeclared = Vec::new();
         let mut stale = Vec::new();
+        let mut unanswered = Vec::new();
 
         for info_type in crate::conformance::all_info_types() {
             let mine = default_get_info::<MockBackend>(info_type);
@@ -1700,7 +1904,18 @@ mod tests {
                 // Backend-derived (or unanswered) but still listed as a core
                 // fact -- the entry outlived the hard-coded value it described.
                 (false, Some(_)) => stale.push(info_type),
-                (false, None) => {}
+                (false, None) => {
+                    // Neither backend answers it at all. `default_get_info`
+                    // returns `None`, so `sql_get_info_w` falls through to the
+                    // shape-aware default -- `0` or `""` -- which for many info
+                    // types is a substantive claim about the data source that
+                    // core is in no position to make. Only the comparison above
+                    // sees arms that *exist*, so without this a type with no arm
+                    // bypasses the whole "capability must be declared" design.
+                    if mine.is_none() && theirs.is_none() {
+                        unanswered.push(info_type);
+                    }
+                }
             }
         }
 
@@ -1710,6 +1925,29 @@ mod tests {
              common, so core is deciding them. Either derive each from a \
              `Backend` method, or add it to CORE_FACTS with the reason core is \
              entitled to decide it: {undeclared:?}"
+        );
+        let undeclared_gap: Vec<_> = unanswered
+            .iter()
+            .filter(|t| !SHAPE_DEFAULT_IS_THE_ANSWER.iter().any(|(d, _)| d == *t))
+            .collect();
+        assert!(
+            undeclared_gap.is_empty(),
+            "these info types have no arm at all, so they reach the shape-aware \
+             default (`0` / `\"\"`) with nothing naming that as the intended \
+             answer. Either give each an arm -- derived from a `Backend` method \
+             if it is a claim about the data source -- or list it in \
+             SHAPE_DEFAULT_IS_THE_ANSWER with the reason the default is \
+             correct: {undeclared_gap:?}"
+        );
+        let stale_gap: Vec<_> = SHAPE_DEFAULT_IS_THE_ANSWER
+            .iter()
+            .map(|(t, _)| *t)
+            .filter(|t| !unanswered.contains(t))
+            .collect();
+        assert!(
+            stale_gap.is_empty(),
+            "these are listed in SHAPE_DEFAULT_IS_THE_ANSWER but now have an \
+             arm; drop the stale entries: {stale_gap:?}"
         );
         assert!(
             stale.is_empty(),

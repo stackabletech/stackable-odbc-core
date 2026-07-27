@@ -52,6 +52,26 @@ pub const SQL_TC_DDL_COMMIT: u32 = 3;
 /// `SQL_TC_DDL_IGNORE` — transactions supported; DDL statements are ignored within transactions.
 pub const SQL_TC_DDL_IGNORE: u32 = 4;
 
+/// `SQL_PARC_BATCH` — each parameter set in an array produces its own row count.
+pub const SQL_PARC_BATCH: u32 = 1;
+/// `SQL_PARC_NO_BATCH` — one row count covers the whole parameter array.
+pub const SQL_PARC_NO_BATCH: u32 = 2;
+
+/// `SQL_PAS_BATCH` — each parameter set in an array produces its own result set.
+pub const SQL_PAS_BATCH: u32 = 1;
+/// `SQL_PAS_NO_BATCH` — one result set covers the whole parameter array.
+pub const SQL_PAS_NO_BATCH: u32 = 2;
+/// `SQL_PAS_NO_SELECT` — a result-set-generating statement cannot be executed
+/// with an array of parameters.
+pub const SQL_PAS_NO_SELECT: u32 = 3;
+
+/// `SQL_ASYNC_NOTIFICATION_NOT_CAPABLE` — the driver does not support
+/// asynchronous execution notification.
+pub const SQL_ASYNC_NOTIFICATION_NOT_CAPABLE: u32 = 0x0000_0000;
+/// `SQL_ASYNC_NOTIFICATION_CAPABLE` — the driver supports asynchronous
+/// execution notification.
+pub const SQL_ASYNC_NOTIFICATION_CAPABLE: u32 = 0x0000_0001;
+
 /// `SQL_PRED_NONE` / `SQL_UNSEARCHABLE` — column is not usable in a `WHERE` clause.
 /// Used in the `SEARCHABLE` column of `SQLGetTypeInfo` and `SQLColAttribute`.
 pub const SQL_PRED_NONE: i16 = 0;

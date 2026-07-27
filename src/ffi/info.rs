@@ -1113,10 +1113,26 @@ mod tests {
             let (env, conn, stmt) = alloc_env_conn_stmt();
             assert_eq!(connect_handle(conn), SqlReturn::SUCCESS);
 
-            // OuterJoins (38) is outside the SQL_CONVERT_* range, and is
-            // itself `String`-shaped ("Y"/"P"/"N" per spec) rather than
-            // numeric; the DM-safe default is an empty string, not U32(0)
-            // (the shape-aware fallback in `info_type_default_response`).
+            // SqlFileUsage (84) is outside the SQL_CONVERT_* range and is
+            // `U16`-shaped, so the shape-aware fallback in
+            // `info_type_default_response` must give it U16(0), not the
+            // blanket U32(0).
+            let mut buf = [0xEEu16; 8];
+            let mut str_len: i16 = -1;
+            let ret = sql_get_info_w::<MockBackend>(
+                conn,
+                InfoType::SqlFileUsage as u16,
+                buf.as_mut_ptr() as *mut c_void,
+                16,
+                &mut str_len,
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS, "SqlFileUsage must not error");
+            assert_eq!(buf[0], 0, "SqlFileUsage default must be U16(0)");
+
+            // OuterJoins (38) is `String`-shaped ("Y"/"P"/"N" per spec), and is
+            // derived from `Backend::outer_join_capabilities` rather than left
+            // to the shape default -- "" is not one of the values the spec
+            // defines for it. `MockBackend` declares LEFT | NESTED.
             let mut buf = [0xEEu16; 8];
             let mut str_len: i16 = -1;
             let ret = sql_get_info_w::<MockBackend>(
@@ -1127,8 +1143,12 @@ mod tests {
                 &mut str_len,
             );
             assert_eq!(ret, SqlReturn::SUCCESS, "OuterJoins must not error");
-            assert_eq!(str_len, 0, "OuterJoins default must be the empty string");
-            assert_eq!(buf[0], 0, "empty string must be null-terminated at index 0");
+            assert_eq!(str_len, 2, "OuterJoins must report one UTF-16 unit");
+            assert_eq!(
+                String::from_utf16_lossy(&buf[..1]),
+                "Y",
+                "a backend declaring outer-join capabilities must report Y"
+            );
 
             // StringFunctions (50) is SQL_STRING_FUNCTIONS, a scalar-function
             // bitmap, not one of the actual SQL_CONVERT_* codes: claiming

@@ -603,8 +603,12 @@ impl Backend for MockAltBackend {
     fn alter_table_support() -> u32 {
         crate::types::SQL_AT_ADD_CONSTRAINT
     }
+    // Zero, i.e. no outer joins at all, where `MockBackend` declares
+    // LEFT | NESTED. `SQL_OUTER_JOINS` is derived from this, so the two mocks
+    // must disagree for the guard test to see that answer move with the
+    // backend rather than being decided by core.
     fn outer_join_capabilities() -> u32 {
-        crate::types::SQL_OJ_RIGHT
+        0
     }
     fn default_txn_isolation() -> u32 {
         crate::types::SQL_TXN_READ_UNCOMMITTED
