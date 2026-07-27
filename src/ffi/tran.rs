@@ -78,10 +78,13 @@ fn apply_cursor_behavior<B: Backend>(
 
     for stmt_ptr in statements {
         let Ok(stmt) = scope.get::<crate::handles::StatementHandle<B>>(stmt_ptr) else {
-            // Freed concurrently between the snapshot above and this lookup,
-            // or (defensively) a registry entry of the wrong kind.
+            // Purely defensive, not a race: freeing a statement takes its
+            // connection's group (statements share it), which this scope
+            // already holds, so nothing in `statements` can actually be gone
+            // by the time this runs. `continue` only covers a registry entry
+            // of the wrong kind.
             tracing::debug!(
-                "SQLEndTran: statement {:?} was freed before this commit/rollback could reach it",
+                "SQLEndTran: statement {:?} resolved to a registry entry of the wrong kind",
                 stmt_ptr
             );
             continue;
@@ -148,13 +151,19 @@ fn apply_cursor_behavior<B: Backend>(
 /// [`apply_cursor_behavior`] fails after a successful commit/rollback: the
 /// per-statement diagnostic it already recorded is what the application
 /// should read, and a connection-level record repeating it would add nothing.
+///
+/// Returns [`EndTranOutcome`] rather than `()`: "no open connection" and "the
+/// backend committed or rolled back" both reach the end of this function
+/// without an `Err`, but a caller needs to tell them apart (see the enum's
+/// own doc comment for why collapsing them into one signal is exactly the
+/// bug this type exists to prevent).
 fn end_tran_on_connection<B: Backend>(
     scope: &mut HandleScope<'_>,
     conn_token: *mut c_void,
     commit: bool,
     behavior: crate::types::CursorBehavior,
     report_end_tran_failure: bool,
-) -> Result<(), OdbcError> {
+) -> Result<EndTranOutcome, OdbcError> {
     let conn = scope.get::<ConnectionHandle<B>>(conn_token)?;
     // Spec: clear diagnostics at the start of each ODBC call -- done per
     // visited connection, not just the top-level handle; see this function's
@@ -162,9 +171,11 @@ fn end_tran_on_connection<B: Backend>(
     conn.diagnostics.clear();
     // Spec 08003 / "connections that are not active do not affect the
     // transaction": see this function's doc comment for how the two callers
-    // differ in reporting this.
+    // differ in reporting this. `Skipped`, not an `Err`: this is core's own
+    // pre-check, never the backend's, so it must never be mistaken for a
+    // failure `B::end_tran` reported: see `EndTranOutcome`.
     let Some(ref connection) = conn.connection else {
-        return Err(OdbcError::NotConnected);
+        return Ok(EndTranOutcome::Skipped);
     };
     if let Err(e) = B::end_tran(connection, commit).into_odbc() {
         if report_end_tran_failure {
@@ -178,7 +189,25 @@ fn end_tran_on_connection<B: Backend>(
     // SQLSTATE even though 25S03/40001/40002 do say the transaction ended;
     // see the "Nothing is applied when B::end_tran fails" paragraph on
     // `sql_end_tran`.
-    apply_cursor_behavior::<B>(scope, conn_token, behavior)
+    apply_cursor_behavior::<B>(scope, conn_token, behavior)?;
+    Ok(EndTranOutcome::Applied)
+}
+
+/// What [`end_tran_on_connection`] did, as distinct from why it failed.
+///
+/// A connection with no open connection is skipped, which is not an error and
+/// must not reach `first_err`. A backend that reports
+/// [`OdbcError::NotConnected`] from its own `end_tran` **is** an error --
+/// legitimate for a `Backend` whose central error-mapping function chose that
+/// variant for whatever its client library reported and the two are only
+/// distinguishable here because this type keeps them apart rather than
+/// overloading one `Result<(), OdbcError>` to mean both "nothing to do" and
+/// "the backend failed, and happened to fail with this particular variant".
+enum EndTranOutcome {
+    /// The backend committed or rolled back.
+    Applied,
+    /// No open connection on this handle; nothing to do.
+    Skipped,
 }
 
 /// Generic implementation of SQLEndTran.
@@ -396,24 +425,34 @@ pub unsafe fn sql_end_tran<B: Backend>(
                             end_tran_on_connection::<B>(child, conn_ptr, commit, behavior, true)
                         });
                         match result {
-                            Ok(Ok(())) => {}
-                            Ok(Err(OdbcError::NotConnected)) => {
+                            Ok(Ok(EndTranOutcome::Applied)) => {}
+                            Ok(Ok(EndTranOutcome::Skipped)) => {
                                 // "Connections that are not active do not
                                 // affect the transaction."
                             }
-                            Ok(Err(e)) => {
-                                first_err.get_or_insert(e);
-                            }
-                            Err(_) => {
-                                // A connection freed between the snapshot
-                                // above and here -- a real race now that each
-                                // connection has its own lock, not a corrupt
-                                // registry entry. Nothing to attempt.
+                            // A connection freed between the `children_of`
+                            // snapshot above and here, arriving through
+                            // either of two exits: `Err(_)` when
+                            // `with_child_group` finds the group already gone,
+                            // `Ok(Err(InvalidHandle))` when the group was
+                            // still there to lock but the connection behind
+                            // it was gone by the time `end_tran_on_connection`
+                            // resolved the token. Neither may set `first_err`:
+                            // the environment handle this call received was
+                            // valid, so reporting SQL_INVALID_HANDLE for it
+                            // would misreport the call, and
+                            // `panic_safe_scoped` pushes no diagnostic for
+                            // that variant, leaving nothing to explain the
+                            // failure.
+                            Ok(Err(OdbcError::InvalidHandle)) | Err(_) => {
                                 tracing::debug!(
                                     "SQLEndTran: connection {:?} was freed before this \
                                      environment-level commit could reach it",
                                     conn_ptr
                                 );
+                            }
+                            Ok(Err(e)) => {
+                                first_err.get_or_insert(e);
                             }
                         }
                     }
@@ -433,8 +472,17 @@ pub unsafe fn sql_end_tran<B: Backend>(
                     // is `handle` itself, so panic_safe_scoped's auto-push
                     // already records a propagated failure here exactly once
                     // (see end_tran_on_connection's doc comment).
-                    end_tran_on_connection::<B>(scope, handle, commit, behavior, false)?;
-                    Ok(SqlReturn::SUCCESS)
+                    match end_tran_on_connection::<B>(scope, handle, commit, behavior, false)? {
+                        EndTranOutcome::Applied => Ok(SqlReturn::SUCCESS),
+                        // Spec 08003: connection not open. `SQL_HANDLE_ENV`
+                        // treats the same `Skipped` outcome as silent (see the
+                        // loop above), but a direct SQLEndTran on an
+                        // unconnected connection really is a failure, so this
+                        // arm turns it back into the `Err` that
+                        // `panic_safe_scoped`'s auto-push records against
+                        // `handle`.
+                        EndTranOutcome::Skipped => Err(OdbcError::NotConnected),
+                    }
                 }
                 _ => Err(OdbcError::InvalidHandle),
             }
@@ -452,7 +500,7 @@ mod tests {
     use crate::synthetic::SyntheticStatement;
     use crate::test_utils::{
         MockBackend, MockFailingCloseBackend, MockFailingCloseStatement, MockTxnCloseBackend,
-        MockTxnDeleteBackend, MockTxnPreserveBackend,
+        MockTxnDeleteBackend, MockTxnNotConnectedBackend, MockTxnPreserveBackend,
     };
     use crate::types::{
         ColumnDescriptor, ColumnValue, CompletionType, FetchResult, Nullable, SQL_NTS, SqlDataType,
@@ -1237,6 +1285,46 @@ mod tests {
             );
 
             free_env_two_conns::<MockTxnDeleteBackend>(env, conn_fail, stmt_fail, conn_ok, stmt_ok);
+        }
+    }
+
+    /// `OdbcError::NotConnected` is also core's own signal for "no open
+    /// connection on this handle" (`end_tran_on_connection`'s pre-check,
+    /// which `SQL_HANDLE_ENV`'s loop must skip without setting `first_err`).
+    /// A *backend* reporting that same variant from `B::end_tran` on a
+    /// connection core already knows is connected is a real failure and must
+    /// not be mistaken for that skip -- `EndTranOutcome` is what keeps them
+    /// apart.
+    #[test]
+    fn end_tran_env_reports_a_backend_returned_not_connected_as_an_error() {
+        unsafe {
+            let (env, conn_fail, stmt_fail, conn_ok, stmt_ok) =
+                alloc_env_two_conns::<MockTxnNotConnectedBackend>();
+
+            let ret = sql_end_tran::<MockTxnNotConnectedBackend>(
+                HandleType::Env as i16,
+                env,
+                CompletionType::Commit as i16,
+            );
+            assert_eq!(
+                ret,
+                SqlReturn::ERROR,
+                "a backend-reported NotConnected must not be treated as an inactive \
+                 connection and silently skipped"
+            );
+
+            // The application can still find out which connection failed.
+            let failed = as_handle_ref::<ConnectionHandle<MockTxnNotConnectedBackend>>(conn_fail)
+                .expect("valid");
+            assert_eq!(
+                failed.diagnostics.len(),
+                1,
+                "no per-connection diagnostic on the failing connection"
+            );
+
+            free_env_two_conns::<MockTxnNotConnectedBackend>(
+                env, conn_fail, stmt_fail, conn_ok, stmt_ok,
+            );
         }
     }
 

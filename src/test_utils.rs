@@ -906,9 +906,24 @@ pub struct MockTxnConnection {
 
 /// Generates a transaction-capable `Backend` with the given declared cursor
 /// behaviours. `end_tran` succeeds unless the connection was opened with
-/// `ENDTRANFAIL=1`.
+/// `ENDTRANFAIL=1`, in which case it fails with a generic HY000. Pass
+/// `error = ...` for a backend whose `end_tran` reports something more
+/// specific -- e.g. `OdbcError::NotConnected`, to exercise a *backend*
+/// reporting the same variant core's own "no open connection" pre-check uses
+/// internally (see `end_tran_on_connection`'s `EndTranOutcome`).
 macro_rules! mock_txn_backend {
     ($name:ident, commit = $commit:expr, rollback = $rollback:expr) => {
+        mock_txn_backend!(
+            $name,
+            commit = $commit,
+            rollback = $rollback,
+            error = OdbcError::general(
+                "mock end_tran failure",
+                crate::types::SqlState::general_error(),
+            )
+        );
+    };
+    ($name:ident, commit = $commit:expr, rollback = $rollback:expr, error = $error:expr) => {
         #[allow(dead_code)]
         pub struct $name;
 
@@ -991,10 +1006,7 @@ macro_rules! mock_txn_backend {
 
             fn end_tran(conn: &MockTxnConnection, _commit: bool) -> Result<(), OdbcError> {
                 if conn.end_tran_fails {
-                    Err(OdbcError::general(
-                        "mock end_tran failure",
-                        crate::types::SqlState::general_error(),
-                    ))
+                    Err($error)
                 } else {
                     Ok(())
                 }
@@ -1054,6 +1066,18 @@ mock_txn_backend!(
     MockTxnDeleteCloseBackend,
     commit = crate::types::CursorBehavior::Delete,
     rollback = crate::types::CursorBehavior::Close
+);
+// `end_tran` fails with `OdbcError::NotConnected` rather than a generic
+// error: that variant is also core's own signal for "no open connection on
+// this handle" (see `end_tran_on_connection`'s `EndTranOutcome`), so this
+// mock exercises a *backend* reporting it instead, from inside a call that
+// core already knows is on a connected connection. That must still surface
+// as a failure, not be mistaken for core's own silent skip.
+mock_txn_backend!(
+    MockTxnNotConnectedBackend,
+    commit = crate::types::CursorBehavior::Close,
+    rollback = crate::types::CursorBehavior::Close,
+    error = OdbcError::NotConnected
 );
 
 // ---------------------------------------------------------------------------
