@@ -5,7 +5,7 @@ use std::ffi::c_void;
 use odbc_sys::HandleType;
 
 use crate::backend::{Backend, StatementBackend};
-use crate::errors::OdbcError;
+use crate::errors::{IntoOdbc, OdbcError};
 use crate::handles::{ConnectionHandle, EnvironmentHandle, as_handle_ref};
 use crate::panic::panic_safe;
 use crate::types::{SqlReturn, SqlState, completion_type_from_raw, handle_type_from_raw};
@@ -341,7 +341,7 @@ pub unsafe fn sql_end_tran<B: Backend>(
                             continue;
                         };
 
-                        match B::end_tran(connection, commit) {
+                        match B::end_tran(connection, commit).into_odbc() {
                             Ok(()) => {
                                 // SAFETY: conn.statements holds live StatementHandle<B>
                                 // allocations; tags are validated inside. This call is
@@ -371,7 +371,7 @@ pub unsafe fn sql_end_tran<B: Backend>(
                     let Some(ref connection) = conn.connection else {
                         return Err(OdbcError::NotConnected);
                     };
-                    B::end_tran(connection, commit)?;
+                    B::end_tran(connection, commit).into_odbc()?;
                     // Only on success. Core does not discriminate on the
                     // backend's SQLSTATE even though 25S03/40001/40002 do say
                     // the transaction ended; see the "Nothing is applied when

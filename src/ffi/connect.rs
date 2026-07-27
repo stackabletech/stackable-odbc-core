@@ -4,7 +4,7 @@
 use std::ffi::c_void;
 
 use crate::backend::Backend;
-use crate::errors::OdbcError;
+use crate::errors::{IntoOdbc, OdbcError};
 use crate::handles::{ConnectionHandle, as_handle_ref};
 use crate::panic::panic_safe;
 use crate::types::{ConnectParams, SQL_NTS, SqlReturn, SqlState};
@@ -130,14 +130,26 @@ pub unsafe fn sql_driver_connect_w<B: Backend>(
 
             let conn_str = utf16_to_string(in_connection_string, string_length1.into())?;
             let params = merge_dsn_params::<B>(&conn_str, read_dsn_keys)?;
-            let connection = B::connect(&params).map_err(Into::into)?;
+            let connection = B::connect(&params).into_odbc()?;
             handle.connection = Some(connection);
             // A deferred attribute the backend cannot honour fails the
             // connect. Close the connection first: the application sees
             // SQL_ERROR and so will never call SQLDisconnect for it.
             if let Err(e) = crate::ffi::connect_attr::apply_pending_connect_attrs::<B>(handle) {
                 if let Some(mut c) = handle.connection.take() {
-                    let _ = B::disconnect(&mut c);
+                    // Logged, not propagated: the application is already being
+                    // told the connect failed, and this teardown error would
+                    // replace the actual reason. It is worth a line because a
+                    // failed teardown here can leak a session on the server that
+                    // no SQLDisconnect will ever reclaim -- the application never
+                    // got a live connection to disconnect. Loggable at all only
+                    // because `Backend::Error` is now bounded by `std::error::Error`.
+                    if let Err(teardown) = B::disconnect(&mut c) {
+                        tracing::warn!(
+                            "disconnect failed while unwinding a half-open connection; \
+                             the data source may still hold the session: {teardown}"
+                        );
+                    }
                 }
                 return Err(e);
             }
@@ -286,14 +298,26 @@ pub unsafe fn sql_connect_w<B: Backend>(
                 params.insert("password", auth);
             }
             tracing::debug!("SQLConnectW: params = {:?}", params);
-            let connection = B::connect(&params).map_err(Into::into)?;
+            let connection = B::connect(&params).into_odbc()?;
             handle.connection = Some(connection);
             // A deferred attribute the backend cannot honour fails the
             // connect. Close the connection first: the application sees
             // SQL_ERROR and so will never call SQLDisconnect for it.
             if let Err(e) = crate::ffi::connect_attr::apply_pending_connect_attrs::<B>(handle) {
                 if let Some(mut c) = handle.connection.take() {
-                    let _ = B::disconnect(&mut c);
+                    // Logged, not propagated: the application is already being
+                    // told the connect failed, and this teardown error would
+                    // replace the actual reason. It is worth a line because a
+                    // failed teardown here can leak a session on the server that
+                    // no SQLDisconnect will ever reclaim -- the application never
+                    // got a live connection to disconnect. Loggable at all only
+                    // because `Backend::Error` is now bounded by `std::error::Error`.
+                    if let Err(teardown) = B::disconnect(&mut c) {
+                        tracing::warn!(
+                            "disconnect failed while unwinding a half-open connection; \
+                             the data source may still hold the session: {teardown}"
+                        );
+                    }
                 }
                 return Err(e);
             }
@@ -472,14 +496,26 @@ pub unsafe fn sql_browse_connect_w<B: Backend>(
             }
 
             // All required attributes are present; connect.
-            let connection = B::connect(&merged).map_err(Into::into)?;
+            let connection = B::connect(&merged).into_odbc()?;
             handle.connection = Some(connection);
             // A deferred attribute the backend cannot honour fails the
             // connect. Close the connection first: the application sees
             // SQL_ERROR and so will never call SQLDisconnect for it.
             if let Err(e) = crate::ffi::connect_attr::apply_pending_connect_attrs::<B>(handle) {
                 if let Some(mut c) = handle.connection.take() {
-                    let _ = B::disconnect(&mut c);
+                    // Logged, not propagated: the application is already being
+                    // told the connect failed, and this teardown error would
+                    // replace the actual reason. It is worth a line because a
+                    // failed teardown here can leak a session on the server that
+                    // no SQLDisconnect will ever reclaim -- the application never
+                    // got a live connection to disconnect. Loggable at all only
+                    // because `Backend::Error` is now bounded by `std::error::Error`.
+                    if let Err(teardown) = B::disconnect(&mut c) {
+                        tracing::warn!(
+                            "disconnect failed while unwinding a half-open connection; \
+                             the data source may still hold the session: {teardown}"
+                        );
+                    }
                 }
                 return Err(e);
             }
@@ -668,7 +704,7 @@ pub unsafe fn sql_disconnect<B: Backend>(connection_handle: *mut c_void) -> SqlR
                 return Err(OdbcError::NotConnected);
             };
 
-            B::disconnect(conn).map_err(Into::into)?;
+            B::disconnect(conn).into_odbc()?;
             handle.connection = None;
 
             // Spec: "the driver frees those statements and all descriptors that

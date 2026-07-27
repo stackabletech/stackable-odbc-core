@@ -174,6 +174,32 @@ impl OdbcError {
     }
 }
 
+/// Moves a backend result into core's error space.
+///
+/// Core's generic FFI functions return `Result<_, OdbcError>` while every
+/// [`Backend`](crate::backend::Backend) and
+/// [`StatementBackend`](crate::backend::StatementBackend) method returns the
+/// driver's own `Self::Error`, so each call across that boundary converts.
+///
+/// Plain `?` cannot do it. `?` needs `OdbcError: From<B::Error>`, and the
+/// `B::Error: Into<OdbcError>` bound does not give the compiler that — the
+/// blanket `impl<T, U: From<T>> Into<U> for T` only runs in the other
+/// direction. Stating the bound as `where OdbcError: From<Self::Error>` on the
+/// trait does not help either: a `where` clause mentioning an associated type
+/// is not elaborated into an implied bound, so every one of core's ~70 generic
+/// functions would have to repeat it. This extension is the cheap way to keep
+/// the call sites readable.
+pub(crate) trait IntoOdbc<T> {
+    /// Converts the error half into [`OdbcError`], leaving the value untouched.
+    fn into_odbc(self) -> Result<T, OdbcError>;
+}
+
+impl<T, E: Into<OdbcError>> IntoOdbc<T> for Result<T, E> {
+    fn into_odbc(self) -> Result<T, OdbcError> {
+        self.map_err(Into::into)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

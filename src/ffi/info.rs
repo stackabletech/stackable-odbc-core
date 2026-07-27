@@ -3,7 +3,7 @@
 use std::ffi::c_void;
 
 use crate::backend::Backend;
-use crate::errors::OdbcError;
+use crate::errors::{IntoOdbc, OdbcError};
 use crate::handles::StatementData;
 use crate::handles::{ConnectionHandle, StatementHandle, as_handle_ref};
 use crate::panic::panic_safe;
@@ -144,7 +144,7 @@ fn info_type_default_response<B: Backend>(
     if let Some(conn) = conn
         && let Some(result) = B::get_info_raw(conn, info_type)
     {
-        return result.map_err(Into::into);
+        return result.into_odbc();
     }
 
     // Derived from the backend hook so that a backend which answers this info
@@ -304,7 +304,7 @@ pub unsafe fn sql_get_info_w<B: Backend>(
             let info = match handle.connection.as_ref() {
                 Some(conn) => match info_type_id {
                     Ok(type_id) => info_type_or_default::<B>(
-                        B::get_info(conn, type_id).map_err(Into::into),
+                        B::get_info(conn, type_id).into_odbc(),
                         Some(conn),
                         info_type,
                     )?,
@@ -312,7 +312,7 @@ pub unsafe fn sql_get_info_w<B: Backend>(
                 },
                 None => match info_type_id {
                     Ok(type_id) => info_type_or_default::<B>(
-                        B::get_info_pre_connect(type_id),
+                        B::get_info_pre_connect(type_id).into_odbc(),
                         None,
                         info_type,
                     )?,

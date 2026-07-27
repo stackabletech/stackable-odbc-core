@@ -6,7 +6,7 @@ use std::ffi::c_void;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::backend::{Backend, StatementBackend};
-use crate::errors::OdbcError;
+use crate::errors::{IntoOdbc, OdbcError};
 use crate::handles::{StatementHandle, as_handle_ref};
 use crate::panic::panic_safe;
 use crate::types::{
@@ -335,7 +335,10 @@ pub unsafe fn sql_cancel<B: Backend>(statement_handle: *mut c_void) -> SqlReturn
             if let Some(crate::handles::StatementData::Backend(ref mut backend_stmt)) =
                 stmt.statement
             {
-                match B::cancel(backend_stmt) {
+                // Converted before matching: `B::cancel` now reports
+                // `B::Error`, and the arm below has to recognise core's own
+                // `NotImplemented` inside it.
+                match B::cancel(backend_stmt).into_odbc() {
                     Ok(()) => {}
                     // NotImplemented is fine; no pending operation to cancel.
                     Err(crate::errors::OdbcError::NotImplemented { .. }) => {}

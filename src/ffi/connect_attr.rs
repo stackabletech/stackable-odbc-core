@@ -5,7 +5,7 @@ use std::ffi::c_void;
 use odbc_sys::ConnectionAttribute;
 
 use crate::backend::Backend;
-use crate::errors::OdbcError;
+use crate::errors::{IntoOdbc, OdbcError};
 use crate::handles::{ConnectionHandle, as_handle_ref};
 use crate::panic::panic_safe;
 use crate::types::{
@@ -54,7 +54,7 @@ fn apply_pending_autocommit<B: Backend>(handle: &mut ConnectionHandle<B>) -> Res
     let Some(connection) = handle.connection.as_ref() else {
         return Ok(());
     };
-    B::set_autocommit(connection, val == SQL_AUTOCOMMIT_ON)
+    B::set_autocommit(connection, val == SQL_AUTOCOMMIT_ON).into_odbc()
 }
 
 /// Apply a `SQL_ATTR_TXN_ISOLATION` value that was set before the connection
@@ -72,7 +72,7 @@ fn apply_pending_txn_isolation<B: Backend>(
     let Some(connection) = handle.connection.as_ref() else {
         return Ok(());
     };
-    B::set_txn_isolation(connection, val as u32)
+    B::set_txn_isolation(connection, val as u32).into_odbc()
 }
 
 /// Reject a `SQL_ATTR_TXN_ISOLATION` value the data source cannot run at.
@@ -250,7 +250,7 @@ pub unsafe fn sql_set_connect_attr_w<B: Backend>(
                     // stored and applied by `apply_pending_autocommit` once the
                     // connection is open.
                     if let Some(connection) = conn.connection.as_ref() {
-                        B::set_autocommit(connection, val == SQL_AUTOCOMMIT_ON)?;
+                        B::set_autocommit(connection, val == SQL_AUTOCOMMIT_ON).into_odbc()?;
                     }
 
                     conn.attrs.insert(attribute, val);
@@ -304,7 +304,7 @@ pub unsafe fn sql_set_connect_attr_w<B: Backend>(
                     // the spec lists this attribute as settable either side of
                     // the connection.
                     if let Some(c) = conn.connection.as_ref() {
-                        B::set_txn_isolation(c, level)?;
+                        B::set_txn_isolation(c, level).into_odbc()?;
                     }
                     conn.attrs.insert(attribute, level as usize);
                     Ok(SqlReturn::SUCCESS)

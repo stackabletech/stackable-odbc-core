@@ -7,7 +7,7 @@
 use std::ffi::c_void;
 
 use crate::backend::{Backend, StatementBackend};
-use crate::errors::OdbcError;
+use crate::errors::{IntoOdbc, OdbcError};
 use crate::handles::{ConnectionHandle, StatementData, StatementHandle, as_handle_ref};
 use crate::panic::panic_safe;
 use crate::synthetic::SyntheticStatement;
@@ -142,7 +142,7 @@ pub unsafe fn sql_tables_w<B: Backend>(
                 table.as_deref(),
                 tt.as_deref(),
             )
-            .map_err(Into::into)?;
+            .into_odbc()?;
 
             stmt.set_result_set(StatementData::Backend(result));
             Ok(SqlReturn::SUCCESS)
@@ -257,7 +257,7 @@ pub unsafe fn sql_columns_w<B: Backend>(
                 table.as_deref(),
                 column.as_deref(),
             )
-            .map_err(Into::into)?;
+            .into_odbc()?;
 
             stmt.set_result_set(StatementData::Backend(result));
             Ok(SqlReturn::SUCCESS)
@@ -353,7 +353,8 @@ pub unsafe fn sql_primary_keys_w<B: Backend>(
                 catalog.as_deref(),
                 schema.as_deref(),
                 table.as_deref(),
-            )?;
+            )
+            .into_odbc()?;
 
             stmt.set_result_set(StatementData::Backend(result));
             Ok(SqlReturn::SUCCESS)
@@ -473,7 +474,8 @@ pub unsafe fn sql_foreign_keys_w<B: Backend>(
                 fk_catalog.as_deref(),
                 fk_schema.as_deref(),
                 fk_table.as_deref(),
-            )?;
+            )
+            .into_odbc()?;
 
             stmt.set_result_set(StatementData::Backend(result));
             Ok(SqlReturn::SUCCESS)
@@ -623,7 +625,11 @@ pub unsafe fn sql_statistics_w<B: Backend>(
                 schema.as_deref(),
                 table.as_deref(),
                 unique_only,
-            ) {
+            )
+            // Converted before matching, so the `NotImplemented` arm below can
+            // still recognise core's own variant inside the backend's error.
+            .into_odbc()
+            {
                 Ok(result) => {
                     stmt.set_result_set(StatementData::Backend(result));
                     Ok(SqlReturn::SUCCESS)
@@ -785,7 +791,11 @@ pub unsafe fn sql_special_columns_w<B: Backend>(
                 table.as_deref(),
                 scope,
                 nullable,
-            ) {
+            )
+            // Converted before matching, so the `NotImplemented` arm below can
+            // still recognise core's own variant inside the backend's error.
+            .into_odbc()
+            {
                 Ok(result) => {
                     stmt.set_result_set(StatementData::Backend(result));
                     Ok(SqlReturn::SUCCESS)

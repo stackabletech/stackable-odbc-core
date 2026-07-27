@@ -8,7 +8,7 @@ use odbc_sys::SqlDataType;
 
 use crate::{
     backend::{Backend, StatementBackend},
-    errors::OdbcError,
+    errors::{IntoOdbc, OdbcError},
     handles::{ConnectionHandle, ParameterBinding, StatementHandle, as_handle_ref},
     panic::panic_safe,
     types::{
@@ -1120,7 +1120,7 @@ pub unsafe fn sql_param_data<B: Backend>(
 
             // If statement was closed (e.g. SQLFreeStmt(SQL_CLOSE)), re-prepare.
             if stmt.statement.is_none() {
-                let prepared = B::prepare(connection, &sql).map_err(Into::into)?;
+                let prepared = B::prepare(connection, &sql).into_odbc()?;
                 let stmt = as_handle_ref::<StatementHandle<B>>(statement_handle)?;
                 stmt.set_prepared_statement(crate::handles::StatementData::Backend(prepared));
             }
@@ -1132,7 +1132,7 @@ pub unsafe fn sql_param_data<B: Backend>(
 
             match stmt_data {
                 crate::handles::StatementData::Backend(backend_stmt) => {
-                    B::execute(connection, backend_stmt, &params).map_err(Into::into)?;
+                    B::execute(connection, backend_stmt, &params).into_odbc()?;
                 }
                 crate::handles::StatementData::Synthetic(_) => {
                     return Err(OdbcError::general(

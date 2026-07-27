@@ -97,6 +97,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking:** `Backend::Error` is now bounded by
+  `Into<OdbcError> + From<OdbcError> + std::error::Error + Send + Sync + 'static`,
+  and *every* `Backend` method returns `Result<_, Self::Error>`. Previously
+  `connect`, `disconnect`, `exec_direct`, `prepare`, `execute`, `get_info`,
+  `tables` and `columns` returned `Self::Error` while `set_autocommit`,
+  `get_info_pre_connect`, `primary_keys`, `foreign_keys`, `statistics`,
+  `special_columns`, `cancel`, `end_tran` and `set_txn_isolation` returned
+  `OdbcError`, which forced a driver to double-convert at every call site in the
+  second group. A driver adds one `impl From<OdbcError> for ItsError`; the
+  `From<OdbcError>` direction is what lets a defaulted trait body construct an
+  error and still name `Self::Error`, and `Into<OdbcError>` is what core uses to
+  build the diagnostic.
+- **Breaking:** `StatementBackend` gains its own associated `Error` with the same
+  bounds; `fetch`, `get_data` and `describe_col` return it instead of
+  `OdbcError`. The fetch path is the hottest error path in the crate, and it was
+  the one place a driver still had to flatten its error into a string. A driver
+  may use one type for both traits.
+- A `disconnect` that fails while unwinding a half-open connection is now logged
+  rather than silently discarded. Core could not report it before, because
+  `Backend::Error` carried no `Debug` or `Display` bound. A failure here can
+  leave a session on the data source that the application will never reclaim,
+  since it never received a connection to disconnect.
 - **Breaking:** `OdbcError::General` gains `native_error` and `cause` fields and
   is now `#[non_exhaustive]` at the variant level, so it can no longer be built
   with struct-literal syntax from outside the crate. Use `OdbcError::general`

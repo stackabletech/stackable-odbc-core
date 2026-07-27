@@ -31,7 +31,7 @@ use odbc_sys::AttrOdbcVersion;
 
 use crate::backend::{Backend, StatementBackend};
 use crate::diagnostics::DiagnosticQueue;
-use crate::errors::OdbcError;
+use crate::errors::{IntoOdbc, OdbcError};
 use crate::types::{ColumnDescriptor, ColumnValue, ConnectParams, FetchResult, SqlReturn, ULen};
 use odbc_sys::{CDataType, ParamType, SqlDataType};
 
@@ -360,9 +360,17 @@ pub enum StatementData<B: Backend> {
 }
 
 impl<B: Backend> StatementBackend for StatementData<B> {
+    /// `OdbcError`, because this is the point where two different error types
+    /// meet: the backend arm carries `<B::Statement as StatementBackend>::Error`
+    /// and the synthetic arm carries `OdbcError`. Normalising here is what lets
+    /// core hold either kind of statement behind one handle, and costs nothing —
+    /// the backend's error converts through the `Into<OdbcError>` bound its own
+    /// associated type already carries.
+    type Error = OdbcError;
+
     fn fetch(&mut self) -> Result<FetchResult, OdbcError> {
         match self {
-            StatementData::Backend(s) => s.fetch(),
+            StatementData::Backend(s) => s.fetch().into_odbc(),
             StatementData::Synthetic(s) => s.fetch(),
         }
     }
@@ -373,7 +381,7 @@ impl<B: Backend> StatementBackend for StatementData<B> {
         target_type: odbc_sys::CDataType,
     ) -> Result<std::borrow::Cow<'_, ColumnValue>, OdbcError> {
         match self {
-            StatementData::Backend(s) => s.get_data(col, target_type),
+            StatementData::Backend(s) => s.get_data(col, target_type).into_odbc(),
             StatementData::Synthetic(s) => s.get_data(col, target_type),
         }
     }
@@ -387,7 +395,7 @@ impl<B: Backend> StatementBackend for StatementData<B> {
 
     fn describe_col(&self, col: u16) -> Result<ColumnDescriptor, OdbcError> {
         match self {
-            StatementData::Backend(s) => s.describe_col(col),
+            StatementData::Backend(s) => s.describe_col(col).into_odbc(),
             StatementData::Synthetic(s) => s.describe_col(col),
         }
     }

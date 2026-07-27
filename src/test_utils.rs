@@ -39,8 +39,21 @@ impl From<MockError> for OdbcError {
     }
 }
 
+impl From<OdbcError> for MockError {
+    fn from(_: OdbcError) -> Self {
+        // Required by the `Backend::Error` / `StatementBackend::Error` bounds so
+        // that a defaulted trait body can construct an error and still name
+        // `Self::Error`. The mock collapses every error to one value, which is
+        // lossy — but the round trip back through `From<MockError> for OdbcError`
+        // lands on `NotImplemented`, which is what the defaults produce anyway.
+        MockError
+    }
+}
+
 // Uses trait defaults (all return NotImplemented).
-impl StatementBackend for MockStatement {}
+impl StatementBackend for MockStatement {
+    type Error = MockError;
+}
 
 /// The eight required capability declarations, for a mock that stands for a
 /// minimal data source and whose test does not care about them.
@@ -793,7 +806,7 @@ mock_isolation_backend!(
         | crate::types::SQL_TXN_REPEATABLE_READ
         | crate::types::SQL_TXN_SERIALIZABLE,
     default = crate::types::SQL_TXN_READ_COMMITTED,
-    fn set_txn_isolation(conn: &MockIsolationConnection, level: u32) -> Result<(), OdbcError> {
+    fn set_txn_isolation(conn: &MockIsolationConnection, level: u32) -> Result<(), MockError> {
         conn.applied
             .store(level, std::sync::atomic::Ordering::SeqCst);
         Ok(())
@@ -832,38 +845,46 @@ macro_rules! mock_txn_backend {
         impl Backend for $name {
             type Connection = MockTxnConnection;
             type Statement = MockStatement;
-            type Error = MockError;
+            /// `OdbcError` rather than `OdbcError`: `end_tran` below constructs a
+            /// real error with a message and SQLSTATE, and routing that through
+            /// `OdbcError` would collapse it to `NotImplemented`. Using
+            /// `OdbcError` directly also exercises the case of a backend whose
+            /// error type simply *is* core's -- which the bounds allow, since
+            /// `OdbcError` converts to and from itself.
+            type Error = OdbcError;
 
-            fn connect(params: &ConnectParams) -> Result<MockTxnConnection, MockError> {
+            fn connect(params: &ConnectParams) -> Result<MockTxnConnection, OdbcError> {
                 Ok(MockTxnConnection {
                     end_tran_fails: params.get("endtranfail") == Some("1"),
                 })
             }
-            fn disconnect(_: &mut MockTxnConnection) -> Result<(), MockError> {
+            fn disconnect(_: &mut MockTxnConnection) -> Result<(), OdbcError> {
                 Ok(())
             }
             // Succeeds, unlike `MockBackend::exec_direct`, so a test can tell
             // "SQLExecDirect was allowed" from "SQLExecDirect was rejected".
             // `MockStatement` reports zero columns, so it stands for a
             // non-result-set statement and opens no cursor.
-            fn exec_direct(_: &MockTxnConnection, _: &str) -> Result<MockStatement, MockError> {
+            fn exec_direct(_: &MockTxnConnection, _: &str) -> Result<MockStatement, OdbcError> {
                 Ok(MockStatement)
             }
-            fn prepare(_: &MockTxnConnection, _: &str) -> Result<MockStatement, MockError> {
+            fn prepare(_: &MockTxnConnection, _: &str) -> Result<MockStatement, OdbcError> {
                 Ok(MockStatement)
             }
             fn execute(
                 _: &MockTxnConnection,
                 _: &mut MockStatement,
                 _: &[crate::types::ColumnValue],
-            ) -> Result<crate::types::ExecuteOutcome, MockError> {
+            ) -> Result<crate::types::ExecuteOutcome, OdbcError> {
                 Ok(crate::types::ExecuteOutcome::default())
             }
             fn get_info(
                 _: &MockTxnConnection,
                 _: crate::types::InfoType,
-            ) -> Result<InfoValue, MockError> {
-                Err(MockError)
+            ) -> Result<InfoValue, OdbcError> {
+                Err(OdbcError::NotImplemented {
+                    feature: "mock txn backend".into(),
+                })
             }
             fn get_functions() -> &'static [crate::function_id::FunctionId] {
                 &[]
@@ -877,8 +898,10 @@ macro_rules! mock_txn_backend {
                 _: Option<&str>,
                 _: Option<&str>,
                 _: Option<&str>,
-            ) -> Result<MockStatement, MockError> {
-                Err(MockError)
+            ) -> Result<MockStatement, OdbcError> {
+                Err(OdbcError::NotImplemented {
+                    feature: "mock txn backend".into(),
+                })
             }
             fn columns(
                 _: &MockTxnConnection,
@@ -886,8 +909,10 @@ macro_rules! mock_txn_backend {
                 _: Option<&str>,
                 _: Option<&str>,
                 _: Option<&str>,
-            ) -> Result<MockStatement, MockError> {
-                Err(MockError)
+            ) -> Result<MockStatement, OdbcError> {
+                Err(OdbcError::NotImplemented {
+                    feature: "mock txn backend".into(),
+                })
             }
 
             fn set_autocommit(_: &MockTxnConnection, _: bool) -> Result<(), OdbcError> {

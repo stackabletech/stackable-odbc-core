@@ -37,6 +37,10 @@ impl SyntheticStatement {
 }
 
 impl StatementBackend for SyntheticStatement {
+    /// `OdbcError` directly: this statement is core's own in-memory result set,
+    /// with no backend behind it and so no driver error type to preserve.
+    type Error = OdbcError;
+
     fn fetch(&mut self) -> Result<FetchResult, OdbcError> {
         self.cursor += 1;
         if (self.cursor as usize) < self.rows.len() {

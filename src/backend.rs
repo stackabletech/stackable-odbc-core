@@ -16,7 +16,26 @@ use crate::types::{
 pub trait Backend: Sized + Send + Sync + 'static {
     type Connection: Send + Sync;
     type Statement: StatementBackend;
-    type Error: Into<OdbcError>;
+
+    /// The one error type every [`Backend`] method returns.
+    ///
+    /// Both conversion directions are required, and they do different jobs:
+    ///
+    /// - `Into<OdbcError>` lets core turn a backend failure into a diagnostic
+    ///   record. This is what the generic FFI entry points call.
+    /// - `From<OdbcError>` lets a *defaulted* method body in this trait
+    ///   construct an error and still name `Self::Error` — without it, no
+    ///   default could report `NotImplemented`.
+    ///
+    /// `std::error::Error` is what makes the causal chain usable: core attaches
+    /// a backend error as [`OdbcError::with_source`] and walks `source()` when
+    /// building the diagnostic message. It also lets core log an error it would
+    /// otherwise have to swallow, such as a `disconnect` that fails while
+    /// unwinding a half-open connection.
+    ///
+    /// `Send + Sync + 'static` matches the handles the error travels inside;
+    /// a `#[derive(Debug, Snafu)]` error type satisfies all of this already.
+    type Error: Into<OdbcError> + From<OdbcError> + std::error::Error + Send + Sync + 'static;
 
     /// Establishes a new connection using the given [`ConnectParams`].
     ///
@@ -90,14 +109,15 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// `SQL_TXN_CAPABLE`. A backend that advertises transaction support **must**
     /// override this: accepting the attribute without honouring it would let
     /// an application believe a rollback is available when it is not.
-    fn set_autocommit(_conn: &Self::Connection, enabled: bool) -> Result<(), OdbcError> {
+    fn set_autocommit(_conn: &Self::Connection, enabled: bool) -> Result<(), Self::Error> {
         if enabled {
             // Autocommit is the default mode; nothing to do.
             Ok(())
         } else {
             Err(OdbcError::NotImplemented {
                 feature: "SQL_ATTR_AUTOCOMMIT=SQL_AUTOCOMMIT_OFF (manual-commit mode)".into(),
-            })
+            }
+            .into())
         }
     }
 
@@ -116,10 +136,11 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// `SQL_DRIVER_ODBC_VER` *before* the connection is established.
     /// Backends should override this to handle those pre-connect info types.
     /// The default returns `NotImplemented`.
-    fn get_info_pre_connect(_info_type: crate::types::InfoType) -> Result<InfoValue, OdbcError> {
+    fn get_info_pre_connect(_info_type: crate::types::InfoType) -> Result<InfoValue, Self::Error> {
         Err(OdbcError::NotImplemented {
             feature: "get_info_pre_connect".into(),
-        })
+        }
+        .into())
     }
 
     /// Handle an info type by its raw `u16` value, before the typed `InfoType`
@@ -201,10 +222,11 @@ pub trait Backend: Sized + Send + Sync + 'static {
         _catalog: Option<&str>,
         _schema: Option<&str>,
         _table: Option<&str>,
-    ) -> Result<Self::Statement, OdbcError> {
+    ) -> Result<Self::Statement, Self::Error> {
         Err(OdbcError::NotImplemented {
             feature: "primary_keys".into(),
-        })
+        }
+        .into())
     }
 
     /// Return foreign key relationships.
@@ -220,10 +242,11 @@ pub trait Backend: Sized + Send + Sync + 'static {
         _fk_catalog: Option<&str>,
         _fk_schema: Option<&str>,
         _fk_table: Option<&str>,
-    ) -> Result<Self::Statement, OdbcError> {
+    ) -> Result<Self::Statement, Self::Error> {
         Err(OdbcError::NotImplemented {
             feature: "foreign_keys".into(),
-        })
+        }
+        .into())
     }
 
     /// Return index statistics for a single table.
@@ -238,10 +261,11 @@ pub trait Backend: Sized + Send + Sync + 'static {
         _schema: Option<&str>,
         _table: Option<&str>,
         _unique_only: bool,
-    ) -> Result<Self::Statement, OdbcError> {
+    ) -> Result<Self::Statement, Self::Error> {
         Err(OdbcError::NotImplemented {
             feature: "statistics".into(),
-        })
+        }
+        .into())
     }
 
     /// Return the optimal row-identifier (`SQL_BEST_ROWID`) or row-version
@@ -258,10 +282,11 @@ pub trait Backend: Sized + Send + Sync + 'static {
         _table: Option<&str>,
         _scope: Scope,
         _nullable: Nullable,
-    ) -> Result<Self::Statement, OdbcError> {
+    ) -> Result<Self::Statement, Self::Error> {
         Err(OdbcError::NotImplemented {
             feature: "special_columns".into(),
-        })
+        }
+        .into())
     }
 
     /// Cancels an in-progress statement.
@@ -273,10 +298,11 @@ pub trait Backend: Sized + Send + Sync + 'static {
     ///
     /// Returns `OdbcError` directly (not `Self::Error`) to allow a default
     /// implementation. The default returns `NotImplemented`.
-    fn cancel(_stmt: &mut Self::Statement) -> Result<(), OdbcError> {
+    fn cancel(_stmt: &mut Self::Statement) -> Result<(), Self::Error> {
         Err(OdbcError::NotImplemented {
             feature: "cancel".into(),
-        })
+        }
+        .into())
     }
 
     /// Commit or roll back the current transaction on a connection.
@@ -284,10 +310,11 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// Called by `SQLEndTran`. If `commit` is `true`, commit; otherwise roll back.
     /// The default implementation returns `NotImplemented`; backends that support
     /// explicit transactions should override this.
-    fn end_tran(_conn: &Self::Connection, _commit: bool) -> Result<(), OdbcError> {
+    fn end_tran(_conn: &Self::Connection, _commit: bool) -> Result<(), Self::Error> {
         Err(OdbcError::NotImplemented {
             feature: "end_tran".into(),
-        })
+        }
+        .into())
     }
 
     /// What `SQLEndTran(SQL_COMMIT)` does to the open cursors on a connection.
@@ -661,14 +688,15 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// rejects every level before the call, because no level can be inside an
     /// empty set. The `NotImplemented` branch below is therefore unreachable
     /// for such a backend, and it needs no implementation.
-    fn set_txn_isolation(_conn: &Self::Connection, level: u32) -> Result<(), OdbcError> {
+    fn set_txn_isolation(_conn: &Self::Connection, level: u32) -> Result<(), Self::Error> {
         if Self::txn_isolation_options() == level {
             // The only level this data source has; it is already in effect.
             Ok(())
         } else {
             Err(OdbcError::NotImplemented {
                 feature: "set_txn_isolation".into(),
-            })
+            }
+            .into())
         }
     }
 }
@@ -679,14 +707,27 @@ pub trait Backend: Sized + Send + Sync + 'static {
 /// allowing backends to implement only the methods they support. Override methods
 /// as you implement real functionality.
 pub trait StatementBackend: Send + Sync {
+    /// The one error type every [`StatementBackend`] method returns.
+    ///
+    /// Same bounds and same reasoning as [`Backend::Error`]. A driver is free to
+    /// use one type for both traits — nothing here requires them to differ.
+    ///
+    /// This exists so the fetch path keeps its causal chain. `fetch` and
+    /// `get_data` are the hottest error path in the crate, and while they
+    /// returned `OdbcError` directly a driver had to flatten its own error into
+    /// a string at every call, which is exactly what `Backend::Error` was
+    /// introduced to stop everywhere else.
+    type Error: Into<OdbcError> + From<OdbcError> + std::error::Error + Send + Sync + 'static;
+
     /// Advances the cursor to the next row.
     ///
     /// Called by `SQLFetchW`. Returns [`FetchResult::Row`] if a row is available,
     /// [`FetchResult::NoData`] when the result set is exhausted.
-    fn fetch(&mut self) -> Result<FetchResult, OdbcError> {
+    fn fetch(&mut self) -> Result<FetchResult, Self::Error> {
         Err(OdbcError::NotImplemented {
             feature: "fetch".into(),
-        })
+        }
+        .into())
     }
 
     /// Retrieves the value of column `col` (1-based) from the current row.
@@ -701,10 +742,11 @@ pub trait StatementBackend: Send + Sync {
         &mut self,
         _col: u16,
         _target_type: CDataType,
-    ) -> Result<std::borrow::Cow<'_, ColumnValue>, OdbcError> {
+    ) -> Result<std::borrow::Cow<'_, ColumnValue>, Self::Error> {
         Err(OdbcError::NotImplemented {
             feature: "get_data".into(),
-        })
+        }
+        .into())
     }
 
     /// Returns the number of columns in the result set.
@@ -717,10 +759,11 @@ pub trait StatementBackend: Send + Sync {
     /// Returns metadata for column `col` (1-based).
     ///
     /// Called by `SQLDescribeColW`.
-    fn describe_col(&self, _col: u16) -> Result<ColumnDescriptor, OdbcError> {
+    fn describe_col(&self, _col: u16) -> Result<ColumnDescriptor, Self::Error> {
         Err(OdbcError::NotImplemented {
             feature: "describe_col".into(),
-        })
+        }
+        .into())
     }
 
     /// Returns the number of rows affected by the last DML statement.

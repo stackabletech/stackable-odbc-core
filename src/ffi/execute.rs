@@ -3,7 +3,7 @@
 use std::ffi::c_void;
 
 use crate::backend::{Backend, StatementBackend};
-use crate::errors::OdbcError;
+use crate::errors::{IntoOdbc, OdbcError};
 use crate::handles::{ConnectionHandle, StatementHandle, as_handle_ref};
 use crate::panic::panic_safe;
 use crate::types::{SQL_NTS, SqlReturn, SqlState};
@@ -190,8 +190,8 @@ pub unsafe fn sql_exec_direct_w<B: Backend>(
             let result = if param_count > 0 {
                 // SAFETY: caller guarantees all bound buffer pointers remain valid.
                 let params = crate::ffi::params::collect_params(&stmt.param_bindings, param_count)?;
-                let mut prepared = B::prepare(connection, &sql).map_err(Into::into)?;
-                let outcome = B::execute(connection, &mut prepared, &params).map_err(Into::into)?;
+                let mut prepared = B::prepare(connection, &sql).into_odbc()?;
+                let outcome = B::execute(connection, &mut prepared, &params).into_odbc()?;
                 // SAFETY: the application's bound output buffer pointers remain
                 // valid per the caller contract (same guarantee collect_params relies on).
                 // Already inside the enclosing `unsafe` context, like collect_params above.
@@ -201,7 +201,7 @@ pub unsafe fn sql_exec_direct_w<B: Backend>(
                 )?;
                 prepared
             } else {
-                B::exec_direct(connection, &sql).map_err(Into::into)?
+                B::exec_direct(connection, &sql).into_odbc()?
             };
             // Opens a cursor only if the statement actually returned columns.
             stmt.set_result_set(crate::handles::StatementData::Backend(result));
@@ -335,7 +335,7 @@ pub unsafe fn sql_prepare_w<B: Backend>(
             };
 
             // Ask backend to validate and prepare the statement.
-            let prepared = B::prepare(connection, &sql).map_err(Into::into)?;
+            let prepared = B::prepare(connection, &sql).into_odbc()?;
 
             // Re-acquire stmt after conn borrow ends, then store state.
             let stmt = as_handle_ref::<StatementHandle<B>>(statement_handle)?;
@@ -491,7 +491,7 @@ pub unsafe fn sql_execute<B: Backend>(statement_handle: *mut c_void) -> SqlRetur
                         SqlState::function_sequence_error(),
                     )
                 })?;
-                let prepared = B::prepare(connection, sql).map_err(Into::into)?;
+                let prepared = B::prepare(connection, sql).into_odbc()?;
                 let stmt = as_handle_ref::<StatementHandle<B>>(statement_handle)?;
                 stmt.set_prepared_statement(crate::handles::StatementData::Backend(prepared));
             }
@@ -506,7 +506,7 @@ pub unsafe fn sql_execute<B: Backend>(statement_handle: *mut c_void) -> SqlRetur
 
             let outcome = match stmt_data {
                 crate::handles::StatementData::Backend(backend_stmt) => {
-                    B::execute(connection, backend_stmt, &params).map_err(Into::into)?
+                    B::execute(connection, backend_stmt, &params).into_odbc()?
                 }
                 crate::handles::StatementData::Synthetic(_) => {
                     return Err(OdbcError::general(
