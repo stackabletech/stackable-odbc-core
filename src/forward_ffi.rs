@@ -1159,3 +1159,23 @@ macro_rules! forward_ffi {
         }
     }; // end of macro arm
 }
+
+/// Expanding the macro is the assertion.
+///
+/// A `macro_rules!` body is stored as token trees and is never name-resolved
+/// until something invokes it. No driver crate is built here, so without this
+/// module the whole macro arm above is uncompiled text: a wrong parameter type
+/// in an exported signature, a swapped or missing argument in a forwarding
+/// call, or a typo in a `$crate::ffi::` path compiles, tests, clippies and
+/// pre-commits clean in this repository, and breaks every downstream driver on
+/// its next dependency bump.
+///
+/// The generated `#[unsafe(no_mangle)]` symbols land in the unit-test binary,
+/// which also links `libodbc` for its own `SQL*` symbols. That is not a
+/// conflict: `libodbc` is a dynamic library, so these definitions take
+/// precedence, and no test in this crate routes a call through the Driver
+/// Manager.
+#[cfg(test)]
+mod expansion {
+    crate::forward_ffi!(crate::test_utils::MockBackend);
+}
