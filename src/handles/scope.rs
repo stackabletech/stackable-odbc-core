@@ -174,14 +174,13 @@ impl<'a> HandleScope<'a> {
     /// twice deadlocks the calling thread forever, with no diagnostic and no
     /// `SqlReturn`. A token from the already-held group (e.g. the scope's own
     /// token, or a statement belonging to a connection whose group this scope
-    /// holds) is caught two ways: a `debug_assert!` panics immediately in a
-    /// debug build — which `panic_safe_scoped`'s `catch_unwind` turns into a
-    /// normal `SQL_ERROR`, never a hang — and, since re-entering a group one
-    /// already holds is logically a no-op, an early return runs `f` directly
-    /// against this scope instead of relocking. The early return is what
-    /// actually removes the deadlock once `debug_assertions` are compiled out;
-    /// the assertion exists only to make the mistake loud during development
-    /// instead of silently degrading to a no-op.
+    /// holds) is treated as a no-op instead: re-entering a group one already
+    /// holds needs no second acquisition, so `f` runs directly against this
+    /// scope and a [`tracing::warn!`] records the deviation. This runs
+    /// identically in every build profile — a debug-only guard (e.g.
+    /// `debug_assert!`) would leave the one branch that actually prevents the
+    /// deadlock uncovered by every test this crate runs in debug, which is
+    /// all of them.
     #[allow(
         dead_code,
         reason = "no caller until SQLEndTran(SQL_HANDLE_ENV) migrates (task 11) and needs to hold a child connection's group while inside the environment's"
@@ -191,13 +190,20 @@ impl<'a> HandleScope<'a> {
         token: *mut c_void,
         f: impl FnOnce(&mut HandleScope<'_>) -> R,
     ) -> Result<R, OdbcError> {
-        let already_held = self.holds(token);
-        debug_assert!(
-            !already_held,
-            "with_child_group called with a token from the group this scope already holds; \
-             crate::sync::Mutex is not reentrant, so this would deadlock in a release build"
-        );
-        if already_held {
+        // Re-entering a group this scope already holds is a no-op, not a
+        // nested acquisition: the lock is not reentrant, so taking it again
+        // would hang the application thread with no diagnostic and no
+        // SqlReturn. The one legitimate nesting is environment-then-
+        // connection, where the groups differ.
+        // Re-entering a group this scope already holds is a no-op, not a
+        // nested acquisition: the lock is not reentrant, so taking it again
+        // would hang the application thread with no diagnostic and no
+        // SqlReturn. The one legitimate nesting is environment-then-
+        // connection, where the groups differ.
+        if self.holds(token) {
+            tracing::warn!(
+                "with_child_group: token is already in the held group; not re-acquiring"
+            );
             return Ok(f(self));
         }
         let group = registry().group_of(token).ok_or(OdbcError::InvalidHandle)?;
@@ -394,28 +400,28 @@ mod tests {
     /// `crate::sync::Mutex` is not reentrant, so passing a token from the
     /// group this scope already holds would deadlock the calling thread
     /// forever, with no diagnostic and no `SqlReturn` -- exactly the hazard
-    /// `with_child_group`'s guard exists to close. In a debug build the
-    /// `debug_assert!` fires first; `panic_safe_scoped`'s `catch_unwind`
-    /// catches it and reports `SQL_ERROR`, never a hang. This test is
-    /// therefore debug-build-only: with `debug_assertions` off, the
-    /// `if self.holds(token)` early return takes over instead and this same
-    /// call returns `SqlReturn::SUCCESS` -- not exercised here, since every
-    /// verification command for this crate runs a debug build.
-    #[cfg(debug_assertions)]
+    /// `with_child_group`'s guard exists to close, and identically in every
+    /// build profile: removing the early return here hangs this test rather
+    /// than failing it, which is exactly why the guard runs unconditionally
+    /// instead of only under `debug_assertions`.
     #[test]
-    fn with_child_group_on_the_scope_s_own_group_is_caught_not_deadlocked() {
+    fn with_child_group_on_the_scope_s_own_group_is_a_no_op_not_a_deadlock() {
         unsafe {
             let (env, conn, stmt) = alloc_env_conn_stmt();
             let ret = panic_safe_scoped::<MockBackend, _>(env, |scope| {
                 // `env` belongs to the group `scope` already holds.
-                let _ = scope.with_child_group(env, |_| ());
+                let ran = scope.with_child_group(env, |_| true)?;
+                assert!(
+                    ran,
+                    "with_child_group must still run f, against this scope, rather than \
+                     silently dropping the call"
+                );
                 Ok(SqlReturn::SUCCESS)
             });
             assert_eq!(
                 ret,
-                SqlReturn::ERROR,
-                "the debug_assert! must be caught by panic_safe_scoped's catch_unwind, not left \
-                 to unwind into a hang or a process abort"
+                SqlReturn::SUCCESS,
+                "re-entering the already-held group must be a no-op, not an error or a hang"
             );
             cleanup_env_conn_stmt(env, conn, stmt);
         }
