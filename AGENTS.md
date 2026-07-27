@@ -498,14 +498,25 @@ See [`fuzz/README.md`](fuzz/README.md) for what is and is not worth fuzzing.
 
 ### Benchmarks
 
-Core has a Criterion fetch-throughput benchmark in `benches/fetch_throughput.rs`
-(in-memory, no backend):
+Core has a Criterion fetch-throughput benchmark (in-memory, no backend). It
+lives in `bench/`, its own detached crate, for the same reason `fuzz/` does:
 
 ```bash
-cargo bench
+cd bench && cargo bench
 ```
 
 `BENCH_ROWS` overrides the row count.
+
+Keeping it out of core's manifest is deliberate. A `[[bench]]` target that is
+excluded from the published package makes `cargo package` warn on every
+publish, and the alternatives are to ship a benchmark no consumer can run or to
+leave a standing warning where it would mask the next real one. Off in its own
+crate, core declares no bench target and `criterion` stays out of core's
+dependency graph.
+
+The directory is `bench/`, singular: cargo auto-discovers `benches/` as a
+target directory and then insists on validating any manifest inside it, which
+fails packaging.
 
 ## Architecture
 

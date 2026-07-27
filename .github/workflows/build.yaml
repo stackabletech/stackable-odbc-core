@@ -102,11 +102,13 @@ jobs:
       - name: Run unit tests
         run: cargo test --locked
 
-      # Benches are a separate target that `cargo test` does not build, and
-      # benches/fetch_throughput.rs sets harness = false so it is never run as a
-      # test either. Compile it so bench rot cannot merge; do not run it.
+      # The benchmark is its own crate (see bench/Cargo.toml), so nothing in
+      # the root build touches it and bench rot could otherwise merge unnoticed.
+      # harness = false means it is never run as a test either. Compile it; do
+      # not run it.
       - name: Compile benchmarks
         run: cargo build --locked --benches
+        working-directory: bench
 
   miri:
     name: Miri (undefined behaviour + leaks)
@@ -200,6 +202,59 @@ jobs:
       - name: Fuzz column_value
         run: cargo +nightly fuzz run column_value --target x86_64-unknown-linux-gnu -- -max_total_time=30
 
+  # Verifies the crate can actually be packaged, without publishing anything.
+  #
+  # `cargo package` is not covered by `cargo build`: it applies `exclude`,
+  # re-resolves the result as a standalone crate and compiles it from the
+  # tarball. That is what catches a source file excluded by accident, a
+  # declared-but-unpackaged target, or a path dependency with no version --
+  # each of which only shows up at publish time otherwise.
+  #
+  # `--locked` so a manifest change without a lockfile update fails here.
+  # Warnings are promoted to failures: the packaging step is short enough that
+  # a standing warning would be read as normal and hide the next one.
+  package:
+    name: Package (publish dry run)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install host dependencies
+        run: sudo apt-get update && sudo apt-get install -y unixodbc-dev
+
+      - name: Setup Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: package
+
+      - name: Build the package and compile it from the tarball
+        run: |
+          set -o pipefail
+          cargo package --locked 2>&1 | tee package.log
+          if grep -q '^warning' package.log; then
+            echo "::error::cargo package emitted warnings; see above"
+            exit 1
+          fi
+
+      # The published tarball must carry the licence and the notice, and must
+      # not carry the toolchain pin -- shipped, it pins consumers to this
+      # crate's Rust version.
+      - name: Check the tarball's contents
+        run: |
+          list=$(cargo package --locked --list)
+          for required in LICENSE NOTICE README.md CHANGELOG.md; do
+            grep -qx "$required" <<<"$list" || {
+              echo "::error::$required missing from the package"; exit 1; }
+          done
+          for forbidden in rust-toolchain.toml AGENTS.md CLAUDE.md; do
+            if grep -qx "$forbidden" <<<"$list"; then
+              echo "::error::$forbidden must not be published"; exit 1
+            fi
+          done
+          echo "$list"
+
   # Single required check for branch protection rules.
   finished:
     name: Finished Build and Test
@@ -209,6 +264,7 @@ jobs:
       - unit-tests
       - miri
       - fuzz
+      - package
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

@@ -96,7 +96,7 @@ When adding a new ODBC function to the framework later, add one entry to
 
 ```bash
 cargo test           # unit tests (no running Driver Manager needed)
-cargo bench          # Criterion fetch-throughput benchmark
+cd bench && cargo bench   # Criterion fetch-throughput benchmark (own crate)
 ```
 
 `stackable-odbc-core` links against unixODBC through

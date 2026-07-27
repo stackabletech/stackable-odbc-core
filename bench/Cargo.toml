@@ -1,0 +1,28 @@
+[package]
+name = "stackable-odbc-core-bench"
+version = "0.0.1"
+publish = false
+edition = "2024"
+rust-version = "1.95.0"
+
+# Own workspace, like `fuzz/`. Two reasons, and the second is the important one:
+#
+# 1. It keeps `criterion` and its tree out of core's own dependency resolution.
+# 2. It means core's manifest declares no `[[bench]]` target at all. A benchmark
+#    that is excluded from the published package while still being declared as a
+#    target makes `cargo package` warn on every publish, and the only ways to
+#    silence that are to ship a benchmark nobody consuming the crate can run, or
+#    to leave a permanent warning in the publish output where it would mask the
+#    next real one.
+[workspace]
+
+[dependencies]
+stackable-odbc-core = { path = ".." }
+odbc-sys = "0.31"
+
+[dev-dependencies]
+criterion = { version = "0.8", features = ["html_reports"] }
+
+[[bench]]
+name = "fetch_throughput"
+harness = false

@@ -1,0 +1,5 @@
+target
+# Not committed, matching fuzz/. The benchmark is a development tool, not a
+# shipped artefact, and pinning its dependency graph would mean a second
+# lockfile to keep current for no reproducibility anyone depends on.
+Cargo.lock

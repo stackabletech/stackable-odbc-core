@@ -10,6 +10,50 @@ repository = "https://github.com/stackabletech/stackable-odbc-core"
 readme = "README.md"
 keywords = ["odbc", "database", "driver", "ffi", "sql"]
 categories = ["database", "external-ffi-bindings", "api-bindings"]
+documentation = "https://docs.rs/stackable-odbc-core"
+homepage = "https://github.com/stackabletech/stackable-odbc-core"
+
+# What does NOT go in the published tarball.
+#
+# `rust-toolchain.toml` is the important one: shipped, it pins *consumers* to
+# 1.95.0, because rustup honours the file it finds in a vendored or unpacked
+# dependency. That is a known docs.rs and vendoring failure mode, and the pin is
+# a contributor convenience with no business travelling with the crate.
+#
+# `bench/` and `fuzz/` are nested packages, which cargo already leaves out of a
+# parent's tarball; they are listed for the reader's benefit, not because the
+# exclusion depends on it. The benchmark lives in its own crate precisely so
+# core declares no `[[bench]]` target: a declared-but-excluded benchmark makes
+# `cargo package` warn on every publish, and the only ways to silence that are
+# to ship a benchmark no consumer can run, or to leave a standing warning where
+# it would mask the next real one. It is `bench/` rather than `benches/`
+# because cargo auto-discovers the plural name as a target directory and then
+# insists on validating the manifest it finds inside.
+exclude = [
+    "rust-toolchain.toml",
+    ".github/",
+    "release/",
+    "release.toml",
+    "fuzz/",
+    "bench/",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "clippy.toml",
+    "deny.toml",
+    "rustfmt.toml",
+    ".pre-commit-config.yaml",
+    ".markdownlint.yaml",
+]
+
+# docs.rs builds for a single target by default, which would leave `ConfigDSNW`
+# and the seven other `#[cfg(windows)]` items undocumented, exactly the parts
+# a Windows driver author needs. Build the docs on Windows, and turn on the
+# `test-support` feature so the `conformance` module a driver's test suite uses
+# is documented too.
+[package.metadata.docs.rs]
+default-target = "x86_64-pc-windows-msvc"
+targets = ["x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu"]
+features = ["test-support"]
 
 [features]
 # Test support for driver crates: the `conformance` module, which drives
@@ -30,14 +74,9 @@ tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
-criterion = { version = "0.8", features = ["html_reports"] }
 proptest = "1"
 
 [lints.clippy]
 unwrap_in_result = "deny"
 unwrap_used = "deny"
 panic = "deny"
-
-[[bench]]
-name = "fetch_throughput"
-harness = false
