@@ -372,16 +372,26 @@ MIRIFLAGS="-Zmiri-disable-isolation" \
   cargo +nightly miri test -p stackable-odbc-core --lib -- --skip proptest
 ```
 
-Takes about 35 seconds. Notes:
+Takes about 110 seconds for 675 tests, with warm build artifacts. Notes:
 
 - **Nightly only.** Miri cannot run on the pinned stable toolchain.
 - **Pure Rust.** All the raw-pointer marshalling lives in `stackable-odbc-core`, so
   it is where the undefined-behaviour risk lives and Miri earns its keep.
 - **Proptests are skipped** — they take hours under Miri. They run on stable.
+- **A test whose cost is algorithmic, not memory-safety-related, gets
+  `#[cfg_attr(miri, ignore = "…")]`.** Miri's slowdown turns a large input into
+  minutes or hours, and the `miri` CI job budgets 30. The precedent is
+  `escape::tests::pathological_nesting_returns_an_error_rather_than_killing_the_process`:
+  50 000 nesting levels over a 250 KB input cost **over 16 minutes** of
+  interpreted execution on its own. Skipping it loses nothing, because
+  `src/escape.rs` contains no `unsafe` for Miri to check and the neighbouring
+  `MAX_ESCAPE_DEPTH ± 1` tests cover the limit on both recursion paths.
+  Before adding a big-input test, ask whether the code under it is `unsafe` at
+  all; if not, Miri is not the tool that should be paying for it.
 - **Leak reporting is deliberately left on.** It is what catches a handle or
   descriptor allocation that a teardown path forgets to free. If you add a
   test that allocates handles, it must free them or the job goes red.
-- **The 35 seconds assumes warm build artifacts.** A run after any source change
+- **That figure assumes warm build artifacts.** A run after any source change
   rebuilds the crate under Miri first, which dominates and can take many
   minutes. Budget for that before assuming a run has hung.
 

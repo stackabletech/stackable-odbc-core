@@ -657,6 +657,17 @@ mod tests {
         assert_eq!(err.sqlstate().as_str(), "42000");
     }
 
+    // Skipped under Miri: 50 000 levels over a 250 KB input costs more than 16
+    // minutes of interpreted execution, against a 30-minute budget for the whole
+    // `miri` CI job. Nothing is lost by skipping it — `escape.rs` contains no
+    // `unsafe` at all, so Miri has no undefined behaviour to find here, and the
+    // three tests above already exercise the depth limit on both recursion paths
+    // at `MAX_ESCAPE_DEPTH ± 1`. Same rationale as `--skip proptest`: the check
+    // is algorithmic, and it runs on stable.
+    #[cfg_attr(
+        miri,
+        ignore = "50k-deep input is too slow under Miri; no unsafe here to check"
+    )]
     #[test]
     fn pathological_nesting_returns_an_error_rather_than_killing_the_process() {
         // The depth that measurably aborted the process before the limit
