@@ -222,7 +222,9 @@ pub unsafe fn sql_exec_direct_w<B: Backend>(
 /// not available until `SQLExecute` is called.
 ///
 /// Calling `SQLPrepareW` again on a statement clears the previous prepared
-/// state, parameter bindings and open cursor.
+/// state and open cursor. Parameter bindings survive: per `SQLBindParameter`,
+/// only another `SQLBindParameter`, `SQLFreeStmt(SQL_RESET_PARAMS)` or
+/// `SQLSetDescField` setting the APD's `SQL_DESC_COUNT` to 0 unbinds one.
 ///
 /// # Parameters
 ///
@@ -344,8 +346,20 @@ pub unsafe fn sql_prepare_w<B: Backend>(
             stmt.set_prepared_statement(crate::handles::StatementData::Backend(prepared));
             stmt.prepared_sql = Some(sql);
             stmt.param_count = Some(param_count);
-            // Clear previous parameter bindings; a re-prepare resets everything.
-            stmt.param_bindings.clear();
+            // Parameter bindings deliberately survive. SQLBindParameter's spec
+            // names the only three things that unbind a parameter -- another
+            // SQLBindParameter, SQLFreeStmt(SQL_RESET_PARAMS), and
+            // SQLSetDescField setting the APD's SQL_DESC_COUNT to 0 -- and
+            // SQLPrepare is not among them. SQLPrepare's own Comments confirm
+            // it from the other side: "an application should unbind all
+            // parameters that applied to an old SQL statement before preparing
+            // a new SQL statement on the same statement", which is advice only
+            // a driver that keeps them could need.
+            //
+            // Bindings above `param_count` are simply not read: `collect_params`
+            // walks 1..=param_count. That is the "old parameter information
+            // being applied to the new statement" the spec warns about, and it
+            // is the application's to avoid.
 
             Ok(SqlReturn::SUCCESS)
         })
@@ -752,41 +766,59 @@ mod tests {
     }
 
     #[test]
-    fn prepare_clears_previous_param_bindings() {
+    fn prepare_keeps_previous_param_bindings() {
+        // SQLBindParameter's spec names the only three things that unbind a
+        // parameter: another SQLBindParameter, SQLFreeStmt(SQL_RESET_PARAMS),
+        // and SQLSetDescField setting the APD's SQL_DESC_COUNT to 0. SQLPrepare
+        // is not among them, and SQLPrepare's own Comments tell the application
+        // to "unbind all parameters that applied to an old SQL statement before
+        // preparing a new SQL statement" -- advice only a driver that keeps them
+        // could need.
+        //
+        // This previously cleared them, which broke the ordinary
+        // bind -> prepare -> execute order: `collect_params` substitutes
+        // ColumnValue::Null for every unbound slot, so the statement executed
+        // with all-NULL parameters and returned the wrong rows with SQL_SUCCESS.
         unsafe {
             use crate::ffi::params::sql_bind_parameter;
+            use crate::types::{CDataType, ParamType, SqlDataType};
+
             let (env, conn, stmt) = alloc_env_conn_stmt();
             let ret = connect_handle(conn);
             assert_eq!(ret, SqlReturn::SUCCESS);
 
-            // Prepare with 1 param
             let sql1 = "SELECT ? + 1";
             let wide: Vec<u16> = sql1.encode_utf16().collect();
             let _ret = sql_prepare_w::<MockBackend>(stmt, wide.as_ptr(), wide.len() as i32);
 
-            // Bind param 1
             let mut v: i32 = 5;
-            let _ret = sql_bind_parameter::<MockBackend>(
+            let ret = sql_bind_parameter::<MockBackend>(
                 stmt,
                 1,
-                1,
-                -16,
-                4,
+                ParamType::Input as i16,
+                CDataType::SLong as i16,
+                SqlDataType::INTEGER.0,
                 10,
                 0,
                 &mut v as *mut i32 as *mut c_void,
-                4,
+                std::mem::size_of::<i32>() as isize,
                 std::ptr::null_mut(),
             );
+            assert_eq!(ret, SqlReturn::SUCCESS);
 
-            // Re-prepare — bindings should be cleared
             let sql2 = "SELECT 1";
             let wide2: Vec<u16> = sql2.encode_utf16().collect();
             let _ret = sql_prepare_w::<MockBackend>(stmt, wide2.as_ptr(), wide2.len() as i32);
 
             let stmt_handle =
                 as_handle_ref::<crate::handles::StatementHandle<MockBackend>>(stmt).unwrap();
-            assert!(stmt_handle.param_bindings.is_empty());
+            assert!(
+                stmt_handle.param_bindings.contains_key(&1),
+                "SQLPrepare unbound a parameter, which only SQLBindParameter, \
+                 SQLFreeStmt(SQL_RESET_PARAMS) or SQLSetDescField may do"
+            );
+            // The new statement has no markers, so nothing reads the surviving
+            // binding: `collect_params` walks 1..=param_count.
             assert_eq!(stmt_handle.param_count, Some(0));
 
             cleanup(env, conn, stmt);

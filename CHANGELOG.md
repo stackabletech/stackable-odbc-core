@@ -360,6 +360,25 @@ markers go away and this section becomes the initial-release notes.
 
 ### Fixed
 
+- `SQLPrepareW` no longer discards parameter bindings. `SQLBindParameter`'s
+  spec names the only three things that unbind a parameter — another
+  `SQLBindParameter`, `SQLFreeStmt(SQL_RESET_PARAMS)`, and `SQLSetDescField`
+  setting the APD's `SQL_DESC_COUNT` to 0 — and `SQLPrepare` is not among them.
+  `SQLPrepare`'s own Comments confirm it from the other side: an application
+  "should unbind all parameters that applied to an old SQL statement before
+  preparing a new SQL statement", which is advice only a driver that keeps them
+  could need.
+
+  The ordinary `SQLBindParameter` → `SQLPrepare` → `SQLExecute` order lost every
+  binding, and `collect_params` substitutes a NULL for each unbound slot, so the
+  statement ran with all-NULL parameters and returned the wrong rows with
+  `SQL_SUCCESS` — no diagnostic, nothing for the application to detect. Power BI
+  binds folded predicates this way.
+
+  Bindings above the new statement's parameter count are simply not read;
+  `collect_params` walks `1..=param_count`. That is the stale-parameter hazard
+  the spec warns about, and it is the application's to avoid.
+
 - Escape translation is linear in nesting depth again. `{fn NAME(args)}`
   translated its argument list, discarded the result when the dialect declined
   to rewrite the call, and left the caller to translate the same span a second
