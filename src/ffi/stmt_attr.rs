@@ -210,12 +210,12 @@ pub unsafe fn sql_set_stmt_attr_w<B: Backend>(
                         SQL_ROW_ARRAY_SIZE_DEFAULT
                     );
                     stmt.attrs.insert(attribute, SQL_ROW_ARRAY_SIZE_DEFAULT);
-                    stmt.diagnostics.push(&OdbcError::General {
-                        message: format!(
+                    stmt.diagnostics.push(&OdbcError::general(
+                        format!(
                             "SQL_ATTR_ROW_ARRAY_SIZE {int_val} is not supported; substituted {SQL_ROW_ARRAY_SIZE_DEFAULT}"
                         ),
-                        sqlstate: SqlState::option_value_changed(),
-                    });
+                        SqlState::option_value_changed(),
+                    ));
                     Ok(SqlReturn::SUCCESS_WITH_INFO)
                 }
 
@@ -234,12 +234,12 @@ pub unsafe fn sql_set_stmt_attr_w<B: Backend>(
                         SQL_PARAMSET_SIZE_DEFAULT
                     );
                     stmt.attrs.insert(attribute, SQL_PARAMSET_SIZE_DEFAULT);
-                    stmt.diagnostics.push(&OdbcError::General {
-                        message: format!(
+                    stmt.diagnostics.push(&OdbcError::general(
+                        format!(
                             "SQL_ATTR_PARAMSET_SIZE {int_val} is not supported; substituted {SQL_PARAMSET_SIZE_DEFAULT}"
                         ),
-                        sqlstate: SqlState::option_value_changed(),
-                    });
+                        SqlState::option_value_changed(),
+                    ));
                     Ok(SqlReturn::SUCCESS_WITH_INFO)
                 }
 

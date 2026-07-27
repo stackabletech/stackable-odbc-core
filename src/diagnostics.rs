@@ -29,11 +29,29 @@ impl DiagnosticQueue {
     }
 
     /// Appends a diagnostic record derived from `error`.
+    ///
+    /// The message carries the causal chain, not just the outermost error:
+    /// a driver that wrapped its client library's failure with
+    /// [`OdbcError::with_source`] would otherwise see it stringified away here,
+    /// which is the one place the application can still read it.
     pub fn push(&mut self, error: &OdbcError) {
+        let mut message = error.to_string();
+        // `Error::source` drops the `Send + Sync` bounds, so the walk is typed
+        // as a plain `dyn Error` from the start.
+        let mut cause: Option<&(dyn std::error::Error + 'static)> = error
+            .cause()
+            .map(|e| e as &(dyn std::error::Error + 'static));
+        while let Some(err) = cause {
+            use std::fmt::Write as _;
+            // Cannot fail: the fmt::Error path is unreachable for a String sink,
+            // and a lost suffix must not cost the caller its diagnostic.
+            let _ = write!(message, ": {err}");
+            cause = err.source();
+        }
         self.records.push(DiagnosticRecord {
             sqlstate: error.sqlstate(),
-            native_error: 0,
-            message: error.to_string(),
+            native_error: error.native_error(),
+            message,
         });
     }
 
@@ -62,6 +80,49 @@ impl Default for DiagnosticQueue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Debug, snafu::Snafu)]
+    #[snafu(display("outer"))]
+    struct Outer {
+        source: Inner,
+    }
+
+    #[derive(Debug, snafu::Snafu)]
+    #[snafu(display("inner"))]
+    struct Inner;
+
+    #[test]
+    fn push_reports_the_data_sources_own_error_code() {
+        // Before this was plumbed through, every driver's native code reached
+        // the application as 0 no matter what the data source said.
+        let mut q = DiagnosticQueue::new();
+        q.push(&OdbcError::general("boom", SqlState::general_error()).with_native_error(1555));
+        assert_eq!(q.get(0).expect("record").native_error, 1555);
+    }
+
+    #[test]
+    fn push_defaults_native_error_to_zero_without_one() {
+        let mut q = DiagnosticQueue::new();
+        q.push(&OdbcError::NotConnected);
+        assert_eq!(q.get(0).expect("record").native_error, 0);
+    }
+
+    #[test]
+    fn push_message_carries_the_whole_causal_chain() {
+        // The diagnostic message is the only place the application can read the
+        // driver's cause, so the chain must not stop at the outermost error.
+        let mut q = DiagnosticQueue::new();
+        q.push(
+            &OdbcError::general("wrapped", SqlState::general_error())
+                .with_source(Outer { source: Inner }),
+        );
+
+        let msg = &q.get(0).expect("record").message;
+        assert_eq!(
+            msg, "wrapped: outer: inner",
+            "expected the full chain, got {msg:?}"
+        );
+    }
 
     #[test]
     fn push_and_retrieve() {

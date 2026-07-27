@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `OdbcError::with_native_error` and `OdbcError::with_source`, plus the
+  `OdbcError::native_error` and `OdbcError::cause` accessors. A driver holding
+  its data source's own error code and the failure that caused it can now carry
+  both across the FFI boundary instead of flattening them into a message string.
+  `SQLGetDiagRec` reports the code verbatim through `NativeErrorPtr`, where
+  every driver's native code previously reached the application as `0`, and the
+  diagnostic message now includes the whole causal chain rather than only its
+  outermost link.
 - `Backend::sensitive_connect_keywords`, naming the connection-string keywords
   whose values must never be logged, plus
   `ConnectParams::declare_sensitive_keywords` which the generic FFI entry points
@@ -89,6 +97,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking:** `OdbcError::General` gains `native_error` and `cause` fields and
+  is now `#[non_exhaustive]` at the variant level, so it can no longer be built
+  with struct-literal syntax from outside the crate. Use `OdbcError::general`
+  with the `with_native_error` / `with_source` builders instead, which stay
+  source-compatible as further fields are added. The enum-level
+  `#[non_exhaustive]` already stopped drivers matching it exhaustively but did
+  nothing to stop them constructing it, which made every future field on this
+  variant a breaking change.
 - **Breaking:** the `handles` module's tag-based validation is replaced by a
   generational handle registry (see `Fixed`). `HasTag` becomes `HasKind`, with
   `const KIND: HandleKind` in place of `const TAG: u32` and a `header()`
