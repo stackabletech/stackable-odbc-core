@@ -14,7 +14,19 @@ use crate::types::{
 /// Everything in stackable-odbc-core is generic over B: Backend.
 /// `Sized` is implicit (all traits require it by default), listed for symmetry with `StatementBackend` and to make the full contract visible in one place.
 pub trait Backend: Sized + Send + Sync + 'static {
+    /// The backend's live connection, whatever it needs to hold: a socket, a
+    /// client-library handle, a file descriptor, a runtime plus a channel.
+    ///
+    /// Core stores one inside a `ConnectionHandle` and hands it back to every
+    /// method by reference; it never inspects it. `Send + Sync` because an
+    /// application may use one connection from several threads, which the
+    /// Driver Manager serialises per handle but does not confine to one thread.
     type Connection: Send + Sync;
+
+    /// The backend's executed or prepared statement, from which rows are read.
+    ///
+    /// Produced by `exec_direct`, `prepare` and the catalog methods, and driven
+    /// through [`StatementBackend`].
     type Statement: StatementBackend;
 
     /// The one error type every [`Backend`] method returns.
@@ -1080,22 +1092,6 @@ pub fn default_get_info<B: Backend>(info_type: crate::types::InfoType) -> Option
     }
 }
 
-/// Returns a value for the few info types that must be dispatched through
-/// [`Backend::get_info_raw`] (rather than the typed `InfoType` path; see
-/// that method's doc for why) but are **identical** across all drivers.
-///
-/// Only `SQL_CURSOR_ROLLBACK_BEHAVIOR` is genuinely absent from
-/// `odbc_sys::InfoType`; `SQL_FILE_USAGE` and `SQL_QUOTED_IDENTIFIER_CASE` are
-/// real `InfoType` variants (`SqlFileUsage`, `SqlQuotedIdentifierCase`) that
-/// simply have no arm in [`default_get_info`], so they still need a raw-`u16`
-/// answer here.
-///
-/// Backends should call this from `get_info_raw` before checking driver-specific values.
-/// Returns `None` if the info type is not handled here.
-///
-/// Generic over the calling backend so that `SQL_CURSOR_ROLLBACK_BEHAVIOR` can be
-/// derived from [`Backend::cursor_rollback_behavior`] -- call it as
-/// `common_get_info_raw::<Self>(info_type)`.
 /// The `SQL_KEYWORDS` (89) value for `B`: [`Backend::keywords`] minus
 /// everything ODBC itself reserves, sorted, comma-separated with no spaces.
 ///
@@ -1126,6 +1122,22 @@ fn data_source_specific_keywords<B: Backend>() -> String {
     names.join(",")
 }
 
+/// Returns a value for the few info types that must be dispatched through
+/// [`Backend::get_info_raw`] (rather than the typed `InfoType` path; see
+/// that method's doc for why) but are **identical** across all drivers.
+///
+/// Only `SQL_CURSOR_ROLLBACK_BEHAVIOR` is genuinely absent from
+/// `odbc_sys::InfoType`; `SQL_FILE_USAGE` and `SQL_QUOTED_IDENTIFIER_CASE` are
+/// real `InfoType` variants (`SqlFileUsage`, `SqlQuotedIdentifierCase`) that
+/// simply have no arm in [`default_get_info`], so they still need a raw-`u16`
+/// answer here.
+///
+/// Backends should call this from `get_info_raw` before checking driver-specific values.
+/// Returns `None` if the info type is not handled here.
+///
+/// Generic over the calling backend so that `SQL_CURSOR_ROLLBACK_BEHAVIOR` can be
+/// derived from [`Backend::cursor_rollback_behavior`] -- call it as
+/// `common_get_info_raw::<Self>(info_type)`.
 pub fn common_get_info_raw<B: Backend>(info_type: u16) -> Option<InfoValue> {
     use crate::types::{
         InfoValue, SQL_CURSOR_ROLLBACK_BEHAVIOR, SQL_DATABASE_NAME, SQL_FILE_USAGE,

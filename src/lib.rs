@@ -1,3 +1,4 @@
+#![deny(missing_docs)]
 //! Generic ODBC driver framework.
 //!
 //! `stackable-odbc-core` provides the database-independent half of an ODBC driver. A

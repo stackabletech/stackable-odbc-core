@@ -177,11 +177,21 @@ pub enum ColumnValue {
     /// A boolean (`BIT`/`BOOLEAN`).
     Bool(bool),
     /// A calendar date (`DATE`).
-    Date { year: i16, month: u16, day: u16 },
+    Date {
+        /// Year, including century. Signed to match `SQL_DATE_STRUCT`.
+        year: i16,
+        /// Month, 1-12.
+        month: u16,
+        /// Day of month, 1-31.
+        day: u16,
+    },
     /// A time of day (`TIME`).
     Time {
+        /// Hour, 0-23.
         hour: u16,
+        /// Minute, 0-59.
         minute: u16,
+        /// Second, 0-61 (the spec allows leap seconds).
         second: u16,
         /// Fractional seconds in nanoseconds, matching `Timestamp::fraction`'s unit.
         ///
@@ -194,12 +204,19 @@ pub enum ColumnValue {
     },
     /// A date and time (`TIMESTAMP`); `fraction` is in nanoseconds.
     Timestamp {
+        /// Year, including century. Signed to match `SQL_TIMESTAMP_STRUCT`.
         year: i16,
+        /// Month, 1-12.
         month: u16,
+        /// Day of month, 1-31.
         day: u16,
+        /// Hour, 0-23.
         hour: u16,
+        /// Minute, 0-59.
         minute: u16,
+        /// Second, 0-61 (the spec allows leap seconds).
         second: u16,
+        /// Fractional seconds, in nanoseconds.
         fraction: u32,
     },
     /// Raw binary data (`BINARY`/`VARBINARY`/`BLOB`).
@@ -210,13 +227,22 @@ pub enum ColumnValue {
     Decimal(String),
     /// TIMESTAMP WITH TIME ZONE
     TimestampTz {
+        /// Year, including century.
         year: i16,
+        /// Month, 1-12.
         month: u16,
+        /// Day of month, 1-31.
         day: u16,
+        /// Hour, 0-23.
         hour: u16,
+        /// Minute, 0-59.
         minute: u16,
+        /// Second, 0-61 (the spec allows leap seconds).
         second: u16,
+        /// Fractional seconds, in nanoseconds.
         fraction: u32,
+        /// Offset from UTC in minutes, positive east. Minutes rather than
+        /// hours because several zones are offset by 30 or 45.
         timezone_offset_minutes: i16,
     },
     /// JSON — raw JSON text
@@ -228,13 +254,21 @@ pub enum ColumnValue {
     /// ROW / struct — ordered fields
     Row(Vec<ColumnValue>),
     /// INTERVAL YEAR TO MONTH
-    IntervalYearMonth { years: i32, months: i32 },
+    IntervalYearMonth {
+        /// Whole years.
+        years: i32,
+        /// Whole months, not normalised into `years`.
+        months: i32,
+    },
     /// INTERVAL DAY TO SECOND, as a single signed total.
     ///
     /// A split days/milliseconds representation admits states where the two
     /// carry different signs, and cannot represent a negative interval of less
     /// than one day at all.
-    IntervalDayTime { total_milliseconds: i64 },
+    IntervalDayTime {
+        /// The whole interval as signed milliseconds.
+        total_milliseconds: i64,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -245,24 +279,81 @@ pub enum ColumnValue {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct TypeInfoRow {
+    /// `TYPE_NAME` — column 1 of the `SQLGetTypeInfo` result set.
+    ///
+    /// The data-source-specific type name, as it appears in DDL.
     pub type_name: &'static str,
+    /// `DATA_TYPE` — column 2 of the `SQLGetTypeInfo` result set.
+    ///
+    /// The ODBC SQL type this maps to.
     pub data_type: SqlDataType,
+    /// `COLUMN_SIZE` — column 3 of the `SQLGetTypeInfo` result set.
+    ///
+    /// Maximum size, in the units the spec defines for the type.
     pub column_size: i32,
+    /// `LITERAL_PREFIX` — column 4 of the `SQLGetTypeInfo` result set.
+    ///
+    /// Characters that open a literal of this type, or `None` if it has no literal form.
     pub literal_prefix: Option<&'static str>,
+    /// `LITERAL_SUFFIX` — column 5 of the `SQLGetTypeInfo` result set.
+    ///
+    /// The closing counterpart of `literal_prefix`.
     pub literal_suffix: Option<&'static str>,
+    /// `CREATE_PARAMS` — column 6 of the `SQLGetTypeInfo` result set.
+    ///
+    /// Comma-separated names of the parameters a `CREATE TABLE` spelling takes, e.g. `"precision,scale"`.
     pub create_params: Option<&'static str>,
+    /// `NULLABLE` — column 7 of the `SQLGetTypeInfo` result set.
+    ///
+    /// Whether the data source accepts `NULL` for this type, as a `SQL_NULLABLE_*` value.
     pub nullable: i16,
+    /// `CASE_SENSITIVE` — column 8 of the `SQLGetTypeInfo` result set.
+    ///
+    /// Whether the type is a character type with case-sensitive collation.
     pub case_sensitive: bool,
+    /// `SEARCHABLE` — column 9 of the `SQLGetTypeInfo` result set.
+    ///
+    /// How the type may be used in a `WHERE` clause, as a `SQL_PRED_*` value.
     pub searchable: i16,
+    /// `UNSIGNED_ATTRIBUTE` — column 10 of the `SQLGetTypeInfo` result set.
+    ///
+    /// Whether the type is unsigned; `None` for non-numeric types.
     pub unsigned: Option<bool>,
+    /// `FIXED_PREC_SCALE` — column 11 of the `SQLGetTypeInfo` result set.
+    ///
+    /// Whether the type has fixed precision and scale, i.e. is a money type.
     pub fixed_prec_scale: bool,
+    /// `AUTO_UNIQUE_VALUE` — column 12 of the `SQLGetTypeInfo` result set.
+    ///
+    /// Whether the type auto-increments; `None` when not applicable.
     pub auto_unique_value: Option<bool>,
+    /// `LOCAL_TYPE_NAME` — column 13 of the `SQLGetTypeInfo` result set.
+    ///
+    /// The localised name for display, which is not usable in SQL.
     pub local_type_name: Option<&'static str>,
+    /// `MINIMUM_SCALE` — column 14 of the `SQLGetTypeInfo` result set.
+    ///
+    /// Least scale the type accepts; `None` when scale does not apply.
     pub minimum_scale: Option<i16>,
+    /// `MAXIMUM_SCALE` — column 15 of the `SQLGetTypeInfo` result set.
+    ///
+    /// Greatest scale the type accepts; `None` when scale does not apply.
     pub maximum_scale: Option<i16>,
+    /// `SQL_DATA_TYPE` — column 16 of the `SQLGetTypeInfo` result set.
+    ///
+    /// The verbose type, which differs from `data_type` for datetimes and intervals.
     pub sql_data_type: i16,
+    /// `SQL_DATETIME_SUB` — column 17 of the `SQLGetTypeInfo` result set.
+    ///
+    /// The datetime or interval subcode, when `sql_data_type` is one of those.
     pub sql_datetime_sub: Option<i16>,
+    /// `NUM_PREC_RADIX` — column 18 of the `SQLGetTypeInfo` result set.
+    ///
+    /// Whether `column_size` counts bits or decimal digits: 2 or 10.
     pub num_prec_radix: Option<i32>,
+    /// `INTERVAL_PRECISION` — column 19 of the `SQLGetTypeInfo` result set.
+    ///
+    /// Leading-field precision, for interval types only.
     pub interval_precision: Option<i16>,
 }
 
@@ -374,8 +465,16 @@ pub struct ColumnDescriptor {
     /// native name to offer, in which case a generic name is derived from
     /// `sql_type`.
     pub type_name: String,
+    /// The ODBC SQL type of the column — `SQL_DESC_CONCISE_TYPE`.
+    ///
+    /// `SQL_DESC_TYPE` reports the *verbose* type derived from this, which
+    /// differs for the datetime and interval families.
     pub sql_type: SqlDataType,
+    /// The column's declared precision: digits for a numeric type, characters
+    /// for a character one, as `SQL_DESC_PRECISION` defines per type.
     pub precision: u32,
+    /// The column's declared scale — digits right of the decimal point.
+    /// Signed, because the spec permits a negative scale.
     pub scale: i16,
     /// Whether the column accepts `NULL` — `SQL_DESC_NULLABLE`.
     ///

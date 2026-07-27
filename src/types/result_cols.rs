@@ -211,10 +211,15 @@ pub(crate) fn integer(name: &'static str, nullable: Nullable) -> ColumnDescripto
 /// Use `.pos()` to get the column number to pass to `describe_col` / `get_data`.
 #[derive(Debug, Clone, Copy)]
 pub enum TablesResultCol {
+    /// `TABLE_CAT` — column 1 of the `SQLTables` result set.
     TableCat = 1,
+    /// `TABLE_SCHEM` — column 2 of the `SQLTables` result set.
     TableSchem = 2,
+    /// `TABLE_NAME` — column 3 of the `SQLTables` result set.
     TableName = 3,
+    /// `TABLE_TYPE` — column 4 of the `SQLTables` result set.
     TableType = 4,
+    /// `REMARKS` — column 5 of the `SQLTables` result set.
     Remarks = 5,
 }
 
@@ -282,23 +287,41 @@ impl TablesResultCol {
 /// Use `.pos()` to get the column number to pass to `describe_col` / `get_data`.
 #[derive(Debug, Clone, Copy)]
 pub enum ColumnsResultCol {
+    /// `TABLE_CAT` — column 1 of the `SQLColumns` result set.
     TableCat = 1,
+    /// `TABLE_SCHEM` — column 2 of the `SQLColumns` result set.
     TableSchem = 2,
+    /// `TABLE_NAME` — column 3 of the `SQLColumns` result set.
     TableName = 3,
+    /// `COLUMN_NAME` — column 4 of the `SQLColumns` result set.
     ColumnName = 4,
+    /// `DATA_TYPE` — column 5 of the `SQLColumns` result set.
     DataType = 5,
+    /// `TYPE_NAME` — column 6 of the `SQLColumns` result set.
     TypeName = 6,
+    /// `COLUMN_SIZE` — column 7 of the `SQLColumns` result set.
     ColumnSize = 7,
+    /// `BUFFER_LENGTH` — column 8 of the `SQLColumns` result set.
     BufferLength = 8,
+    /// `DECIMAL_DIGITS` — column 9 of the `SQLColumns` result set.
     DecimalDigits = 9,
+    /// `NUM_PREC_RADIX` — column 10 of the `SQLColumns` result set.
     NumPrecRadix = 10,
+    /// `NULLABLE` — column 11 of the `SQLColumns` result set.
     Nullable = 11,
+    /// `REMARKS` — column 12 of the `SQLColumns` result set.
     Remarks = 12,
+    /// `COLUMN_DEF` — column 13 of the `SQLColumns` result set.
     ColumnDef = 13,
+    /// `SQL_DATA_TYPE` — column 14 of the `SQLColumns` result set.
     SqlDataType = 14,
+    /// `SQL_DATETIME_SUB` — column 15 of the `SQLColumns` result set.
     SqlDatetimeSub = 15,
+    /// `CHAR_OCTET_LENGTH` — column 16 of the `SQLColumns` result set.
     CharOctetLength = 16,
+    /// `ORDINAL_POSITION` — column 17 of the `SQLColumns` result set.
     OrdinalPosition = 17,
+    /// `IS_NULLABLE` — column 18 of the `SQLColumns` result set.
     IsNullable = 18,
 }
 
@@ -400,11 +423,17 @@ impl ColumnsResultCol {
 /// Use `.pos()` to get the column number to pass to `describe_col` / `get_data`.
 #[derive(Debug, Clone, Copy)]
 pub enum PrimaryKeysResultCol {
+    /// `TABLE_CAT` — column 1 of the `SQLPrimaryKeys` result set.
     TableCat = 1,
+    /// `TABLE_SCHEM` — column 2 of the `SQLPrimaryKeys` result set.
     TableSchem = 2,
+    /// `TABLE_NAME` — column 3 of the `SQLPrimaryKeys` result set.
     TableName = 3,
+    /// `COLUMN_NAME` — column 4 of the `SQLPrimaryKeys` result set.
     ColumnName = 4,
+    /// `KEY_SEQ` — column 5 of the `SQLPrimaryKeys` result set.
     KeySeq = 5,
+    /// `PK_NAME` — column 6 of the `SQLPrimaryKeys` result set.
     PkName = 6,
 }
 
@@ -460,19 +489,33 @@ impl PrimaryKeysResultCol {
 /// Use `.pos()` to get the column number to pass to `describe_col` / `get_data`.
 #[derive(Debug, Clone, Copy)]
 pub enum ForeignKeysResultCol {
+    /// `PKTABLE_CAT` — column 1 of the `SQLForeignKeys` result set.
     PkTableCat = 1,
+    /// `PKTABLE_SCHEM` — column 2 of the `SQLForeignKeys` result set.
     PkTableSchem = 2,
+    /// `PKTABLE_NAME` — column 3 of the `SQLForeignKeys` result set.
     PkTableName = 3,
+    /// `PKCOLUMN_NAME` — column 4 of the `SQLForeignKeys` result set.
     PkColumnName = 4,
+    /// `FKTABLE_CAT` — column 5 of the `SQLForeignKeys` result set.
     FkTableCat = 5,
+    /// `FKTABLE_SCHEM` — column 6 of the `SQLForeignKeys` result set.
     FkTableSchem = 6,
+    /// `FKTABLE_NAME` — column 7 of the `SQLForeignKeys` result set.
     FkTableName = 7,
+    /// `FKCOLUMN_NAME` — column 8 of the `SQLForeignKeys` result set.
     FkColumnName = 8,
+    /// `KEY_SEQ` — column 9 of the `SQLForeignKeys` result set.
     KeySeq = 9,
+    /// `UPDATE_RULE` — column 10 of the `SQLForeignKeys` result set.
     UpdateRule = 10,
+    /// `DELETE_RULE` — column 11 of the `SQLForeignKeys` result set.
     DeleteRule = 11,
+    /// `FK_NAME` — column 12 of the `SQLForeignKeys` result set.
     FkName = 12,
+    /// `PK_NAME` — column 13 of the `SQLForeignKeys` result set.
     PkName = 13,
+    /// `DEFERRABILITY` — column 14 of the `SQLForeignKeys` result set.
     Deferrability = 14,
 }
 

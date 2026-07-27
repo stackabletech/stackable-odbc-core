@@ -17,21 +17,42 @@ use crate::types::{SqlReturn, SqlState};
 #[derive(Debug, Snafu)]
 #[non_exhaustive]
 pub enum OdbcError {
+    /// The handle the application passed is not one this driver handed out, or
+    /// was freed. Maps to `SQL_INVALID_HANDLE`, which posts no diagnostic
+    /// record at all — see [`OdbcError::sqlstate`].
     #[snafu(display("Invalid handle"))]
     InvalidHandle,
 
+    /// An optional ODBC feature this driver does not provide (`HYC00`).
+    ///
+    /// Also what a defaulted `Backend` method returns, which is how core tells
+    /// "the backend did not implement this" from "the backend failed": several
+    /// FFI paths match on this variant to fall back to a benign default rather
+    /// than propagate an error.
     #[snafu(display("{feature} is not implemented"))]
-    NotImplemented { feature: String },
+    NotImplemented {
+        /// The feature named in the diagnostic message.
+        feature: String,
+    },
 
+    /// An operation that needs a live connection was attempted on a handle that
+    /// has none (`08003`).
     #[snafu(display("Connection not established"))]
     NotConnected,
 
+    /// A cursor operation was attempted with no result set open (`24000`).
     #[snafu(display("No result set available"))]
     NoResultSet,
 
+    /// A string did not fit the application's buffer and was truncated
+    /// (`01004`). Reported as `SQL_SUCCESS_WITH_INFO`, not an error, so the
+    /// application can retry with a larger buffer.
     #[snafu(display("String data truncated"))]
     StringTruncated,
 
+    /// A numeric or timestamp value lost fractional precision on conversion
+    /// (`01S07`). Like [`OdbcError::StringTruncated`], this is
+    /// `SQL_SUCCESS_WITH_INFO` rather than a failure.
     #[snafu(display("Fractional truncation"))]
     FractionalTruncation,
 
@@ -48,7 +69,10 @@ pub enum OdbcError {
     #[snafu(display("{message}"))]
     #[non_exhaustive]
     General {
+        /// The diagnostic message the application reads through
+        /// `SQLGetDiagRec`.
         message: String,
+        /// The five-character SQLSTATE this failure reports.
         sqlstate: SqlState,
         /// The data source's own error code, reported verbatim as
         /// `SQLGetDiagRec`'s `NativeErrorPtr`. `0` means "none", which is what
@@ -65,11 +89,21 @@ pub enum OdbcError {
         cause: Option<Box<dyn std::error::Error + Send + Sync>>,
     },
 
+    /// A panic that core's panic guard caught before it could unwind
+    /// across the C ABI, which would be undefined behaviour. Reported as
+    /// `HY000`.
     #[snafu(display("Panic in driver: {message}"))]
-    Panic { message: String },
+    Panic {
+        /// The panic payload, as far as it could be recovered.
+        message: String,
+    },
 
+    /// A connection-string keyword the backend requires was absent.
     #[snafu(display("Missing required parameter: {name}"))]
-    MissingParameter { name: String },
+    MissingParameter {
+        /// The keyword that was missing.
+        name: String,
+    },
 }
 
 impl OdbcError {
