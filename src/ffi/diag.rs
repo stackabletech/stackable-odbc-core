@@ -6,24 +6,34 @@ use crate::backend::Backend;
 use crate::handles::try_get_diagnostic_queue;
 use crate::types::{SqlReturn, handle_type_from_raw};
 use crate::utf16::write_utf16;
+use odbc_sys::HeaderDiagnosticIdentifier;
 
 /// Maximum buffer size for ODBC diagnostic message text (SQL_MAX_MESSAGE_LENGTH = 512 bytes = 256 UTF-16 code units).
 #[cfg(test)]
 const DIAG_MSG_BUF_LEN: usize = 256;
 
-// SQLGetDiagField diag_identifier values (header fields)
-const SQL_DIAG_RETURNCODE: i16 = 1;
-const SQL_DIAG_NUMBER: i16 = 2;
-// SQLGetDiagField diag_identifier values (record fields)
-const SQL_DIAG_SQLSTATE: i16 = 4;
-const SQL_DIAG_NATIVE: i16 = 5;
-const SQL_DIAG_MESSAGE_TEXT: i16 = 6;
-const SQL_DIAG_CLASS_ORIGIN: i16 = 8;
-const SQL_DIAG_SERVER_NAME: i16 = 11;
-const SQL_DIAG_COLUMN_NUMBER: i16 = 12;
-const SQL_DIAG_ROW_NUMBER: i16 = 13;
-// Sentinel values returned for column/row number fields when not applicable
+// `SQLGetDiagField` diag_identifier values, derived from `odbc-sys` rather than
+// restated. Hand-written copies had `SQL_DIAG_COLUMN_NUMBER` as 12 and
+// `SQL_DIAG_ROW_NUMBER` as 13, where `sqlext.h` defines them as -1247 and
+// -1248. 12 is `SQL_DIAG_DYNAMIC_FUNCTION_CODE` and 13 is unassigned, so the
+// real fields fell through to the unknown-field arm while a caller asking for
+// the dynamic function code was answered with a row-number sentinel.
+//
+// These are `const` bindings rather than direct enum uses because the match
+// below needs them in patterns, including an inclusive range.
+const SQL_DIAG_RETURNCODE: i16 = HeaderDiagnosticIdentifier::ReturnCode as i16;
+const SQL_DIAG_NUMBER: i16 = HeaderDiagnosticIdentifier::Number as i16;
+const SQL_DIAG_SQLSTATE: i16 = HeaderDiagnosticIdentifier::SqlState as i16;
+const SQL_DIAG_NATIVE: i16 = HeaderDiagnosticIdentifier::Native as i16;
+const SQL_DIAG_MESSAGE_TEXT: i16 = HeaderDiagnosticIdentifier::MessageText as i16;
+const SQL_DIAG_CLASS_ORIGIN: i16 = HeaderDiagnosticIdentifier::ClassOrigin as i16;
+const SQL_DIAG_SERVER_NAME: i16 = HeaderDiagnosticIdentifier::ServerName as i16;
+const SQL_DIAG_COLUMN_NUMBER: i16 = HeaderDiagnosticIdentifier::ColumnNumber as i16;
+const SQL_DIAG_ROW_NUMBER: i16 = HeaderDiagnosticIdentifier::RowNumber as i16;
+// Sentinels for the two fields above, from `sqlext.h`; `odbc-sys` has neither.
+// Private because only `SQLGetDiagField` produces them.
 const SQL_NO_COLUMN_NUMBER: i32 = -1;
+const SQL_NO_ROW_NUMBER: isize = -1;
 // SQL_DIAG_RETURNCODE value for SQL_SUCCESS
 const SQL_SUCCESS_VALUE: i16 = 0;
 
@@ -403,13 +413,26 @@ pub unsafe fn sql_get_diag_field_w<B: Backend>(
                 // caller-allocated buffer of at least buffer_length/2 u16 values.
                 unsafe { write_diag_string("", diag_info, buffer_length, string_length) }
             }
-            // SQL_DIAG_COLUMN_NUMBER or SQL_DIAG_ROW_NUMBER
-            SQL_DIAG_COLUMN_NUMBER | SQL_DIAG_ROW_NUMBER => {
+            // The spec's Record Fields table types these two differently:
+            // SQL_DIAG_COLUMN_NUMBER is SQLINTEGER, SQL_DIAG_ROW_NUMBER is
+            // SQLLEN. They shared one arm writing four bytes, which left the
+            // high half of a caller's SQLLEN untouched on a 64-bit platform.
+            SQL_DIAG_COLUMN_NUMBER => {
                 if !diag_info.is_null() {
-                    // SAFETY: diag_info is non-null (checked above); caller guarantees
-                    // it points to a valid i32 output buffer for column/row number fields.
+                    // SAFETY: diag_info is non-null (checked above); the caller
+                    // guarantees it points to a valid SQLINTEGER output buffer.
                     unsafe {
                         std::ptr::write_unaligned(diag_info as *mut i32, SQL_NO_COLUMN_NUMBER)
+                    };
+                }
+                SqlReturn::SUCCESS
+            }
+            SQL_DIAG_ROW_NUMBER => {
+                if !diag_info.is_null() {
+                    // SAFETY: diag_info is non-null (checked above); the caller
+                    // guarantees it points to a valid SQLLEN output buffer.
+                    unsafe {
+                        std::ptr::write_unaligned(diag_info as *mut isize, SQL_NO_ROW_NUMBER)
                     };
                 }
                 SqlReturn::SUCCESS
@@ -1081,6 +1104,117 @@ mod tests {
             assert_eq!(str_len, 10);
             let state = String::from_utf16_lossy(&buf[..5]);
             assert_eq!(state, sql_state::CONNECTION_NOT_OPEN);
+
+            let _ = sql_free_handle::<MockBackend>(HandleType::Env as i16, env);
+        }
+    }
+
+    #[test]
+    fn diag_identifiers_match_the_odbc_headers() {
+        // These were hand-written as 12 and 13. `sqlext.h` defines
+        // SQL_DIAG_COLUMN_NUMBER as -1247 and SQL_DIAG_ROW_NUMBER as -1248,
+        // and 12 is SQL_DIAG_DYNAMIC_FUNCTION_CODE (sql.h), so the driver
+        // answered the wrong field for one identifier and never matched the
+        // other two at all.
+        assert_eq!(SQL_DIAG_COLUMN_NUMBER, -1247);
+        assert_eq!(SQL_DIAG_ROW_NUMBER, -1248);
+        // The rest were right; pin them so deriving from `odbc-sys` cannot
+        // silently move them.
+        assert_eq!(SQL_DIAG_RETURNCODE, 1);
+        assert_eq!(SQL_DIAG_NUMBER, 2);
+        assert_eq!(SQL_DIAG_SQLSTATE, 4);
+        assert_eq!(SQL_DIAG_NATIVE, 5);
+        assert_eq!(SQL_DIAG_MESSAGE_TEXT, 6);
+        assert_eq!(SQL_DIAG_CLASS_ORIGIN, 8);
+        assert_eq!(SQL_DIAG_SERVER_NAME, 11);
+        // The identifier the old SQL_DIAG_COLUMN_NUMBER collided with.
+        assert_eq!(HeaderDiagnosticIdentifier::DynamicFunctionCode as i16, 12);
+    }
+
+    #[test]
+    fn diag_field_row_number_writes_a_full_sqllen() {
+        // The spec's Record Fields table types SQL_DIAG_ROW_NUMBER as SQLLEN
+        // and SQL_DIAG_COLUMN_NUMBER as SQLINTEGER. They shared one arm that
+        // wrote four bytes, so on a 64-bit platform the high half of the
+        // caller's SQLLEN kept whatever it held before the call.
+        unsafe {
+            let mut env: *mut c_void = std::ptr::null_mut();
+            let _ = sql_alloc_handle::<MockBackend>(
+                HandleType::Env as i16,
+                std::ptr::null_mut(),
+                &mut env,
+            );
+            let queue = try_get_diagnostic_queue::<MockBackend>(env).unwrap();
+            queue.push(&crate::errors::OdbcError::NotConnected);
+
+            // Pre-fill with a value whose high half is non-zero, so a
+            // four-byte write leaves evidence.
+            let mut row_number: isize = !0;
+            let mut str_len: i16 = 0;
+            let ret = sql_get_diag_field_w::<MockBackend>(
+                1,
+                env,
+                1,
+                SQL_DIAG_ROW_NUMBER,
+                &mut row_number as *mut isize as *mut c_void,
+                0,
+                &mut str_len,
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+            assert_eq!(
+                row_number, SQL_NO_ROW_NUMBER,
+                "SQL_DIAG_ROW_NUMBER did not write a whole SQLLEN"
+            );
+
+            // SQL_DIAG_COLUMN_NUMBER really is four bytes wide.
+            let mut column_number: i32 = 0;
+            let ret = sql_get_diag_field_w::<MockBackend>(
+                1,
+                env,
+                1,
+                SQL_DIAG_COLUMN_NUMBER,
+                &mut column_number as *mut i32 as *mut c_void,
+                0,
+                &mut str_len,
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+            assert_eq!(column_number, SQL_NO_COLUMN_NUMBER);
+
+            let _ = sql_free_handle::<MockBackend>(HandleType::Env as i16, env);
+        }
+    }
+
+    #[test]
+    fn diag_field_dynamic_function_code_is_not_answered_as_a_row_number() {
+        // 12 is SQL_DIAG_DYNAMIC_FUNCTION_CODE. While SQL_DIAG_COLUMN_NUMBER
+        // was defined as 12, asking for it wrote -1 -- which as a dynamic
+        // function code is SQL_DIAG_CREATE_INDEX, so the driver reported
+        // "CREATE INDEX" as the executed statement for everything. Core does
+        // not implement the field, so the honest answer is the unknown-field
+        // one.
+        unsafe {
+            let mut env: *mut c_void = std::ptr::null_mut();
+            let _ = sql_alloc_handle::<MockBackend>(
+                HandleType::Env as i16,
+                std::ptr::null_mut(),
+                &mut env,
+            );
+            let queue = try_get_diagnostic_queue::<MockBackend>(env).unwrap();
+            queue.push(&crate::errors::OdbcError::NotConnected);
+
+            let mut value: i32 = 0;
+            let mut str_len: i16 = 0;
+            let ret = sql_get_diag_field_w::<MockBackend>(
+                1,
+                env,
+                1,
+                HeaderDiagnosticIdentifier::DynamicFunctionCode as i16,
+                &mut value as *mut i32 as *mut c_void,
+                0,
+                &mut str_len,
+            );
+            assert_eq!(ret, SqlReturn::NO_DATA);
+            assert_eq!(value, 0, "an unimplemented field wrote to the buffer");
 
             let _ = sql_free_handle::<MockBackend>(HandleType::Env as i16, env);
         }
