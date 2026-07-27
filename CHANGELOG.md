@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `Backend::sensitive_connect_keywords`, naming the connection-string keywords
+  whose values must never be logged, plus
+  `ConnectParams::declare_sensitive_keywords` which the generic FFI entry points
+  use to apply it. The backend owns its connection-string vocabulary, so it is
+  the only party that can identify its own secrets: core sees `WalletLocation`,
+  `OAuthAssertion` or `KeyStorePin` as ordinary keywords. Because the list is
+  attached to the `ConnectParams` itself rather than applied at each log site, a
+  driver's own `{:?}` on the params it receives in `connect` redacts too.
+  Defaulted to empty rather than required, because core's substring heuristic
+  stays in force underneath: declaring nothing still covers the common shapes,
+  so the default understates rather than leaks, and a declaration can only ever
+  add redaction.
 - Initial extraction of `stackable-odbc-core` into its own repository.
   Provides the database-independent ODBC framework:
   protocol logic, handle allocation and tag validation, UTF-16 marshalling,
@@ -163,10 +175,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `sslkeypassword` printed in clear; it now matches a set of substrings covering
   the realistic shapes. And the log file is created `0600` on Unix instead of
   inheriting the umask, which is commonly `0644`.
-  The keyword deny-list is best-effort and cannot be complete, because the
-  keyword set is backend-defined. The complete fix is for the backend to declare
-  which of its keywords are secret, which is a `Backend` addition and is
-  deferred.
+  That substring list is a safety net rather than the primary mechanism: a
+  backend names its own secret keywords through
+  `Backend::sensitive_connect_keywords` (see `Added`).
 - **Security.** A parameter's length indicator is no longer trusted over the
   buffer the application bound. For `SQL_C_CHAR`, `SQL_C_WCHAR` and
   `SQL_C_BINARY`, `read_param_value` took the byte count solely from

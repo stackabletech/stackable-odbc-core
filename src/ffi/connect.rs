@@ -129,7 +129,7 @@ pub unsafe fn sql_driver_connect_w<B: Backend>(
             }
 
             let conn_str = utf16_to_string(in_connection_string, string_length1.into())?;
-            let params = merge_dsn_params(&conn_str, read_dsn_keys)?;
+            let params = merge_dsn_params::<B>(&conn_str, read_dsn_keys)?;
             let connection = B::connect(&params).map_err(Into::into)?;
             handle.connection = Some(connection);
             // A deferred attribute the backend cannot honour fails the
@@ -270,6 +270,7 @@ pub unsafe fn sql_connect_w<B: Backend>(
             // The DM's odbcinst library reads ODBCINI/ODBCSYSINI env vars.
             let dsn_keys = read_dsn_keys(&dsn);
             let mut params: ConnectParams = dsn_keys.into_iter().collect();
+            params.declare_sensitive_keywords(B::sensitive_connect_keywords());
 
             // Override with user/password if provided
             if !user_name.is_null()
@@ -418,7 +419,7 @@ pub unsafe fn sql_browse_connect_w<B: Backend>(
 
             // Parse the incoming connection string.
             let conn_str = utf16_to_string(in_connection_string, string_length1.into())?;
-            let new_params = merge_dsn_params(&conn_str, read_dsn_keys)?;
+            let new_params = merge_dsn_params::<B>(&conn_str, read_dsn_keys)?;
             // The parsed form, never the raw string: `ConnectParams`' `Debug`
             // redacts credential keywords and the raw string does not, so
             // logging `conn_str` wrote `PWD=` to the log file verbatim.
@@ -520,7 +521,7 @@ pub unsafe fn sql_browse_connect_w<B: Backend>(
 /// the required precedence.
 ///
 /// `dsn_resolver` is injectable so unit tests can supply fake DSN data.
-fn merge_dsn_params(
+fn merge_dsn_params<B: Backend>(
     conn_str: &str,
     dsn_resolver: impl Fn(&str) -> Vec<(String, String)>,
 ) -> Result<ConnectParams, OdbcError> {
@@ -529,6 +530,9 @@ fn merge_dsn_params(
         let from_dsn: ConnectParams = dsn_resolver(&dsn).into_iter().collect();
         params.merge(&from_dsn);
     }
+    // Seeded here rather than at each log site so that a driver's own `{:?}` on
+    // the `ConnectParams` it receives in `connect` redacts too, not just core's.
+    params.declare_sensitive_keywords(B::sensitive_connect_keywords());
     Ok(params)
 }
 
@@ -855,7 +859,7 @@ mod tests {
 
     #[test]
     fn merge_dsn_params_takes_dsn_value_when_the_connection_string_omits_it() {
-        let params = merge_dsn_params("DSN=prod", |dsn| {
+        let params = merge_dsn_params::<MockBackend>("DSN=prod", |dsn| {
             assert_eq!(dsn, "prod");
             vec![("Host".into(), "dsn-host.internal".into())]
         })
@@ -866,7 +870,7 @@ mod tests {
 
     #[test]
     fn merge_dsn_params_explicit_value_wins_over_the_dsn_file() {
-        let params = merge_dsn_params("DSN=prod;Host=explicit.internal", |_| {
+        let params = merge_dsn_params::<MockBackend>("DSN=prod;Host=explicit.internal", |_| {
             vec![("Host".into(), "dsn-host.internal".into())]
         })
         .unwrap();
@@ -876,7 +880,7 @@ mod tests {
 
     #[test]
     fn merge_dsn_params_explicit_credentials_win_over_the_dsn_file() {
-        let params = merge_dsn_params("DSN=prod;UID=alice;PWD=alicepw", |_| {
+        let params = merge_dsn_params::<MockBackend>("DSN=prod;UID=alice;PWD=alicepw", |_| {
             vec![
                 ("UID".into(), "admin".into()),
                 ("PWD".into(), "hunter2".into()),
@@ -893,7 +897,7 @@ mod tests {
         // A `;` inside a DSN value must stay part of that value. Unquoted, it
         // would terminate the segment and everything after it would parse as
         // further keywords.
-        let params = merge_dsn_params("DSN=prod;Host=explicit.internal", |_| {
+        let params = merge_dsn_params::<MockBackend>("DSN=prod;Host=explicit.internal", |_| {
             vec![(
                 "Description".into(),
                 "x;UID=admin;PWD=hunter2;Host=attacker.example.com".into(),
@@ -912,15 +916,48 @@ mod tests {
 
     #[test]
     fn merge_dsn_params_dsn_value_containing_an_equals_sign_survives_the_round_trip() {
-        let params =
-            merge_dsn_params("DSN=prod", |_| vec![("Token".into(), "abc=def==".into())]).unwrap();
+        let params = merge_dsn_params::<MockBackend>("DSN=prod", |_| {
+            vec![("Token".into(), "abc=def==".into())]
+        })
+        .unwrap();
 
         assert_eq!(params.get("token"), Some("abc=def=="));
     }
 
     #[test]
+    fn merge_dsn_params_seeds_the_backend_declared_sensitive_keywords() {
+        use crate::test_utils::MockAltBackend;
+
+        // `wallet` matches none of core's substring markers, so a redaction
+        // here can only have come from the backend's own declaration.
+        let params =
+            merge_dsn_params::<MockAltBackend>("Host=explicit.internal;Wallet=abc123", |_| vec![])
+                .unwrap();
+        let debug_str = format!("{params:?}");
+        assert!(
+            !debug_str.contains("abc123"),
+            "backend-declared keyword must be redacted, got: {debug_str}"
+        );
+        assert!(debug_str.contains("explicit.internal"));
+    }
+
+    #[test]
+    fn merge_dsn_params_leaves_a_backend_declaring_nothing_with_the_built_in_markers() {
+        let params = merge_dsn_params::<MockBackend>(
+            "Host=explicit.internal;Wallet=abc123;Pwd=s3cr3t",
+            |_| vec![],
+        )
+        .unwrap();
+        let debug_str = format!("{params:?}");
+        // MockBackend declares none, so `wallet` is visible ...
+        assert!(debug_str.contains("abc123"), "got: {debug_str}");
+        // ... but core's own safeguard still covers the obvious one.
+        assert!(!debug_str.contains("s3cr3t"), "got: {debug_str}");
+    }
+
+    #[test]
     fn merge_dsn_params_without_a_dsn_key_never_consults_the_resolver() {
-        let params = merge_dsn_params("Host=explicit.internal", |_| {
+        let params = merge_dsn_params::<MockBackend>("Host=explicit.internal", |_| {
             panic!("resolver must not be called when the connection string has no DSN=")
         })
         .unwrap();

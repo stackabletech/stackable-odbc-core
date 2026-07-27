@@ -527,6 +527,12 @@ impl Backend for MockAltBackend {
     type Statement = MockStatement;
     type Error = MockError;
 
+    /// Names a secret that none of core's substring markers would catch, so a
+    /// test can tell a backend-declared redaction from the built-in heuristic.
+    fn sensitive_connect_keywords() -> &'static [&'static str] {
+        &["wallet"]
+    }
+
     fn connect(_: &ConnectParams) -> Result<MockConnection, MockError> {
         Ok(MockConnection)
     }

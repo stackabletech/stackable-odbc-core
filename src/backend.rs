@@ -24,6 +24,27 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// connection handle on success.
     fn connect(params: &ConnectParams) -> Result<Self::Connection, Self::Error>;
 
+    /// Connection-string keywords whose values must never be logged.
+    ///
+    /// The backend owns its connection-string vocabulary, so it is the only
+    /// party that can name its own secrets: core sees `WalletLocation`,
+    /// `OAuthAssertion` or `KeyStorePin` as ordinary keywords and has no way to
+    /// know better. Every `ConnectParams` the generic FFI entry points build is
+    /// told this list, so declaring a keyword here is all a driver has to do.
+    ///
+    /// Matched case-insensitively against the whole keyword name. Aliases must
+    /// be listed individually.
+    ///
+    /// Defaulted to empty rather than required, because core keeps a substring
+    /// heuristic (`password`, `pwd`, `secret`, `token`, `apikey`, …) in force
+    /// underneath: a backend that declares nothing is still covered for the
+    /// common shapes, so the default understates rather than leaks. Declaring a
+    /// keyword here only ever adds redaction — it can never un-redact one the
+    /// heuristic already catches.
+    fn sensitive_connect_keywords() -> &'static [&'static str] {
+        &[]
+    }
+
     /// Closes an existing connection and releases associated resources.
     ///
     /// Called by `SQLDisconnectW`.

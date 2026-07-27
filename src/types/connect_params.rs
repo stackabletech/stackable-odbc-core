@@ -25,6 +25,9 @@ pub const SAVEFILE: &str = "savefile";
 #[derive(Clone)]
 pub struct ConnectParams {
     params: HashMap<String, String>,
+    /// Keyword names the backend has declared as carrying secrets. Additive to
+    /// `SENSITIVE_KEYWORD_MARKERS`; see [`ConnectParams::declare_sensitive_keywords`].
+    sensitive_keywords: &'static [&'static str],
 }
 
 /// Substrings that mark a connection-string keyword as carrying a credential.
@@ -35,9 +38,13 @@ pub struct ConnectParams {
 /// Over-matching is harmless — redacting `authentication=kerberos` costs a line
 /// of diagnostics — whereas under-matching writes a credential to the log file.
 ///
-/// This is best-effort and cannot be complete for exactly the reason above. The
-/// complete fix is for the backend, which owns the keyword set, to declare which
-/// of its keywords are secret; that is a `Backend` addition and is deferred.
+/// This is a safety net, not the primary mechanism, and it cannot be complete
+/// for exactly the reason above. A backend names its own secret keywords
+/// through [`Backend::sensitive_connect_keywords`](crate::backend::Backend::sensitive_connect_keywords),
+/// which the generic FFI entry points feed to
+/// [`ConnectParams::declare_sensitive_keywords`]. These markers stay in force
+/// underneath that, so a driver that declares nothing is still covered for the
+/// common shapes.
 const SENSITIVE_KEYWORD_MARKERS: &[&str] = &[
     "pass", // password, passwd, pass, sslkeypassword
     "pwd",
@@ -69,6 +76,10 @@ impl std::fmt::Debug for ConnectParams {
             let displayed = if key.eq_ignore_ascii_case(PASSWORD)
                 || key.eq_ignore_ascii_case(PWD)
                 || is_sensitive_keyword(&key.to_lowercase())
+                || self
+                    .sensitive_keywords
+                    .iter()
+                    .any(|declared| key.eq_ignore_ascii_case(declared))
             {
                 "*****"
             } else {
@@ -169,7 +180,10 @@ impl ConnectParams {
             }
         }
 
-        Ok(Self { params })
+        Ok(Self {
+            params,
+            sensitive_keywords: &[],
+        })
     }
 
     /// Case-insensitive key lookup.
@@ -218,6 +232,27 @@ impl ConnectParams {
         self.params.insert(key.into().to_lowercase(), value.into());
     }
 
+    /// Declare backend-specific keywords whose values must be redacted from
+    /// `Debug` output.
+    ///
+    /// The backend owns its connection-string vocabulary, so it is the only
+    /// party that can name a secret core would never guess — an `OAuthAssertion`
+    /// or a `WalletLocation` looks like any other keyword from here. Core's
+    /// built-in substring heuristic stays in force underneath: this
+    /// list is additive, never a replacement, so declaring nothing is safe and
+    /// declaring the wrong thing cannot un-redact a password.
+    ///
+    /// Matched case-insensitively against the whole keyword name, unlike the
+    /// built-in markers, which match as substrings. A backend naming its own
+    /// keywords knows them exactly.
+    ///
+    /// The generic FFI entry points call this for every `ConnectParams` they
+    /// build, using [`Backend::sensitive_connect_keywords`](crate::backend::Backend::sensitive_connect_keywords),
+    /// so a driver only has to declare the list.
+    pub fn declare_sensitive_keywords(&mut self, keywords: &'static [&'static str]) {
+        self.sensitive_keywords = keywords;
+    }
+
     /// Merge another `ConnectParams` into self. Existing keys are NOT overwritten.
     pub fn merge(&mut self, other: &ConnectParams) {
         for (key, value) in &other.params {
@@ -253,7 +288,10 @@ impl FromIterator<(String, String)> for ConnectParams {
         for (k, v) in iter {
             params.insert(k.to_lowercase(), v);
         }
-        Self { params }
+        Self {
+            params,
+            sensitive_keywords: &[],
+        }
     }
 }
 
@@ -310,6 +348,40 @@ mod tests {
     fn user_missing_returns_error() {
         let params = ConnectParams::parse("").unwrap();
         assert!(params.user().is_err());
+    }
+
+    #[test]
+    fn debug_redacts_backend_declared_keywords() {
+        // A backend owns its own keyword vocabulary, so it can name secrets
+        // core's heuristic would never guess.
+        let mut params = ConnectParams::parse("Host=localhost;Wallet=abc123").unwrap();
+        params.declare_sensitive_keywords(&["wallet"]);
+        let debug_str = format!("{params:?}");
+        assert!(
+            !debug_str.contains("abc123"),
+            "backend-declared keyword must be redacted, got: {debug_str}"
+        );
+        assert!(
+            debug_str.contains("localhost"),
+            "unrelated values must stay visible, got: {debug_str}"
+        );
+    }
+
+    #[test]
+    fn declared_keywords_are_matched_case_insensitively() {
+        let mut params = ConnectParams::parse("KeyStorePin=1234").unwrap();
+        params.declare_sensitive_keywords(&["KEYSTOREPIN"]);
+        assert!(!format!("{params:?}").contains("1234"));
+    }
+
+    #[test]
+    fn declaring_keywords_does_not_disable_the_built_in_markers() {
+        // The backend's list adds to core's safeguard, it does not replace it.
+        let mut params = ConnectParams::parse("Wallet=abc123;Password=s3cr3t").unwrap();
+        params.declare_sensitive_keywords(&["wallet"]);
+        let debug_str = format!("{params:?}");
+        assert!(!debug_str.contains("abc123"));
+        assert!(!debug_str.contains("s3cr3t"));
     }
 
     #[test]
