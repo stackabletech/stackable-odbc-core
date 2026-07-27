@@ -69,12 +69,33 @@ tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# Exhaustive interleaving checker for the handle lock discipline. This is a
+# regular (non-dev) dependency, despite existing only for testing: `src/sync.rs`
+# is production code, and `tests/loom_handles.rs` is a separate crate that links
+# the library normally (not as a unit-test build), so the library itself must
+# see this dependency whenever `--cfg loom` is set, not only in test-context
+# builds. Putting it under `[dev-dependencies]` instead compiles fine for `cargo
+# test --lib` but fails to link `tests/loom_handles.rs`, because that build
+# compiles `stackable-odbc-core` as an ordinary dependency, where
+# `[dev-dependencies]` are never visible, yet still receives `--cfg loom` from
+# RUSTFLAGS (which applies to every rustc invocation, not just test ones).
+# `crossbeam-epoch` hits the same requirement and resolves it the same way
+# (`[target.'cfg(crossbeam_loom)'.dependencies]`).
+[target.'cfg(loom)'.dependencies]
+loom = "0.7"
+
 [dev-dependencies]
 proptest = "1"
 # For `tests/logging.rs`, which installs a competing global subscriber before
 # calling `init_logging`. That has to run in its own process, so it cannot be a
 # unit test, and an integration test reaches only the public API plus these.
 tracing-subscriber = "0.3"
+
+[lints.rust]
+# `loom` is a custom cfg (see `src/sync.rs`), set via `RUSTFLAGS="--cfg loom"`
+# rather than a Cargo feature, so rustc does not know its name is legitimate
+# without this declaration.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)"] }
 
 [lints.clippy]
 expect_used = "deny"

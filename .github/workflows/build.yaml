@@ -150,6 +150,41 @@ jobs:
           MIRIFLAGS: -Zmiri-disable-isolation
         run: cargo +nightly miri test --locked -p stackable-odbc-core --lib -- --skip proptest
 
+  loom:
+    name: loom
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [unit-tests]
+    steps:
+      # odbc-sys links against libodbc/libodbcinst, so linking the loom test
+      # binary needs the same host dependency as the other jobs.
+      - name: Install host dependencies
+        uses: awalsh128/cache-apt-pkgs-action@acb598e5ddbc6f68a970c5da0688d2f3a9f04d05 # v1.6.0
+        with:
+          packages: unixodbc-dev
+          version: ubuntu-latest
+
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install Rust ${{ env.RUST_TOOLCHAIN_VERSION }} toolchain
+        uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b # 1.95.0
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
+
+      - name: Setup Rust Cache
+        uses: Swatinem/rust-cache@98c8021b550208e191a6a3145459bfc9fb29c4c0 # v2.8.0
+        with:
+          key: loom
+
+      # `--cfg loom` swaps every lock in `src/sync.rs` for loom's instrumented
+      # equivalent, so this is a full rebuild of the crate and cannot share a
+      # cache with the normal test job.
+      - run: RUSTFLAGS="--cfg loom" cargo test --test loom_handles
+        env:
+          LOOM_MAX_PREEMPTIONS: "3"
+
   fuzz:
     name: Fuzz (ASAN smoke)
     runs-on: ubuntu-latest
@@ -266,6 +301,7 @@ jobs:
       - pre-commit
       - unit-tests
       - miri
+      - loom
       - fuzz
       - package
     runs-on: ubuntu-latest

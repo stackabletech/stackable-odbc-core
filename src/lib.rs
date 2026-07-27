@@ -73,6 +73,7 @@ pub mod function_id;
 pub(crate) mod handles;
 pub mod logging;
 pub(crate) mod panic;
+mod sync;
 pub mod synthetic;
 /// Hooks a driver's test suite needs and its production build must not have.
 /// Behind the same default-off `test-support` feature as [`conformance`].
