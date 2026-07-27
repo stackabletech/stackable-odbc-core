@@ -177,10 +177,6 @@ impl<'a> HandleScope<'a> {
     /// `debug_assert!`) would leave the one branch that actually prevents the
     /// deadlock uncovered by every test this crate runs in debug, which is
     /// all of them.
-    #[allow(
-        dead_code,
-        reason = "no caller until SQLEndTran(SQL_HANDLE_ENV) migrates (task 11) and needs to hold a child connection's group while inside the environment's"
-    )]
     pub fn with_child_group<R>(
         &mut self,
         token: *mut c_void,

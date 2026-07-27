@@ -25,6 +25,11 @@ use crate::types::SqlReturn;
 ///
 /// `handle` must be either null or a valid pointer to an ODBC handle previously
 /// allocated by one of the `alloc_*` functions in `handles`.
+#[allow(
+    dead_code,
+    reason = "superseded by panic_safe_scoped; every ffi/ call site has migrated as of task 11, \
+              leaving only this module's own tests as callers, pending removal in a follow-up task"
+)]
 pub unsafe fn panic_safe<B, F>(handle: *mut std::ffi::c_void, f: F) -> SqlReturn
 where
     B: crate::backend::Backend,

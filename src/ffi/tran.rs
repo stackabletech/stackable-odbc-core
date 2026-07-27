@@ -6,9 +6,10 @@ use odbc_sys::HandleType;
 
 use crate::backend::{Backend, StatementBackend};
 use crate::errors::{IntoOdbc, OdbcError};
-use crate::handles::{ConnectionHandle, EnvironmentHandle, as_handle_ref};
-use crate::panic::panic_safe;
-use crate::types::{SqlReturn, SqlState, completion_type_from_raw, handle_type_from_raw};
+use crate::handles::scope::HandleScope;
+use crate::handles::{ConnectionHandle, EnvironmentHandle};
+use crate::panic::panic_safe_scoped;
+use crate::types::{SqlReturn, completion_type_from_raw, handle_type_from_raw};
 
 /// Apply the backend's declared cursor behaviour to every statement on a
 /// connection, after a successful `B::end_tran`.
@@ -47,10 +48,13 @@ use crate::types::{SqlReturn, SqlState, completion_type_from_raw, handle_type_fr
 /// driver-side `HY010` check is added for the need-data states S8-S10: the
 /// transition table marks them `(HY010)`, i.e. Driver-Manager-detected.
 ///
-/// # Safety
-///
-/// `conn_token` must be a live connection handle.
-unsafe fn apply_cursor_behavior<B: Backend>(
+/// Called from within a scope that already holds `conn_token`'s group --
+/// either `sql_end_tran`'s own scope for the `SQL_HANDLE_DBC` arm, or the
+/// nested child scope `with_child_group` builds for one connection at a time
+/// under the `SQL_HANDLE_ENV` arm -- so this borrows through `scope` rather
+/// than acquiring anything of its own.
+fn apply_cursor_behavior<B: Backend>(
+    scope: &mut HandleScope<'_>,
     conn_token: *mut c_void,
     behavior: crate::types::CursorBehavior,
 ) -> Result<(), OdbcError> {
@@ -73,11 +77,13 @@ unsafe fn apply_cursor_behavior<B: Backend>(
     let mut first_close_err: Option<OdbcError> = None;
 
     for stmt_ptr in statements {
-        // SAFETY: stmt_ptr was registered by sql_alloc_handle and remains valid
-        // while the connection handle is alive; the tag is validated here.
-        let Ok(stmt) = (unsafe { as_handle_ref::<crate::handles::StatementHandle<B>>(stmt_ptr) })
-        else {
-            tracing::warn!("SQLEndTran: skipping statement with an invalid tag");
+        let Ok(stmt) = scope.get::<crate::handles::StatementHandle<B>>(stmt_ptr) else {
+            // Freed concurrently between the snapshot above and this lookup,
+            // or (defensively) a registry entry of the wrong kind.
+            tracing::debug!(
+                "SQLEndTran: statement {:?} was freed before this commit/rollback could reach it",
+                stmt_ptr
+            );
             continue;
         };
 
@@ -110,6 +116,69 @@ unsafe fn apply_cursor_behavior<B: Backend>(
         Some(e) => Err(e),
         None => Ok(()),
     }
+}
+
+/// Commit or roll back the transaction on one connection, then apply the
+/// resulting cursor behaviour to its statements. Shared by both the
+/// `SQL_HANDLE_ENV` and `SQL_HANDLE_DBC` arms of [`sql_end_tran`], which need
+/// this connection's group already held via `scope` -- the `SQL_HANDLE_DBC`
+/// arm's own scope for a direct call, or the nested scope
+/// [`HandleScope::with_child_group`] builds for one connection at a time
+/// under `SQL_HANDLE_ENV`.
+///
+/// `report_end_tran_failure` controls whether a failing `B::end_tran` call
+/// additionally records its own diagnostic on `conn_token`'s queue here,
+/// which the two callers need differently:
+///
+/// - `SQL_HANDLE_DBC` passes `false`: `conn_token` is the same handle
+///   [`crate::panic::panic_safe_scoped`] was given at the top, so its own
+///   auto-push already records the failure once when this function's `Err`
+///   propagates all the way out through `?`; pushing here too would record
+///   the same failure twice.
+/// - `SQL_HANDLE_ENV` passes `true`: by the time its per-connection loop sees
+///   this call's result, `with_child_group` has already released
+///   `conn_token`'s group, so this is its only chance to satisfy the spec's
+///   "the application can call SQLGetDiagRec for each connection" -- the
+///   scope out there belongs to the *environment*, not this connection.
+///
+/// Neither caller wants a push for "not connected" (`SQL_HANDLE_DBC` still
+/// reports 08003, via its own auto-push described above; `SQL_HANDLE_ENV`
+/// treats it as "Connections that are not active do not affect the
+/// transaction" and skips the connection silently), nor when only
+/// [`apply_cursor_behavior`] fails after a successful commit/rollback: the
+/// per-statement diagnostic it already recorded is what the application
+/// should read, and a connection-level record repeating it would add nothing.
+fn end_tran_on_connection<B: Backend>(
+    scope: &mut HandleScope<'_>,
+    conn_token: *mut c_void,
+    commit: bool,
+    behavior: crate::types::CursorBehavior,
+    report_end_tran_failure: bool,
+) -> Result<(), OdbcError> {
+    let conn = scope.get::<ConnectionHandle<B>>(conn_token)?;
+    // Spec: clear diagnostics at the start of each ODBC call -- done per
+    // visited connection, not just the top-level handle; see this function's
+    // callers in `sql_end_tran`.
+    conn.diagnostics.clear();
+    // Spec 08003 / "connections that are not active do not affect the
+    // transaction": see this function's doc comment for how the two callers
+    // differ in reporting this.
+    let Some(ref connection) = conn.connection else {
+        return Err(OdbcError::NotConnected);
+    };
+    if let Err(e) = B::end_tran(connection, commit).into_odbc() {
+        if report_end_tran_failure {
+            // Spec: "To determine which connection or connections failed ...
+            // the application can call SQLGetDiagRec for each connection."
+            conn.diagnostics.push(&e);
+        }
+        return Err(e);
+    }
+    // Only reached on success. Core does not discriminate on the backend's
+    // SQLSTATE even though 25S03/40001/40002 do say the transaction ended;
+    // see the "Nothing is applied when B::end_tran fails" paragraph on
+    // `sql_end_tran`.
+    apply_cursor_behavior::<B>(scope, conn_token, behavior)
 }
 
 /// Generic implementation of SQLEndTran.
@@ -286,17 +355,20 @@ pub unsafe fn sql_end_tran<B: Backend>(
         }
     };
 
-    // Route based on handle type. panic_safe dispatches diagnostics to the
-    // correct queue regardless of whether the handle is an ENV or DBC.
+    // Route based on handle type. panic_safe_scoped dispatches diagnostics to
+    // the correct queue regardless of whether the handle is an ENV or DBC.
     // SAFETY: handle is null or a valid EnvironmentHandle<B> or ConnectionHandle<B>
-    // allocated by sql_alloc_handle; the tag is validated by as_handle_ref inside
-    // the closure. conn_ptr values from children_of are valid ConnectionHandle<B>
-    // pointers registered during sql_alloc_handle and still alive while the env lives.
+    // allocated by sql_alloc_handle; kind and group are validated by scope.get (and,
+    // for SQL_HANDLE_ENV's per-connection loop, by scope.with_child_group) inside the
+    // closure. Every conn_ptr from children_of(handle) is re-validated the same way
+    // when it is actually visited, since a concurrent SQLFreeHandle can retire one
+    // between the snapshot and here -- this is the crate's only lock-nesting site
+    // (environment before connection), so this is the one place that can happen.
     let ret = unsafe {
-        panic_safe::<B, _>(handle, || {
+        panic_safe_scoped::<B, _>(handle, |scope| {
             match handle_type_from_raw(handle_type) {
                 Some(HandleType::Env) => {
-                    let env = as_handle_ref::<EnvironmentHandle<B>>(handle)?;
+                    let env = scope.get::<EnvironmentHandle<B>>(handle)?;
                     // Spec: clear diagnostics at the start of each ODBC call.
                     env.diagnostics.clear();
                     let behavior = if commit {
@@ -313,73 +385,35 @@ pub unsafe fn sql_end_tran<B: Backend>(
                     // attempted; the first error is returned once the loop
                     // finishes. Stopping early would leave later connections
                     // holding open transactions the application asked to end.
+                    //
+                    // This is the crate's only lock nesting: the environment's
+                    // group is held while each connection's is taken in turn.
+                    // Environment before connection, always.
                     let mut first_err: Option<OdbcError> = None;
 
                     for conn_ptr in conn_ptrs {
-                        // SAFETY: conn_ptr was registered by sql_alloc_handle and
-                        // remains valid while the environment handle is alive.
-                        let conn = match as_handle_ref::<ConnectionHandle<B>>(conn_ptr) {
-                            Ok(conn) => conn,
+                        let result = scope.with_child_group(conn_ptr, |child| {
+                            end_tran_on_connection::<B>(child, conn_ptr, commit, behavior, true)
+                        });
+                        match result {
+                            Ok(Ok(())) => {}
+                            Ok(Err(OdbcError::NotConnected)) => {
+                                // "Connections that are not active do not
+                                // affect the transaction."
+                            }
+                            Ok(Err(e)) => {
+                                first_err.get_or_insert(e);
+                            }
                             Err(_) => {
-                                tracing::warn!(
-                                    "SQLEndTran: connection {:?} failed tag validation",
+                                // A connection freed between the snapshot
+                                // above and here -- a real race now that each
+                                // connection has its own lock, not a corrupt
+                                // registry entry. Nothing to attempt.
+                                tracing::debug!(
+                                    "SQLEndTran: connection {:?} was freed before this \
+                                     environment-level commit could reach it",
                                     conn_ptr
                                 );
-                                // Not `OdbcError::InvalidHandle`: the input
-                                // handle was valid, so returning
-                                // SQL_INVALID_HANDLE would misreport the
-                                // call — and `panic_safe` pushes no
-                                // diagnostic for that variant, leaving
-                                // nothing to explain the failure. This is a
-                                // corrupt entry in the environment's own
-                                // connection list, i.e. a general error.
-                                first_err.get_or_insert_with(|| {
-                                    OdbcError::general(
-                                        "Environment holds a connection entry that failed \
-                                             handle validation",
-                                        SqlState::general_error(),
-                                    )
-                                });
-                                continue;
-                            }
-                        };
-
-                        // Spec: clear diagnostics at the start of each ODBC
-                        // call. Done per visited connection too, before
-                        // anything can push: the application is told to call
-                        // SQLGetDiagRec on each connection to find which one
-                        // failed, so a record left over from an earlier call
-                        // would blame a connection that committed fine.
-                        conn.diagnostics.clear();
-
-                        let Some(ref connection) = conn.connection else {
-                            // Not connected: "Connections that are not active do
-                            // not affect the transaction."
-                            continue;
-                        };
-
-                        match B::end_tran(connection, commit).into_odbc() {
-                            Ok(()) => {
-                                // SAFETY: children_of(conn_ptr) holds live
-                                // StatementHandle<B> allocations; tags are
-                                // validated inside. This call is within the
-                                // outer `unsafe { panic_safe(...) }` closure.
-                                //
-                                // The transaction itself ended, but under
-                                // SQL_CB_CLOSE a failure here means a cursor the
-                                // application was promised would close did not.
-                                // It joins the same per-connection reporting as
-                                // a failed end_tran.
-                                if let Err(e) = apply_cursor_behavior::<B>(conn_ptr, behavior) {
-                                    first_err.get_or_insert(e);
-                                }
-                            }
-                            Err(e) => {
-                                // Spec: "To determine which connection or
-                                // connections failed ... the application can call
-                                // SQLGetDiagRec for each connection."
-                                conn.diagnostics.push(&e);
-                                first_err.get_or_insert(e);
                             }
                         }
                     }
@@ -390,32 +424,16 @@ pub unsafe fn sql_end_tran<B: Backend>(
                     }
                 }
                 Some(HandleType::Dbc) => {
-                    let conn = as_handle_ref::<ConnectionHandle<B>>(handle)?;
-                    // Spec: clear diagnostics at the start of each ODBC call.
-                    conn.diagnostics.clear();
-                    // Spec 08003: Connection not open.
-                    let Some(ref connection) = conn.connection else {
-                        return Err(OdbcError::NotConnected);
-                    };
-                    B::end_tran(connection, commit).into_odbc()?;
-                    // Only on success. Core does not discriminate on the
-                    // backend's SQLSTATE even though 25S03/40001/40002 do say
-                    // the transaction ended; see the "Nothing is applied when
-                    // B::end_tran fails" paragraph in the doc comment.
                     let behavior = if commit {
                         B::cursor_commit_behavior()
                     } else {
                         B::cursor_rollback_behavior()
                     };
-                    // SAFETY: children_of(handle) holds live StatementHandle<B>
-                    // allocations; tags are validated inside.
-                    //
-                    // Propagated: the commit or rollback succeeded, but under
-                    // SQL_CB_CLOSE this is the call that closes the cursors, and
-                    // reporting SQL_SUCCESS for a close that failed would tell
-                    // the application its cursors are gone when they are not.
-                    // The diagnostic was already pushed per statement.
-                    apply_cursor_behavior::<B>(handle, behavior)?;
+                    // report_end_tran_failure=false: this scope's own handle
+                    // is `handle` itself, so panic_safe_scoped's auto-push
+                    // already records a propagated failure here exactly once
+                    // (see end_tran_on_connection's doc comment).
+                    end_tran_on_connection::<B>(scope, handle, commit, behavior, false)?;
                     Ok(SqlReturn::SUCCESS)
                 }
                 _ => Err(OdbcError::InvalidHandle),
@@ -430,7 +448,7 @@ pub unsafe fn sql_end_tran<B: Backend>(
 mod tests {
     use super::*;
     use crate::ffi::handle::{sql_alloc_handle, sql_free_handle};
-    use crate::handles::{StatementData, StatementHandle};
+    use crate::handles::{StatementData, StatementHandle, as_handle_ref};
     use crate::synthetic::SyntheticStatement;
     use crate::test_utils::{
         MockBackend, MockFailingCloseBackend, MockFailingCloseStatement, MockTxnCloseBackend,
@@ -438,6 +456,7 @@ mod tests {
     };
     use crate::types::{
         ColumnDescriptor, ColumnValue, CompletionType, FetchResult, Nullable, SQL_NTS, SqlDataType,
+        SqlState,
     };
 
     unsafe fn alloc_env_conn() -> (*mut c_void, *mut c_void) {
@@ -1283,6 +1302,53 @@ mod tests {
             free_env_two_conns::<MockTxnPreserveBackend>(
                 env, conn_fail, stmt_fail, conn_ok, stmt_ok,
             );
+        }
+    }
+
+    /// `SQLEndTran(SQL_HANDLE_ENV)` is the crate's only lock-nesting site. It
+    /// holds the environment's group while acquiring each connection's. This
+    /// pins that it actually reaches through to the statements: an
+    /// environment-level commit/rollback must apply the backend's cursor
+    /// behaviour to every statement on every connection, which is only
+    /// observable if the nested acquisition happens.
+    #[test]
+    fn end_tran_on_an_environment_reaches_its_connections_statements() {
+        unsafe {
+            // Connected, not just allocated: an unconnected connection is
+            // "not active" and SQL_HANDLE_ENV's per-connection loop skips it
+            // silently (see `end_tran_on_connection`), which would make this
+            // test pass for the wrong reason -- never actually reaching the
+            // nested group at all. `MockTxnCloseBackend` is used rather than
+            // `MockBackend` because the latter's `end_tran` is the default
+            // `NotImplemented` (it exists to test paths that never reach the
+            // backend), which would fail this call before cursor behaviour
+            // ever applies.
+            let (env, conn, stmt) = alloc_connected_stmt::<MockTxnCloseBackend>("DRIVER=mock;");
+
+            // Open a cursor, so SQL_CB_CLOSE has something to close.
+            let h = as_handle_ref::<StatementHandle<MockTxnCloseBackend>>(stmt).expect("valid");
+            h.set_result_set(StatementData::Synthetic(
+                crate::test_utils::synthetic_result_set(vec![]),
+            ));
+            let h = as_handle_ref::<StatementHandle<MockTxnCloseBackend>>(stmt).expect("valid");
+            assert!(h.cursor_open, "precondition: a cursor is open");
+
+            let ret = sql_end_tran::<MockTxnCloseBackend>(
+                HandleType::Env as i16,
+                env,
+                CompletionType::Commit as i16,
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+
+            // `MockTxnCloseBackend` reports SQL_CB_CLOSE for both commit and
+            // rollback, so the cursor is closed and the statement kept. This
+            // is observable only if the environment-level call actually
+            // nested into the connection's group and reached its statement.
+            let h = as_handle_ref::<StatementHandle<MockTxnCloseBackend>>(stmt).expect("valid");
+            assert!(!h.cursor_open, "env-level commit must reach the statement");
+            assert!(h.statement.is_some(), "SQL_CB_CLOSE keeps the statement");
+
+            cleanup_connected::<MockTxnCloseBackend>(env, conn, stmt);
         }
     }
 
