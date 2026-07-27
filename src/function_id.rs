@@ -97,6 +97,121 @@ pub enum FunctionId {
     CancelHandle = 1022,
 }
 
+/// The [`FunctionId`]s whose C entry point `forward_ffi!` actually exports.
+///
+/// A driver's `Backend::get_functions` should be built from this rather than
+/// hand-listed. `SQLGetFunctions` is what the Windows Driver Manager uses to
+/// build its dispatch table, so naming a function whose symbol does not exist
+/// gives the DM a null pointer to call.
+pub const CORE_EXPORTED_FUNCTIONS: &[FunctionId] = &[
+    FunctionId::AllocConnect,
+    FunctionId::AllocEnv,
+    FunctionId::AllocStmt,
+    FunctionId::BindCol,
+    FunctionId::Cancel,
+    FunctionId::ColAttribute,
+    FunctionId::Connect,
+    FunctionId::DescribeCol,
+    FunctionId::Disconnect,
+    FunctionId::Error,
+    FunctionId::ExecDirect,
+    FunctionId::Execute,
+    FunctionId::Fetch,
+    FunctionId::FreeConnect,
+    FunctionId::FreeEnv,
+    FunctionId::FreeStmt,
+    FunctionId::GetCursorName,
+    FunctionId::NumResultCols,
+    FunctionId::Prepare,
+    FunctionId::RowCount,
+    FunctionId::SetCursorName,
+    FunctionId::Transact,
+    FunctionId::BulkOperations,
+    FunctionId::Columns,
+    FunctionId::DriverConnect,
+    FunctionId::GetConnectOption,
+    FunctionId::GetData,
+    FunctionId::GetFunctions,
+    FunctionId::GetInfo,
+    FunctionId::GetStmtOption,
+    FunctionId::GetTypeInfo,
+    FunctionId::ParamData,
+    FunctionId::PutData,
+    FunctionId::SetConnectOption,
+    FunctionId::SetStmtOption,
+    FunctionId::SpecialColumns,
+    FunctionId::Statistics,
+    FunctionId::Tables,
+    FunctionId::BrowseConnect,
+    FunctionId::ColumnPrivileges,
+    FunctionId::DescribeParam,
+    FunctionId::ExtendedFetch,
+    FunctionId::ForeignKeys,
+    FunctionId::MoreResults,
+    FunctionId::NativeSql,
+    FunctionId::NumParams,
+    FunctionId::PrimaryKeys,
+    FunctionId::ProcedureColumns,
+    FunctionId::Procedures,
+    FunctionId::SetPos,
+    FunctionId::SetScrollOptions,
+    FunctionId::TablePrivileges,
+    FunctionId::BindParameter,
+    FunctionId::AllocHandle,
+    FunctionId::CloseCursor,
+    FunctionId::EndTran,
+    FunctionId::FreeHandle,
+    FunctionId::GetConnectAttr,
+    FunctionId::GetDescField,
+    FunctionId::GetDiagField,
+    FunctionId::GetDiagRec,
+    FunctionId::GetEnvAttr,
+    FunctionId::GetStmtAttr,
+    FunctionId::SetConnectAttr,
+    FunctionId::SetDescField,
+    FunctionId::SetDescRec,
+    FunctionId::SetEnvAttr,
+    FunctionId::SetStmtAttr,
+    FunctionId::FetchScroll,
+];
+
+/// The [`FunctionId`]s core knows the number for but does not export.
+///
+/// They exist so `function_id_from_raw` recognises every assigned `SQL_API_*`
+/// value and so the ODBC 2.x `SQL_API_ALL_FUNCTIONS` array can be filled from
+/// named values. A driver must not report any of them as supported.
+pub const CORE_UNEXPORTED_FUNCTIONS: &[(FunctionId, &str)] = &[
+    (
+        FunctionId::SetParam,
+        "superseded by SQLBindParameter, which is exported",
+    ),
+    (
+        FunctionId::DataSources,
+        "enumerated by the Driver Manager, never by a driver",
+    ),
+    (
+        FunctionId::ParamOptions,
+        "superseded by SQLSetStmtAttr, which is exported",
+    ),
+    (
+        FunctionId::Drivers,
+        "enumerated by the Driver Manager, never by a driver",
+    ),
+    (
+        FunctionId::AllocHandleStd,
+        "an ODBC 3.x standards-compliance entry point the DM calls, not a driver export",
+    ),
+    (
+        FunctionId::BindParam,
+        "superseded by SQLBindParameter, which is exported",
+    ),
+    (FunctionId::CopyDesc, "descriptors are not implemented"),
+    (FunctionId::GetDescRec, "descriptors are not implemented"),
+    (
+        FunctionId::CancelHandle,
+        "not implemented; SQLCancel is exported instead",
+    ),
+];
 /// `SQLGetFunctions` special values.
 pub const SQL_API_ODBC3_ALL_FUNCTIONS: u16 = 999;
 /// Size of the `SQL_API_ODBC3_ALL_FUNCTIONS` bitmap, in `u16` words (4000 bits).
@@ -302,6 +417,29 @@ mod tests {
                 "function_id_from_raw({value}) did not yield {id:?}"
             );
         }
+    }
+
+    #[test]
+    fn every_function_id_is_declared_exported_or_not() {
+        // The two lists together are the answer to "does this symbol exist?",
+        // which `Backend::get_functions` turns into a Driver Manager dispatch
+        // entry. A variant in neither list, or in both, means that question has
+        // no single answer.
+        for &(_, id) in SPEC_IDS {
+            let exported = CORE_EXPORTED_FUNCTIONS.contains(&id);
+            let unexported = CORE_UNEXPORTED_FUNCTIONS.iter().any(|(u, _)| *u == id);
+            assert!(
+                exported ^ unexported,
+                "{id:?} must appear in exactly one of CORE_EXPORTED_FUNCTIONS \
+                 (exported={exported}) and CORE_UNEXPORTED_FUNCTIONS \
+                 (unexported={unexported})"
+            );
+        }
+        assert_eq!(
+            CORE_EXPORTED_FUNCTIONS.len() + CORE_UNEXPORTED_FUNCTIONS.len(),
+            SPEC_IDS.len(),
+            "the two lists must partition FunctionId with nothing left over"
+        );
     }
 
     #[test]

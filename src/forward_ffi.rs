@@ -1178,4 +1178,118 @@ macro_rules! forward_ffi {
 #[cfg(test)]
 mod expansion {
     crate::forward_ffi!(crate::test_utils::MockBackend);
+
+    /// Pins [`CORE_EXPORTED_FUNCTIONS`] to symbols that actually exist.
+    ///
+    /// Each entry takes the address of the generated entry point, so a
+    /// `FunctionId` listed as exported without a matching `forward_ffi!` arm is
+    /// a compile error rather than a null pointer the Windows Driver Manager
+    /// discovers at dispatch time.
+    #[test]
+    fn every_exported_function_id_has_a_generated_symbol() {
+        use crate::function_id::{CORE_EXPORTED_FUNCTIONS, FunctionId};
+
+        let pairs: &[(FunctionId, *const ())] = &[
+            (FunctionId::AllocConnect, SQLAllocConnect as *const ()),
+            (FunctionId::AllocEnv, SQLAllocEnv as *const ()),
+            (FunctionId::AllocStmt, SQLAllocStmt as *const ()),
+            (FunctionId::BindCol, SQLBindCol as *const ()),
+            (FunctionId::Cancel, SQLCancel as *const ()),
+            (FunctionId::ColAttribute, SQLColAttributeW as *const ()),
+            (FunctionId::Connect, SQLConnectW as *const ()),
+            (FunctionId::DescribeCol, SQLDescribeColW as *const ()),
+            (FunctionId::Disconnect, SQLDisconnect as *const ()),
+            (FunctionId::Error, SQLError as *const ()),
+            (FunctionId::ExecDirect, SQLExecDirectW as *const ()),
+            (FunctionId::Execute, SQLExecute as *const ()),
+            (FunctionId::Fetch, SQLFetch as *const ()),
+            (FunctionId::FreeConnect, SQLFreeConnect as *const ()),
+            (FunctionId::FreeEnv, SQLFreeEnv as *const ()),
+            (FunctionId::FreeStmt, SQLFreeStmt as *const ()),
+            (FunctionId::GetCursorName, SQLGetCursorNameW as *const ()),
+            (FunctionId::NumResultCols, SQLNumResultCols as *const ()),
+            (FunctionId::Prepare, SQLPrepareW as *const ()),
+            (FunctionId::RowCount, SQLRowCount as *const ()),
+            (FunctionId::SetCursorName, SQLSetCursorNameW as *const ()),
+            (FunctionId::Transact, SQLTransact as *const ()),
+            (FunctionId::BulkOperations, SQLBulkOperations as *const ()),
+            (FunctionId::Columns, SQLColumnsW as *const ()),
+            (FunctionId::DriverConnect, SQLDriverConnectW as *const ()),
+            (
+                FunctionId::GetConnectOption,
+                SQLGetConnectOption as *const (),
+            ),
+            (FunctionId::GetData, SQLGetData as *const ()),
+            (FunctionId::GetFunctions, SQLGetFunctions as *const ()),
+            (FunctionId::GetInfo, SQLGetInfoW as *const ()),
+            (FunctionId::GetStmtOption, SQLGetStmtOption as *const ()),
+            (FunctionId::GetTypeInfo, SQLGetTypeInfo as *const ()),
+            (FunctionId::ParamData, SQLParamData as *const ()),
+            (FunctionId::PutData, SQLPutData as *const ()),
+            (
+                FunctionId::SetConnectOption,
+                SQLSetConnectOption as *const (),
+            ),
+            (FunctionId::SetStmtOption, SQLSetStmtOption as *const ()),
+            (FunctionId::SpecialColumns, SQLSpecialColumnsW as *const ()),
+            (FunctionId::Statistics, SQLStatisticsW as *const ()),
+            (FunctionId::Tables, SQLTablesW as *const ()),
+            (FunctionId::BrowseConnect, SQLBrowseConnectW as *const ()),
+            (
+                FunctionId::ColumnPrivileges,
+                SQLColumnPrivilegesW as *const (),
+            ),
+            (FunctionId::DescribeParam, SQLDescribeParam as *const ()),
+            (FunctionId::ExtendedFetch, SQLExtendedFetch as *const ()),
+            (FunctionId::ForeignKeys, SQLForeignKeysW as *const ()),
+            (FunctionId::MoreResults, SQLMoreResults as *const ()),
+            (FunctionId::NativeSql, SQLNativeSqlW as *const ()),
+            (FunctionId::NumParams, SQLNumParams as *const ()),
+            (FunctionId::PrimaryKeys, SQLPrimaryKeysW as *const ()),
+            (
+                FunctionId::ProcedureColumns,
+                SQLProcedureColumnsW as *const (),
+            ),
+            (FunctionId::Procedures, SQLProceduresW as *const ()),
+            (FunctionId::SetPos, SQLSetPos as *const ()),
+            (
+                FunctionId::SetScrollOptions,
+                SQLSetScrollOptions as *const (),
+            ),
+            (
+                FunctionId::TablePrivileges,
+                SQLTablePrivilegesW as *const (),
+            ),
+            (FunctionId::BindParameter, SQLBindParameter as *const ()),
+            (FunctionId::AllocHandle, SQLAllocHandle as *const ()),
+            (FunctionId::CloseCursor, SQLCloseCursor as *const ()),
+            (FunctionId::EndTran, SQLEndTran as *const ()),
+            (FunctionId::FreeHandle, SQLFreeHandle as *const ()),
+            (FunctionId::GetConnectAttr, SQLGetConnectAttrW as *const ()),
+            (FunctionId::GetDescField, SQLGetDescFieldW as *const ()),
+            (FunctionId::GetDiagField, SQLGetDiagFieldW as *const ()),
+            (FunctionId::GetDiagRec, SQLGetDiagRecW as *const ()),
+            (FunctionId::GetEnvAttr, SQLGetEnvAttr as *const ()),
+            (FunctionId::GetStmtAttr, SQLGetStmtAttrW as *const ()),
+            (FunctionId::SetConnectAttr, SQLSetConnectAttrW as *const ()),
+            (FunctionId::SetDescField, SQLSetDescFieldW as *const ()),
+            (FunctionId::SetDescRec, SQLSetDescRec as *const ()),
+            (FunctionId::SetEnvAttr, SQLSetEnvAttr as *const ()),
+            (FunctionId::SetStmtAttr, SQLSetStmtAttrW as *const ()),
+            (FunctionId::FetchScroll, SQLFetchScroll as *const ()),
+        ];
+
+        assert_eq!(
+            pairs.len(),
+            CORE_EXPORTED_FUNCTIONS.len(),
+            "every entry in CORE_EXPORTED_FUNCTIONS needs a symbol here"
+        );
+        for (id, ptr) in pairs {
+            assert!(
+                CORE_EXPORTED_FUNCTIONS.contains(id),
+                "{id:?} has a symbol but is not listed as exported"
+            );
+            assert!(!ptr.is_null());
+        }
+    }
 }

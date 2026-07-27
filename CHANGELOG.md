@@ -130,6 +130,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `SHAPE_DEFAULT_IS_THE_ANSWER` with the reason, and adding an info type without
   either an arm or an entry fails a test that names it.
 - `SQL_PARC_*`, `SQL_PAS_*` and `SQL_ASYNC_NOTIFICATION_*` constants.
+- `CORE_EXPORTED_FUNCTIONS` and `CORE_UNEXPORTED_FUNCTIONS`, partitioning
+  `FunctionId` by whether `forward_ffi!` generates a C entry point for it. Nine
+  ids name real ODBC functions core does not export (`SQLGetDescRec`,
+  `SQLCancelHandle`, `SQLDataSources` and six others), and `SQLGetFunctions` is
+  what the Windows Driver Manager builds its dispatch table from — reporting one
+  of them supported hands the DM a null pointer to call. A driver's
+  `get_functions` should be built from `CORE_EXPORTED_FUNCTIONS` rather than
+  hand-listed. A test in the `forward_ffi!` expansion module takes the address
+  of every entry, so listing a function without a matching macro arm is a
+  compile error.
 - **Breaking:** `Backend::identifier_case`, a required capability method for
   `SQL_IDENTIFIER_CASE`. Required rather than defaulted because no default can
   be legal: the spec defines `SQL_IC_UPPER` (1) through `SQL_IC_MIXED` (4), and
@@ -313,6 +323,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `SQL_ATTR_AUTOCOMMIT` already had).
 
 ### Fixed
+
+- `SQLSetStmtAttrW` substitutes and reports `01S02` for an unsupported
+  `SQL_ATTR_CURSOR_TYPE` or `SQL_ATTR_CURSOR_SCROLLABLE`, instead of refusing
+  them with `HYC00`. The spec defines 01S02 as "the driver did not support the
+  value specified and substituted a similar value", and `SQLGetStmtAttr` now
+  reports the substituted value back, which is how the application learns what
+  it was given. `SQL_ATTR_ROW_ARRAY_SIZE` in the same function already behaved
+  this way.
 
 - `SQLGetFunctions`' ODBC 2.x `SQL_API_ALL_FUNCTIONS` array recorded
   `SQLGetConnectOption` at index 30 instead of its spec value 42. Slot 30 is not

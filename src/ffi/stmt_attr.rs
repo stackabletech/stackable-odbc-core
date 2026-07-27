@@ -37,9 +37,9 @@ const SQL_PARAMSET_SIZE_DEFAULT: usize = 1;
 /// Spec: <https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlsetstmtattr-function>
 ///
 /// Accepts and stores all recognised integer/pointer attributes.
-/// Returns `HYC00` (optional feature not implemented) when an application
-/// requests a scrollable cursor or a non-read-only concurrency mode, since
-/// only forward-only, read-only cursors are supported.
+/// Only forward-only, read-only cursors are supported: a request for a
+/// scrollable cursor type is substituted with the supported value and reported
+/// as `01S02`, and a non-read-only concurrency mode reports `HYC00`.
 ///
 /// # Parameters
 ///
@@ -54,10 +54,13 @@ const SQL_PARAMSET_SIZE_DEFAULT: usize = 1;
 /// # Spec compliance
 ///
 /// - 01000 General warning: not currently returned here.
-/// - 01S02 Option value changed: not currently returned; the driver stores
-///   whatever integer value the application provides without substitution.
-///   Returning 01S02 would require defining what values are "similar" for each
-///   attribute. Deferred.
+/// - 01S02 Option value changed: returned for `SQL_ATTR_CURSOR_TYPE`,
+///   `SQL_ATTR_CURSOR_SCROLLABLE`, `SQL_ATTR_ROW_ARRAY_SIZE` and
+///   `SQL_ATTR_PARAMSET_SIZE`, each of which has exactly one supported value;
+///   the driver stores that value and `SQLGetStmtAttr` reports it back, which
+///   is how the application learns what it was given. Other attributes are
+///   stored verbatim, since defining what counts as a "similar" value for them
+///   is not something the spec settles.
 /// - 24000 Invalid cursor state: returned when setting `SQL_ATTR_CONCURRENCY`,
 ///   `SQL_ATTR_CURSOR_TYPE`, `SQL_ATTR_SIMULATE_CURSOR`, or
 ///   `SQL_ATTR_USE_BOOKMARKS` while a cursor is open (`stmt.cursor_open`). A
@@ -81,19 +84,21 @@ const SQL_PARAMSET_SIZE_DEFAULT: usize = 1;
 ///   (driver-manager-handled; not returned here). Descriptor
 ///   attributes are accepted silently because descriptors are not yet
 ///   fully implemented.
-/// - HY024 Invalid attribute value: not returned. Unsupported cursor-type values
-///   are rejected with HYC00 (Optional feature not implemented) via
-///   `OdbcError::NotImplemented`. Per-attribute range validation for other
-///   discrete-valued attributes is not implemented. Deferred.
+/// - HY024 Invalid attribute value: not returned. An unsupported cursor-type
+///   value is substituted and reported as 01S02 rather than rejected, per the
+///   spec's own note that the driver "substituted a similar value".
+///   Per-attribute range validation for other discrete-valued attributes is not
+///   implemented. Deferred.
 /// - HY090 Invalid string or buffer length: (driver-manager-handled; not
 ///   returned here).
 /// - HY092 Invalid attribute/option identifier: (driver-manager-handled; not
 ///   returned here). Unknown attributes are accepted silently.
 /// - HY117 Connection is suspended due to unknown transaction state:
 ///   (driver-manager-handled; not returned here).
-/// - HYC00 Optional feature not implemented: returned when
-///   `SQL_ATTR_CURSOR_TYPE` is not `SQL_CURSOR_FORWARD_ONLY` or
-///   `SQL_ATTR_CURSOR_SCROLLABLE` is not `SQL_NONSCROLLABLE`.
+/// - HYC00 Optional feature not implemented: returned for a non-read-only
+///   `SQL_ATTR_CONCURRENCY` and the other unsupported optional features below.
+///   Cursor type and scrollability are *not* among them — those take the
+///   01S02 substitution path above.
 /// - HYT01 Connection timeout expired: not returned; this function does not
 ///   communicate with the data source.
 /// - IM001 Driver does not support this function: (driver-manager-handled; not
@@ -155,11 +160,23 @@ pub unsafe fn sql_set_stmt_attr_w<B: Backend>(
                     if matches!(attr, Some(StatementAttribute::CursorType))
                         && int_val != SQL_CURSOR_FORWARD_ONLY
                     {
-                        return Err(OdbcError::NotImplemented {
-                            feature: format!(
-                                "SQL_ATTR_CURSOR_TYPE value {int_val} (only SQL_CURSOR_FORWARD_ONLY=0 is supported)"
+                        // Spec: the driver substitutes a similar value and
+                        // reports 01S02, rather than refusing the attribute.
+                        // `SQLGetStmtAttr` then reports the substituted value,
+                        // which is how the application learns what it got. The
+                        // same treatment `SQL_ATTR_ROW_ARRAY_SIZE` gets below.
+                        tracing::warn!(
+                            "SQLSetStmtAttrW: SQL_ATTR_CURSOR_TYPE={} not supported, substituting SQL_CURSOR_FORWARD_ONLY (01S02)",
+                            int_val
+                        );
+                        stmt.attrs.insert(attribute, SQL_CURSOR_FORWARD_ONLY);
+                        stmt.diagnostics.push(&OdbcError::general(
+                            format!(
+                                "SQL_ATTR_CURSOR_TYPE {int_val} is not supported; substituted SQL_CURSOR_FORWARD_ONLY"
                             ),
-                        });
+                            SqlState::option_value_changed(),
+                        ));
+                        return Ok(SqlReturn::SUCCESS_WITH_INFO);
                     }
                     stmt.attrs.insert(attribute, int_val);
                     Ok(SqlReturn::SUCCESS)
@@ -168,9 +185,21 @@ pub unsafe fn sql_set_stmt_attr_w<B: Backend>(
                 // SQL_ATTR_CURSOR_SCROLLABLE: only non-scrollable is supported.
                 Some(StatementAttribute::CursorScrollable) => {
                     if int_val != SQL_NONSCROLLABLE {
-                        return Err(OdbcError::NotImplemented {
-                            feature: "SQL_ATTR_CURSOR_SCROLLABLE = SQL_SCROLLABLE".into(),
-                        });
+                        // Substituted and reported as 01S02 for the same reason
+                        // as SQL_ATTR_CURSOR_TYPE above: the two describe one
+                        // cursor, and refusing this one while substituting the
+                        // other would leave them disagreeing.
+                        tracing::warn!(
+                            "SQLSetStmtAttrW: SQL_ATTR_CURSOR_SCROLLABLE={} not supported, substituting SQL_NONSCROLLABLE (01S02)",
+                            int_val
+                        );
+                        stmt.attrs.insert(attribute, SQL_NONSCROLLABLE);
+                        stmt.diagnostics.push(&OdbcError::general(
+                            "SQL_ATTR_CURSOR_SCROLLABLE = SQL_SCROLLABLE is not supported; \
+                             substituted SQL_NONSCROLLABLE",
+                            SqlState::option_value_changed(),
+                        ));
+                        return Ok(SqlReturn::SUCCESS_WITH_INFO);
                     }
                     stmt.attrs.insert(attribute, int_val);
                     Ok(SqlReturn::SUCCESS)
@@ -775,7 +804,10 @@ mod tests {
     }
 
     #[test]
-    fn set_cursor_type_static_returns_error() {
+    fn set_cursor_type_static_substitutes_forward_only_with_01s02() {
+        // Spec: an unsupported value is substituted and reported as 01S02, not
+        // refused. `SQLGetStmtAttr` then reports what the driver actually used,
+        // which is the application's only way to find out.
         unsafe {
             let (env, conn, stmt) = alloc_env_conn_stmt();
             let ret = sql_set_stmt_attr_w::<MockBackend>(
@@ -784,7 +816,32 @@ mod tests {
                 3usize as *mut c_void, // SQL_CURSOR_STATIC
                 0,
             );
-            assert_eq!(ret, SqlReturn::ERROR);
+            assert_eq!(ret, SqlReturn::SUCCESS_WITH_INFO);
+
+            let handle = as_handle_ref::<StatementHandle<MockBackend>>(stmt).expect("valid");
+            assert_eq!(
+                handle
+                    .diagnostics
+                    .get(0)
+                    .expect("a 01S02 record")
+                    .sqlstate
+                    .as_str(),
+                "01S02"
+            );
+
+            let mut val: u32 = 99;
+            let ret = sql_get_stmt_attr_w::<MockBackend>(
+                stmt,
+                StatementAttribute::CursorType as i32,
+                &mut val as *mut u32 as *mut c_void,
+                0,
+                std::ptr::null_mut(),
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+            assert_eq!(
+                val as usize, SQL_CURSOR_FORWARD_ONLY,
+                "SQLGetStmtAttr must report the substituted value"
+            );
             cleanup(env, conn, stmt);
         }
     }
@@ -808,7 +865,7 @@ mod tests {
     }
 
     #[test]
-    fn set_scrollable_cursor_returns_error() {
+    fn set_scrollable_cursor_substitutes_nonscrollable_with_01s02() {
         unsafe {
             let (env, conn, stmt) = alloc_env_conn_stmt();
             let ret = sql_set_stmt_attr_w::<MockBackend>(
@@ -817,7 +874,32 @@ mod tests {
                 std::ptr::dangling_mut::<c_void>(), // SQL_SCROLLABLE (non-null)
                 0,
             );
-            assert_eq!(ret, SqlReturn::ERROR);
+            assert_eq!(ret, SqlReturn::SUCCESS_WITH_INFO);
+
+            let handle = as_handle_ref::<StatementHandle<MockBackend>>(stmt).expect("valid");
+            assert_eq!(
+                handle
+                    .diagnostics
+                    .get(0)
+                    .expect("a 01S02 record")
+                    .sqlstate
+                    .as_str(),
+                "01S02"
+            );
+
+            let mut val: u32 = 99;
+            let ret = sql_get_stmt_attr_w::<MockBackend>(
+                stmt,
+                StatementAttribute::CursorScrollable as i32,
+                &mut val as *mut u32 as *mut c_void,
+                0,
+                std::ptr::null_mut(),
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+            assert_eq!(
+                val as usize, SQL_NONSCROLLABLE,
+                "SQLGetStmtAttr must report the substituted value"
+            );
             cleanup(env, conn, stmt);
         }
     }
