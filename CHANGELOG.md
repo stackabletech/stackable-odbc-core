@@ -146,6 +146,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Security.** A DSN entry in `odbc.ini` could override the connection string
+  the application supplied, and could inject additional keywords. Both are
+  fixed, and `merge_dsn_params` now has tests, which it had none of.
+  `ConnectParams::parse` is first-occurrence-wins, but `merge_dsn_params`
+  placed the DSN file's keys *first* and appended the connection string last,
+  under a comment asserting the opposite — so the file won every conflict. A
+  DSN could therefore redirect a connection to another host and substitute the
+  `UID`/`PWD` an application had passed explicitly. Separately, DSN values were
+  rendered back into `Key=Value;` form and re-parsed without quoting, so a `;`
+  in a value injected further keywords. The merge is now performed on parsed
+  values via `ConnectParams::merge`, which does not overwrite existing keys;
+  no DSN value is ever re-parsed. Quoting alone would not have been enough,
+  because a `}` in a value ends the quoted run early and re-opens the same
+  hole.
 - Every `SQLGetInfo` type the spec declares as a character string but which
   `odbc_sys::InfoType` has no variant for is answered as a string, instead of
   falling through to the unnamed-raw default `U32(0)`. An application reading

@@ -502,22 +502,31 @@ pub unsafe fn sql_browse_connect_w<B: Backend>(
 
 /// Parse a connection string, merging in DSN keys from odbc.ini when a `DSN=` key is present.
 ///
-/// Explicit connection string values take priority over DSN-file values.
+/// Explicit connection string values take priority over DSN-file values. The
+/// direction matters: an application states its connection string in its own
+/// code, whereas `odbc.ini` is a file any process running as the user can edit,
+/// so the DSN file must never be able to redirect a connection or substitute
+/// credentials the application supplied itself.
+///
+/// The merge is done on parsed values, never by concatenating strings and
+/// re-parsing. A DSN value is arbitrary file content: rendered back into
+/// `Key=Value;` form it could contain a `;` and inject further keywords, and
+/// brace-quoting it does not close that hole, because a `}` in the value ends
+/// the quoted run early and everything after it parses as keywords again.
+/// [`ConnectParams::merge`] does not overwrite existing keys, which is exactly
+/// the required precedence.
+///
 /// `dsn_resolver` is injectable so unit tests can supply fake DSN data.
 fn merge_dsn_params(
     conn_str: &str,
     dsn_resolver: impl Fn(&str) -> Vec<(String, String)>,
 ) -> Result<ConnectParams, OdbcError> {
-    let explicit = ConnectParams::parse(conn_str)?;
-    if let Some(dsn) = explicit.get("dsn") {
-        let dsn_keys = dsn_resolver(dsn);
-        // DSN values first; explicit connection string appended last so its values win.
-        let mut parts: Vec<String> = dsn_keys.iter().map(|(k, v)| format!("{k}={v}")).collect();
-        parts.push(conn_str.to_string());
-        ConnectParams::parse(&parts.join(";"))
-    } else {
-        Ok(explicit)
+    let mut params = ConnectParams::parse(conn_str)?;
+    if let Some(dsn) = params.get("dsn").map(str::to_owned) {
+        let from_dsn: ConnectParams = dsn_resolver(&dsn).into_iter().collect();
+        params.merge(&from_dsn);
     }
+    Ok(params)
 }
 
 /// Read key-value pairs for a DSN from the ODBC configuration file.
@@ -821,6 +830,90 @@ mod tests {
         let mut conn: *mut c_void = std::ptr::null_mut();
         let _ = unsafe { sql_alloc_handle::<MockBackend>(HandleType::Dbc as i16, env, &mut conn) };
         (env, conn)
+    }
+
+    // -----------------------------------------------------------------------
+    // merge_dsn_params
+    //
+    // The DSN file is lower-trust than the connection string: an application
+    // states its own connection string in code, while odbc.ini is a file any
+    // process running as the user can edit. The spec, this function's doc
+    // comment and AGENTS.md all say the explicit value wins.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn merge_dsn_params_takes_dsn_value_when_the_connection_string_omits_it() {
+        let params = merge_dsn_params("DSN=prod", |dsn| {
+            assert_eq!(dsn, "prod");
+            vec![("Host".into(), "dsn-host.internal".into())]
+        })
+        .unwrap();
+
+        assert_eq!(params.get("host"), Some("dsn-host.internal"));
+    }
+
+    #[test]
+    fn merge_dsn_params_explicit_value_wins_over_the_dsn_file() {
+        let params = merge_dsn_params("DSN=prod;Host=explicit.internal", |_| {
+            vec![("Host".into(), "dsn-host.internal".into())]
+        })
+        .unwrap();
+
+        assert_eq!(params.get("host"), Some("explicit.internal"));
+    }
+
+    #[test]
+    fn merge_dsn_params_explicit_credentials_win_over_the_dsn_file() {
+        let params = merge_dsn_params("DSN=prod;UID=alice;PWD=alicepw", |_| {
+            vec![
+                ("UID".into(), "admin".into()),
+                ("PWD".into(), "hunter2".into()),
+            ]
+        })
+        .unwrap();
+
+        assert_eq!(params.get("uid"), Some("alice"));
+        assert_eq!(params.get("pwd"), Some("alicepw"));
+    }
+
+    #[test]
+    fn merge_dsn_params_dsn_value_containing_a_semicolon_cannot_inject_keywords() {
+        // A `;` inside a DSN value must stay part of that value. Unquoted, it
+        // would terminate the segment and everything after it would parse as
+        // further keywords.
+        let params = merge_dsn_params("DSN=prod;Host=explicit.internal", |_| {
+            vec![(
+                "Description".into(),
+                "x;UID=admin;PWD=hunter2;Host=attacker.example.com".into(),
+            )]
+        })
+        .unwrap();
+
+        assert_eq!(
+            params.get("description"),
+            Some("x;UID=admin;PWD=hunter2;Host=attacker.example.com")
+        );
+        assert_eq!(params.get("host"), Some("explicit.internal"));
+        assert_eq!(params.get("uid"), None);
+        assert_eq!(params.get("pwd"), None);
+    }
+
+    #[test]
+    fn merge_dsn_params_dsn_value_containing_an_equals_sign_survives_the_round_trip() {
+        let params =
+            merge_dsn_params("DSN=prod", |_| vec![("Token".into(), "abc=def==".into())]).unwrap();
+
+        assert_eq!(params.get("token"), Some("abc=def=="));
+    }
+
+    #[test]
+    fn merge_dsn_params_without_a_dsn_key_never_consults_the_resolver() {
+        let params = merge_dsn_params("Host=explicit.internal", |_| {
+            panic!("resolver must not be called when the connection string has no DSN=")
+        })
+        .unwrap();
+
+        assert_eq!(params.get("host"), Some("explicit.internal"));
     }
 
     #[test]
