@@ -751,31 +751,7 @@ pub unsafe fn sql_set_pos<B: Backend>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ffi::handle::{sql_alloc_handle, sql_free_handle};
-    use crate::test_utils::MockBackend;
-    use odbc_sys::HandleType;
-
-    /// Helper: allocate env + connection + statement handles.
-    unsafe fn alloc_env_conn_stmt() -> (*mut c_void, *mut c_void, *mut c_void) {
-        let mut env: *mut c_void = std::ptr::null_mut();
-        let _ = unsafe {
-            sql_alloc_handle::<MockBackend>(HandleType::Env as i16, std::ptr::null_mut(), &mut env)
-        };
-        let mut conn: *mut c_void = std::ptr::null_mut();
-        let _ = unsafe { sql_alloc_handle::<MockBackend>(HandleType::Dbc as i16, env, &mut conn) };
-        let mut stmt: *mut c_void = std::ptr::null_mut();
-        let _ =
-            unsafe { sql_alloc_handle::<MockBackend>(HandleType::Stmt as i16, conn, &mut stmt) };
-        (env, conn, stmt)
-    }
-
-    unsafe fn cleanup(env: *mut c_void, conn: *mut c_void, stmt_ptr: *mut c_void) {
-        unsafe {
-            let _ = sql_free_handle::<MockBackend>(HandleType::Stmt as i16, stmt_ptr);
-            let _ = sql_free_handle::<MockBackend>(HandleType::Dbc as i16, conn);
-            let _ = sql_free_handle::<MockBackend>(HandleType::Env as i16, env);
-        }
-    }
+    use crate::test_utils::{MockBackend, alloc_env_conn_stmt, cleanup_env_conn_stmt};
 
     #[test]
     fn num_result_cols_without_execute_returns_error() {
@@ -784,7 +760,7 @@ mod tests {
             let mut count: i16 = 0;
             let ret = sql_num_result_cols::<MockBackend>(stmt, &mut count);
             assert_eq!(ret, SqlReturn::ERROR);
-            cleanup(env, conn, stmt);
+            cleanup_env_conn_stmt(env, conn, stmt);
         }
     }
 
@@ -797,7 +773,7 @@ mod tests {
             // No statement executed → HY010, regardless of output pointer.
             let ret = sql_num_result_cols::<MockBackend>(stmt, std::ptr::null_mut());
             assert_eq!(ret, SqlReturn::ERROR);
-            cleanup(env, conn, stmt);
+            cleanup_env_conn_stmt(env, conn, stmt);
         }
     }
 
@@ -836,7 +812,7 @@ mod tests {
             let ret = sql_num_result_cols::<MockBackend>(stmt, &mut count);
             assert_eq!(ret, SqlReturn::SUCCESS);
             assert_eq!(count, 2);
-            cleanup(env, conn, stmt);
+            cleanup_env_conn_stmt(env, conn, stmt);
         }
     }
 
@@ -848,7 +824,7 @@ mod tests {
             let ret = sql_row_count::<MockBackend>(stmt, &mut count);
             assert_eq!(ret, SqlReturn::SUCCESS);
             assert_eq!(count, 0);
-            cleanup(env, conn, stmt);
+            cleanup_env_conn_stmt(env, conn, stmt);
         }
     }
 
@@ -858,7 +834,7 @@ mod tests {
             let (env, conn, stmt) = alloc_env_conn_stmt();
             let ret = sql_more_results::<MockBackend>(stmt);
             assert_eq!(ret, SqlReturn::NO_DATA);
-            cleanup(env, conn, stmt);
+            cleanup_env_conn_stmt(env, conn, stmt);
         }
     }
 
@@ -868,7 +844,7 @@ mod tests {
             let (env, conn, stmt) = alloc_env_conn_stmt();
             let ret = sql_close_cursor::<MockBackend>(stmt);
             assert_eq!(ret, SqlReturn::ERROR);
-            cleanup(env, conn, stmt);
+            cleanup_env_conn_stmt(env, conn, stmt);
         }
     }
 
@@ -883,7 +859,7 @@ mod tests {
 
             let ret = sql_close_cursor::<MockBackend>(stmt);
             assert_eq!(ret, SqlReturn::SUCCESS);
-            cleanup(env, conn, stmt);
+            cleanup_env_conn_stmt(env, conn, stmt);
         }
     }
 
@@ -919,7 +895,7 @@ mod tests {
             let ret = sql_row_count::<MockBackend>(stmt, &mut count);
             assert_eq!(ret, SqlReturn::SUCCESS);
             assert_eq!(count, 3);
-            cleanup(env, conn, stmt);
+            cleanup_env_conn_stmt(env, conn, stmt);
         }
     }
 
@@ -941,7 +917,7 @@ mod tests {
             let ret = sql_row_count::<MockBackend>(stmt, &mut count);
             assert_eq!(ret, SqlReturn::SUCCESS);
             assert_eq!(count, -1); // unknown
-            cleanup(env, conn, stmt);
+            cleanup_env_conn_stmt(env, conn, stmt);
         }
     }
 
@@ -960,7 +936,7 @@ mod tests {
 
             let ret = sql_num_result_cols::<MockBackend>(stmt, std::ptr::null_mut());
             assert_eq!(ret, SqlReturn::SUCCESS);
-            cleanup(env, conn, stmt);
+            cleanup_env_conn_stmt(env, conn, stmt);
         }
     }
 
@@ -970,7 +946,7 @@ mod tests {
             let (env, conn, stmt) = alloc_env_conn_stmt();
             let ret = sql_row_count::<MockBackend>(stmt, std::ptr::null_mut());
             assert_eq!(ret, SqlReturn::SUCCESS);
-            cleanup(env, conn, stmt);
+            cleanup_env_conn_stmt(env, conn, stmt);
         }
     }
 
@@ -1012,7 +988,7 @@ mod tests {
             let ret2 = sql_close_cursor::<MockBackend>(stmt);
             assert_eq!(ret2, SqlReturn::ERROR);
 
-            cleanup(env, conn, stmt);
+            cleanup_env_conn_stmt(env, conn, stmt);
         }
     }
 
@@ -1064,7 +1040,7 @@ mod tests {
             let (env, conn, stmt) = alloc_env_conn_stmt();
             let ret = sql_cancel::<MockBackend>(stmt);
             assert_eq!(ret, SqlReturn::SUCCESS);
-            cleanup(env, conn, stmt);
+            cleanup_env_conn_stmt(env, conn, stmt);
         }
     }
 
@@ -1085,7 +1061,7 @@ mod tests {
             assert!(handle.statement.is_some());
             assert!(handle.cursor_open);
 
-            cleanup(env, conn, stmt);
+            cleanup_env_conn_stmt(env, conn, stmt);
         }
     }
 
@@ -1104,7 +1080,7 @@ mod tests {
             let (env, conn, stmt) = alloc_env_conn_stmt();
             let ret = sql_cancel::<MockBackend>(stmt);
             assert_eq!(ret, SqlReturn::SUCCESS);
-            cleanup(env, conn, stmt);
+            cleanup_env_conn_stmt(env, conn, stmt);
         }
     }
 
@@ -1126,7 +1102,7 @@ mod tests {
             let queue = crate::handles::try_get_diagnostic_queue::<MockBackend>(stmt).unwrap();
             assert_eq!(queue.len(), 0);
 
-            cleanup(env, conn, stmt);
+            cleanup_env_conn_stmt(env, conn, stmt);
         }
     }
 
@@ -1153,7 +1129,7 @@ mod tests {
                 name.starts_with("SQL_CURSR"),
                 "expected auto-generated name starting with SQL_CURSR, got {name:?}"
             );
-            cleanup(env, conn, stmt);
+            cleanup_env_conn_stmt(env, conn, stmt);
         }
     }
 
@@ -1184,7 +1160,7 @@ mod tests {
             let name = String::from_utf16_lossy(&buf[..name_len as usize]);
             assert_eq!(name, "MyCursor");
 
-            cleanup(env, conn, stmt);
+            cleanup_env_conn_stmt(env, conn, stmt);
         }
     }
 
@@ -1216,7 +1192,7 @@ mod tests {
             // name_len reports the full length, not the truncated length
             assert_eq!(name_len, 18);
 
-            cleanup(env, conn, stmt);
+            cleanup_env_conn_stmt(env, conn, stmt);
         }
     }
 
@@ -1226,7 +1202,7 @@ mod tests {
             let (env, conn, stmt) = alloc_env_conn_stmt();
             let ret = sql_set_cursor_name_w::<MockBackend>(stmt, std::ptr::null(), 0);
             assert_eq!(ret, SqlReturn::ERROR);
-            cleanup(env, conn, stmt);
+            cleanup_env_conn_stmt(env, conn, stmt);
         }
     }
 
@@ -1257,7 +1233,7 @@ mod tests {
                 "expected HYC00, got {}",
                 rec.sqlstate.as_str()
             );
-            cleanup(env, conn, stmt);
+            cleanup_env_conn_stmt(env, conn, stmt);
         }
     }
 
@@ -1276,7 +1252,7 @@ mod tests {
                 "expected HY092, got {}",
                 rec.sqlstate.as_str()
             );
-            cleanup(env, conn, stmt);
+            cleanup_env_conn_stmt(env, conn, stmt);
         }
     }
 
@@ -1312,7 +1288,7 @@ mod tests {
                 "expected HYC00, got {}",
                 rec.sqlstate.as_str()
             );
-            cleanup(env, conn, stmt);
+            cleanup_env_conn_stmt(env, conn, stmt);
         }
     }
 
@@ -1331,7 +1307,7 @@ mod tests {
                 "expected HY092, got {}",
                 rec.sqlstate.as_str()
             );
-            cleanup(env, conn, stmt);
+            cleanup_env_conn_stmt(env, conn, stmt);
         }
     }
 
@@ -1350,7 +1326,7 @@ mod tests {
                 "expected HY092, got {}",
                 rec.sqlstate.as_str()
             );
-            cleanup(env, conn, stmt);
+            cleanup_env_conn_stmt(env, conn, stmt);
         }
     }
 }

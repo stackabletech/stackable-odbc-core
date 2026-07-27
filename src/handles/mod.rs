@@ -36,6 +36,7 @@ use crate::types::{ColumnDescriptor, ColumnValue, ConnectParams, FetchResult, Sq
 use odbc_sys::{CDataType, ParamType, SqlDataType};
 
 pub(crate) mod registry;
+pub(crate) mod scope;
 
 use registry::{GroupLock, HandleKind, encode_token, registry};
 

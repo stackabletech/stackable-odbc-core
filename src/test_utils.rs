@@ -3,9 +3,56 @@
 //! Provides `MockBackend` (connect succeeds) and `MockFailBackend` (connect fails)
 //! so test modules don't each need their own copy.
 
+use std::ffi::c_void;
+
+use odbc_sys::HandleType;
+
 use crate::backend::{Backend, StatementBackend};
 use crate::errors::OdbcError;
+use crate::ffi::handle::{sql_alloc_handle, sql_free_handle};
 use crate::types::{ConnectParams, InfoValue, Nullable, TypeInfoRow};
+
+// ---------------------------------------------------------------------------
+// Handle allocation helpers
+// ---------------------------------------------------------------------------
+
+/// Allocate an environment, a connection on it, and a statement on that
+/// connection, all against [`MockBackend`].
+///
+/// Shared by every test module that needs a live env/conn/stmt triple rather
+/// than building one by hand.
+///
+/// # Safety
+///
+/// Purely a test helper: it allocates real handles via `sql_alloc_handle` and
+/// hands back their tokens, so the caller must free them (see
+/// [`cleanup_env_conn_stmt`]) before the test ends.
+pub(crate) unsafe fn alloc_env_conn_stmt() -> (*mut c_void, *mut c_void, *mut c_void) {
+    let mut env: *mut c_void = std::ptr::null_mut();
+    let _ = unsafe {
+        sql_alloc_handle::<MockBackend>(HandleType::Env as i16, std::ptr::null_mut(), &mut env)
+    };
+    let mut conn: *mut c_void = std::ptr::null_mut();
+    let _ = unsafe { sql_alloc_handle::<MockBackend>(HandleType::Dbc as i16, env, &mut conn) };
+    let mut stmt: *mut c_void = std::ptr::null_mut();
+    let _ = unsafe { sql_alloc_handle::<MockBackend>(HandleType::Stmt as i16, conn, &mut stmt) };
+    (env, conn, stmt)
+}
+
+/// Free a statement, connection and environment allocated by
+/// [`alloc_env_conn_stmt`], in child-before-parent order.
+///
+/// # Safety
+///
+/// `env`, `conn` and `stmt` must be live tokens from `alloc_env_conn_stmt` (or
+/// otherwise valid `MockBackend` handles) that have not already been freed.
+pub(crate) unsafe fn cleanup_env_conn_stmt(env: *mut c_void, conn: *mut c_void, stmt: *mut c_void) {
+    unsafe {
+        let _ = sql_free_handle::<MockBackend>(HandleType::Stmt as i16, stmt);
+        let _ = sql_free_handle::<MockBackend>(HandleType::Dbc as i16, conn);
+        let _ = sql_free_handle::<MockBackend>(HandleType::Env as i16, env);
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Shared types

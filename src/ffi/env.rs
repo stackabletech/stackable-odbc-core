@@ -6,8 +6,8 @@ use odbc_sys::EnvironmentAttribute;
 
 use crate::backend::Backend;
 use crate::errors::OdbcError;
-use crate::handles::{EnvironmentHandle, as_handle_ref};
-use crate::panic::panic_safe;
+use crate::handles::EnvironmentHandle;
+use crate::panic::panic_safe_scoped;
 use crate::types::{
     SQL_TRUE, SqlReturn, attr_odbc_version_from_raw, environment_attribute_from_raw,
 };
@@ -70,11 +70,12 @@ pub unsafe fn sql_set_env_attr<B: Backend>(
     );
     let attr = environment_attribute_from_raw(attribute);
     tracing::debug!("SQLSetEnvAttr: attr={:?}", attr);
-    // SAFETY: environment_handle is null or a valid EnvironmentHandle<B> allocated by
-    // sql_alloc_handle; tag is validated by as_handle_ref inside the closure.
+    // SAFETY: environment_handle is null or a token previously issued by
+    // sql_alloc_handle; kind and group are validated by scope.get inside the
+    // closure.
     let ret = unsafe {
-        panic_safe::<B, _>(environment_handle, || {
-            let env = as_handle_ref::<EnvironmentHandle<B>>(environment_handle)?;
+        panic_safe_scoped::<B, _>(environment_handle, |scope| {
+            let env = scope.get::<EnvironmentHandle<B>>(environment_handle)?;
 
             // Spec HY010: "An application can call SQLSetEnvAttr only if no
             // connection handle is allocated on the environment." The
@@ -185,11 +186,12 @@ pub unsafe fn sql_get_env_attr<B: Backend>(
     );
     let attr = environment_attribute_from_raw(attribute);
     tracing::debug!("SQLGetEnvAttr: attr={:?}", attr);
-    // SAFETY: environment_handle is null or a valid EnvironmentHandle<B> allocated by
-    // sql_alloc_handle; tag is validated by as_handle_ref inside the closure.
+    // SAFETY: environment_handle is null or a token previously issued by
+    // sql_alloc_handle; kind and group are validated by scope.get inside the
+    // closure.
     let ret = unsafe {
-        panic_safe::<B, _>(environment_handle, || {
-            let env = as_handle_ref::<EnvironmentHandle<B>>(environment_handle)?;
+        panic_safe_scoped::<B, _>(environment_handle, |scope| {
+            let env = scope.get::<EnvironmentHandle<B>>(environment_handle)?;
 
             match attr {
                 Some(EnvironmentAttribute::OdbcVersion) => {

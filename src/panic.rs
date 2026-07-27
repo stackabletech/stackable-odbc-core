@@ -4,6 +4,8 @@
 use std::panic::AssertUnwindSafe;
 
 use crate::errors::OdbcError;
+use crate::handles::registry::registry;
+use crate::handles::scope::HandleScope;
 use crate::handles::try_get_diagnostic_queue;
 use crate::types::SqlReturn;
 
@@ -45,6 +47,58 @@ where
             if let Ok(queue) = unsafe { try_get_diagnostic_queue::<B>(handle) } {
                 queue.push(&err);
             }
+            SqlReturn::ERROR
+        }
+    }
+}
+
+/// Execute `f` at the FFI boundary, holding `handle`'s lock group, catching
+/// both `Err` returns and panics.
+///
+/// The group's `Arc` and its guard live in *this* frame, and the
+/// [`HandleScope`] handed to `f` merely borrows them. That is what keeps the
+/// scope free of a self-referential owned guard, and so free of `unsafe`.
+///
+/// A null `handle` is not an error: `SQLAllocHandle(SQL_HANDLE_ENV,
+/// SQL_NULL_HANDLE, ..)` legitimately arrives with nothing to lock, and gets a
+/// scope holding no group.
+///
+/// On an `Err`, the error is pushed onto the handle's diagnostic queue through
+/// the scope this function still holds — no second acquisition. On a panic, an
+/// [`OdbcError::Panic`] diagnostic is pushed and `SqlReturn::ERROR` is
+/// returned; the guard is released by unwinding, so the connection stays
+/// usable.
+///
+/// [`OdbcError::InvalidHandle`] is the exception: the spec posts no diagnostic
+/// record alongside `SQL_INVALID_HANDLE`, since there is no valid handle to
+/// post it against.
+///
+/// # Safety
+///
+/// `handle` must be either null or a token previously issued by one of the
+/// `alloc_*` functions in [`crate::handles`].
+pub unsafe fn panic_safe_scoped<B, F>(handle: *mut std::ffi::c_void, f: F) -> SqlReturn
+where
+    B: crate::backend::Backend,
+    F: FnOnce(&mut HandleScope<'_>) -> Result<SqlReturn, OdbcError>,
+{
+    let group = registry().group_of(handle);
+    let _guard = group.as_ref().map(|g| g.lock());
+    let mut scope = HandleScope::new(group.clone());
+
+    match std::panic::catch_unwind(AssertUnwindSafe(|| f(&mut scope))) {
+        Ok(Ok(ret)) => ret,
+        Ok(Err(err)) => {
+            if !matches!(err, OdbcError::InvalidHandle) {
+                scope.push_diagnostic::<B>(handle, &err);
+            }
+            err.sql_return()
+        }
+        Err(_panic) => {
+            let err = OdbcError::Panic {
+                message: "internal driver panic".into(),
+            };
+            scope.push_diagnostic::<B>(handle, &err);
             SqlReturn::ERROR
         }
     }
