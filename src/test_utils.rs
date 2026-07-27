@@ -72,65 +72,65 @@ macro_rules! minimal_capability_decls {
         minimal_capability_decls!(keywords = &[]);
     };
     (keywords = $keywords:expr) => {
-        fn keywords() -> &'static [&'static str] {
+        fn keywords(_conn: &Self::Connection) -> &'static [&'static str] {
             $keywords
         }
-        fn group_by() -> u16 {
+        fn group_by(_conn: &Self::Connection) -> u16 {
             crate::types::SQL_GB_NOT_SUPPORTED
         }
-        fn null_collation() -> u16 {
+        fn null_collation(_conn: &Self::Connection) -> u16 {
             crate::types::SQL_NC_HIGH
         }
         // No "minimal" value exists: 0 is not a legal SQL_IDENTIFIER_CASE.
-        fn identifier_case() -> u16 {
+        fn identifier_case(_conn: &Self::Connection) -> u16 {
             crate::types::SQL_IC_SENSITIVE
         }
-        fn correlation_name() -> u16 {
+        fn correlation_name(_conn: &Self::Connection) -> u16 {
             crate::types::SQL_CN_NONE
         }
-        fn non_nullable_columns() -> u16 {
+        fn non_nullable_columns(_conn: &Self::Connection) -> u16 {
             crate::types::SQL_NNC_NULL
         }
-        fn expressions_in_order_by() -> bool {
+        fn expressions_in_order_by(_conn: &Self::Connection) -> bool {
             false
         }
         // Conforms to no SQL-92 level, which is consistent with the values
         // above -- an entry-level claim would contradict SQL_CN_NONE and
         // SQL_NNC_NULL.
-        fn sql_conformance() -> u32 {
+        fn sql_conformance(_conn: &Self::Connection) -> u32 {
             0
         }
-        fn timedate_add_intervals() -> u32 {
+        fn timedate_add_intervals(_conn: &Self::Connection) -> u32 {
             0
         }
-        fn timedate_diff_intervals() -> u32 {
+        fn timedate_diff_intervals(_conn: &Self::Connection) -> u32 {
             0
         }
-        fn subqueries() -> u32 {
+        fn subqueries(_conn: &Self::Connection) -> u32 {
             0
         }
-        fn column_alias() -> bool {
+        fn column_alias(_conn: &Self::Connection) -> bool {
             false
         }
-        fn concat_null_behavior() -> u16 {
+        fn concat_null_behavior(_conn: &Self::Connection) -> u16 {
             crate::types::SQL_CB_NULL
         }
-        fn union_support() -> u32 {
+        fn union_support(_conn: &Self::Connection) -> u32 {
             0
         }
-        fn convert_functions() -> u32 {
+        fn convert_functions(_conn: &Self::Connection) -> u32 {
             0
         }
-        fn order_by_columns_in_select() -> bool {
+        fn order_by_columns_in_select(_conn: &Self::Connection) -> bool {
             true
         }
-        fn accessible_tables() -> bool {
+        fn accessible_tables(_conn: &Self::Connection) -> bool {
             false
         }
-        fn data_source_read_only() -> bool {
+        fn data_source_read_only(_conn: &Self::Connection) -> bool {
             false
         }
-        fn search_pattern_escape() -> &'static str {
+        fn search_pattern_escape(_conn: &Self::Connection) -> &'static str {
             ""
         }
     };
@@ -197,7 +197,7 @@ impl Backend for MockBackend {
     fn get_functions() -> &'static [crate::function_id::FunctionId] {
         &[]
     }
-    fn get_type_info() -> &'static [TypeInfoRow] {
+    fn get_type_info(_conn: &Self::Connection) -> &'static [TypeInfoRow] {
         &[]
     }
     fn tables(
@@ -219,30 +219,30 @@ impl Backend for MockBackend {
         Err(MockError)
     }
 
-    fn supports_catalogs() -> bool {
+    fn supports_catalogs(_conn: &Self::Connection) -> bool {
         true
     }
-    fn supports_schemas() -> bool {
+    fn supports_schemas(_conn: &Self::Connection) -> bool {
         true
     }
     // Deliberately non-zero and not a round number: these values are only
     // correct in a test if `default_get_info` actually read them from the
     // backend. The previous implementation returned a hard-coded 0 for both,
     // which a zero-valued mock could not have distinguished.
-    fn alter_table_support() -> u32 {
+    fn alter_table_support(_conn: &Self::Connection) -> u32 {
         crate::types::SQL_AT_ADD_COLUMN_SINGLE | crate::types::SQL_AT_DROP_COLUMN_RESTRICT
     }
-    fn outer_join_capabilities() -> u32 {
+    fn outer_join_capabilities(_conn: &Self::Connection) -> u32 {
         crate::types::SQL_OJ_LEFT | crate::types::SQL_OJ_NESTED
     }
     // Deliberately SERIALIZABLE, not READ_COMMITTED. READ_COMMITTED is the
     // value core would most plausibly reach for if it answered the unset
     // `SQL_ATTR_TXN_ISOLATION` itself, and a mock declaring it could not tell
     // the hook being consulted from a constant that happens to agree.
-    fn default_txn_isolation() -> u32 {
+    fn default_txn_isolation(_conn: &Self::Connection) -> u32 {
         crate::types::SQL_TXN_SERIALIZABLE
     }
-    fn txn_isolation_options() -> u32 {
+    fn txn_isolation_options(_conn: &Self::Connection) -> u32 {
         crate::types::SQL_TXN_SERIALIZABLE
     }
 
@@ -252,33 +252,33 @@ impl Backend for MockBackend {
     // bad example as well as a bad test fixture. Each value is also
     // deliberately *not* the old core default, so a test cannot pass by
     // accident against the hard-coded value it replaced.
-    fn group_by() -> u16 {
+    fn group_by(_conn: &Self::Connection) -> u16 {
         crate::types::SQL_GB_GROUP_BY_EQUALS_SELECT // was SQL_GB_NO_RELATION
     }
-    fn null_collation() -> u16 {
+    fn null_collation(_conn: &Self::Connection) -> u16 {
         crate::types::SQL_NC_END // was SQL_NC_HIGH (0), via the shape default
     }
-    fn identifier_case() -> u16 {
+    fn identifier_case(_conn: &Self::Connection) -> u16 {
         crate::types::SQL_IC_UPPER
     }
-    fn correlation_name() -> u16 {
+    fn correlation_name(_conn: &Self::Connection) -> u16 {
         crate::types::SQL_CN_ANY // was SQL_CN_NONE (0)
     }
-    fn non_nullable_columns() -> u16 {
+    fn non_nullable_columns(_conn: &Self::Connection) -> u16 {
         crate::types::SQL_NNC_NON_NULL // was SQL_NNC_NULL (0)
     }
-    fn expressions_in_order_by() -> bool {
+    fn expressions_in_order_by(_conn: &Self::Connection) -> bool {
         true // was "" -- neither "Y" nor "N"
     }
-    fn sql_conformance() -> u32 {
+    fn sql_conformance(_conn: &Self::Connection) -> u32 {
         crate::types::SQL_SC_SQL92_ENTRY
     }
     // Deliberately different from each other, so one hook cannot serve both
     // without a test noticing.
-    fn timedate_add_intervals() -> u32 {
+    fn timedate_add_intervals(_conn: &Self::Connection) -> u32 {
         crate::types::SQL_FN_TSI_SECOND | crate::types::SQL_FN_TSI_DAY
     }
-    fn timedate_diff_intervals() -> u32 {
+    fn timedate_diff_intervals(_conn: &Self::Connection) -> u32 {
         crate::types::SQL_FN_TSI_SECOND | crate::types::SQL_FN_TSI_YEAR
     }
 
@@ -286,41 +286,41 @@ impl Backend for MockBackend {
     // this mock's `SQL_SC_SQL92_ENTRY` claim honest: `SQL_SQL_CONFORMANCE`
     // constrains each of the first three, so declaring a level and then
     // contradicting it here would make the mock itself a bad example.
-    fn subqueries() -> u32 {
+    fn subqueries(_conn: &Self::Connection) -> u32 {
         crate::types::SQL_SQ_COMPARISON
             | crate::types::SQL_SQ_EXISTS
             | crate::types::SQL_SQ_IN
             | crate::types::SQL_SQ_QUANTIFIED
             | crate::types::SQL_SQ_CORRELATED_SUBQUERIES
     }
-    fn column_alias() -> bool {
+    fn column_alias(_conn: &Self::Connection) -> bool {
         true
     }
-    fn concat_null_behavior() -> u16 {
+    fn concat_null_behavior(_conn: &Self::Connection) -> u16 {
         crate::types::SQL_CB_NULL
     }
-    fn union_support() -> u32 {
+    fn union_support(_conn: &Self::Connection) -> u32 {
         crate::types::SQL_U_UNION | crate::types::SQL_U_UNION_ALL
     }
-    fn convert_functions() -> u32 {
+    fn convert_functions(_conn: &Self::Connection) -> u32 {
         crate::types::SQL_FN_CVT_CAST
     }
-    fn order_by_columns_in_select() -> bool {
+    fn order_by_columns_in_select(_conn: &Self::Connection) -> bool {
         false
     }
-    fn accessible_tables() -> bool {
+    fn accessible_tables(_conn: &Self::Connection) -> bool {
         false
     }
-    fn data_source_read_only() -> bool {
+    fn data_source_read_only(_conn: &Self::Connection) -> bool {
         false
     }
-    fn search_pattern_escape() -> &'static str {
+    fn search_pattern_escape(_conn: &Self::Connection) -> &'static str {
         "\\"
     }
     // Deliberately mixed: `SELECT` is in `ODBC_RESERVED_KEYWORDS` and must be
     // subtracted out, the other two are not and must survive. Unsorted, so the
     // ordering guarantee is exercised too.
-    fn keywords() -> &'static [&'static str] {
+    fn keywords(_conn: &Self::Connection) -> &'static [&'static str] {
         &["MOCK_PRAGMA", "SELECT", "MOCK_ATTACH"]
     }
 }
@@ -367,7 +367,7 @@ impl Backend for MockNoCatalogBackend {
     fn get_functions() -> &'static [crate::function_id::FunctionId] {
         &[]
     }
-    fn get_type_info() -> &'static [TypeInfoRow] {
+    fn get_type_info(_conn: &Self::Connection) -> &'static [TypeInfoRow] {
         &[]
     }
     fn tables(
@@ -389,22 +389,22 @@ impl Backend for MockNoCatalogBackend {
         Err(MockError)
     }
 
-    fn supports_catalogs() -> bool {
+    fn supports_catalogs(_conn: &Self::Connection) -> bool {
         false
     }
-    fn supports_schemas() -> bool {
+    fn supports_schemas(_conn: &Self::Connection) -> bool {
         false
     }
-    fn alter_table_support() -> u32 {
+    fn alter_table_support(_conn: &Self::Connection) -> u32 {
         0
     }
-    fn outer_join_capabilities() -> u32 {
+    fn outer_join_capabilities(_conn: &Self::Connection) -> u32 {
         0
     }
-    fn default_txn_isolation() -> u32 {
+    fn default_txn_isolation(_conn: &Self::Connection) -> u32 {
         0
     }
-    fn txn_isolation_options() -> u32 {
+    fn txn_isolation_options(_conn: &Self::Connection) -> u32 {
         0
     }
 
@@ -460,7 +460,7 @@ macro_rules! mock_keywords_backend {
             fn get_functions() -> &'static [crate::function_id::FunctionId] {
                 &[]
             }
-            fn get_type_info() -> &'static [TypeInfoRow] {
+            fn get_type_info(_conn: &Self::Connection) -> &'static [TypeInfoRow] {
                 &[]
             }
             fn tables(
@@ -482,22 +482,22 @@ macro_rules! mock_keywords_backend {
                 Err(MockError)
             }
 
-            fn supports_catalogs() -> bool {
+            fn supports_catalogs(_conn: &Self::Connection) -> bool {
                 false
             }
-            fn supports_schemas() -> bool {
+            fn supports_schemas(_conn: &Self::Connection) -> bool {
                 false
             }
-            fn alter_table_support() -> u32 {
+            fn alter_table_support(_conn: &Self::Connection) -> u32 {
                 0
             }
-            fn outer_join_capabilities() -> u32 {
+            fn outer_join_capabilities(_conn: &Self::Connection) -> u32 {
                 0
             }
-            fn default_txn_isolation() -> u32 {
+            fn default_txn_isolation(_conn: &Self::Connection) -> u32 {
                 0
             }
-            fn txn_isolation_options() -> u32 {
+            fn txn_isolation_options(_conn: &Self::Connection) -> u32 {
                 0
             }
 
@@ -580,7 +580,7 @@ impl Backend for MockAltBackend {
     fn get_functions() -> &'static [crate::function_id::FunctionId] {
         &[]
     }
-    fn get_type_info() -> &'static [TypeInfoRow] {
+    fn get_type_info(_conn: &Self::Connection) -> &'static [TypeInfoRow] {
         &[]
     }
     fn tables(
@@ -602,85 +602,85 @@ impl Backend for MockAltBackend {
         Err(MockError)
     }
 
-    fn supports_catalogs() -> bool {
+    fn supports_catalogs(_conn: &Self::Connection) -> bool {
         false
     }
-    fn supports_schemas() -> bool {
+    fn supports_schemas(_conn: &Self::Connection) -> bool {
         false
     }
-    fn alter_table_support() -> u32 {
+    fn alter_table_support(_conn: &Self::Connection) -> u32 {
         crate::types::SQL_AT_ADD_CONSTRAINT
     }
     // Zero, i.e. no outer joins at all, where `MockBackend` declares
     // LEFT | NESTED. `SQL_OUTER_JOINS` is derived from this, so the two mocks
     // must disagree for the guard test to see that answer move with the
     // backend rather than being decided by core.
-    fn outer_join_capabilities() -> u32 {
+    fn outer_join_capabilities(_conn: &Self::Connection) -> u32 {
         0
     }
-    fn default_txn_isolation() -> u32 {
+    fn default_txn_isolation(_conn: &Self::Connection) -> u32 {
         crate::types::SQL_TXN_READ_UNCOMMITTED
     }
-    fn txn_isolation_options() -> u32 {
+    fn txn_isolation_options(_conn: &Self::Connection) -> u32 {
         crate::types::SQL_TXN_READ_UNCOMMITTED
     }
-    fn group_by() -> u16 {
+    fn group_by(_conn: &Self::Connection) -> u16 {
         crate::types::SQL_GB_NO_RELATION
     }
-    fn identifier_case() -> u16 {
+    fn identifier_case(_conn: &Self::Connection) -> u16 {
         crate::types::SQL_IC_MIXED
     }
-    fn null_collation() -> u16 {
+    fn null_collation(_conn: &Self::Connection) -> u16 {
         crate::types::SQL_NC_LOW
     }
-    fn correlation_name() -> u16 {
+    fn correlation_name(_conn: &Self::Connection) -> u16 {
         crate::types::SQL_CN_DIFFERENT
     }
-    fn non_nullable_columns() -> u16 {
+    fn non_nullable_columns(_conn: &Self::Connection) -> u16 {
         crate::types::SQL_NNC_NULL
     }
-    fn expressions_in_order_by() -> bool {
+    fn expressions_in_order_by(_conn: &Self::Connection) -> bool {
         false
     }
-    fn sql_conformance() -> u32 {
+    fn sql_conformance(_conn: &Self::Connection) -> u32 {
         crate::types::SQL_SC_SQL92_FULL
     }
-    fn timedate_add_intervals() -> u32 {
+    fn timedate_add_intervals(_conn: &Self::Connection) -> u32 {
         crate::types::SQL_FN_TSI_HOUR
     }
-    fn timedate_diff_intervals() -> u32 {
+    fn timedate_diff_intervals(_conn: &Self::Connection) -> u32 {
         crate::types::SQL_FN_TSI_WEEK
     }
-    fn subqueries() -> u32 {
+    fn subqueries(_conn: &Self::Connection) -> u32 {
         crate::types::SQL_SQ_EXISTS
     }
-    fn column_alias() -> bool {
+    fn column_alias(_conn: &Self::Connection) -> bool {
         false
     }
-    fn concat_null_behavior() -> u16 {
+    fn concat_null_behavior(_conn: &Self::Connection) -> u16 {
         crate::types::SQL_CB_NON_NULL
     }
-    fn union_support() -> u32 {
+    fn union_support(_conn: &Self::Connection) -> u32 {
         crate::types::SQL_U_UNION
     }
-    fn convert_functions() -> u32 {
+    fn convert_functions(_conn: &Self::Connection) -> u32 {
         crate::types::SQL_FN_CVT_CONVERT
     }
-    fn order_by_columns_in_select() -> bool {
+    fn order_by_columns_in_select(_conn: &Self::Connection) -> bool {
         true
     }
-    fn accessible_tables() -> bool {
+    fn accessible_tables(_conn: &Self::Connection) -> bool {
         true
     }
-    fn data_source_read_only() -> bool {
+    fn data_source_read_only(_conn: &Self::Connection) -> bool {
         true
     }
-    fn search_pattern_escape() -> &'static str {
+    fn search_pattern_escape(_conn: &Self::Connection) -> &'static str {
         "/"
     }
     // Shares no entry with MockBackend's list, and spells its ODBC-reserved
     // overlap in lower case so the subtraction is proven case-insensitive.
-    fn keywords() -> &'static [&'static str] {
+    fn keywords(_conn: &Self::Connection) -> &'static [&'static str] {
         &["alter", "ALT_VACUUM"]
     }
 
@@ -695,7 +695,7 @@ impl Backend for MockAltBackend {
 
     // Differs from MockBackend's `"`-quoted ANSI dialect, so
     // SQL_IDENTIFIER_QUOTE_CHAR moves with it.
-    fn escape_dialect() -> crate::escape::EscapeDialect {
+    fn escape_dialect(_conn: &Self::Connection) -> crate::escape::EscapeDialect {
         crate::escape::EscapeDialect {
             identifier_quotes: &[('`', '`')],
             ..crate::escape::EscapeDialect::ansi_default()
@@ -768,7 +768,7 @@ macro_rules! mock_isolation_backend {
             fn get_functions() -> &'static [crate::function_id::FunctionId] {
                 &[]
             }
-            fn get_type_info() -> &'static [TypeInfoRow] {
+            fn get_type_info(_conn: &Self::Connection) -> &'static [TypeInfoRow] {
                 &[]
             }
             fn tables(
@@ -790,22 +790,22 @@ macro_rules! mock_isolation_backend {
                 Err(MockError)
             }
 
-            fn supports_catalogs() -> bool {
+            fn supports_catalogs(_conn: &Self::Connection) -> bool {
                 true
             }
-            fn supports_schemas() -> bool {
+            fn supports_schemas(_conn: &Self::Connection) -> bool {
                 true
             }
-            fn alter_table_support() -> u32 {
+            fn alter_table_support(_conn: &Self::Connection) -> u32 {
                 0
             }
-            fn outer_join_capabilities() -> u32 {
+            fn outer_join_capabilities(_conn: &Self::Connection) -> u32 {
                 0
             }
-            fn default_txn_isolation() -> u32 {
+            fn default_txn_isolation(_conn: &Self::Connection) -> u32 {
                 $default
             }
-            fn txn_isolation_options() -> u32 {
+            fn txn_isolation_options(_conn: &Self::Connection) -> u32 {
                 $options
             }
 
@@ -905,7 +905,7 @@ macro_rules! mock_txn_backend {
             fn get_functions() -> &'static [crate::function_id::FunctionId] {
                 &[]
             }
-            fn get_type_info() -> &'static [TypeInfoRow] {
+            fn get_type_info(_conn: &Self::Connection) -> &'static [TypeInfoRow] {
                 &[]
             }
             fn tables(
@@ -953,24 +953,24 @@ macro_rules! mock_txn_backend {
                 $rollback
             }
 
-            fn supports_catalogs() -> bool {
+            fn supports_catalogs(_conn: &Self::Connection) -> bool {
                 true
             }
-            fn supports_schemas() -> bool {
+            fn supports_schemas(_conn: &Self::Connection) -> bool {
                 true
             }
-            fn alter_table_support() -> u32 {
+            fn alter_table_support(_conn: &Self::Connection) -> u32 {
                 0
             }
-            fn outer_join_capabilities() -> u32 {
+            fn outer_join_capabilities(_conn: &Self::Connection) -> u32 {
                 0
             }
             // A single supported level, so `Backend::set_txn_isolation`'s
             // default applies it without these mocks overriding anything.
-            fn default_txn_isolation() -> u32 {
+            fn default_txn_isolation(_conn: &Self::Connection) -> u32 {
                 crate::types::SQL_TXN_SERIALIZABLE
             }
-            fn txn_isolation_options() -> u32 {
+            fn txn_isolation_options(_conn: &Self::Connection) -> u32 {
                 crate::types::SQL_TXN_SERIALIZABLE
             }
 
@@ -1081,7 +1081,7 @@ impl Backend for MockTypeInfoBackend {
     fn get_functions() -> &'static [crate::function_id::FunctionId] {
         &[]
     }
-    fn get_type_info() -> &'static [TypeInfoRow] {
+    fn get_type_info(_conn: &Self::Connection) -> &'static [TypeInfoRow] {
         Self::TYPES
     }
     fn tables(
@@ -1103,22 +1103,22 @@ impl Backend for MockTypeInfoBackend {
         Err(MockError)
     }
 
-    fn supports_catalogs() -> bool {
+    fn supports_catalogs(_conn: &Self::Connection) -> bool {
         false
     }
-    fn supports_schemas() -> bool {
+    fn supports_schemas(_conn: &Self::Connection) -> bool {
         false
     }
-    fn alter_table_support() -> u32 {
+    fn alter_table_support(_conn: &Self::Connection) -> u32 {
         0
     }
-    fn outer_join_capabilities() -> u32 {
+    fn outer_join_capabilities(_conn: &Self::Connection) -> u32 {
         0
     }
-    fn default_txn_isolation() -> u32 {
+    fn default_txn_isolation(_conn: &Self::Connection) -> u32 {
         0
     }
-    fn txn_isolation_options() -> u32 {
+    fn txn_isolation_options(_conn: &Self::Connection) -> u32 {
         0
     }
 
@@ -1180,7 +1180,7 @@ impl Backend for MockFunctionsBackend {
             F::Fetch,
         ]
     }
-    fn get_type_info() -> &'static [TypeInfoRow] {
+    fn get_type_info(_conn: &Self::Connection) -> &'static [TypeInfoRow] {
         &[]
     }
     fn tables(
@@ -1202,22 +1202,22 @@ impl Backend for MockFunctionsBackend {
         Err(MockError)
     }
 
-    fn supports_catalogs() -> bool {
+    fn supports_catalogs(_conn: &Self::Connection) -> bool {
         false
     }
-    fn supports_schemas() -> bool {
+    fn supports_schemas(_conn: &Self::Connection) -> bool {
         false
     }
-    fn alter_table_support() -> u32 {
+    fn alter_table_support(_conn: &Self::Connection) -> u32 {
         0
     }
-    fn outer_join_capabilities() -> u32 {
+    fn outer_join_capabilities(_conn: &Self::Connection) -> u32 {
         0
     }
-    fn default_txn_isolation() -> u32 {
+    fn default_txn_isolation(_conn: &Self::Connection) -> u32 {
         0
     }
-    fn txn_isolation_options() -> u32 {
+    fn txn_isolation_options(_conn: &Self::Connection) -> u32 {
         0
     }
 
@@ -1288,7 +1288,7 @@ impl Backend for MockFailingCloseBackend {
     fn get_functions() -> &'static [crate::function_id::FunctionId] {
         &[]
     }
-    fn get_type_info() -> &'static [TypeInfoRow] {
+    fn get_type_info(_conn: &Self::Connection) -> &'static [TypeInfoRow] {
         &[]
     }
     fn tables(
@@ -1327,22 +1327,22 @@ impl Backend for MockFailingCloseBackend {
         crate::types::CursorBehavior::Close
     }
 
-    fn supports_catalogs() -> bool {
+    fn supports_catalogs(_conn: &Self::Connection) -> bool {
         false
     }
-    fn supports_schemas() -> bool {
+    fn supports_schemas(_conn: &Self::Connection) -> bool {
         false
     }
-    fn alter_table_support() -> u32 {
+    fn alter_table_support(_conn: &Self::Connection) -> u32 {
         0
     }
-    fn outer_join_capabilities() -> u32 {
+    fn outer_join_capabilities(_conn: &Self::Connection) -> u32 {
         0
     }
-    fn default_txn_isolation() -> u32 {
+    fn default_txn_isolation(_conn: &Self::Connection) -> u32 {
         crate::types::SQL_TXN_SERIALIZABLE
     }
-    fn txn_isolation_options() -> u32 {
+    fn txn_isolation_options(_conn: &Self::Connection) -> u32 {
         crate::types::SQL_TXN_SERIALIZABLE
     }
 

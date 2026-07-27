@@ -160,7 +160,7 @@ pub unsafe fn sql_exec_direct_w<B: Backend>(
             let sql = if noscan {
                 sql
             } else {
-                crate::escape::translate_escapes(&sql, &B::escape_dialect())?
+                crate::escape::translate_escapes(&sql, &B::escape_dialect(connection))?
             };
 
             // Check for data-at-execution parameters.
@@ -315,18 +315,9 @@ pub unsafe fn sql_prepare_w<B: Backend>(
             }
 
             let sql = utf16_to_string(statement_text, text_length)?;
-            // Spec: SQL_ATTR_NOSCAN=SQL_NOSCAN_ON disables escape-sequence
-            // scanning; otherwise translate before counting `?` markers:
-            // escapes never contain them, so translation cannot move a
-            // marker's position.
-            let sql = if noscan {
-                sql
-            } else {
-                crate::escape::translate_escapes(&sql, &B::escape_dialect())?
-            };
-            let param_count = crate::ffi::params::count_params(&sql);
 
-            // Get parent connection.
+            // Resolved before translating, because the escape dialect is a
+            // property of the connection.
             let conn_ptr = stmt.conn;
             let conn = as_handle_ref::<ConnectionHandle<B>>(conn_ptr)?;
             let Some(ref connection) = conn.connection else {
@@ -335,6 +326,17 @@ pub unsafe fn sql_prepare_w<B: Backend>(
                     SqlState::function_sequence_error(),
                 ));
             };
+
+            // Spec: SQL_ATTR_NOSCAN=SQL_NOSCAN_ON disables escape-sequence
+            // scanning; otherwise translate before counting `?` markers:
+            // escapes never contain them, so translation cannot move a
+            // marker's position.
+            let sql = if noscan {
+                sql
+            } else {
+                crate::escape::translate_escapes(&sql, &B::escape_dialect(connection))?
+            };
+            let param_count = crate::ffi::params::count_params(&sql);
 
             // Ask backend to validate and prepare the statement.
             let prepared = B::prepare(connection, &sql).into_odbc()?;

@@ -60,9 +60,11 @@ fn apply_pending_autocommit<B: Backend>(handle: &mut ConnectionHandle<B>) -> Res
 /// Apply a `SQL_ATTR_TXN_ISOLATION` value that was set before the connection
 /// was open. See [`apply_pending_connect_attrs`].
 ///
-/// The value was already validated against
-/// [`Backend::txn_isolation_options`] when it was set, so this only has to
-/// apply it.
+/// A value set before the connection existed was checked only for naming
+/// exactly one level: [`Backend::txn_isolation_options`] is the data source's
+/// answer and could not be consulted yet. That check happens here, against the
+/// connection this is about to apply the level to, so an unsupported level
+/// fails the connect rather than being applied silently.
 fn apply_pending_txn_isolation<B: Backend>(
     handle: &mut ConnectionHandle<B>,
 ) -> Result<(), OdbcError> {
@@ -72,6 +74,7 @@ fn apply_pending_txn_isolation<B: Backend>(
     let Some(connection) = handle.connection.as_ref() else {
         return Ok(());
     };
+    validate_txn_isolation::<B>(Some(connection), val as u32)?;
     B::set_txn_isolation(connection, val as u32).into_odbc()
 }
 
@@ -83,14 +86,25 @@ fn apply_pending_txn_isolation<B: Backend>(
 /// level must appear in [`Backend::txn_isolation_options`], which is what
 /// `SQLGetInfo(SQL_TXN_ISOLATION_OPTION)` reports to the application as the
 /// menu to choose from.
-fn validate_txn_isolation<B: Backend>(level: u32) -> Result<(), OdbcError> {
-    let supported = B::txn_isolation_options();
+fn validate_txn_isolation<B: Backend>(
+    conn: Option<&B::Connection>,
+    level: u32,
+) -> Result<(), OdbcError> {
+    // Structural check first, because it holds with or without a connection:
+    // the spec lets this attribute be set on either side of one.
     if level == 0 || !level.is_power_of_two() {
         return Err(OdbcError::general(
             format!("SQL_ATTR_TXN_ISOLATION: {level:#x} does not name exactly one isolation level"),
             SqlState::invalid_attribute_value(),
         ));
     }
+    // The supported set is the data source's, so it cannot be consulted before
+    // a connection exists. A level set early is checked against it by
+    // `apply_pending_txn_isolation` once the connection is up.
+    let Some(conn) = conn else {
+        return Ok(());
+    };
+    let supported = B::txn_isolation_options(conn);
     if level & supported == 0 {
         return Err(OdbcError::general(
             format!(
@@ -298,7 +312,7 @@ pub unsafe fn sql_set_connect_attr_w<B: Backend>(
                             SqlState::invalid_attribute_value(),
                         )
                     })?;
-                    validate_txn_isolation::<B>(level)?;
+                    validate_txn_isolation::<B>(conn.connection.as_ref(), level)?;
                     // Applied here when connected; deferred to
                     // `apply_pending_txn_isolation` at connect otherwise, since
                     // the spec lists this attribute as settable either side of
@@ -493,11 +507,14 @@ pub unsafe fn sql_get_connect_attr_w<B: Backend>(
                     // `SQL_DEFAULT_TXN_ISOLATION` is derived from the same hook
                     // (see `default_get_info`), so the info type and the
                     // connection attribute cannot disagree on one connection.
-                    let v = conn
-                        .attrs
-                        .get(&attribute)
-                        .copied()
-                        .unwrap_or(B::default_txn_isolation() as usize);
+                    // The declared default needs the connection; with none
+                    // there is no data source to have a default, so an unset
+                    // attribute reads as 0 until one exists.
+                    let declared = conn
+                        .connection
+                        .as_ref()
+                        .map_or(0, |c| B::default_txn_isolation(c) as usize);
+                    let v = conn.attrs.get(&attribute).copied().unwrap_or(declared);
                     write_u32(v as u32);
                     Ok(SqlReturn::SUCCESS)
                 }
@@ -595,7 +612,8 @@ mod tests {
     use crate::ffi::handle::{sql_alloc_handle, sql_free_handle};
     use crate::handles::as_handle_ref;
     use crate::test_utils::{
-        MockBackend, MockIsolationBackend, MockIsolationConnection, MockUnappliedIsolationBackend,
+        MockBackend, MockConnection, MockIsolationBackend, MockIsolationConnection,
+        MockUnappliedIsolationBackend,
     };
     use odbc_sys::HandleType;
 
@@ -1054,10 +1072,14 @@ mod tests {
     /// `SQL_TXN_READ_COMMITTED` — makes a backend that reports
     /// `SQL_TXN_SERIALIZABLE` for `SQL_DEFAULT_TXN_ISOLATION` contradict itself
     /// on the same connection.
+    ///
+    /// Connected first, because the declared default is the data source's and
+    /// [`Backend::default_txn_isolation`] takes the connection to read it from.
     #[test]
     fn get_txn_isolation_default_comes_from_the_backend() {
         unsafe {
             let (env, conn) = alloc_env_conn();
+            assert_eq!(driver_connect::<MockBackend>(conn), SqlReturn::SUCCESS);
             let mut val: u32 = 99;
             let ret = sql_get_connect_attr_w::<MockBackend>(
                 conn,
@@ -1069,12 +1091,12 @@ mod tests {
             assert_eq!(ret, SqlReturn::SUCCESS);
             assert_eq!(
                 val,
-                MockBackend::default_txn_isolation(),
+                MockBackend::default_txn_isolation(&MockConnection),
                 "unset SQL_ATTR_TXN_ISOLATION ignored Backend::default_txn_isolation"
             );
             assert_ne!(
                 val, SQL_TXN_READ_COMMITTED,
-                "still reporting the old hard-coded READ_COMMITTED"
+                "reported a constant rather than the backend's declared level"
             );
             cleanup(env, conn);
         }
@@ -1084,10 +1106,15 @@ mod tests {
     /// "For all other connection and statement attributes, the driver must
     /// verify the value specified in ValuePtr". A level outside
     /// `SQL_TXN_ISOLATION_OPTION` is not one the data source can run at.
+    ///
+    /// Connected first: the supported set is the data source's, so a level set
+    /// before there is a connection is checked only for naming exactly one
+    /// level, and against the set by `apply_pending_txn_isolation` at connect.
     #[test]
     fn set_txn_isolation_rejects_a_level_the_backend_does_not_support() {
         unsafe {
             let (env, conn) = alloc_env_conn();
+            assert_eq!(driver_connect::<MockBackend>(conn), SqlReturn::SUCCESS);
             // MockBackend declares SERIALIZABLE only.
             let ret = sql_set_connect_attr_w::<MockBackend>(
                 conn,

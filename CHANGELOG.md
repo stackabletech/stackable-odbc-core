@@ -124,6 +124,48 @@ markers go away and this section becomes the initial-release notes.
 
 ### Changed
 
+- **Breaking.** The `Backend` capability declarations take
+  `&Self::Connection`. `SQLGetInfo` is a per-connection call, so what a data
+  source can do is a property of the connection rather than of the driver
+  binary; as associated functions these forced a driver to pick one answer for
+  every server it would ever talk to. A backend gating a capability on server
+  version can now read it from the connection, which is what `types::version`
+  was added for and had no way to be used for.
+
+  Affected: the 25 required capability methods (`supports_catalogs`,
+  `supports_schemas`, `alter_table_support`, `outer_join_capabilities`,
+  `group_by`, `null_collation`, `identifier_case`, `correlation_name`,
+  `non_nullable_columns`, `expressions_in_order_by`, `sql_conformance`,
+  `subqueries`, `column_alias`, `concat_null_behavior`, `union_support`,
+  `convert_functions`, `order_by_columns_in_select`, `accessible_tables`,
+  `data_source_read_only`, `search_pattern_escape`, `keywords`,
+  `timedate_add_intervals`, `timedate_diff_intervals`, `default_txn_isolation`,
+  `txn_isolation_options`), plus `get_type_info` and `escape_dialect`.
+
+  Three declarations deliberately keep no connection: `cursor_commit_behavior`,
+  `cursor_rollback_behavior` and `catalog_result_column_widths`. The first two
+  because `SQLGetInfo` must answer `SQL_CURSOR_COMMIT_BEHAVIOR` and
+  `SQL_CURSOR_ROLLBACK_BEHAVIOR` before a connection exists — the Windows Driver
+  Manager queries info types ahead of `SQLDriverConnectW`, and the fallback
+  there is `SQL_CB_DELETE`, the claim those hooks exist to stop core inventing.
+  The third because four catalog functions return an empty result set without
+  resolving a connection, and requiring one would add a lookup and an error path
+  to paths that have neither. The rule: a declaration `SQLGetInfo` has to answer
+  without a connection cannot ask for one.
+
+  `default_get_info` and `common_get_info_raw` take `Option<&B::Connection>`
+  accordingly. Pre-connect they answer only what is knowable without a data
+  source — driver identity, core's own implementation facts, and the limits the
+  spec defines `0` for — and return `None` for the rest, where they previously
+  answered from an invented value.
+
+  Two consequences worth noting for drivers. `SQLGetTypeInfo` now requires an
+  open connection, since the type list is the data source's. And
+  `SQL_ATTR_TXN_ISOLATION` set before connecting is checked only for naming
+  exactly one level; the check against `txn_isolation_options` moves to connect
+  time, in `apply_pending_txn_isolation`, so an unsupported level fails the
+  connect rather than being applied silently.
+
 - `#![deny(missing_docs)]`, with the 183 doc comments it required. Every public
   item now documents itself, including all 78 `FunctionId` variants, the 43
   catalog result-set column variants, the 19 `SQLGetTypeInfo` row fields, every

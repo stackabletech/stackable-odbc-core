@@ -199,7 +199,7 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// Called by `SQLGetTypeInfoW`. The returned slice should include both ANSI and Unicode
     /// type variants so that ODBC applications can match on `SQL_VARCHAR` as well as
     /// `SQL_WVARCHAR`.
-    fn get_type_info() -> &'static [TypeInfoRow];
+    fn get_type_info(conn: &Self::Connection) -> &'static [TypeInfoRow];
 
     /// Returns a result set describing tables matching the given filter criteria.
     ///
@@ -399,7 +399,7 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// identifier quotes, date-literal rendering). Called by the generic
     /// `SQLExecDirect`/`SQLPrepare`/`SQLNativeSql` translation. The default is a
     /// neutral ANSI dialect.
-    fn escape_dialect() -> crate::escape::EscapeDialect {
+    fn escape_dialect(_conn: &Self::Connection) -> crate::escape::EscapeDialect {
         crate::escape::EscapeDialect::ansi_default()
     }
 
@@ -416,9 +416,43 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// driver for a source that *does* impose one -- PostgreSQL's 63-character
     /// `NAMEDATALEN - 1`, say -- overrides this, and both its catalog result
     /// sets and its `SQL_MAX_*_NAME_LEN` answers follow from the one override.
+    ///
+    /// Deliberately takes no connection, unlike the capability methods below.
+    /// Four of the catalog functions it serves — `SQLProcedures`,
+    /// `SQLProcedureColumns`, `SQLColumnPrivileges` and `SQLTablePrivileges` —
+    /// return an empty result set without resolving one, and requiring a
+    /// connection here would put a connection lookup, and an error path, into
+    /// paths that have neither. A driver whose identifier limit varies by
+    /// server version reports the widest form here and narrows the
+    /// `SQL_MAX_*_NAME_LEN` answers through the per-connection hooks.
     fn catalog_result_column_widths() -> CatalogResultColumnWidths {
         CatalogResultColumnWidths::default()
     }
+
+    // ------------------------------------------------------------------
+    // Capability declarations
+    //
+    // Each takes `&Self::Connection`, because `SQLGetInfo` is a
+    // *per-connection* call: what a data source can do is a property of the
+    // connection, not of the driver binary. A backend whose answer depends on
+    // the server version reads it from the connection here; one whose answer is
+    // fixed ignores the argument. Modelling these as associated functions would
+    // make a driver pick one answer for every server it ever talks to.
+    //
+    // Two kinds of declaration deliberately take no connection:
+    //
+    // - `cursor_commit_behavior` and `cursor_rollback_behavior`, because
+    //   `SQLGetInfo` must answer `SQL_CURSOR_COMMIT_BEHAVIOR` and
+    //   `SQL_CURSOR_ROLLBACK_BEHAVIOR` *before* a connection exists -- the
+    //   Windows Driver Manager queries info types ahead of
+    //   `SQLDriverConnectW`, and falling through to the shape default there
+    //   answers `SQL_CB_DELETE`, which is the exact claim these hooks exist to
+    //   stop core from inventing.
+    // - `catalog_result_column_widths`, for the reason given above it.
+    //
+    // The rule those two cases share: a declaration `SQLGetInfo` has to answer
+    // without a connection cannot ask for one. Everything else does.
+    // ------------------------------------------------------------------
 
     /// Whether this data source exposes ODBC **catalogs**.
     ///
@@ -446,7 +480,7 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// `SQL_CATALOG_USAGE` become genuinely data-source-specific; core returns
     /// `None` for them rather than inventing a value, so a backend with
     /// catalogs answers those two itself.
-    fn supports_catalogs() -> bool;
+    fn supports_catalogs(conn: &Self::Connection) -> bool;
 
     /// Whether this data source exposes ODBC **schemas**.
     ///
@@ -459,7 +493,7 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// There is no `SQL_SCHEMA_NAME` info type; the spec directs applications
     /// to `SQL_CATALOG_NAME` for both questions, so this hook is the only
     /// place the schema fact is stated.
-    fn supports_schemas() -> bool;
+    fn supports_schemas(conn: &Self::Connection) -> bool;
 
     /// The `SQL_ALTER_TABLE` (86) capability bitmask — an OR of the
     /// [`SQL_AT_*`](crate::types::SQL_AT_ADD_COLUMN_SINGLE) constants.
@@ -469,14 +503,14 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// all", which is a claim, not an absence of one. A backend author is
     /// unlikely to notice a capability they never wrote code for, so the
     /// compiler asks instead. Return `0` only if that is genuinely true.
-    fn alter_table_support() -> u32;
+    fn alter_table_support(conn: &Self::Connection) -> u32;
 
     /// The `SQL_OJ_CAPABILITIES` (115) bitmask — an OR of the
     /// [`SQL_OJ_*`](crate::types::SQL_OJ_LEFT) constants.
     ///
     /// Required for the same reason as [`Backend::alter_table_support`]: `0`
     /// asserts that the data source supports no outer joins whatsoever.
-    fn outer_join_capabilities() -> u32;
+    fn outer_join_capabilities(conn: &Self::Connection) -> u32;
 
     /// The `SQL_GROUP_BY` (88) relationship between the columns in a
     /// `GROUP BY` clause and the non-aggregated columns in the select list —
@@ -488,7 +522,7 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// `SQL_GB_NO_RELATION` is one the spec says an entry-level driver does not
     /// return — "a SQL-92 Entry level-conformant driver will always return the
     /// SQL_GB_GROUP_BY_EQUALS_SELECT option as supported."
-    fn group_by() -> u16;
+    fn group_by(conn: &Self::Connection) -> u16;
 
     /// The `SQL_NULL_COLLATION` (85) position of NULLs in a sorted result set
     /// — one of the [`SQL_NC_*`](crate::types::SQL_NC_END) values.
@@ -497,7 +531,7 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// substantive answer ("NULLs sort high, depending on ASC/DESC") rather
     /// than an absence of one — so a shape-derived default would silently make
     /// that claim for every backend.
-    fn null_collation() -> u16;
+    fn null_collation(conn: &Self::Connection) -> u16;
 
     /// How the data source treats *unquoted* identifiers —
     /// `SQL_IDENTIFIER_CASE` (28), one of the
@@ -513,7 +547,7 @@ pub trait Backend: Sized + Send + Sync + 'static {
     ///
     /// Distinct from `SQL_QUOTED_IDENTIFIER_CASE`, which describes *quoted*
     /// identifiers and which [`common_get_info_raw`] answers.
-    fn identifier_case() -> u16;
+    fn identifier_case(conn: &Self::Connection) -> u16;
 
     /// The `SQL_CORRELATION_NAME` (74) support level — one of the
     /// [`SQL_CN_*`](crate::types::SQL_CN_ANY) values.
@@ -522,7 +556,7 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// "correlation names are not supported". The spec also ties this to
     /// [`Backend::sql_conformance`]: "a SQL-92 Entry level-conformant driver
     /// will always return SQL_CN_ANY."
-    fn correlation_name() -> u16;
+    fn correlation_name(conn: &Self::Connection) -> u16;
 
     /// The `SQL_NON_NULLABLE_COLUMNS` (75) answer to whether the data source
     /// supports `NOT NULL` — [`SQL_NNC_NULL`](crate::types::SQL_NNC_NULL) or
@@ -531,7 +565,7 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// Required because `0` is `SQL_NNC_NULL`, "all columns must be nullable".
     /// The spec ties this to [`Backend::sql_conformance`] too: "a SQL-92 Entry
     /// level-conformant driver will return SQL_NNC_NON_NULL."
-    fn non_nullable_columns() -> u16;
+    fn non_nullable_columns(conn: &Self::Connection) -> u16;
 
     /// Whether the data source supports expressions (not just column names) in
     /// an `ORDER BY` list — `SQL_EXPRESSIONS_IN_ORDERBY` (27), reported as
@@ -541,7 +575,7 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// application acts on: a tool deciding whether to push `ORDER BY
     /// lower(name)` down to the data source reads this, and both a wrong `"N"`
     /// and the `""` a shape-derived default would produce read as "no".
-    fn expressions_in_order_by() -> bool;
+    fn expressions_in_order_by(conn: &Self::Connection) -> bool;
 
     /// The `SQL_SQL_CONFORMANCE` (118) level — one of the
     /// [`SQL_SC_*`](crate::types::SQL_SC_SQL92_ENTRY) values.
@@ -552,7 +586,7 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// `SQL_NON_NULLABLE_COLUMNS` values the spec says an entry-level driver
     /// never returns. Declaring a level here is a promise about those three
     /// hooks.
-    fn sql_conformance() -> u32;
+    fn sql_conformance(conn: &Self::Connection) -> u32;
 
     /// The `SQL_SUBQUERIES` (95) bitmask: which predicates accept a subquery,
     /// as an OR of the [`SQL_SQ_*`](crate::types::SQL_SQ_EXISTS) constants.
@@ -562,14 +596,14 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// bits set." Hard-coding that in core would tell a backend declaring no
     /// conformance level at all that it supports correlated subqueries — the
     /// claim a BI tool acts on when it decides to push one down.
-    fn subqueries() -> u32;
+    fn subqueries(conn: &Self::Connection) -> u32;
 
     /// Whether the data source supports column aliases (`SELECT x AS y`) —
     /// `SQL_COLUMN_ALIAS` (87), reported as `"Y"` or `"N"`.
     ///
     /// Constrained by [`Backend::sql_conformance`]: "a SQL-92 Entry
     /// level-conformant driver will always return 'Y'."
-    fn column_alias() -> bool;
+    fn column_alias(conn: &Self::Connection) -> bool;
 
     /// How the data source concatenates a NULL character column with a
     /// non-NULL one — `SQL_CONCAT_NULL_BEHAVIOR` (22), either
@@ -579,13 +613,13 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// Required because `0` is `SQL_CB_NULL`, a substantive answer. Also
     /// constrained by [`Backend::sql_conformance`]: "a SQL-92 Entry
     /// level-conformant driver will always return SQL_CB_NULL."
-    fn concat_null_behavior() -> u16;
+    fn concat_null_behavior(conn: &Self::Connection) -> u16;
 
     /// The `SQL_UNION` (96) bitmask: which of `UNION` and `UNION ALL` the data
     /// source supports, as an OR of
     /// [`SQL_U_UNION`](crate::types::SQL_U_UNION) and
     /// [`SQL_U_UNION_ALL`](crate::types::SQL_U_UNION_ALL).
-    fn union_support() -> u32;
+    fn union_support(conn: &Self::Connection) -> u32;
 
     /// The `SQL_CONVERT_FUNCTIONS` (48) bitmask: which of the ODBC conversion
     /// functions the driver supports, as an OR of
@@ -595,7 +629,7 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// Note this is about `CAST` / `CONVERT` themselves. Which *type pairs*
     /// each can convert between is the separate `SQL_CONVERT_*` family, which
     /// a backend answers through [`Backend::get_info_raw`].
-    fn convert_functions() -> u32;
+    fn convert_functions(conn: &Self::Connection) -> u32;
 
     /// Whether a column named in `ORDER BY` must also appear in the select
     /// list — `SQL_ORDER_BY_COLUMNS_IN_SELECT` (90), reported as `"Y"` or
@@ -604,7 +638,7 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// `false` is the *permissive* answer, so it is a claim rather than an
     /// absence of one: it tells an application it may order by a column it did
     /// not select.
-    fn order_by_columns_in_select() -> bool;
+    fn order_by_columns_in_select(conn: &Self::Connection) -> bool;
 
     /// Whether the connected user is guaranteed `SELECT` on **every** table
     /// `SQLTables` returns — `SQL_ACCESSIBLE_TABLES` (19).
@@ -613,11 +647,11 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// that depends on the connected principal rather than the driver. Return
     /// `false` unless the data source genuinely filters its catalog by
     /// privilege.
-    fn accessible_tables() -> bool;
+    fn accessible_tables(conn: &Self::Connection) -> bool;
 
     /// Whether the data source is read-only — `SQL_DATA_SOURCE_READ_ONLY`
     /// (25), reported as `"Y"` or `"N"`.
-    fn data_source_read_only() -> bool;
+    fn data_source_read_only(conn: &Self::Connection) -> bool;
 
     /// The `SQL_SEARCH_PATTERN_ESCAPE` (14) character: what escapes `%` and
     /// `_` in the pattern arguments of the catalog functions, so they match
@@ -627,7 +661,7 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// (that is `SQL_LIKE_ESCAPE_CLAUSE`). Return `""` if the data source has
     /// no escape character — the spec's answer for that case, and one core
     /// cannot distinguish from a backend that simply never set it.
-    fn search_pattern_escape() -> &'static str;
+    fn search_pattern_escape(conn: &Self::Connection) -> &'static str;
 
     /// The data source's own reserved words, unfiltered.
     ///
@@ -648,7 +682,7 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// `SQLGetInfo(SQL_KEYWORDS)` is not a hot path. A backend whose list is
     /// expensive to produce — read out of a linked library, say — should cache
     /// behind its own `OnceLock` and return the cached slice from here.
-    fn keywords() -> &'static [&'static str];
+    fn keywords(conn: &Self::Connection) -> &'static [&'static str];
 
     /// The `SQL_TIMEDATE_ADD_INTERVALS` (109) bitmask: the interval units the
     /// `TIMESTAMPADD` scalar function accepts, as an OR of the
@@ -659,7 +693,7 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// exists but accepts no units. Required so that contradiction cannot be
     /// inherited silently. Return `0` only if `TIMESTAMPADD` is genuinely not
     /// supported.
-    fn timedate_add_intervals() -> u32;
+    fn timedate_add_intervals(conn: &Self::Connection) -> u32;
 
     /// The `SQL_TIMEDATE_DIFF_INTERVALS` (110) bitmask: the interval units the
     /// `TIMESTAMPDIFF` scalar function accepts.
@@ -667,7 +701,7 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// Separate from [`Backend::timedate_add_intervals`] because a data source
     /// may accept different units for each; see that method for the coupling
     /// to `SQL_TIMEDATE_FUNCTIONS`.
-    fn timedate_diff_intervals() -> u32;
+    fn timedate_diff_intervals(conn: &Self::Connection) -> u32;
 
     /// The `SQL_DEFAULT_TXN_ISOLATION` (26) level this data source runs at
     /// when the application has not set one — a single
@@ -680,7 +714,7 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// attribute from a constant instead would let a connection report one
     /// isolation level through `SQLGetConnectAttr` and another through
     /// `SQLGetInfo`, with nothing in either path to reconcile them.
-    fn default_txn_isolation() -> u32;
+    fn default_txn_isolation(conn: &Self::Connection) -> u32;
 
     /// The `SQL_TXN_ISOLATION_OPTION` (72) bitmask: every isolation level this
     /// data source can actually run at, as an OR of the
@@ -695,7 +729,7 @@ pub trait Backend: Sized + Send + Sync + 'static {
     ///
     /// Must include [`Backend::default_txn_isolation`] whenever that is
     /// non-zero.
-    fn txn_isolation_options() -> u32;
+    fn txn_isolation_options(conn: &Self::Connection) -> u32;
 
     /// Apply an isolation level to an open connection.
     ///
@@ -717,8 +751,8 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// rejects every level before the call, because no level can be inside an
     /// empty set. The `NotImplemented` branch below is therefore unreachable
     /// for such a backend, and it needs no implementation.
-    fn set_txn_isolation(_conn: &Self::Connection, level: u32) -> Result<(), Self::Error> {
-        if Self::txn_isolation_options() == level {
+    fn set_txn_isolation(conn: &Self::Connection, level: u32) -> Result<(), Self::Error> {
+        if Self::txn_isolation_options(conn) == level {
             // The only level this data source has; it is already in effect.
             Ok(())
         } else {
@@ -870,8 +904,10 @@ pub trait StatementBackend: Send + Sync {
 /// taking them separately would let a caller hand over widths that disagree with
 /// the ones the same backend reports everywhere else -- which is exactly what
 /// the `SQL_MAX_*_NAME_LEN` group is derived from.
-pub fn default_get_info<B: Backend>(info_type: crate::types::InfoType) -> Option<InfoValue> {
-    let widths = &B::catalog_result_column_widths();
+pub fn default_get_info<B: Backend>(
+    conn: Option<&B::Connection>,
+    info_type: crate::types::InfoType,
+) -> Option<InfoValue> {
     use crate::types::{
         InfoType, InfoValue, SQL_AM_NONE, SQL_ASYNC_NOTIFICATION_NOT_CAPABLE, SQL_CA1_NEXT,
         SQL_DRIVER_ODBC_VER_STRING, SQL_GD_ANY_COLUMN, SQL_GD_ANY_ORDER, SQL_GD_BOUND,
@@ -881,14 +917,16 @@ pub fn default_get_info<B: Backend>(info_type: crate::types::InfoType) -> Option
     match info_type {
         // --- String types identical in all drivers ---
         InfoType::DriverOdbcVer => Some(InfoValue::String(SQL_DRIVER_ODBC_VER_STRING.into())),
-        InfoType::SearchPatternEscape => Some(InfoValue::String(B::search_pattern_escape().into())),
+        InfoType::SearchPatternEscape => {
+            Some(InfoValue::String(B::search_pattern_escape(conn?).into()))
+        }
         // Derived from the escape dialect, which already carries this fact and
         // is what the escape translator itself consults. Hard-coding `"` here
         // let a backend quote identifiers one way and tell the application
         // another. The spec's "if the data source does not support quoted
         // identifiers, a blank is returned" is the empty-dialect case.
         InfoType::IdentifierQuoteChar => Some(InfoValue::String(
-            B::escape_dialect()
+            B::escape_dialect(conn?)
                 .identifier_quotes
                 .first()
                 .map(|(open, _)| open.to_string())
@@ -899,7 +937,7 @@ pub fn default_get_info<B: Backend>(info_type: crate::types::InfoType) -> Option
         // has catalogs (resp. schemas) at all, and mandates the empty string
         // or zero when it does not. See `Backend::supports_catalogs`.
         InfoType::CatalogTerm => Some(InfoValue::String(
-            if B::supports_catalogs() {
+            if B::supports_catalogs(conn?) {
                 "catalog"
             } else {
                 ""
@@ -907,47 +945,67 @@ pub fn default_get_info<B: Backend>(info_type: crate::types::InfoType) -> Option
             .into(),
         )),
         InfoType::SchemaTerm => Some(InfoValue::String(
-            if B::supports_schemas() { "schema" } else { "" }.into(),
+            if B::supports_schemas(conn?) {
+                "schema"
+            } else {
+                ""
+            }
+            .into(),
         )),
         InfoType::CatalogNameSeparator => Some(InfoValue::String(
-            if B::supports_catalogs() { "." } else { "" }.into(),
+            if B::supports_catalogs(conn?) { "." } else { "" }.into(),
         )),
         InfoType::CatalogName => Some(InfoValue::String(
-            if B::supports_catalogs() { "Y" } else { "N" }.into(),
-        )),
-        // Only the spec-mandated zero is asserted here. Once catalogs or
-        // schemas exist, the position of the catalog in a qualified name and
-        // the statements catalogs/schemas may appear in are genuinely
-        // per-data-source, so core falls through and lets the backend answer
-        // rather than overstating a capability it cannot know.
-        InfoType::CatalogLocation if !B::supports_catalogs() => Some(InfoValue::U16(0)),
-        InfoType::CatalogUsage if !B::supports_catalogs() => Some(InfoValue::U32(0)),
-        InfoType::SchemaUsage if !B::supports_schemas() => Some(InfoValue::U32(0)),
-        // Each of these was core asserting an entry-level SQL-92 answer while
-        // the conformance level itself is the backend's to declare, so a
-        // backend claiming no level was still told it had all of them.
-        InfoType::ColumnAlias => Some(InfoValue::String(
-            if B::column_alias() { "Y" } else { "N" }.into(),
-        )),
-        InfoType::Subqueries => Some(InfoValue::U32(B::subqueries())),
-        InfoType::ConcatNullBehavior => Some(InfoValue::U16(B::concat_null_behavior())),
-        InfoType::OrderByColumnsInSelect => Some(InfoValue::String(
-            if B::order_by_columns_in_select() {
+            if B::supports_catalogs(conn?) {
                 "Y"
             } else {
                 "N"
             }
             .into(),
         )),
-        InfoType::UnionStatement => Some(InfoValue::U32(B::union_support())),
+        // Only the spec-mandated zero is asserted here. Once catalogs or
+        // schemas exist, the position of the catalog in a qualified name and
+        // the statements catalogs/schemas may appear in are genuinely
+        // per-data-source, so core falls through and lets the backend answer
+        // rather than overstating a capability it cannot know.
+        InfoType::CatalogLocation if !B::supports_catalogs(conn?) => Some(InfoValue::U16(0)),
+        InfoType::CatalogUsage if !B::supports_catalogs(conn?) => Some(InfoValue::U32(0)),
+        InfoType::SchemaUsage if !B::supports_schemas(conn?) => Some(InfoValue::U32(0)),
+        // Each of these was core asserting an entry-level SQL-92 answer while
+        // the conformance level itself is the backend's to declare, so a
+        // backend claiming no level was still told it had all of them.
+        InfoType::ColumnAlias => Some(InfoValue::String(
+            if B::column_alias(conn?) { "Y" } else { "N" }.into(),
+        )),
+        InfoType::Subqueries => Some(InfoValue::U32(B::subqueries(conn?))),
+        InfoType::ConcatNullBehavior => Some(InfoValue::U16(B::concat_null_behavior(conn?))),
+        InfoType::OrderByColumnsInSelect => Some(InfoValue::String(
+            if B::order_by_columns_in_select(conn?) {
+                "Y"
+            } else {
+                "N"
+            }
+            .into(),
+        )),
+        InfoType::UnionStatement => Some(InfoValue::U32(B::union_support(conn?))),
         InfoType::DataSourceName => Some(InfoValue::String(String::new())),
         InfoType::ServerName => Some(InfoValue::String(String::new())),
         InfoType::UserName => Some(InfoValue::String(String::new())),
         InfoType::DataSourceReadOnly => Some(InfoValue::String(
-            if B::data_source_read_only() { "Y" } else { "N" }.into(),
+            if B::data_source_read_only(conn?) {
+                "Y"
+            } else {
+                "N"
+            }
+            .into(),
         )),
         InfoType::AccessibleTables => Some(InfoValue::String(
-            if B::accessible_tables() { "Y" } else { "N" }.into(),
+            if B::accessible_tables(conn?) {
+                "Y"
+            } else {
+                "N"
+            }
+            .into(),
         )),
         InfoType::AccessibleProcedures => Some(InfoValue::String("N".into())),
         InfoType::Integrity => Some(InfoValue::String("N".into())),
@@ -964,7 +1022,7 @@ pub fn default_get_info<B: Backend>(info_type: crate::types::InfoType) -> Option
         // A capability, not a shared default: `""` and a wrong "N" both read as
         // "no" to a tool deciding whether to push an expression into ORDER BY.
         InfoType::ExpressionsInOrderBy => Some(InfoValue::String(
-            if B::expressions_in_order_by() {
+            if B::expressions_in_order_by(conn?) {
                 "Y"
             } else {
                 "N"
@@ -976,10 +1034,10 @@ pub fn default_get_info<B: Backend>(info_type: crate::types::InfoType) -> Option
         // (SQL_GB_NOT_SUPPORTED, SQL_NC_HIGH, SQL_CN_NONE, SQL_NNC_NULL), not
         // "unknown" -- so the backend has to state them rather than inherit a
         // claim it never made. See the `Backend` docs for each.
-        InfoType::GroupBy => Some(InfoValue::U16(B::group_by())),
-        InfoType::NullCollation => Some(InfoValue::U16(B::null_collation())),
-        InfoType::CorrelationName => Some(InfoValue::U16(B::correlation_name())),
-        InfoType::NonNullableColumns => Some(InfoValue::U16(B::non_nullable_columns())),
+        InfoType::GroupBy => Some(InfoValue::U16(B::group_by(conn?))),
+        InfoType::NullCollation => Some(InfoValue::U16(B::null_collation(conn?))),
+        InfoType::CorrelationName => Some(InfoValue::U16(B::correlation_name(conn?))),
+        InfoType::NonNullableColumns => Some(InfoValue::U16(B::non_nullable_columns(conn?))),
         InfoType::MaxDriverConnections => Some(InfoValue::U16(0)),
         InfoType::MaxConcurrentActivities => Some(InfoValue::U16(0)),
         // Derived from the backend hook so the value reported here and the
@@ -987,15 +1045,23 @@ pub fn default_get_info<B: Backend>(info_type: crate::types::InfoType) -> Option
         InfoType::CursorCommitBehaviour => {
             Some(InfoValue::U16(B::cursor_commit_behavior().as_u16()))
         }
-        InfoType::MaxColumnNameLen => Some(InfoValue::U16(widths.identifier_len)),
+        InfoType::MaxColumnNameLen => Some(InfoValue::U16(
+            B::catalog_result_column_widths().identifier_len,
+        )),
         // Deliberately not `widths.identifier_len` -- a cursor name is an
         // ODBC-level convention the application invents, not a data-source
         // identifier the backend's catalog stores. See
         // `SQL_MAX_CURSOR_NAME_LEN`'s doc comment for the full rationale.
         InfoType::MaxCursorNameLen => Some(InfoValue::U16(SQL_MAX_CURSOR_NAME_LEN)),
-        InfoType::MaxSchemaNameLen => Some(InfoValue::U16(widths.identifier_len)),
-        InfoType::MaxCatalogNameLen => Some(InfoValue::U16(widths.identifier_len)),
-        InfoType::MaxTableNameLen => Some(InfoValue::U16(widths.identifier_len)),
+        InfoType::MaxSchemaNameLen => Some(InfoValue::U16(
+            B::catalog_result_column_widths().identifier_len,
+        )),
+        InfoType::MaxCatalogNameLen => Some(InfoValue::U16(
+            B::catalog_result_column_widths().identifier_len,
+        )),
+        InfoType::MaxTableNameLen => Some(InfoValue::U16(
+            B::catalog_result_column_widths().identifier_len,
+        )),
         InfoType::MaxColumnsInGroupBy => Some(InfoValue::U16(0)),
         InfoType::MaxColumnsInIndex => Some(InfoValue::U16(0)),
         InfoType::MaxColumnsInOrderBy => Some(InfoValue::U16(0)),
@@ -1011,14 +1077,16 @@ pub fn default_get_info<B: Backend>(info_type: crate::types::InfoType) -> Option
         // here would hand a numeric type expecting 4 bytes only 2, leaving
         // the upper 2 bytes as whatever the caller's buffer already held.
         InfoType::CursorSensitivity => Some(InfoValue::U32(u32::from(SQL_INSENSITIVE))),
-        InfoType::MaxIdentifierLen => Some(InfoValue::U16(widths.identifier_len)),
+        InfoType::MaxIdentifierLen => Some(InfoValue::U16(
+            B::catalog_result_column_widths().identifier_len,
+        )),
         // --- U32 types identical in all drivers ---
         InfoType::ScrollOptions => Some(InfoValue::U32(SQL_SO_FORWARD_ONLY)),
-        InfoType::ConvertFunctions => Some(InfoValue::U32(B::convert_functions())),
+        InfoType::ConvertFunctions => Some(InfoValue::U32(B::convert_functions(conn?))),
         // Capability bitmaps, not limits: a `0` here is the claim "this data
         // source cannot do this at all", so the backend has to state it.
-        InfoType::AlterTable => Some(InfoValue::U32(B::alter_table_support())),
-        InfoType::OuterJoinCapabilities => Some(InfoValue::U32(B::outer_join_capabilities())),
+        InfoType::AlterTable => Some(InfoValue::U32(B::alter_table_support(conn?))),
+        InfoType::OuterJoinCapabilities => Some(InfoValue::U32(B::outer_join_capabilities(conn?))),
         // Limits, where the spec defines 0 as "no specified limit or the limit
         // is unknown" -- correct as a shared default, unlike the two above.
         InfoType::MaxIndexSize => Some(InfoValue::U32(0)),
@@ -1027,18 +1095,20 @@ pub fn default_get_info<B: Backend>(info_type: crate::types::InfoType) -> Option
         // Derived from the backend hooks so that SQL_DEFAULT_TXN_ISOLATION and
         // SQLGetConnectAttr(SQL_ATTR_TXN_ISOLATION) cannot report two
         // different levels for the same connection.
-        InfoType::DefaultTxnIsolation => Some(InfoValue::U32(B::default_txn_isolation())),
-        InfoType::TransactionIsolationProtocol => Some(InfoValue::U32(B::txn_isolation_options())),
+        InfoType::DefaultTxnIsolation => Some(InfoValue::U32(B::default_txn_isolation(conn?))),
+        InfoType::TransactionIsolationProtocol => {
+            Some(InfoValue::U32(B::txn_isolation_options(conn?)))
+        }
         // Core cannot know the conformance level, and hard-coding it made core
         // contradict its own SQL_GROUP_BY / SQL_CORRELATION_NAME /
         // SQL_NON_NULLABLE_COLUMNS answers.
-        InfoType::SqlConformance => Some(InfoValue::U32(B::sql_conformance())),
+        InfoType::SqlConformance => Some(InfoValue::U32(B::sql_conformance(conn?))),
         // The units TIMESTAMPADD / TIMESTAMPDIFF accept. Defaulting these to 0
         // while the backend claims SQL_FN_TD_TIMESTAMPADD in
         // SQL_TIMEDATE_FUNCTIONS is self-contradictory.
-        InfoType::TimedateAddIntervals => Some(InfoValue::U32(B::timedate_add_intervals())),
-        InfoType::TimedateDiffIntervals => Some(InfoValue::U32(B::timedate_diff_intervals())),
-        InfoType::IdentifierCase => Some(InfoValue::U16(B::identifier_case())),
+        InfoType::TimedateAddIntervals => Some(InfoValue::U32(B::timedate_add_intervals(conn?))),
+        InfoType::TimedateDiffIntervals => Some(InfoValue::U32(B::timedate_diff_intervals(conn?))),
+        InfoType::IdentifierCase => Some(InfoValue::U16(B::identifier_case(conn?))),
         InfoType::OdbcInterfaceConformance => Some(InfoValue::U32(SQL_OIC_CORE)),
         InfoType::AsyncMode => Some(InfoValue::U32(SQL_AM_NONE)),
         InfoType::AsyncDbcFunctions => Some(InfoValue::U32(0)),
@@ -1073,7 +1143,7 @@ pub fn default_get_info<B: Backend>(info_type: crate::types::InfoType) -> Option
         // by `outer_join_capabilities`; deriving it here keeps the two from
         // contradicting each other.
         InfoType::OuterJoins => Some(InfoValue::String(
-            if B::outer_join_capabilities() != 0 {
+            if B::outer_join_capabilities(conn?) != 0 {
                 "Y"
             } else {
                 "N"
@@ -1109,8 +1179,8 @@ pub fn default_get_info<B: Backend>(info_type: crate::types::InfoType) -> Option
 /// this is a linear scan of a short list against a fixed one on a path
 /// `SQLGetInfo` reaches at most a handful of times per connection; a backend
 /// with an expensive list caches on its own side (see [`Backend::keywords`]).
-fn data_source_specific_keywords<B: Backend>() -> String {
-    let mut names: Vec<&'static str> = B::keywords()
+fn data_source_specific_keywords<B: Backend>(conn: &B::Connection) -> String {
+    let mut names: Vec<&'static str> = B::keywords(conn)
         .iter()
         .copied()
         .filter(|name| {
@@ -1139,7 +1209,10 @@ fn data_source_specific_keywords<B: Backend>() -> String {
 /// Generic over the calling backend so that `SQL_CURSOR_ROLLBACK_BEHAVIOR` can be
 /// derived from [`Backend::cursor_rollback_behavior`] -- call it as
 /// `common_get_info_raw::<Self>(info_type)`.
-pub fn common_get_info_raw<B: Backend>(info_type: u16) -> Option<InfoValue> {
+pub fn common_get_info_raw<B: Backend>(
+    conn: Option<&B::Connection>,
+    info_type: u16,
+) -> Option<InfoValue> {
     use crate::types::{
         InfoValue, SQL_CURSOR_ROLLBACK_BEHAVIOR, SQL_DATABASE_NAME, SQL_FILE_USAGE,
         SQL_IC_SENSITIVE, SQL_KEYWORDS, SQL_MULTIPLE_ACTIVE_TXN, SQL_PROCEDURE_TERM,
@@ -1171,7 +1244,7 @@ pub fn common_get_info_raw<B: Backend>(info_type: u16) -> Option<InfoValue> {
         // applied once here rather than in each backend. The list itself is a
         // capability, so it comes from `Backend::keywords`; core only owns the
         // rule.
-        SQL_KEYWORDS => Some(InfoValue::String(data_source_specific_keywords::<B>())),
+        SQL_KEYWORDS => Some(InfoValue::String(data_source_specific_keywords::<B>(conn?))),
         // The remaining character-string info types with no
         // `odbc_sys::InfoType` variant. Empty is a valid value for both:
         // there is no shared name for the current database, and -- given
@@ -1188,7 +1261,10 @@ pub fn common_get_info_raw<B: Backend>(info_type: u16) -> Option<InfoValue> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::{MockBackend, MockNoCatalogBackend, MockTxnDeleteCloseBackend};
+    use crate::test_utils::{
+        MockBackend, MockConnection, MockNoCatalogBackend, MockTxnConnection,
+        MockTxnDeleteCloseBackend,
+    };
     use crate::types::{
         DEFAULT_IDENTIFIER_LEN, InfoType, InfoValue, SQL_AM_NONE, SQL_AT_ADD_COLUMN_SINGLE,
         SQL_AT_DROP_COLUMN_RESTRICT, SQL_CA1_NEXT, SQL_CB_PRESERVE, SQL_CN_ANY,
@@ -1297,7 +1373,7 @@ mod tests {
     #[test]
     fn default_get_info_snapshot() {
         for (info_type, expected) in EXPECTED {
-            let actual = default_get_info::<MockBackend>(*info_type)
+            let actual = default_get_info::<MockBackend>(Some(&MockConnection), *info_type)
                 .unwrap_or_else(|| panic!("default_get_info returned None for {info_type:?}"));
             match (expected, &actual) {
                 (Expected::Str(s), InfoValue::String(v)) => {
@@ -1334,12 +1410,22 @@ mod tests {
         use crate::types::{SQL_CB_CLOSE, SQL_CB_DELETE, SQL_CURSOR_ROLLBACK_BEHAVIOR};
 
         assert_eq!(
-            default_get_info::<MockTxnDeleteCloseBackend>(InfoType::CursorCommitBehaviour),
+            default_get_info::<MockTxnDeleteCloseBackend>(
+                Some(&MockTxnConnection {
+                    end_tran_fails: false
+                }),
+                InfoType::CursorCommitBehaviour
+            ),
             Some(InfoValue::U16(SQL_CB_DELETE)),
             "SQL_CURSOR_COMMIT_BEHAVIOR ignored Backend::cursor_commit_behavior"
         );
         assert_eq!(
-            common_get_info_raw::<MockTxnDeleteCloseBackend>(SQL_CURSOR_ROLLBACK_BEHAVIOR),
+            common_get_info_raw::<MockTxnDeleteCloseBackend>(
+                Some(&MockTxnConnection {
+                    end_tran_fails: false
+                }),
+                SQL_CURSOR_ROLLBACK_BEHAVIOR
+            ),
             Some(InfoValue::U16(SQL_CB_CLOSE)),
             "SQL_CURSOR_ROLLBACK_BEHAVIOR ignored Backend::cursor_rollback_behavior"
         );
@@ -1351,11 +1437,11 @@ mod tests {
         use crate::types::{SQL_CB_PRESERVE, SQL_CURSOR_ROLLBACK_BEHAVIOR};
 
         assert_eq!(
-            default_get_info::<MockBackend>(InfoType::CursorCommitBehaviour),
+            default_get_info::<MockBackend>(Some(&MockConnection), InfoType::CursorCommitBehaviour),
             Some(InfoValue::U16(SQL_CB_PRESERVE))
         );
         assert_eq!(
-            common_get_info_raw::<MockBackend>(SQL_CURSOR_ROLLBACK_BEHAVIOR),
+            common_get_info_raw::<MockBackend>(Some(&MockConnection), SQL_CURSOR_ROLLBACK_BEHAVIOR),
             Some(InfoValue::U16(SQL_CB_PRESERVE))
         );
     }
@@ -1371,27 +1457,33 @@ mod tests {
     fn catalog_less_backend_reports_the_spec_mandated_empty_catalog_group() {
         use crate::test_utils::MockNoCatalogBackend;
         assert_eq!(
-            default_get_info::<MockNoCatalogBackend>(InfoType::CatalogTerm),
+            default_get_info::<MockNoCatalogBackend>(Some(&MockConnection), InfoType::CatalogTerm),
             Some(InfoValue::String(String::new())),
             "SQL_CATALOG_TERM must be empty when the data source has no catalogs"
         );
         assert_eq!(
-            default_get_info::<MockNoCatalogBackend>(InfoType::CatalogNameSeparator),
+            default_get_info::<MockNoCatalogBackend>(
+                Some(&MockConnection),
+                InfoType::CatalogNameSeparator
+            ),
             Some(InfoValue::String(String::new())),
             "SQL_CATALOG_NAME_SEPARATOR must be empty when the data source has no catalogs"
         );
         assert_eq!(
-            default_get_info::<MockNoCatalogBackend>(InfoType::CatalogName),
+            default_get_info::<MockNoCatalogBackend>(Some(&MockConnection), InfoType::CatalogName),
             Some(InfoValue::String("N".into())),
             "SQL_CATALOG_NAME must be \"N\" when the data source has no catalogs"
         );
         assert_eq!(
-            default_get_info::<MockNoCatalogBackend>(InfoType::CatalogLocation),
+            default_get_info::<MockNoCatalogBackend>(
+                Some(&MockConnection),
+                InfoType::CatalogLocation
+            ),
             Some(InfoValue::U16(0)),
             "SQL_CATALOG_LOCATION must be 0 when the data source has no catalogs"
         );
         assert_eq!(
-            default_get_info::<MockNoCatalogBackend>(InfoType::CatalogUsage),
+            default_get_info::<MockNoCatalogBackend>(Some(&MockConnection), InfoType::CatalogUsage),
             Some(InfoValue::U32(0)),
             "SQL_CATALOG_USAGE must be 0 when the data source has no catalogs"
         );
@@ -1403,12 +1495,12 @@ mod tests {
     fn schema_less_backend_reports_the_spec_mandated_empty_schema_group() {
         use crate::test_utils::MockNoCatalogBackend;
         assert_eq!(
-            default_get_info::<MockNoCatalogBackend>(InfoType::SchemaTerm),
+            default_get_info::<MockNoCatalogBackend>(Some(&MockConnection), InfoType::SchemaTerm),
             Some(InfoValue::String(String::new())),
             "SQL_SCHEMA_TERM must be empty when the data source has no schemas"
         );
         assert_eq!(
-            default_get_info::<MockNoCatalogBackend>(InfoType::SchemaUsage),
+            default_get_info::<MockNoCatalogBackend>(Some(&MockConnection), InfoType::SchemaUsage),
             Some(InfoValue::U32(0)),
             "SQL_SCHEMA_USAGE must be 0 when the data source has no schemas"
         );
@@ -1427,7 +1519,7 @@ mod tests {
             (InfoType::CatalogName, "Y"),
         ] {
             assert_eq!(
-                default_get_info::<MockBackend>(info_type),
+                default_get_info::<MockBackend>(Some(&MockConnection), info_type),
                 Some(InfoValue::String(expected.into())),
                 "{info_type:?} changed for a catalog-supporting backend"
             );
@@ -1447,7 +1539,7 @@ mod tests {
             InfoType::SchemaUsage,
         ] {
             assert_eq!(
-                default_get_info::<MockBackend>(info_type),
+                default_get_info::<MockBackend>(Some(&MockConnection), info_type),
                 None,
                 "{info_type:?} must be left to the backend when catalogs/schemas exist"
             );
@@ -1461,19 +1553,23 @@ mod tests {
     #[test]
     fn alter_table_and_outer_join_capabilities_come_from_the_backend() {
         assert_eq!(
-            default_get_info::<MockBackend>(InfoType::AlterTable),
-            Some(InfoValue::U32(MockBackend::alter_table_support())),
+            default_get_info::<MockBackend>(Some(&MockConnection), InfoType::AlterTable),
+            Some(InfoValue::U32(MockBackend::alter_table_support(
+                &MockConnection
+            ))),
             "SQL_ALTER_TABLE ignored Backend::alter_table_support"
         );
         assert_eq!(
-            default_get_info::<MockBackend>(InfoType::OuterJoinCapabilities),
-            Some(InfoValue::U32(MockBackend::outer_join_capabilities())),
+            default_get_info::<MockBackend>(Some(&MockConnection), InfoType::OuterJoinCapabilities),
+            Some(InfoValue::U32(MockBackend::outer_join_capabilities(
+                &MockConnection
+            ))),
             "SQL_OJ_CAPABILITIES ignored Backend::outer_join_capabilities"
         );
         // A non-zero declaration is what proves the value is read rather than
         // hard-coded: the previous implementation returned 0 for both.
-        assert_ne!(MockBackend::alter_table_support(), 0);
-        assert_ne!(MockBackend::outer_join_capabilities(), 0);
+        assert_ne!(MockBackend::alter_table_support(&MockConnection), 0);
+        assert_ne!(MockBackend::outer_join_capabilities(&MockConnection), 0);
     }
 
     /// `SQL_ROW_UPDATES` (11) and `SQL_PROCEDURES` (21) are spec-defined
@@ -1487,7 +1583,7 @@ mod tests {
         use crate::types::{SQL_PROCEDURES, SQL_ROW_UPDATES};
 
         for info_type in [SQL_ROW_UPDATES, SQL_PROCEDURES] {
-            let value = common_get_info_raw::<MockBackend>(info_type)
+            let value = common_get_info_raw::<MockBackend>(Some(&MockConnection), info_type)
                 .unwrap_or_else(|| panic!("common_get_info_raw returned None for {info_type}"));
             assert!(
                 matches!(&value, InfoValue::String(s) if s == "N"),
@@ -1509,7 +1605,7 @@ mod tests {
             InfoType::NeedLongDataLen,
         ] {
             assert_eq!(
-                default_get_info::<MockBackend>(info_type),
+                default_get_info::<MockBackend>(Some(&MockConnection), info_type),
                 Some(InfoValue::String("N".into())),
                 "{info_type:?} must be \"Y\" or \"N\", never the empty string"
             );
@@ -1524,16 +1620,22 @@ mod tests {
     #[test]
     fn enum_valued_info_types_come_from_the_backend() {
         for (info_type, actual) in [
-            (InfoType::NullCollation, MockBackend::null_collation()),
-            (InfoType::CorrelationName, MockBackend::correlation_name()),
+            (
+                InfoType::NullCollation,
+                MockBackend::null_collation(&MockConnection),
+            ),
+            (
+                InfoType::CorrelationName,
+                MockBackend::correlation_name(&MockConnection),
+            ),
             (
                 InfoType::NonNullableColumns,
-                MockBackend::non_nullable_columns(),
+                MockBackend::non_nullable_columns(&MockConnection),
             ),
-            (InfoType::GroupBy, MockBackend::group_by()),
+            (InfoType::GroupBy, MockBackend::group_by(&MockConnection)),
         ] {
             assert_eq!(
-                default_get_info::<MockBackend>(info_type),
+                default_get_info::<MockBackend>(Some(&MockConnection), info_type),
                 Some(InfoValue::U16(actual)),
                 "{info_type:?} ignored its Backend hook"
             );
@@ -1552,18 +1654,21 @@ mod tests {
     #[test]
     fn sql_conformance_comes_from_the_backend() {
         assert_eq!(
-            default_get_info::<MockBackend>(InfoType::SqlConformance),
+            default_get_info::<MockBackend>(Some(&MockConnection), InfoType::SqlConformance),
             Some(InfoValue::U32(SQL_SC_SQL92_ENTRY)),
             "SQL_SQL_CONFORMANCE ignored Backend::sql_conformance"
         );
         assert_eq!(
-            default_get_info::<MockNoCatalogBackend>(InfoType::SqlConformance),
+            default_get_info::<MockNoCatalogBackend>(
+                Some(&MockConnection),
+                InfoType::SqlConformance
+            ),
             Some(InfoValue::U32(0)),
             "SQL_SQL_CONFORMANCE is still pinned to SQL_SC_SQL92_ENTRY"
         );
         assert_ne!(
-            MockBackend::sql_conformance(),
-            MockNoCatalogBackend::sql_conformance(),
+            MockBackend::sql_conformance(&MockConnection),
+            MockNoCatalogBackend::sql_conformance(&MockConnection),
             "the two mocks must declare different levels or this test proves nothing"
         );
     }
@@ -1577,7 +1682,7 @@ mod tests {
     fn entry_level_conformance_no_longer_contradicts_the_other_info_types() {
         use crate::types::{SQL_CN_ANY, SQL_GB_GROUP_BY_EQUALS_SELECT, SQL_NNC_NON_NULL};
         assert_eq!(
-            default_get_info::<MockBackend>(InfoType::SqlConformance),
+            default_get_info::<MockBackend>(Some(&MockConnection), InfoType::SqlConformance),
             Some(InfoValue::U32(SQL_SC_SQL92_ENTRY)),
         );
         for (info_type, expected, spec) in [
@@ -1598,7 +1703,7 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                default_get_info::<MockBackend>(info_type),
+                default_get_info::<MockBackend>(Some(&MockConnection), info_type),
                 Some(InfoValue::U16(expected)),
                 "an entry-level-conformant driver {spec} for {info_type:?}"
             );
@@ -1610,12 +1715,15 @@ mod tests {
     #[test]
     fn expressions_in_order_by_comes_from_the_backend() {
         assert_eq!(
-            default_get_info::<MockBackend>(InfoType::ExpressionsInOrderBy),
+            default_get_info::<MockBackend>(Some(&MockConnection), InfoType::ExpressionsInOrderBy),
             Some(InfoValue::String("Y".into())),
             "SQL_EXPRESSIONS_IN_ORDERBY ignored Backend::expressions_in_order_by"
         );
         assert_eq!(
-            default_get_info::<MockNoCatalogBackend>(InfoType::ExpressionsInOrderBy),
+            default_get_info::<MockNoCatalogBackend>(
+                Some(&MockConnection),
+                InfoType::ExpressionsInOrderBy
+            ),
             Some(InfoValue::String("N".into())),
             "a backend declaring no ORDER BY expressions must report \"N\", not \"\""
         );
@@ -1629,18 +1737,22 @@ mod tests {
     #[test]
     fn timedate_interval_bitmaps_come_from_the_backend() {
         assert_eq!(
-            default_get_info::<MockBackend>(InfoType::TimedateAddIntervals),
-            Some(InfoValue::U32(MockBackend::timedate_add_intervals())),
+            default_get_info::<MockBackend>(Some(&MockConnection), InfoType::TimedateAddIntervals),
+            Some(InfoValue::U32(MockBackend::timedate_add_intervals(
+                &MockConnection
+            ))),
             "SQL_TIMEDATE_ADD_INTERVALS ignored Backend::timedate_add_intervals"
         );
         assert_eq!(
-            default_get_info::<MockBackend>(InfoType::TimedateDiffIntervals),
-            Some(InfoValue::U32(MockBackend::timedate_diff_intervals())),
+            default_get_info::<MockBackend>(Some(&MockConnection), InfoType::TimedateDiffIntervals),
+            Some(InfoValue::U32(MockBackend::timedate_diff_intervals(
+                &MockConnection
+            ))),
             "SQL_TIMEDATE_DIFF_INTERVALS ignored Backend::timedate_diff_intervals"
         );
         assert_ne!(
-            MockBackend::timedate_add_intervals(),
-            MockBackend::timedate_diff_intervals(),
+            MockBackend::timedate_add_intervals(&MockConnection),
+            MockBackend::timedate_diff_intervals(&MockConnection),
             "the mock must declare different units for each, or one hook could \
              serve both and the test would not notice"
         );
@@ -1654,12 +1766,15 @@ mod tests {
     fn txn_isolation_info_types_come_from_the_backend() {
         use crate::types::SQL_TXN_SERIALIZABLE;
         assert_eq!(
-            default_get_info::<MockBackend>(InfoType::DefaultTxnIsolation),
+            default_get_info::<MockBackend>(Some(&MockConnection), InfoType::DefaultTxnIsolation),
             Some(InfoValue::U32(SQL_TXN_SERIALIZABLE)),
             "SQL_DEFAULT_TXN_ISOLATION ignored Backend::default_txn_isolation"
         );
         assert_eq!(
-            default_get_info::<MockBackend>(InfoType::TransactionIsolationProtocol),
+            default_get_info::<MockBackend>(
+                Some(&MockConnection),
+                InfoType::TransactionIsolationProtocol
+            ),
             Some(InfoValue::U32(SQL_TXN_SERIALIZABLE)),
             "SQL_TXN_ISOLATION_OPTION ignored Backend::txn_isolation_options"
         );
@@ -1922,8 +2037,8 @@ mod tests {
         let mut unanswered = Vec::new();
 
         for info_type in crate::conformance::all_info_types() {
-            let mine = default_get_info::<MockBackend>(info_type);
-            let theirs = default_get_info::<MockAltBackend>(info_type);
+            let mine = default_get_info::<MockBackend>(Some(&MockConnection), info_type);
+            let theirs = default_get_info::<MockAltBackend>(Some(&MockConnection), info_type);
             let declared = CORE_FACTS.iter().find(|(t, _)| *t == info_type);
 
             match (mine.is_some() && mine == theirs, declared) {
@@ -1997,7 +2112,8 @@ mod tests {
         macro_rules! differs {
             ($($hook:ident),+ $(,)?) => {$(
                 assert_ne!(
-                    MockBackend::$hook(), MockAltBackend::$hook(),
+                    MockBackend::$hook(&MockConnection),
+                    MockAltBackend::$hook(&MockConnection),
                     concat!(
                         "MockBackend and MockAltBackend declare the same ",
                         stringify!($hook),
@@ -2032,12 +2148,21 @@ mod tests {
             data_source_read_only,
             search_pattern_escape,
             keywords,
-            cursor_commit_behavior,
-            cursor_rollback_behavior,
+        );
+        // Asserted separately: these three do not take a connection, because
+        // `SQLGetInfo` has to answer the two cursor-behaviour info types before
+        // one exists.
+        assert_ne!(
+            MockBackend::cursor_commit_behavior(),
+            MockAltBackend::cursor_commit_behavior(),
         );
         assert_ne!(
-            MockBackend::escape_dialect().identifier_quotes,
-            MockAltBackend::escape_dialect().identifier_quotes,
+            MockBackend::cursor_rollback_behavior(),
+            MockAltBackend::cursor_rollback_behavior(),
+        );
+        assert_ne!(
+            MockBackend::escape_dialect(&MockConnection).identifier_quotes,
+            MockAltBackend::escape_dialect(&MockConnection).identifier_quotes,
         );
     }
 
@@ -2066,7 +2191,7 @@ mod tests {
             InfoType::MaxIdentifierLen,
         ] {
             assert_eq!(
-                default_get_info::<MockAltBackend>(info_type),
+                default_get_info::<MockAltBackend>(Some(&MockConnection), info_type),
                 Some(InfoValue::U16(63)),
                 "{info_type:?} ignored the backend's declared identifier_len"
             );

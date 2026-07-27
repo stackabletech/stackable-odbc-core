@@ -805,10 +805,12 @@ pub unsafe fn sql_native_sql_w<B: Backend>(
             let conn = as_handle_ref::<ConnectionHandle<B>>(connection_handle)?;
             conn.diagnostics.clear();
 
-            // Spec 08003: Connection not open.
-            if conn.connection.is_none() {
+            // Spec 08003: Connection not open. Bound rather than tested,
+            // because the escape dialect below is a property of the
+            // connection.
+            let Some(ref connection) = conn.connection else {
                 return Err(OdbcError::NotConnected);
-            }
+            };
 
             // Spec HY009: InStatementText must not be NULL.
             if in_statement_text.is_null() {
@@ -839,8 +841,8 @@ pub unsafe fn sql_native_sql_w<B: Backend>(
             // SQLExecDirect/SQLPrepare), so a translation failure (a `{call}`
             // escape or a malformed escape) is surfaced here as HY000 instead of
             // propagating translate_escapes' own (off-table) SQLSTATE.
-            let translated =
-                crate::escape::translate_escapes(&sql, &B::escape_dialect()).map_err(|e| {
+            let translated = crate::escape::translate_escapes(&sql, &B::escape_dialect(connection))
+                .map_err(|e| {
                     OdbcError::general(
                         format!("failed to translate ODBC escapes: {e}"),
                         SqlState::general_error(),

@@ -162,7 +162,7 @@ fn info_type_default_response<B: Backend>(
     // delegate" stay coupled: `SQL_ROW_UPDATES` and `SQL_PROCEDURES` would
     // fall to `U32(0)` for a Y/N string, and `SQL_QUOTED_IDENTIFIER_CASE` to
     // `U16(0)`, which is not one of the four `SQL_IC_*` values.
-    if let Some(value) = crate::backend::common_get_info_raw::<B>(info_type) {
+    if let Some(value) = crate::backend::common_get_info_raw::<B>(conn, info_type) {
         return Ok(value);
     }
 
@@ -171,7 +171,7 @@ fn info_type_default_response<B: Backend>(
     // still overrides everything here from its own `get_info` or
     // `get_info_raw`.
     if let Some(type_id) = crate::types::info_type_from_raw(info_type)
-        && let Some(value) = crate::backend::default_get_info::<B>(type_id)
+        && let Some(value) = crate::backend::default_get_info::<B>(conn, type_id)
     {
         return Ok(value);
     }
@@ -509,7 +509,17 @@ pub unsafe fn sql_get_type_info<B: Backend>(
             let handle = as_handle_ref::<StatementHandle<B>>(statement_handle)?;
             handle.diagnostics.clear();
 
-            let all_types = B::get_type_info();
+            // The type list is the data source's, so it comes from the
+            // statement's connection.
+            let conn_ptr = handle.conn;
+            let conn = as_handle_ref::<crate::handles::ConnectionHandle<B>>(conn_ptr)?;
+            let Some(ref connection) = conn.connection else {
+                return Err(OdbcError::general(
+                    "Connection is not open",
+                    crate::types::SqlState::function_sequence_error(),
+                ));
+            };
+            let all_types = B::get_type_info(connection);
 
             // Filter by data_type if not SQL_ALL_TYPES (SqlDataType::UNKNOWN_TYPE = 0)
             let mut selected: Vec<_> = all_types
@@ -829,12 +839,28 @@ mod tests {
 
     /// Generic counterparts of the `MockBackend`-fixed helpers above, for tests
     /// that need a different backend.
+    /// Allocates the handle chain and connects it. `SQLGetTypeInfo` reports the
+    /// data source's types, so it needs an open connection to read them from.
     unsafe fn alloc_env_conn_stmt_for<B: Backend>() -> (*mut c_void, *mut c_void, *mut c_void) {
         unsafe {
             let mut env: *mut c_void = std::ptr::null_mut();
             let _ = sql_alloc_handle::<B>(HandleType::Env as i16, std::ptr::null_mut(), &mut env);
             let mut conn: *mut c_void = std::ptr::null_mut();
             let _ = sql_alloc_handle::<B>(HandleType::Dbc as i16, env, &mut conn);
+            let wide: Vec<u16> = "Host=localhost;Database=test".encode_utf16().collect();
+            assert_eq!(
+                crate::ffi::connect::sql_driver_connect_w::<B>(
+                    conn,
+                    std::ptr::null_mut(),
+                    wide.as_ptr(),
+                    wide.len() as i16,
+                    std::ptr::null_mut(),
+                    0,
+                    std::ptr::null_mut(),
+                    0,
+                ),
+                SqlReturn::SUCCESS,
+            );
             let mut stmt: *mut c_void = std::ptr::null_mut();
             let _ = sql_alloc_handle::<B>(HandleType::Stmt as i16, conn, &mut stmt);
             (env, conn, stmt)
@@ -844,6 +870,8 @@ mod tests {
     unsafe fn cleanup_for<B: Backend>(env: *mut c_void, conn: *mut c_void, stmt: *mut c_void) {
         unsafe {
             let _ = sql_free_handle::<B>(HandleType::Stmt as i16, stmt);
+            // A connected handle cannot be freed.
+            let _ = crate::ffi::connect::sql_disconnect::<B>(conn);
             let _ = sql_free_handle::<B>(HandleType::Dbc as i16, conn);
             let _ = sql_free_handle::<B>(HandleType::Env as i16, env);
         }
@@ -1228,6 +1256,22 @@ mod tests {
         // MockBackend returns empty type info, so the result set should have 0 rows
         unsafe {
             let (env, conn) = alloc_env_and_conn();
+            // The type list is the data source's, so SQLGetTypeInfo needs an
+            // open connection to read it from.
+            let wide: Vec<u16> = "Host=localhost;Database=test".encode_utf16().collect();
+            assert_eq!(
+                crate::ffi::connect::sql_driver_connect_w::<MockBackend>(
+                    conn,
+                    std::ptr::null_mut(),
+                    wide.as_ptr(),
+                    wide.len() as i16,
+                    std::ptr::null_mut(),
+                    0,
+                    std::ptr::null_mut(),
+                    0,
+                ),
+                SqlReturn::SUCCESS,
+            );
             let mut stmt: *mut c_void = std::ptr::null_mut();
             let _ = sql_alloc_handle::<MockBackend>(HandleType::Stmt as i16, conn, &mut stmt);
 
@@ -1239,6 +1283,7 @@ mod tests {
             assert!(handle.statement.is_some());
 
             let _ = sql_free_handle::<MockBackend>(HandleType::Stmt as i16, stmt);
+            let _ = crate::ffi::connect::sql_disconnect::<MockBackend>(conn);
             let _ = sql_free_handle::<MockBackend>(HandleType::Dbc as i16, conn);
             let _ = sql_free_handle::<MockBackend>(HandleType::Env as i16, env);
         }
