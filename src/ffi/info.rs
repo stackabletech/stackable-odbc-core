@@ -949,6 +949,79 @@ mod tests {
     }
 
     #[test]
+    fn type_info_columns_and_row_values_describe_the_same_result_set() {
+        // `type_info_columns` and `TypeInfoRow::to_column_values` declare the
+        // 19 `SQLGetTypeInfo` columns independently, and `SyntheticStatement`
+        // pairs them positionally. A mismatch shows up as `SQLGetData` reading
+        // a neighbouring column, not as an error.
+        use crate::types::{ColumnValue, TypeInfoRow};
+
+        let row = TypeInfoRow {
+            type_name: "VARCHAR",
+            data_type: crate::types::SqlDataType::VARCHAR,
+            column_size: 255,
+            literal_prefix: Some("'"),
+            literal_suffix: Some("'"),
+            create_params: Some("length"),
+            nullable: 1,
+            case_sensitive: true,
+            searchable: 3,
+            unsigned: None,
+            fixed_prec_scale: false,
+            auto_unique_value: None,
+            local_type_name: Some("VARCHAR"),
+            minimum_scale: None,
+            maximum_scale: None,
+            sql_data_type: 12,
+            sql_datetime_sub: None,
+            num_prec_radix: None,
+            interval_precision: None,
+        };
+
+        let widths = CatalogResultColumnWidths::default();
+        let columns = type_info_columns(&widths);
+        let values = row.to_column_values();
+        assert_eq!(
+            columns.len(),
+            values.len(),
+            "type_info_columns declares {} columns but to_column_values produced {}",
+            columns.len(),
+            values.len()
+        );
+
+        // Each declared SQL type must match the kind of value actually produced,
+        // so a column cannot be declared numeric and filled with a string.
+        for (i, (col, val)) in columns.iter().zip(values.iter()).enumerate() {
+            let declared_is_char = matches!(
+                col.sql_type,
+                crate::types::SqlDataType::VARCHAR
+                    | crate::types::SqlDataType::CHAR
+                    | crate::types::SqlDataType::EXT_W_VARCHAR
+                    | crate::types::SqlDataType::EXT_W_CHAR
+            );
+            let value_is_char = matches!(val, ColumnValue::String(_) | ColumnValue::Null);
+            assert!(
+                !declared_is_char || value_is_char,
+                "column {} ({}) is declared character but carries {:?}",
+                i + 1,
+                col.name,
+                val
+            );
+            let value_is_numeric = matches!(
+                val,
+                ColumnValue::I16(_) | ColumnValue::I32(_) | ColumnValue::I64(_) | ColumnValue::Null
+            );
+            assert!(
+                declared_is_char || value_is_numeric,
+                "column {} ({}) is declared numeric but carries {:?}",
+                i + 1,
+                col.name,
+                val
+            );
+        }
+    }
+
+    #[test]
     fn driver_odbc_ver_is_answered_before_the_connection_exists() {
         // The Windows Driver Manager asks for this one *before*
         // `SQLDriverConnectW`, and treats an unusable answer as "ODBC 2.x

@@ -324,6 +324,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `SyntheticStatement::new` checks that every row carries one value per declared
+  column. The descriptors and the row values are built by separate functions for
+  each catalog result set — `type_info_columns` against
+  `TypeInfoRow::to_column_values`, and each `*ResultCol` enum against its
+  `all_descriptors` — and nothing paired them up, so a short or long row
+  surfaced later as `SQLGetData` returning a neighbouring column's value rather
+  than as an error. A direct test also cross-checks the 19 `SQLGetTypeInfo`
+  columns, including that a column declared character is not filled with a
+  number.
 - `SQLSetStmtAttrW` substitutes and reports `01S02` for an unsupported
   `SQL_ATTR_CURSOR_TYPE` or `SQL_ATTR_CURSOR_SCROLLABLE`, instead of refusing
   them with `HYC00`. The spec defines 01S02 as "the driver did not support the

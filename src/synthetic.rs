@@ -27,7 +27,24 @@ pub struct SyntheticStatement {
 
 impl SyntheticStatement {
     /// Create a new synthetic statement with the given column descriptors and rows.
+    ///
+    /// Every row must have exactly one value per column. The descriptors and the
+    /// row values are built by separate functions for each catalog result set --
+    /// `type_info_columns` against `TypeInfoRow::to_column_values`, and each
+    /// `*ResultCol` enum against its `all_descriptors` -- so nothing but this
+    /// check makes the two agree. A row that is short or long here surfaces much
+    /// later as `SQLGetData` reading the wrong column, or as `07009` for a
+    /// column the descriptor says exists.
     pub fn new(columns: Vec<ColumnDescriptor>, rows: Vec<Vec<ColumnValue>>) -> Self {
+        debug_assert!(
+            rows.iter().all(|r| r.len() == columns.len()),
+            "synthetic result set has {} columns but a row with {} values",
+            columns.len(),
+            rows.iter()
+                .map(Vec::len)
+                .find(|n| *n != columns.len())
+                .unwrap_or(columns.len()),
+        );
         Self {
             columns,
             rows,
@@ -128,6 +145,17 @@ mod tests {
             nullable: Nullable::SqlNullable,
             ..Default::default()
         }]
+    }
+
+    #[test]
+    #[should_panic(expected = "synthetic result set has 1 columns but a row with 2 values")]
+    fn new_rejects_a_row_that_does_not_match_the_column_count() {
+        // The descriptors and the row values are built by separate functions
+        // for every catalog result set, and nothing else pairs them up.
+        SyntheticStatement::new(
+            test_columns(),
+            vec![vec![ColumnValue::I32(1), ColumnValue::I32(2)]],
+        );
     }
 
     #[test]
