@@ -155,7 +155,14 @@ pub unsafe fn config_dsn_w(
     // SAFETY: lpsz_attributes is null or a valid double-null-terminated UTF-16
     // attribute string as guaranteed by the function's safety contract.
     let attrs = unsafe { parse_attributes_w(lpsz_attributes) };
-    tracing::debug!("ConfigDSNW: request={}, attrs={:?}", f_request, attrs);
+    // Keyword names only. A DSN attribute list routinely carries `PWD=`, and
+    // unlike `ConnectParams` this is a plain `Vec` with no redacting `Debug`.
+    let attr_keys: Vec<&str> = attrs.iter().map(|(k, _)| k.as_str()).collect();
+    tracing::debug!(
+        "ConfigDSNW: request={}, attr_keys={:?}",
+        f_request,
+        attr_keys
+    );
 
     let Some((_, dsn_value)) = attrs.iter().find(|(k, _)| k.eq_ignore_ascii_case("DSN")) else {
         return 0;

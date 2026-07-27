@@ -418,8 +418,11 @@ pub unsafe fn sql_browse_connect_w<B: Backend>(
 
             // Parse the incoming connection string.
             let conn_str = utf16_to_string(in_connection_string, string_length1.into())?;
-            tracing::debug!("SQLBrowseConnectW: in_connection_string={:?}", conn_str);
             let new_params = merge_dsn_params(&conn_str, read_dsn_keys)?;
+            // The parsed form, never the raw string: `ConnectParams`' `Debug`
+            // redacts credential keywords and the raw string does not, so
+            // logging `conn_str` wrote `PWD=` to the log file verbatim.
+            tracing::debug!("SQLBrowseConnectW: params = {:?}", new_params);
 
             // Merge with any previously accumulated browse state.
             // New params take priority: start from new params and merge prior state into them

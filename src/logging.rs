@@ -33,10 +33,18 @@ pub fn init_logging() {
         };
 
         if let Ok(log_file) = std::env::var("ODBC_LOG_FILE") {
-            let file = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&log_file);
+            let mut options = std::fs::OpenOptions::new();
+            options.create(true).append(true);
+            // The log records connection parameters, so it must not be
+            // world-readable. Without an explicit mode it inherits the umask,
+            // which is commonly 0644. This applies at creation only: an
+            // existing log file keeps whatever mode it already has.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let file = options.open(&log_file);
             match file {
                 Ok(file) => {
                     tracing_subscriber::registry()

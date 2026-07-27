@@ -27,11 +27,49 @@ pub struct ConnectParams {
     params: HashMap<String, String>,
 }
 
+/// Substrings that mark a connection-string keyword as carrying a credential.
+///
+/// Matched as substrings, not whole names, because the keyword set is
+/// backend-defined: core sees `sslkeypassword`, `clientsecret` and
+/// `accesstoken` as readily as `pwd`, and a driver is free to invent more.
+/// Over-matching is harmless — redacting `authentication=kerberos` costs a line
+/// of diagnostics — whereas under-matching writes a credential to the log file.
+///
+/// This is best-effort and cannot be complete for exactly the reason above. The
+/// complete fix is for the backend, which owns the keyword set, to declare which
+/// of its keywords are secret; that is a `Backend` addition and is deferred.
+const SENSITIVE_KEYWORD_MARKERS: &[&str] = &[
+    "pass", // password, passwd, pass, sslkeypassword
+    "pwd",
+    "secret", // secret, clientsecret, client_secret
+    "token",  // token, accesstoken, auth_token
+    "credential",
+    "apikey",
+    "api_key",
+    "auth", // auth, authtoken, authorization
+    "privatekey",
+    "private_key",
+    "signature",
+];
+
+/// Whether a (already lowercased) keyword's value must be redacted.
+fn is_sensitive_keyword(key: &str) -> bool {
+    SENSITIVE_KEYWORD_MARKERS
+        .iter()
+        .any(|marker| key.contains(marker))
+}
+
 impl std::fmt::Debug for ConnectParams {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut map = f.debug_map();
         for (key, value) in &self.params {
-            let displayed = if key.eq_ignore_ascii_case(PASSWORD) || key.eq_ignore_ascii_case(PWD) {
+            // Keys are lowercased by `parse` and `insert`, so a plain
+            // `contains` is enough; the explicit comparisons keep the two
+            // spec-named keywords obvious.
+            let displayed = if key.eq_ignore_ascii_case(PASSWORD)
+                || key.eq_ignore_ascii_case(PWD)
+                || is_sensitive_keyword(&key.to_lowercase())
+            {
                 "*****"
             } else {
                 value.as_str()
@@ -272,6 +310,37 @@ mod tests {
     fn user_missing_returns_error() {
         let params = ConnectParams::parse("").unwrap();
         assert!(params.user().is_err());
+    }
+
+    #[test]
+    fn debug_redacts_credential_keywords_beyond_password_and_pwd() {
+        // The keyword set is backend-defined, so core sees names it has never
+        // heard of. These are the shapes a credential realistically takes.
+        for keyword in [
+            "Token",
+            "AccessToken",
+            "ApiKey",
+            "Api_Key",
+            "Secret",
+            "ClientSecret",
+            "Passwd",
+            "Pass",
+            "SslKeyPassword",
+            "Credential",
+            "PrivateKey",
+            "AuthToken",
+        ] {
+            let params = ConnectParams::parse(&format!("Host=localhost;{keyword}=s3cr3t")).unwrap();
+            let debug_str = format!("{params:?}");
+            assert!(
+                !debug_str.contains("s3cr3t"),
+                "{keyword} value must be redacted, got: {debug_str}"
+            );
+            assert!(
+                debug_str.contains("localhost"),
+                "{keyword} redaction must not hide unrelated values, got: {debug_str}"
+            );
+        }
     }
 
     #[test]

@@ -146,6 +146,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Security.** Credentials no longer reach the log file by four separate
+  routes. `SQLBrowseConnectW` logged the raw incoming connection string,
+  `PWD=` included — every other connect path was already careful — and now logs
+  the parsed `ConnectParams`, whose `Debug` redacts. `ConfigDSNW` logged the
+  whole parsed DSN attribute list, which routinely carries `PWD=`, and now logs
+  only the keyword names. `ConnectParams`' redaction covered exactly `password`
+  and `pwd`, so a backend-defined `token`, `apikey`, `clientsecret` or
+  `sslkeypassword` printed in clear; it now matches a set of substrings covering
+  the realistic shapes. And the log file is created `0600` on Unix instead of
+  inheriting the umask, which is commonly `0644`.
+  The keyword deny-list is best-effort and cannot be complete, because the
+  keyword set is backend-defined. The complete fix is for the backend to declare
+  which of its keywords are secret, which is a `Backend` addition and is
+  deferred.
 - **Security.** A parameter's length indicator is no longer trusted over the
   buffer the application bound. For `SQL_C_CHAR`, `SQL_C_WCHAR` and
   `SQL_C_BINARY`, `read_param_value` took the byte count solely from
