@@ -113,6 +113,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `#![deny(missing_docs)]`, with the 183 doc comments it required. Every public
+  item now documents itself, including all 78 `FunctionId` variants, the 43
+  catalog result-set column variants, the 19 `SQLGetTypeInfo` row fields, every
+  `OdbcError` variant and both `Backend` associated types. `common_get_info_raw`
+  — the one function AGENTS.md tells every driver to call — had none: its doc
+  block sat directly above a private function with no blank line between them,
+  so rustdoc merged the two and attached both to the private one.
 - `SQLGetInfoW` answers ten more info types instead of letting them reach the
   shape-aware default. `SQL_GETDATA_EXTENSIONS` reports
   `SQL_GD_ANY_COLUMN | SQL_GD_ANY_ORDER | SQL_GD_BOUND`, which is what core's
