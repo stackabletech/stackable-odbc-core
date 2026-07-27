@@ -21,7 +21,7 @@ static INIT: Once = Once::new();
 /// every ODBC application makes, and it runs this before entering `panic_safe` —
 /// a panic here would unwind across the `extern "system"` boundary, which is
 /// undefined behaviour, and would poison the `Once` so that every later call
-/// panicked too.
+/// panics too.
 ///
 /// Environment variables:
 /// - `ODBC_LOG_LEVEL`: tracing filter (e.g. "info", "debug", "trace"). Default: "off".

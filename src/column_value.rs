@@ -3803,10 +3803,11 @@ mod tests {
     // SQL-to-C conversions for the temporal types.
     //
     // These walk the spec's SQL-to-C conversion table rather than the pairs a
-    // particular backend happens to emit. Every earlier temporal test read its
-    // value as SQL_C_CHAR or SQL_C_WCHAR, which take the string-coercion
-    // catch-all, so the whole struct-target half of the table was untested and
-    // four legal conversions were missing without anything noticing.
+    // particular backend happens to emit. That distinction matters here: a
+    // temporal value read as SQL_C_CHAR or SQL_C_WCHAR takes the
+    // string-coercion catch-all and never reaches a struct target, so a suite
+    // built from what a backend produces can cover every temporal type and
+    // still leave the whole struct half of the table unexercised.
     //
     // Spec: https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/converting-data-from-sql-to-c-data-types
     // -----------------------------------------------------------------------
@@ -4088,10 +4089,10 @@ mod tests {
     #[test]
     fn civil_from_days_handles_a_pre_epoch_clock() {
         // `current_utc_date` cannot be pointed at a fake clock without a clock
-        // abstraction, but the branch that was wrong is the arithmetic, not the
-        // read: a machine whose clock is set before 1970 used to be given
-        // 1970-01-01 because the error carrying the distance backwards was
-        // discarded. These are the day counts that branch produces.
+        // abstraction, but the part worth testing is the arithmetic rather than
+        // the read. `duration_since(UNIX_EPOCH)` fails for a clock set before
+        // 1970 and carries the distance backwards in the error, so that branch
+        // produces negative day counts; these are the ones it can reach.
         assert_eq!(civil_from_days(-1), (1969, 12, 31));
         assert_eq!(civil_from_days(-365), (1969, 1, 1));
         assert_eq!(civil_from_days(-719_468), (0, 3, 1));

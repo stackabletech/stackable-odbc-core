@@ -20,13 +20,14 @@ fn init_logging_survives_an_application_that_already_installed_a_subscriber() {
         .try_init()
         .expect("this test owns the process, so nothing else has set a subscriber yet");
 
-    // Before the fix this panicked inside `SubscriberInitExt::init`, which is
-    // `try_init().expect(...)`. `SQLAllocHandle(SQL_HANDLE_ENV, ...)` runs it
-    // outside `panic_safe`, so the panic unwound across `extern "system"`.
+    // Losing the race must not panic. `SubscriberInitExt::init` is
+    // `try_init().expect(...)`, and `SQLAllocHandle(SQL_HANDLE_ENV, ...)` calls
+    // this before entering `panic_safe`, so a panic here unwinds across
+    // `extern "system"` with nothing to catch it.
     init_logging();
 
-    // The first panic also poisoned the `Once`, so every later call panicked
-    // with "Once instance has previously been poisoned" for the life of the
-    // process. That turned one lost race into a permanently dead driver.
+    // And the call is inside a `Once`, so a panic would poison it: every later
+    // call would panic too, turning one lost race into a driver that stays dead
+    // for the life of the process. Hence the second call.
     init_logging();
 }

@@ -775,10 +775,11 @@ mod tests {
         // preparing a new SQL statement" -- advice only a driver that keeps them
         // could need.
         //
-        // This previously cleared them, which broke the ordinary
-        // bind -> prepare -> execute order: `collect_params` substitutes
-        // ColumnValue::Null for every unbound slot, so the statement executed
-        // with all-NULL parameters and returned the wrong rows with SQL_SUCCESS.
+        // Clearing them here would break the ordinary
+        // bind -> prepare -> execute order silently: `collect_params`
+        // substitutes ColumnValue::Null for every unbound slot, so the
+        // statement would run with all-NULL parameters and return the wrong
+        // rows with SQL_SUCCESS and no diagnostic.
         unsafe {
             use crate::ffi::params::sql_bind_parameter;
             use crate::types::{CDataType, ParamType, SqlDataType};

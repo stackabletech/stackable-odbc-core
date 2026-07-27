@@ -26,10 +26,12 @@ const SQL_UB_OFF: usize = 0;
 const SQL_NOSCAN_OFF: usize = 0;
 // SQL_ATTR_ROW_BIND_TYPE values
 const SQL_BIND_BY_COLUMN: usize = 0;
-// SQL_ATTR_CURSOR_SENSITIVITY uses the shared `SQL_INSENSITIVE` from
-// `types::constants`. A second copy here held the value 2, which `sql.h` gives
-// to SQL_SENSITIVE, so SQLGetStmtAttr(SQL_ATTR_CURSOR_SENSITIVITY) contradicted
-// SQLGetInfo(SQL_CURSOR_SENSITIVITY) for the same statement.
+// SQL_ATTR_CURSOR_SENSITIVITY deliberately has no constant here: it uses the
+// shared `SQL_INSENSITIVE` from `types::constants`, which is what
+// `default_get_info` answers SQL_CURSOR_SENSITIVITY with. The two draw on the
+// same value set, so a local copy is a second place for the same statement to
+// describe its cursor — and `sql.h` puts SQL_SENSITIVE at 2, one away, which
+// is what a copy would most likely drift to.
 
 // SQL_ATTR_ROW_ARRAY_SIZE default
 const SQL_ROW_ARRAY_SIZE_DEFAULT: usize = 1;

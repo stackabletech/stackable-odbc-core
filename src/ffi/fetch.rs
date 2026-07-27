@@ -102,12 +102,12 @@ pub unsafe fn sql_fetch<B: Backend>(statement_handle: *mut c_void) -> SqlReturn 
             // to return: "The StatementHandle was in an executed state but no
             // result set was associated with the StatementHandle."
             //
-            // `statement.is_some()` is not that test. `set_result_set` leaves
-            // `cursor_open` false when the backend reports zero columns -- an
-            // UPDATE, ODBC state S4 -- and `set_prepared_statement` leaves it
-            // false in the prepared states S2/S3. Both kept a statement, so
-            // fetching after an UPDATE, or after SQLPrepare without
-            // SQLExecute, used to drive the backend instead.
+            // `cursor_open`, not `statement.is_some()`: a statement outlives
+            // its cursor. `set_result_set` leaves `cursor_open` false when the
+            // backend reports zero columns -- an UPDATE, ODBC state S4 -- and
+            // `set_prepared_statement` leaves it false in the prepared states
+            // S2/S3. Both keep a statement, so testing for one would drive the
+            // backend in exactly the two states this SQLSTATE names.
             if !cursor_open {
                 return Err(OdbcError::general(
                     "No cursor is open on this statement",
@@ -525,9 +525,9 @@ mod tests {
         // StatementHandle."
         //
         // `MockStatement` reports zero columns, so this stands for an UPDATE:
-        // ODBC state S4, executed with no cursor. The guard used to test
-        // `statement.is_some()`, which is true here, so SQLFetch drove the
-        // backend instead of refusing.
+        // ODBC state S4, executed with no cursor. Both states checked here keep
+        // a statement on the handle, which is what makes `statement.is_some()`
+        // the wrong guard and this test worth having.
         unsafe {
             let (env, conn, stmt) = alloc_env_conn_stmt();
             let input = "Host=localhost;Port=8080;Database=test;User=me";

@@ -13,11 +13,11 @@ use odbc_sys::HeaderDiagnosticIdentifier;
 const DIAG_MSG_BUF_LEN: usize = 256;
 
 // `SQLGetDiagField` diag_identifier values, derived from `odbc-sys` rather than
-// restated. Hand-written copies had `SQL_DIAG_COLUMN_NUMBER` as 12 and
-// `SQL_DIAG_ROW_NUMBER` as 13, where `sqlext.h` defines them as -1247 and
-// -1248. 12 is `SQL_DIAG_DYNAMIC_FUNCTION_CODE` and 13 is unassigned, so the
-// real fields fell through to the unknown-field arm while a caller asking for
-// the dynamic function code was answered with a row-number sentinel.
+// restated. The record fields are the reason: `sqlext.h` puts
+// `SQL_DIAG_ROW_NUMBER` at -1248 and `SQL_DIAG_COLUMN_NUMBER` at -1247, far
+// from the small positive header-field numbers around them, and 12 is
+// `SQL_DIAG_DYNAMIC_FUNCTION_CODE`. A transcribed copy that drifts therefore
+// does not simply fail to match — it answers a different field.
 //
 // These are `const` bindings rather than direct enum uses because the match
 // below needs them in patterns, including an inclusive range.
@@ -413,10 +413,11 @@ pub unsafe fn sql_get_diag_field_w<B: Backend>(
                 // caller-allocated buffer of at least buffer_length/2 u16 values.
                 unsafe { write_diag_string("", diag_info, buffer_length, string_length) }
             }
-            // The spec's Record Fields table types these two differently:
-            // SQL_DIAG_COLUMN_NUMBER is SQLINTEGER, SQL_DIAG_ROW_NUMBER is
-            // SQLLEN. They shared one arm writing four bytes, which left the
-            // high half of a caller's SQLLEN untouched on a 64-bit platform.
+            // An arm each, because the spec's Record Fields table types these
+            // two differently: SQL_DIAG_COLUMN_NUMBER is SQLINTEGER and
+            // SQL_DIAG_ROW_NUMBER is SQLLEN. Sharing one four-byte write would
+            // leave the high half of a caller's SQLLEN untouched on a 64-bit
+            // platform.
             SQL_DIAG_COLUMN_NUMBER => {
                 if !diag_info.is_null() {
                     // SAFETY: diag_info is non-null (checked above); the caller
@@ -1111,15 +1112,15 @@ mod tests {
 
     #[test]
     fn diag_identifiers_match_the_odbc_headers() {
-        // These were hand-written as 12 and 13. `sqlext.h` defines
-        // SQL_DIAG_COLUMN_NUMBER as -1247 and SQL_DIAG_ROW_NUMBER as -1248,
-        // and 12 is SQL_DIAG_DYNAMIC_FUNCTION_CODE (sql.h), so the driver
-        // answered the wrong field for one identifier and never matched the
-        // other two at all.
+        // Every identifier pinned against `sql.h` / `sqlext.h`, so that
+        // deriving them from `odbc-sys` cannot silently move one. The two
+        // record fields carry the risk: they sit at -1247 and -1248, nowhere
+        // near the header fields they are listed beside, and the value a
+        // careless transcription reaches for -- 12 -- is a real identifier,
+        // `SQL_DIAG_DYNAMIC_FUNCTION_CODE`. A wrong value here answers the
+        // wrong field rather than failing to match.
         assert_eq!(SQL_DIAG_COLUMN_NUMBER, -1247);
         assert_eq!(SQL_DIAG_ROW_NUMBER, -1248);
-        // The rest were right; pin them so deriving from `odbc-sys` cannot
-        // silently move them.
         assert_eq!(SQL_DIAG_RETURNCODE, 1);
         assert_eq!(SQL_DIAG_NUMBER, 2);
         assert_eq!(SQL_DIAG_SQLSTATE, 4);
@@ -1134,9 +1135,10 @@ mod tests {
     #[test]
     fn diag_field_row_number_writes_a_full_sqllen() {
         // The spec's Record Fields table types SQL_DIAG_ROW_NUMBER as SQLLEN
-        // and SQL_DIAG_COLUMN_NUMBER as SQLINTEGER. They shared one arm that
-        // wrote four bytes, so on a 64-bit platform the high half of the
-        // caller's SQLLEN kept whatever it held before the call.
+        // and SQL_DIAG_COLUMN_NUMBER as SQLINTEGER, so the two cannot share a
+        // write width. The buffer is pre-filled with a value whose high half is
+        // non-zero: a four-byte write would leave that half standing on a
+        // 64-bit platform, which no assertion on the low half would catch.
         unsafe {
             let mut env: *mut c_void = std::ptr::null_mut();
             let _ = sql_alloc_handle::<MockBackend>(
@@ -1186,12 +1188,13 @@ mod tests {
 
     #[test]
     fn diag_field_dynamic_function_code_is_not_answered_as_a_row_number() {
-        // 12 is SQL_DIAG_DYNAMIC_FUNCTION_CODE. While SQL_DIAG_COLUMN_NUMBER
-        // was defined as 12, asking for it wrote -1 -- which as a dynamic
-        // function code is SQL_DIAG_CREATE_INDEX, so the driver reported
-        // "CREATE INDEX" as the executed statement for everything. Core does
-        // not implement the field, so the honest answer is the unknown-field
-        // one.
+        // Core does not implement SQL_DIAG_DYNAMIC_FUNCTION_CODE, so the honest
+        // answer is the unknown-field one. What makes it worth a test is the
+        // shape of the failure if a record-field constant ever collides with
+        // 12: the sentinel those fields write is -1, and -1 is a *valid*
+        // dynamic function code, SQL_DIAG_CREATE_INDEX. The application would
+        // be told every statement it ran was a CREATE INDEX, with no error
+        // anywhere to suggest otherwise.
         unsafe {
             let mut env: *mut c_void = std::ptr::null_mut();
             let _ = sql_alloc_handle::<MockBackend>(

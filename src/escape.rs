@@ -471,14 +471,16 @@ enum FnCall {
 /// `{call ...}` nested inside an argument list must still fail with `HYC00`,
 /// not be silently swallowed.
 ///
-/// The argument span is translated exactly once, whether the dialect accepts
-/// the call or not, and [`FnCall::Declined`] hands that work back to the
-/// caller. Discarding it instead is what made this path exponential: every
-/// nesting level translated its arguments, threw the result away when the
-/// dialect declined, and left the caller to translate the same span again, so
-/// the cost doubled per level. Since [`EscapeDialect::ansi_default`] declines
-/// every call, that was the default for every driver, and a 694-byte string
-/// nested to `MAX_ESCAPE_DEPTH` never returned.
+/// The argument span must be translated exactly once, whether the dialect
+/// accepts the call or not, which is why [`FnCall::Declined`] hands that work
+/// back to the caller rather than the caller redoing it. Translating it and
+/// then discarding it on the declined path would double the cost at every
+/// nesting level, making translation exponential in depth: `MAX_ESCAPE_DEPTH`
+/// bounds the recursion but not the work, so it would set the exponent rather
+/// than cap it, and a few hundred bytes of nested `{fn}` would never finish.
+/// [`EscapeDialect::ansi_default`] declines every call, so that is the path a
+/// driver takes unless it implements `rewrite_scalar_fn` — and one that does is
+/// still on it for every name it declines.
 fn translate_call(
     chars: &[char],
     name: &str,
@@ -731,6 +733,11 @@ mod tests {
 
     #[test]
     fn nesting_within_the_depth_limit_is_linear_through_the_fn_argument_path() {
+        // Exactly `MAX_ESCAPE_DEPTH`, the deepest input the limit accepts, and
+        // it has to run to completion: the `+ 1` tests above fail on the first
+        // descent, so they never reach the argument recursion. `dialect()`
+        // declines every call, so every level here takes the declined path,
+        // which is where a superlinear translation cost would show up.
         let out = translate_escapes(&nested_fn(MAX_ESCAPE_DEPTH), &dialect())
             .expect("the deepest accepted nesting must translate");
         assert!(out.contains('x'));
