@@ -146,6 +146,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- DSN lookup no longer trusts the installer library's returned length.
+  `read_dsn_keys` sliced its buffers at the value `SQLGetPrivateProfileStringW`
+  returned, checking only that it was positive. unixODBC and odbccp32 have both
+  been observed returning the length *required* rather than the length *copied*
+  when a buffer is too small, which would panic — and the panic would cross the
+  C ABI boundary from `SQLConnectW`, `SQLDriverConnectW` or `SQLBrowseConnectW`.
+  Both lengths are now clamped to the buffer.
 - **Security.** Credentials no longer reach the log file by four separate
   routes. `SQLBrowseConnectW` logged the raw incoming connection string,
   `PWD=` included — every other connect path was already careful — and now logs

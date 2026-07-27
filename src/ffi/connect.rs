@@ -565,8 +565,15 @@ fn read_dsn_keys(dsn: &str) -> Vec<(String, String)> {
         return Vec::new();
     }
 
-    // Parse null-separated key list (double-null terminated)
-    let keys: Vec<String> = key_buf[..key_len as usize]
+    // Parse null-separated key list (double-null terminated).
+    //
+    // `key_len` comes from the installer library, not from this crate. unixODBC
+    // and odbccp32 have both been observed returning the length *required*
+    // rather than the length *copied* when a buffer is too small, so it is
+    // clamped rather than trusted: an unclamped slice would panic, and the
+    // panic would cross the C ABI boundary from `SQLConnectW`.
+    let key_len = (key_len as usize).min(key_buf.len());
+    let keys: Vec<String> = key_buf[..key_len]
         .split(|&c| c == 0)
         .filter(|s| !s.is_empty())
         .map(String::from_utf16_lossy)
@@ -594,7 +601,9 @@ fn read_dsn_keys(dsn: &str) -> Vec<(String, String)> {
             )
         };
         if val_len > 0 {
-            let value = String::from_utf16_lossy(&val_buf[..val_len as usize]);
+            // Clamped for the same reason as `key_len` above.
+            let val_len = (val_len as usize).min(val_buf.len());
+            let value = String::from_utf16_lossy(&val_buf[..val_len]);
             result.push((key.clone(), value));
         }
     }
