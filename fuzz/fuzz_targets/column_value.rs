@@ -122,11 +122,25 @@ fuzz_target!(|input: Input| {
     //   256 bytes covers every fixed ODBC C type (SQL_C_NUMERIC and the interval
     //   structs, the largest, are well under it), so a write past it would be a
     //   genuine defect.
+    // - SQL_C_DEFAULT is neither, and giving it the blanket 256 bytes is what
+    //   hid a real heap overflow from this fuzzer: the *driver* picks the C
+    //   type there, and it picks from the runtime `ColumnValue` variant rather
+    //   than from the `sql_type` the application sized its buffer against, so
+    //   `BufferLength` is the only bound that exists. A positive `BufferLength`
+    //   must therefore be honoured and gets an exact-size allocation. Zero is
+    //   the documented exemption — it is how an application says "not
+    //   applicable" for a fixed C type, so it carries no size information — and
+    //   gets the fixed-type allocation instead.
     let variable_len = matches!(
         target,
         CDataType::WChar | CDataType::Char | CDataType::Binary
     );
-    let alloc = if variable_len { input.buf_len as usize } else { 256 };
+    let bounded_by_buf_len = variable_len || (target == CDataType::Default && buf_len > 0);
+    let alloc = if bounded_by_buf_len {
+        input.buf_len as usize
+    } else {
+        256
+    };
     let mut buf = vec![0u8; alloc];
     let mut ind: isize = 0;
     unsafe {

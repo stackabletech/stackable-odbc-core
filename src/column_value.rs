@@ -70,6 +70,36 @@ pub unsafe fn write_column_value(
             // The (_, CDataType::WChar) arm will call column_value_to_string.
             _ => CDataType::WChar,
         };
+
+        // For an explicitly named fixed C type the spec has the driver ignore
+        // BufferLength, because naming the type is itself a statement of the
+        // buffer's size. SQL_C_DEFAULT inverts that: the driver chooses, and it
+        // chooses from the runtime `ColumnValue` variant rather than from the
+        // `sql_type` that `SQLDescribeCol` reported and the application sized
+        // its buffer from. Nothing cross-checks those two, so a backend
+        // yielding a wider variant than it described would otherwise write past
+        // the application's buffer — 16 bytes of `Timestamp` into the four an
+        // application allocated for a declared `SQL_INTEGER`.
+        //
+        // A positive `buf_len` is the only evidence of the real buffer size
+        // core has here, so honour it. Zero is exempt: it is the idiomatic way
+        // to say "not applicable" for a fixed C type, so it carries no size
+        // information and cannot be used as a bound. Variable-length targets
+        // are not checked because `write_wchar` / `write_char` / `write_binary`
+        // already bound themselves by `buf_len`.
+        if let Some(needed) = default_target_width(inferred)
+            && buf_len > 0
+            && buf_len < needed as isize
+        {
+            return Err(OdbcError::general(
+                format!(
+                    "SQL_C_DEFAULT for {value:?} selects {inferred:?}, which needs {needed} bytes, \
+                     but the application supplied a {buf_len}-byte buffer"
+                ),
+                SqlState::restricted_data_type_attribute_violation(),
+            ));
+        }
+
         return unsafe { write_column_value(value, inferred, target_ptr, buf_len, len_ind_ptr) };
     }
 
@@ -286,6 +316,29 @@ pub unsafe fn write_column_value(
 // ---------------------------------------------------------------------------
 // Helper: write a fixed-size value to a raw pointer
 // ---------------------------------------------------------------------------
+
+/// How many bytes `write_fixed` will write for a C type that
+/// [`write_column_value`]'s `SQL_C_DEFAULT` inference can select, or `None` for
+/// the variable-length targets, which bound themselves by `buf_len`.
+///
+/// Deliberately covers only the types that inference can produce. A wider match
+/// would invite the impression that this is a general size table for
+/// `CDataType`, which it is not — it exists solely to bound the one path where
+/// the driver, not the application, picks the C type.
+fn default_target_width(c_type: CDataType) -> Option<usize> {
+    Some(match c_type {
+        CDataType::Bit | CDataType::STinyInt => 1,
+        CDataType::SShort => 2,
+        CDataType::SLong | CDataType::Float => 4,
+        CDataType::SBigInt | CDataType::Double => 8,
+        CDataType::TypeDate => size_of::<Date>(),
+        CDataType::TypeTime => size_of::<Time>(),
+        CDataType::TypeTimestamp => size_of::<Timestamp>(),
+        // WChar and Binary are the other two inference results; both are
+        // variable-length and already respect buf_len.
+        _ => return None,
+    })
+}
 
 unsafe fn write_fixed<T: Copy>(
     target_ptr: *mut c_void,
@@ -1092,6 +1145,115 @@ mod tests {
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
         assert_eq!(ind, -1); // NULL_DATA
+    }
+
+    // -----------------------------------------------------------------------
+    // SQL_C_DEFAULT and the application's buffer
+    //
+    // For an explicitly named fixed C type the spec says BufferLength is
+    // ignored, because the application named the type and therefore knows its
+    // size. SQL_C_DEFAULT inverts that: the *driver* picks the C type, and it
+    // picks from the runtime ColumnValue variant rather than the sql_type the
+    // application sized its buffer from. Nothing cross-checks the two, so the
+    // buffer length is the only bound available.
+    // -----------------------------------------------------------------------
+
+    /// A canary either side of the target buffer catches an overrun even when
+    /// the allocator happens to leave slack after it.
+    fn with_guarded_buffer(
+        len: usize,
+        f: impl FnOnce(*mut c_void) -> Result<SqlReturn, OdbcError>,
+    ) {
+        let mut arena = vec![0xAAu8; len + 32];
+        let target = unsafe { arena.as_mut_ptr().add(16) };
+        let result = f(target.cast());
+
+        assert!(
+            result.is_err(),
+            "expected an error rather than a write past the buffer, got {result:?}"
+        );
+        assert!(
+            arena[..16].iter().all(|&b| b == 0xAA),
+            "wrote before the buffer: {:?}",
+            &arena[..16]
+        );
+        assert!(
+            arena[16 + len..].iter().all(|&b| b == 0xAA),
+            "wrote past the end of a {len}-byte buffer: {:?}",
+            &arena[16 + len..]
+        );
+    }
+
+    #[test]
+    fn default_c_type_will_not_write_a_timestamp_into_a_four_byte_buffer() {
+        // An application that saw SQL_INTEGER from SQLDescribeCol binds four
+        // bytes with SQL_C_DEFAULT. A backend that then yields a Timestamp must
+        // not cause a 16-byte write.
+        let value = ColumnValue::Timestamp {
+            year: 2026,
+            month: 7,
+            day: 27,
+            hour: 12,
+            minute: 30,
+            second: 15,
+            fraction: 0,
+        };
+        let mut ind: isize = 0;
+        with_guarded_buffer(4, |target| unsafe {
+            write_column_value(&value, CDataType::Default, target, 4, &mut ind)
+        });
+    }
+
+    #[test]
+    fn default_c_type_will_not_write_an_i64_into_a_four_byte_buffer() {
+        let mut ind: isize = 0;
+        with_guarded_buffer(4, |target| unsafe {
+            write_column_value(
+                &ColumnValue::I64(i64::MAX),
+                CDataType::Default,
+                target,
+                4,
+                &mut ind,
+            )
+        });
+    }
+
+    #[test]
+    fn default_c_type_still_writes_when_the_buffer_is_large_enough() {
+        let mut buf: i64 = 0;
+        let mut ind: isize = 0;
+        let ret = unsafe {
+            write_column_value(
+                &ColumnValue::I64(42),
+                CDataType::Default,
+                &mut buf as *mut i64 as *mut c_void,
+                8,
+                &mut ind,
+            )
+        };
+        assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
+        assert_eq!(buf, 42);
+        assert_eq!(ind, 8);
+    }
+
+    #[test]
+    fn an_explicitly_named_fixed_c_type_still_ignores_buffer_length() {
+        // The spec says so, and applications rely on it: naming SQL_C_SBIGINT
+        // is a statement that the buffer is eight bytes, whatever is passed as
+        // BufferLength. Only the SQL_C_DEFAULT path gains a bound.
+        let mut buf: i64 = 0;
+        let mut ind: isize = 0;
+        let ret = unsafe {
+            write_column_value(
+                &ColumnValue::I64(42),
+                CDataType::SBigInt,
+                &mut buf as *mut i64 as *mut c_void,
+                0,
+                &mut ind,
+            )
+        };
+        assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
+        assert_eq!(buf, 42);
     }
 
     #[test]

@@ -146,6 +146,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Security.** `SQL_C_DEFAULT` could overrun the application's buffer.
+  `write_column_value` ignored `BufferLength` for every fixed-width C type,
+  which is correct when the application *names* the type — naming it states the
+  buffer's size — but not for `SQL_C_DEFAULT`, where the driver chooses. Core
+  chose from the runtime `ColumnValue` variant rather than from the `sql_type`
+  `SQLDescribeCol` reported and the application sized its buffer against, and
+  nothing cross-checked the two: a column described as `SQL_INTEGER` and bound
+  with four bytes received a 16-byte write if the backend produced a
+  `Timestamp`, and `SQL_SUCCESS` with it. A positive `BufferLength` is now
+  honoured on the `SQL_C_DEFAULT` path and a value too wide for it returns
+  `07006`. `BufferLength = 0` remains exempt: for a fixed C type it is the
+  idiomatic "not applicable" and carries no size information. The residual is
+  closed properly by deriving the default C type from the column's `sql_type`,
+  which needs a signature change and is deferred.
+  The `column_value` fuzz target allocated a blanket 256 bytes for every
+  non-character target, including `SQL_C_DEFAULT`, which is what hid this; it
+  now allocates exactly `BufferLength` for that case.
 - **Security.** A DSN entry in `odbc.ini` could override the connection string
   the application supplied, and could inject additional keywords. Both are
   fixed, and `merge_dsn_params` now has tests, which it had none of.
