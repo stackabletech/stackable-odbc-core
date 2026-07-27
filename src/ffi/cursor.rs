@@ -344,8 +344,8 @@ pub unsafe fn sql_cancel<B: Backend>(statement_handle: *mut c_void) -> SqlReturn
             if let Some(crate::handles::StatementData::Backend(ref mut backend_stmt)) =
                 stmt.statement
             {
-                // Converted before matching: `B::cancel` now reports
-                // `B::Error`, and the arm below has to recognise core's own
+                // Converted before matching: `B::cancel` reports `B::Error`,
+                // and the arm below has to recognise core's own
                 // `NotImplemented` inside it.
                 match B::cancel(backend_stmt).into_odbc() {
                     Ok(()) => {}

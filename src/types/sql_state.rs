@@ -415,8 +415,9 @@ mod tests {
 
     #[test]
     fn try_from_rejects_anything_that_is_not_five_ascii_characters() {
-        // The reason the byte array is private: each of these used to be
-        // constructible, and each makes `as_str` return its "?????" fallback.
+        // The reason the byte array is private: a public one makes every one of
+        // these constructible, and each makes `as_str` return its "?????"
+        // fallback in place of a diagnostic code.
         for bad in ["", "HY0", "HY0000", "HY00é"] {
             let err = SqlState::try_from(bad).expect_err("must reject {bad:?}");
             assert_eq!(err.input, bad);

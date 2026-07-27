@@ -1309,9 +1309,10 @@ mod tests {
     /// used to build the driver's reported capability value, a tautology,
     /// since a typo in the constant's definition (e.g.
     /// `SQL_SU_PRIVILEGE_DEFINITION = 0x20` instead of `0x10`) moves both the
-    /// implementation and that expectation together and is never caught.
-    /// Six capability bitmaps were found wrong in this codebase precisely
-    /// because their values were unverifiable this way.
+    /// implementation and that expectation together and is never caught. That
+    /// is how a capability bitmap comes to report a value no header defines
+    /// while every test around it stays green, so these are pinned against the
+    /// headers directly.
     ///
     /// This test deliberately breaks the project's usual "no spec literals
     /// in tests" rule (see AGENTS.md, "Named constants") for the same reason

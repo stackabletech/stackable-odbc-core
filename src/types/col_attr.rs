@@ -40,9 +40,10 @@ pub fn get_column_attribute(
         } else {
             desc.type_name.clone()
         })),
-        // Taken from the descriptor. These are empty unless the backend
-        // populated them, which is the same answer core used to hard-code --
-        // but a backend that does track a column's origin can now report it.
+        // Taken from the descriptor, so they are empty unless the backend
+        // populated them. A backend that tracks a column's origin reports it
+        // here; one that does not gets the empty string, rather than core
+        // inventing a name for a table it knows nothing about.
         Desc::TableName => Ok(ColAttrValue::String(desc.table_name.clone())),
         Desc::SchemaName => Ok(ColAttrValue::String(desc.schema_name.clone())),
         Desc::CatalogName => Ok(ColAttrValue::String(desc.catalog_name.clone())),

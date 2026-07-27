@@ -98,8 +98,10 @@ mod tests {
 
     #[test]
     fn push_reports_the_data_sources_own_error_code() {
-        // Before this was plumbed through, every driver's native code reached
-        // the application as 0 no matter what the data source said.
+        // The data source's own code has to survive the trip to
+        // `SQLGetDiagRec`'s NativeErrorPtr. Nothing else carries it, so if the
+        // queue drops it the application sees 0 whatever the data source said,
+        // and 0 is also the legitimate "no native code" answer.
         let mut q = DiagnosticQueue::new();
         q.push(&OdbcError::general("boom", SqlState::general_error()).with_native_error(1555));
         assert_eq!(q.get(0).expect("record").native_error, 1555);

@@ -334,8 +334,9 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// This value is authoritative in two places at once: `sql_end_tran`
     /// applies it to the connection's statements, and `SQLGetInfoW` reports it
     /// for `SQL_CURSOR_COMMIT_BEHAVIOR`. Overriding this method therefore
-    /// changes both together, which is the point — before this hook existed,
-    /// core advertised `SQL_CB_DELETE` and implemented nothing.
+    /// changes both together, which is the point: the value a driver reports
+    /// and the value it applies have to be the same one, or it advertises a
+    /// behaviour it does not implement.
     ///
     /// The default is [`crate::types::CursorBehavior::Preserve`]: the least destructive
     /// value, and the one both psqlODBC and MySQL Connector/ODBC report for
@@ -482,10 +483,10 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// one of the [`SQL_GB_*`](crate::types::SQL_GB_NO_RELATION) values.
     ///
     /// Required because every value here is a claim, `0`
-    /// (`SQL_GB_NOT_SUPPORTED`, "GROUP BY is not supported") included. Core
-    /// used to answer `SQL_GB_NO_RELATION`, which is both a claim no backend
-    /// made and one the spec says an entry-level driver does not return: "a
-    /// SQL-92 Entry level-conformant driver will always return the
+    /// (`SQL_GB_NOT_SUPPORTED`, "GROUP BY is not supported") included. There is
+    /// none core could pick that would merely be permissive: even
+    /// `SQL_GB_NO_RELATION` is one the spec says an entry-level driver does not
+    /// return — "a SQL-92 Entry level-conformant driver will always return the
     /// SQL_GB_GROUP_BY_EQUALS_SELECT option as supported."
     fn group_by() -> u16;
 
@@ -494,8 +495,8 @@ pub trait Backend: Sized + Send + Sync + 'static {
     ///
     /// Required because `0` is [`SQL_NC_HIGH`](crate::types::SQL_NC_HIGH), a
     /// substantive answer ("NULLs sort high, depending on ASC/DESC") rather
-    /// than an absence of one — so the shape default silently claimed it for
-    /// every backend.
+    /// than an absence of one — so a shape-derived default would silently make
+    /// that claim for every backend.
     fn null_collation() -> u16;
 
     /// How the data source treats *unquoted* identifiers —
@@ -539,7 +540,7 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// Required rather than defaulted because it is a capability an
     /// application acts on: a tool deciding whether to push `ORDER BY
     /// lower(name)` down to the data source reads this, and both a wrong `"N"`
-    /// and the `""` core used to fall back to read as "no".
+    /// and the `""` a shape-derived default would produce read as "no".
     fn expressions_in_order_by() -> bool;
 
     /// The `SQL_SQL_CONFORMANCE` (118) level — one of the
@@ -558,10 +559,9 @@ pub trait Backend: Sized + Send + Sync + 'static {
     ///
     /// Constrained by [`Backend::sql_conformance`]: "a SQL-92 Entry
     /// level-conformant driver will always return a bitmask with all of these
-    /// bits set." Core used to hard-code exactly that, which is why a backend
-    /// declaring no conformance level was still told it supported correlated
-    /// subqueries — the claim a BI tool acts on when it decides to push one
-    /// down.
+    /// bits set." Hard-coding that in core would tell a backend declaring no
+    /// conformance level at all that it supports correlated subqueries — the
+    /// claim a BI tool acts on when it decides to push one down.
     fn subqueries() -> u32;
 
     /// Whether the data source supports column aliases (`SELECT x AS y`) —
@@ -676,9 +676,10 @@ pub trait Backend: Sized + Send + Sync + 'static {
     ///
     /// This is also what `SQLGetConnectAttr(SQL_ATTR_TXN_ISOLATION)` reports
     /// on a connection where the application has not set the attribute. Both
-    /// answers come from here so they cannot disagree; core previously
-    /// hard-coded `SQL_TXN_READ_COMMITTED` for the connection attribute while
-    /// the backend reported something else for the info type.
+    /// answers come from here so they cannot disagree. Answering the connection
+    /// attribute from a constant instead would let a connection report one
+    /// isolation level through `SQLGetConnectAttr` and another through
+    /// `SQLGetInfo`, with nothing in either path to reconcile them.
     fn default_txn_isolation() -> u32;
 
     /// The `SQL_TXN_ISOLATION_OPTION` (72) bitmask: every isolation level this
@@ -954,9 +955,9 @@ pub fn default_get_info<B: Backend>(info_type: crate::types::InfoType) -> Option
         InfoType::XopenCliYear => Some(InfoValue::String("1995".into())),
         InfoType::CollationSeq => Some(InfoValue::String(String::new())),
         InfoType::DescribeParameter => Some(InfoValue::String("Y".into())),
-        // Spec-declared "Y"/"N" strings that previously had no arm, so the
-        // shape-aware fallback gave them `""` -- the right shape, but not a
-        // value in any of their value lists.
+        // Spec-declared "Y"/"N" strings, which need an arm each: the
+        // shape-aware fallback would give them `""` -- the right shape, but not
+        // a value in any of their value lists.
         InfoType::MultResultSets => Some(InfoValue::String("N".into())),
         InfoType::MaxRowSizeIncludesLong => Some(InfoValue::String("N".into())),
         InfoType::NeedLongDataLen => Some(InfoValue::String("N".into())),
@@ -1229,8 +1230,8 @@ mod tests {
         (InfoType::XopenCliYear,                  Expected::Str("1995")),
         (InfoType::CollationSeq,                  Expected::Str("")),
         (InfoType::DescribeParameter,             Expected::Str("Y")),
-        // Y/N strings that used to fall through to the shape default's "",
-        // which is not in any of their value lists.
+        // Y/N strings, which need arms of their own: the shape default's "" is
+        // not in any of their value lists.
         (InfoType::MultResultSets,                Expected::Str("N")),
         (InfoType::MaxRowSizeIncludesLong,        Expected::Str("N")),
         (InfoType::NeedLongDataLen,               Expected::Str("N")),
@@ -1363,9 +1364,9 @@ mod tests {
     /// `SQL_CATALOG_LOCATION` and `SQL_CATALOG_USAGE` are all defined by the
     /// `SQLGetInfo` spec in terms of one fact — whether the data source has
     /// catalogs at all — so a backend that says it has none must not be handed
-    /// a name for them. Core used to answer "catalog" and "." unconditionally,
-    /// which let a driver report `SQL_CATALOG_NAME = "N"` and name its
-    /// catalogs in the same breath.
+    /// a name for them. Answering "catalog" and "." unconditionally would let a
+    /// driver report `SQL_CATALOG_NAME = "N"` and name its catalogs in the same
+    /// breath.
     #[test]
     fn catalog_less_backend_reports_the_spec_mandated_empty_catalog_group() {
         use crate::test_utils::MockNoCatalogBackend;
@@ -1413,9 +1414,10 @@ mod tests {
         );
     }
 
-    /// A backend that *does* have catalogs and schemas still gets the SQL-92
-    /// Full level terms the spec names, so the fix does not quietly blank the
-    /// values for the drivers that were already right.
+    /// A backend that *does* have catalogs and schemas gets the SQL-92 Full
+    /// level terms the spec names. The sibling test above pins the empty group
+    /// for a backend without them; this one is its other half, so that
+    /// suppressing the group for one backend cannot blank it for both.
     #[test]
     fn catalog_supporting_backend_keeps_the_sql92_full_terms() {
         for (info_type, expected) in [
@@ -1974,12 +1976,12 @@ mod tests {
             .collect();
         assert!(
             stale_gap.is_empty(),
-            "these are listed in SHAPE_DEFAULT_IS_THE_ANSWER but now have an \
-             arm; drop the stale entries: {stale_gap:?}"
+            "these are listed in SHAPE_DEFAULT_IS_THE_ANSWER but have an arm; \
+             drop the stale entries: {stale_gap:?}"
         );
         assert!(
             stale.is_empty(),
-            "these are listed in CORE_FACTS but no longer answered identically \
+            "these are listed in CORE_FACTS but are not answered identically \
              for every backend; drop the stale entries: {stale:?}"
         );
     }

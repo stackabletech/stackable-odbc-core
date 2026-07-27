@@ -235,9 +235,10 @@ impl Backend for MockBackend {
     fn outer_join_capabilities() -> u32 {
         crate::types::SQL_OJ_LEFT | crate::types::SQL_OJ_NESTED
     }
-    // Deliberately SERIALIZABLE, not READ_COMMITTED: core used to hard-code
-    // READ_COMMITTED as the unset `SQL_ATTR_TXN_ISOLATION` value, so a mock
-    // declaring READ_COMMITTED could not tell the hook from the old constant.
+    // Deliberately SERIALIZABLE, not READ_COMMITTED. READ_COMMITTED is the
+    // value core would most plausibly reach for if it answered the unset
+    // `SQL_ATTR_TXN_ISOLATION` itself, and a mock declaring it could not tell
+    // the hook being consulted from a constant that happens to agree.
     fn default_txn_isolation() -> u32 {
         crate::types::SQL_TXN_SERIALIZABLE
     }
@@ -281,10 +282,10 @@ impl Backend for MockBackend {
         crate::types::SQL_FN_TSI_SECOND | crate::types::SQL_FN_TSI_YEAR
     }
 
-    // The values core used to hard-code. Keeping them here rather than
-    // changing them keeps this mock's `SQL_SC_SQL92_ENTRY` claim honest --
-    // the spec names each of the first three as what an entry-level driver
-    // returns -- and means the snapshot test still pins the same output.
+    // The values the spec names for an entry-level driver, which is what keeps
+    // this mock's `SQL_SC_SQL92_ENTRY` claim honest: `SQL_SQL_CONFORMANCE`
+    // constrains each of the first three, so declaring a level and then
+    // contradicting it here would make the mock itself a bad example.
     fn subqueries() -> u32 {
         crate::types::SQL_SQ_COMPARISON
             | crate::types::SQL_SQ_EXISTS

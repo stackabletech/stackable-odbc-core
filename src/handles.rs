@@ -292,10 +292,10 @@ pub struct EnvironmentHandle<B: Backend> {
     /// Tokens of child connections, not addresses: everything outside this
     /// module deals in tokens, so they can be revalidated after any free.
     pub connections: Vec<*mut c_void>,
-    /// `EnvironmentHandle` no longer names `B` in any field now that child
-    /// handles are tokens, but it must stay generic: `as_handle_ref::<T>` keys
-    /// on the concrete type, and an environment allocated for one backend must
-    /// not resolve as another's.
+    /// No field names `B`, since child handles are tokens rather than typed
+    /// pointers, but the struct must stay generic: `as_handle_ref::<T>` keys on
+    /// the concrete type, and an environment allocated for one backend must not
+    /// resolve as another's.
     _backend: std::marker::PhantomData<fn() -> B>,
     pub diagnostics: DiagnosticQueue,
 }

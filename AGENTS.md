@@ -240,9 +240,10 @@ These deliberately are not:
 Each states a **capability**, where any default is a claim the backend author
 never made. `0` understates ("this data source cannot do this at all") and
 `true` overstates, and a backend author is unlikely to notice a capability they
-never wrote code for — so the compiler asks instead of core guessing. Each of
-these replaced a value core used to invent, and each of those values was wrong
-for at least one real driver.
+never wrote code for — so the compiler asks instead of core guessing. Any value
+core invents for these is wrong for some real driver, and wrong silently: the
+backend author never sees the question, and the application never sees anything
+but a confident answer.
 
 #### Deciding whether a new info type belongs here
 

@@ -1050,9 +1050,10 @@ mod tests {
     }
 
     /// C2: an unset `SQL_ATTR_TXN_ISOLATION` must report the level the backend
-    /// declares, not a constant. Core used to answer `SQL_TXN_READ_COMMITTED`
-    /// unconditionally, so a backend reporting `SQL_TXN_SERIALIZABLE` for
-    /// `SQL_DEFAULT_TXN_ISOLATION` contradicted itself on the same connection.
+    /// declares, not a constant. Answering one unconditionally — say
+    /// `SQL_TXN_READ_COMMITTED` — makes a backend that reports
+    /// `SQL_TXN_SERIALIZABLE` for `SQL_DEFAULT_TXN_ISOLATION` contradict itself
+    /// on the same connection.
     #[test]
     fn get_txn_isolation_default_comes_from_the_backend() {
         unsafe {

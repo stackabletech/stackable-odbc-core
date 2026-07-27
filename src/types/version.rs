@@ -4,8 +4,8 @@
 //! "a character string of the form ##.##.####, where the first two digits are
 //! the major version, the next two digits are the minor version, and the last
 //! four digits are the release version". This module is the only place that
-//! renders that form, so a driver version can no longer drift from
-//! `Cargo.toml` and a server version can no longer be reported malformed.
+//! renders that form, which is what keeps a driver version from drifting out of
+//! step with `Cargo.toml` and a server version from being reported malformed.
 
 /// Formats a version triple into the ODBC `##.##.####` form required by
 /// `SQL_DRIVER_VER` and `SQL_DBMS_VER`.

@@ -727,9 +727,9 @@ mod tests {
     fn end_tran_close_lets_the_statement_execute_again() {
         // The transition table sends S5-S7 to S3 and S4 to S2 under
         // SQL_CB_CLOSE: no cursor is open afterwards, so SQLExecDirect is legal.
-        // Core used to answer 24000 here, because it read `statement.is_some()`
-        // as "a cursor is open" and SQL_CB_CLOSE deliberately keeps the
-        // statement.
+        // The trap is that SQL_CB_CLOSE deliberately keeps the statement, so
+        // anything reading `statement.is_some()` as "a cursor is open" answers
+        // 24000 to a statement the spec has just made executable again.
         unsafe {
             let (env, conn, stmt) = alloc_connected_stmt::<MockTxnCloseBackend>("DRIVER=mock;");
 

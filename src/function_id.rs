@@ -554,7 +554,9 @@ mod tests {
 
     #[test]
     fn function_id_from_raw_rejects_unassigned_values() {
-        // 30 is the slot SQLGetConnectOption was wrongly recorded at.
+        // 30 sits in the middle of the assigned 2.x range without being
+        // assigned itself, so it is the kind of value a mistranscribed function
+        // id lands on -- `SQL_API_SQLGETCONNECTOPTION` is 42, not 30.
         for value in [0u16, 25, 30, 39, 74, 1000, 1013, 1015, 1023, 9999] {
             assert_eq!(
                 function_id_from_raw(value),

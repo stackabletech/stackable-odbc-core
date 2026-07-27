@@ -1632,9 +1632,9 @@ mod tests {
     /// `SQL_KEYWORDS` is the spec's *subtraction*: the data source's reserved
     /// words minus the ones ODBC already reserves. Core owns that rule and
     /// `Backend::keywords` owns the raw list, so what an application sees has
-    /// to move with the backend — the empty string core used to return for
-    /// everyone is the claim "this data source reserves nothing beyond ODBC",
-    /// which is how a generated identifier ends up unquoted.
+    /// to move with the backend. An empty string is not a neutral answer here:
+    /// it is the claim "this data source reserves nothing beyond ODBC", which
+    /// is how a generated identifier ends up unquoted.
     ///
     /// Asserted through `sql_get_info_w` rather than `common_get_info_raw`, so
     /// the dispatch ordering is covered too.
