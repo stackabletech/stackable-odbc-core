@@ -360,6 +360,28 @@ markers go away and this section becomes the initial-release notes.
 
 ### Fixed
 
+- Escape translation is linear in nesting depth again. `{fn NAME(args)}`
+  translated its argument list, discarded the result when the dialect declined
+  to rewrite the call, and left the caller to translate the same span a second
+  time, so the work doubled at every nesting level. `MAX_ESCAPE_DEPTH` bounded
+  the recursion but not the work — it set the exponent. Since
+  `EscapeDialect::ansi_default` declines every call and `Backend::escape_dialect`
+  returns it by default, this was the path every driver took unless it
+  implemented `rewrite_scalar_fn`, and a driver that did was still exposed for
+  every function name it declined.
+
+  A 631-byte `SELECT`-able string nested to the depth limit needed 2^63
+  translations and never returned; measured, 26 levels took 9.5 seconds and 40
+  levels did not finish in 25. `SQLExecDirectW` reaches this whenever
+  `SQL_ATTR_NOSCAN` is off, which is the default, as do `SQLPrepareW` and
+  `SQLNativeSqlW`. `SQLCancel` cannot interrupt it and the output stays a few
+  hundred bytes, so nothing signals the hang. The same input now translates in
+  tens of microseconds.
+
+  The existing depth tests missed it because they nest through `{oj}`, which
+  does not double, and the one `{fn}` test uses `MAX_ESCAPE_DEPTH + 1`, where
+  the depth error fires on the first descent and short-circuits.
+
 - `init_logging` no longer aborts the host process when a global `tracing`
   subscriber already exists. It installed its subscriber with
   `SubscriberInitExt::init`, which is `try_init().expect(...)`, and

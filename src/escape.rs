@@ -395,15 +395,21 @@ fn translate_escape(
             if name.is_empty() {
                 // malformed {fn} — copy verbatim
                 out.extend(chars[open..=close].iter().copied());
-            } else if let Some(rewritten) =
-                rewrite_call(chars, &name, n, close, dialect, depth).transpose()?
-            {
-                out.push_str(&rewritten);
             } else {
-                let mapped = (dialect.remap_scalar_fn)(&name).unwrap_or(&name);
-                out.push_str(mapped);
-                let rest = translate_slice(&chars[n..close], dialect, depth + 1)?;
-                out.push_str(&rest);
+                match translate_call(chars, &name, n, close, dialect, depth)? {
+                    FnCall::Rewritten(rewritten) => out.push_str(&rewritten),
+                    FnCall::Declined(rest) => {
+                        let mapped = (dialect.remap_scalar_fn)(&name).unwrap_or(&name);
+                        out.push_str(mapped);
+                        out.push_str(&rest);
+                    }
+                    FnCall::NotACall => {
+                        let mapped = (dialect.remap_scalar_fn)(&name).unwrap_or(&name);
+                        out.push_str(mapped);
+                        let rest = translate_slice(&chars[n..close], dialect, depth + 1)?;
+                        out.push_str(&rest);
+                    }
+                }
             }
         }
         "d" => out.push_str(&(dialect.render_date)(
@@ -444,46 +450,78 @@ fn translate_escape(
     Ok(())
 }
 
+/// What [`translate_call`] found when it examined a `{fn NAME(args)}` call.
+enum FnCall {
+    /// The dialect rewrote the call. The string is the finished replacement.
+    Rewritten(String),
+    /// The dialect declined. The string is the already-translated remainder of
+    /// the escape — the parenthesized argument list and anything between the
+    /// closing paren and the `}` — so the caller can assemble the
+    /// `remap_scalar_fn` form without translating that span a second time.
+    Declined(String),
+    /// Not a call: no balanced parenthesis pair follows the name. Nothing has
+    /// been translated, so the caller translates the remainder itself.
+    NotACall,
+}
+
 /// Offer a `{fn NAME(args)}` call to [`EscapeDialect::rewrite_scalar_fn`].
 ///
 /// `name_end` is the index just past the function name, `close` the index of
-/// the escape's `}`. Returns `Ok(None)` when the dialect declines or the call
-/// has no balanced parenthesis pair, in which case the caller falls back to
-/// the `remap_scalar_fn` path. The inner `Result` propagates an error from
-/// translating the argument text — a `{call ...}` nested inside an argument
-/// list must still fail with `HYC00`, not be silently swallowed.
-#[allow(clippy::type_complexity)]
-fn rewrite_call(
+/// the escape's `}`. Errors propagate from translating the argument text — a
+/// `{call ...}` nested inside an argument list must still fail with `HYC00`,
+/// not be silently swallowed.
+///
+/// The argument span is translated exactly once, whether the dialect accepts
+/// the call or not, and [`FnCall::Declined`] hands that work back to the
+/// caller. Discarding it instead is what made this path exponential: every
+/// nesting level translated its arguments, threw the result away when the
+/// dialect declined, and left the caller to translate the same span again, so
+/// the cost doubled per level. Since [`EscapeDialect::ansi_default`] declines
+/// every call, that was the default for every driver, and a 694-byte string
+/// nested to `MAX_ESCAPE_DEPTH` never returned.
+fn translate_call(
     chars: &[char],
     name: &str,
     name_end: usize,
     close: usize,
     dialect: &EscapeDialect,
     depth: usize,
-) -> Option<Result<String, OdbcError>> {
+) -> Result<FnCall, OdbcError> {
     let mut p = name_end;
     while p < close && chars[p].is_whitespace() {
         p += 1;
     }
     if chars.get(p) != Some(&'(') {
-        return None;
+        return Ok(FnCall::NotACall);
     }
-    let arg_close = find_matching_paren(chars, p, close, dialect)?;
+    let Some(arg_close) = find_matching_paren(chars, p, close, dialect) else {
+        return Ok(FnCall::NotACall);
+    };
 
     // Translate the arguments *before* the dialect sees them, so a nested
     // escape is already resolved and the dialect never parses escapes itself.
-    let args = match translate_slice(&chars[p + 1..arg_close], dialect, depth + 1) {
-        Ok(a) => a,
-        Err(e) => return Some(Err(e)),
-    };
-    let rewritten = (dialect.rewrite_scalar_fn)(name, args.trim())?;
-
+    let args = translate_slice(&chars[p + 1..arg_close], dialect, depth + 1)?;
     // Anything between the closing paren and `}` is whitespace in a
     // well-formed call, but translate it rather than dropping it so that a
     // trailing nested escape is not silently lost.
-    match translate_slice(&chars[arg_close + 1..close], dialect, depth + 1) {
-        Ok(tail) => Some(Ok(rewritten + tail.trim_end())),
-        Err(e) => Some(Err(e)),
+    let tail = translate_slice(&chars[arg_close + 1..close], dialect, depth + 1)?;
+
+    match (dialect.rewrite_scalar_fn)(name, args.trim()) {
+        Some(rewritten) => Ok(FnCall::Rewritten(rewritten + tail.trim_end())),
+        None => {
+            // Reassemble exactly what translating `chars[name_end..close]` in
+            // one piece would have produced. Only the argument span needed
+            // translating, so everything else is copied from the source: the
+            // whitespace before the `(` and the `(` itself (`..=p`), then the
+            // matching `)` at `arg_close`. `translate_slice` copies whitespace
+            // and parentheses verbatim, so splitting the span at them does not
+            // change the result.
+            let mut rest: String = chars[name_end..=p].iter().collect();
+            rest.push_str(&args);
+            rest.push(chars[arg_close]);
+            rest.push_str(&tail);
+            Ok(FnCall::Declined(rest))
+        }
     }
 }
 
@@ -689,6 +727,33 @@ mod tests {
         let out = translate_escapes(&nested_oj(MAX_ESCAPE_DEPTH - 1), &dialect())
             .expect("nesting inside the limit must translate");
         assert!(out.contains('x'));
+    }
+
+    #[test]
+    fn nesting_within_the_depth_limit_is_linear_through_the_fn_argument_path() {
+        // Regression: `translate_call` used to translate a call's arguments,
+        // discard the result when the dialect declined the rewrite, and leave
+        // the caller to translate the same span again — doubling the work per
+        // nesting level. `dialect()` declines every call, as
+        // `EscapeDialect::ansi_default` does, so this is the default path for
+        // every driver.
+        //
+        // The sibling test at `MAX_ESCAPE_DEPTH + 1` did not catch it: the
+        // depth error fires on the first descent and propagates straight out,
+        // so it never reaches the doubling. Only a depth *inside* the limit
+        // does, and it has to run to completion.
+        //
+        // At this depth the input is 631 bytes and the old code needed 2^63
+        // translations — measured at 9.5 s for depth 26 and doubling from
+        // there, so it never returned. It now completes in tens of
+        // microseconds. A test that hangs rather than fails is a poor signal,
+        // but the alternative is a wall-clock assertion, which is flakier.
+        let out = translate_escapes(&nested_fn(MAX_ESCAPE_DEPTH - 1), &dialect())
+            .expect("nesting inside the limit must translate");
+        assert!(out.contains('x'));
+        // Every level is the declined path, so each contributes its remapped
+        // name and its parentheses: `upper(` ... `)`.
+        assert_eq!(out.matches("upper(").count(), MAX_ESCAPE_DEPTH - 1);
     }
 
     #[test]
