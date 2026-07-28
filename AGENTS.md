@@ -526,10 +526,10 @@ mechanism:
   is occasionally left uncleared where it strictly could have been —
   harmless, and explicitly spec-legal.
 - **Every lock in the crate is imported from `src/sync.rs`**, never directly
-  from `std::sync`, so that building with `--cfg loom` swaps every one of them
-  for loom's instrumented equivalent. A lock imported around that module would
-  be invisible to loom and silently opt its code out of the interleaving
-  proof.
+  from `std::sync`, so that building a test with `--cfg loom` swaps every one
+  of them for loom's instrumented equivalent. A lock imported around that
+  module would be invisible to loom and silently opt its code out of the
+  interleaving proof.
 
 **Loom models** the primitives this discipline is built from —
 `Registry` and `GroupLock` (`src/handles/registry.rs`'s

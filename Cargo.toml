@@ -69,24 +69,13 @@ tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# Exhaustive interleaving checker for the handle lock discipline. This is a
-# regular (non-dev) dependency even though the models themselves
-# (`src/handles/registry.rs`'s `#[cfg(all(test, loom))] mod loom_tests`) only
-# need `loom` inside a test build: `src/sync.rs`'s own `#[cfg(loom)]` type
-# aliases are *not* additionally gated on `cfg(test)`, so any build at all —
-# `cargo build --lib`, `cargo check`, not only `cargo test` — resolves
-# `loom::sync::{Arc, Mutex, MutexGuard, RwLock}` the moment `--cfg loom` is
-# set. A `[dev-dependencies]` entry is invisible to exactly that non-test
-# build, which is what `cargo build --lib` under `RUSTFLAGS="--cfg loom"`
-# demonstrates directly: `error[E0432]: unresolved imports crate::sync::Arc,
-# ...`. Making `sync.rs`'s aliasing itself conditional on `cfg(test)` would
-# avoid that, but it would also mean `--cfg loom` on a non-test build silently
-# stops swapping in loom's primitives — the opposite of `sync.rs`'s own
-# documented purpose. A regular dependency costs the crate a handful of inert
-# entries in every consumer's resolved dependency graph when `loom` is not
-# active; it does not cost anything at build time, since `--cfg loom` is never
-# set outside the one job that uses it.
-[target.'cfg(loom)'.dependencies]
+# Exhaustive interleaving checker for the handle lock discipline. The models
+# themselves live in `src/handles/registry.rs`'s
+# `#[cfg(all(test, loom))] mod loom_tests`, and `src/sync.rs`'s type aliases
+# are gated the same way, so `loom` is only ever resolved inside a test build
+# with `--cfg loom` set. That keeps it a dev-dependency: it never appears in a
+# downstream consumer's resolved dependency graph.
+[target.'cfg(loom)'.dev-dependencies]
 loom = "0.7"
 
 [dev-dependencies]
