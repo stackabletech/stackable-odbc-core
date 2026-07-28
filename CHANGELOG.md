@@ -18,6 +18,28 @@ baseline that a driver built against it has to act on when it moves to this
 crate, which is what the two sibling drivers are doing. At the 0.1.0 cut these
 markers go away and this section becomes the initial-release notes.
 
+### Migration: the catalog functions
+
+Everything a driver has to change for the catalog rework, in one place.
+
+1. **Six methods return typed rows instead of `Self::Statement`:** `tables` →
+   `Vec<TableRow>`, `columns` → `Vec<ColumnRow>`, `primary_keys` →
+   `Vec<PrimaryKeyRow>`, `foreign_keys` → `Vec<ForeignKeyRow>`, `statistics` →
+   `Vec<StatisticsRow>`, `special_columns` → `Vec<SpecialColumnRow>`. Keep the
+   query helpers; return their rows as structs and delete the statement
+   construction.
+2. **`Backend::table_types` is new and required.** Return the data source's
+   table types, e.g. `["TABLE", "VIEW"]`, upper case.
+3. **`Backend::catalogs` and `Backend::schemas` are new and defaulted.**
+   Implement them if `supports_catalogs`/`supports_schemas` returns `true`; a
+   backend that claims either and leaves the method defaulted answers `HYC00`
+   for the corresponding enumeration.
+4. **Delete any `ORDER BY` added purely for ODBC compliance.** Core sorts every
+   catalog result set into its spec order. A backend-side `ORDER BY` is now
+   redundant, though harmless.
+5. **Delete any `SQL_ATTR_METADATA_ID` handling.** Core normalises identifier
+   arguments before calling the backend.
+
 ### Added
 
 - `Backend::describe_param` and the `ParamDescriptor` it returns, so a backend

@@ -221,6 +221,33 @@ cannot, a named constant is the correct answer, not a worse conversion.
 2. Implement `Backend` + `StatementBackend` for your backend type.
 3. In `lib.rs`, invoke `stackable_odbc_core::forward_ffi!(crate::backend::YourBackend);` — no `ffi.rs` needed.
 
+### The catalog functions: core owns the result set
+
+The six catalog `Backend` methods — `tables`, `columns`, `primary_keys`,
+`foreign_keys`, `statistics`, `special_columns` — return **typed row structs**
+(`TableRow`, `ColumnRow`, …), not a `Self::Statement`. Four consequences for a
+driver author:
+
+- **Return the rows in any order.** Core sorts each result set into the order
+  its spec page mandates (`SQLTables` by `TABLE_TYPE, TABLE_CAT, TABLE_SCHEM,
+  TABLE_NAME`, and so on), with NULL placement from `Backend::null_collation`.
+  A driver needs no `ORDER BY` for ODBC compliance, and one added purely for it
+  can be deleted.
+- **Core owns the column layout.** A backend fills named fields, so it cannot
+  get column order or count wrong, and a column added to a spec result set is a
+  core-only change.
+- **The `SQL_ALL_*` enumerations never reach these methods.** Core serves
+  `SQL_ALL_CATALOGS`, `SQL_ALL_SCHEMAS` and `SQL_ALL_TABLE_TYPES` from
+  `Backend::catalogs`, `Backend::schemas` and `Backend::table_types`, building
+  the all-but-one-column-NULL rows itself. The first two are only called when
+  `supports_catalogs`/`supports_schemas` already returned `true`.
+- **`SQL_ATTR_METADATA_ID` is core's job.** When it is `SQL_TRUE`, core has
+  already stripped delimiters, case-folded per `identifier_case` and escaped
+  `%`/`_` per `search_pattern_escape` before calling the backend, so these
+  methods always see ordinary pattern values. `SQLTables`' `TableType` is
+  exempt — the spec makes it a value list under both settings, and a driver
+  still parses it itself.
+
 ### Capability methods are required, not defaulted
 
 Most of `Backend` is defaulted, so a driver implements only what it needs.
@@ -253,6 +280,7 @@ These deliberately are not:
 | `data_source_read_only` | `SQL_DATA_SOURCE_READ_ONLY` |
 | `search_pattern_escape` | `SQL_SEARCH_PATTERN_ESCAPE` |
 | `keywords` | the data source's own reserved words, *before* ODBC's are subtracted (`SQL_KEYWORDS`) |
+| `table_types` | the data source's table types, for `SQLTables`' `SQL_ALL_TABLE_TYPES` enumeration |
 
 Each states a **capability**, where any default is a claim the backend author
 never made. `0` understates ("this data source cannot do this at all") and
@@ -709,6 +737,9 @@ Generic framework. Zero database-specific code.
 | `types/redacted.rs` | `Redacted<T>` — `Debug` wrapper that prints `*****` for sensitive fields (e.g. passwords) |
 | `column_value.rs` | `write_column_value()` — core data marshalling for `SQLGetData` (NULL, truncation, type coercion) |
 | `synthetic.rs` | `SyntheticStatement` — in-memory result set for `SQLGetTypeInfo` and catalog functions |
+| `catalog_sort.rs` | Sorts a catalog result set into its spec-mandated order; NULL placement from `Backend::null_collation` |
+| `catalog_ident.rs` | `SQL_ATTR_METADATA_ID` identifier normalisation and the `SQLTables` `TableType` value-list parser |
+| `types/catalog_rows.rs` | The six typed catalog row structs a `Backend` returns, and their spec-order conversion to `ColumnValue`s |
 | `conformance.rs` | Shared support for the `SQLGetInfoW` info-type conformance test (return shape + Driver-Manager-safe value), reused by core and by driver test suites |
 | `escape.rs` | ODBC escape-sequence translation (`{fn}`, `{d/t/ts}`, `{oj}`, `{escape}`); a shared scanner with a per-backend `EscapeDialect` |
 | `errors.rs` | `OdbcError` with SQLSTATE mapping and `SqlReturn` conversion |
