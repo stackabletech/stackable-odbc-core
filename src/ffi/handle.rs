@@ -322,11 +322,16 @@ pub unsafe fn sql_free_handle<B: Backend>(handle_type: i16, handle: *mut c_void)
 /// - HY010: Function sequence error (async execution in progress, data-at-execution pending,
 ///   etc.) — driver-manager-handled; not returned here.
 /// - HY013: Memory management error (driver-manager-handled; not returned here).
-/// - HY092: Returns `SQL_ERROR` if `option` is not one of the recognised values
-///   (`SQL_CLOSE`, `SQL_UNBIND`, `SQL_RESET_PARAMS`). `SQL_DROP` (1) is handled as a
-///   special case for Windows DM compatibility (the Windows DM passes it through to the
-///   driver instead of mapping it to `SQLFreeHandle`); it is forwarded to `sql_free_handle`
-///   rather than rejected.
+/// - HY092: Returns `SQL_ERROR` and posts this SQLSTATE if `option` is not one of
+///   the recognised values (`SQL_CLOSE`, `SQL_UNBIND`, `SQL_RESET_PARAMS`). The
+///   spec marks this row **(DM)**, so a conforming Driver Manager normally
+///   rejects the call before it reaches the driver; the check is kept because the
+///   function must still do something with an option it cannot parse, and posting
+///   the same SQLSTATE the DM would means an application branches identically
+///   whichever layer caught it. `SQL_DROP` (1) is handled as a special case for
+///   Windows DM compatibility (the Windows DM passes it through to the driver
+///   instead of mapping it to `SQLFreeHandle`); it is forwarded to
+///   `sql_free_handle` rather than rejected.
 /// - HYT01: Connection timeout expired (driver-manager-handled; not returned here).
 /// - IM001: Driver does not support this function (driver-manager-handled; not returned
 ///   here).
@@ -352,19 +357,6 @@ pub unsafe fn sql_free_stmt<B: Backend>(statement_handle: *mut c_void, option: u
         tracing::debug!("SQLFreeStmt(SQL_DROP) -> {:?}", ret);
         return ret;
     }
-    let opt = free_stmt_option_from_raw(option);
-    tracing::debug!(
-        "SQLFreeStmt(handle={:?}, option={:?})",
-        statement_handle,
-        opt
-    );
-    let opt = match opt {
-        Some(o) => o,
-        None => {
-            tracing::error!("SQLFreeStmt: invalid option {}", option);
-            return SqlReturn::ERROR;
-        }
-    };
     // Wrapped in panic_safe like every other FFI entry point: SQL_CLOSE drops
     // the backend statement, and a backend cursor's Drop can run arbitrary code
     // (draining residual pages, for example). A panic there would otherwise
@@ -376,6 +368,29 @@ pub unsafe fn sql_free_stmt<B: Backend>(statement_handle: *mut c_void, option: u
         panic_safe::<B, _>(statement_handle, |scope| {
             let stmt = scope.get::<StatementHandle<B>>(statement_handle)?;
             stmt.diagnostics.clear();
+
+            // Parsed inside `panic_safe`, not before it: returning early out
+            // there left no HandleScope, so the SQL_ERROR reached the
+            // application with an empty diagnostic queue and SQLGetDiagRec
+            // answered SQL_NO_DATA — a failure with no SQLSTATE to branch on.
+            //
+            // The spec marks HY092 (DM) for this function, so a conforming
+            // Driver Manager rejects the call before the driver sees it. The
+            // check is kept regardless, because the function must still do
+            // something with an option it cannot parse, and posting the same
+            // SQLSTATE the DM would means an application branches identically
+            // whichever layer caught it.
+            let Some(opt) = free_stmt_option_from_raw(option) else {
+                return Err(OdbcError::general(
+                    format!("SQLFreeStmt: option {option} is not a recognised value"),
+                    crate::types::SqlState::invalid_attribute_option_identifier(),
+                ));
+            };
+            tracing::debug!(
+                "SQLFreeStmt(handle={:?}, option={:?})",
+                statement_handle,
+                opt
+            );
 
             match opt {
                 // Discard the result set so the handle is ready for a new statement.
@@ -675,26 +690,29 @@ mod tests {
     }
 
     #[test]
-    fn free_stmt_invalid_option_returns_error() {
-        // HY092: unrecognised option value.
+    fn free_stmt_invalid_option_posts_hy092() {
+        // The spec marks HY092 (DM) for this function, so a conforming Driver
+        // Manager normally catches an unrecognised Option before the driver
+        // sees it. This driver keeps the check anyway — it must do something
+        // with an option it cannot parse — and the fix is only that the failure
+        // becomes reportable: returning SQL_ERROR before `panic_safe` left no
+        // HandleScope and no handle to post onto, so SQLGetDiagRec answered
+        // SQL_NO_DATA and the application saw a failure with no SQLSTATE it
+        // could branch on.
+        const UNRECOGNISED_FREE_STMT_OPTION: u16 = 99;
         unsafe {
-            let mut env: *mut c_void = std::ptr::null_mut();
-            let _ = sql_alloc_handle::<MockBackend>(
-                HandleType::Env as i16,
-                std::ptr::null_mut(),
-                &mut env,
-            );
-            let mut conn: *mut c_void = std::ptr::null_mut();
-            let _ = sql_alloc_handle::<MockBackend>(HandleType::Dbc as i16, env, &mut conn);
-            let mut stmt: *mut c_void = std::ptr::null_mut();
-            let _ = sql_alloc_handle::<MockBackend>(HandleType::Stmt as i16, conn, &mut stmt);
+            let (env, conn, stmt) = crate::test_utils::alloc_env_conn_stmt();
 
-            let ret = sql_free_stmt::<MockBackend>(stmt, 99); // invalid option
+            let ret = sql_free_stmt::<MockBackend>(stmt, UNRECOGNISED_FREE_STMT_OPTION);
             assert_eq!(ret, SqlReturn::ERROR);
 
-            let _ = sql_free_handle::<MockBackend>(HandleType::Stmt as i16, stmt);
-            let _ = sql_free_handle::<MockBackend>(HandleType::Dbc as i16, conn);
-            let _ = sql_free_handle::<MockBackend>(HandleType::Env as i16, env);
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+                assert_eq!(handle.diagnostics.len(), 1, "SQL_ERROR must be reportable");
+                let rec = handle.diagnostics.get(0).expect("record 1 exists");
+                assert_eq!(rec.sqlstate.as_str(), "HY092");
+            });
+
+            crate::test_utils::cleanup_env_conn_stmt(env, conn, stmt);
         }
     }
 

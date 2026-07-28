@@ -599,6 +599,11 @@ markers go away and this section becomes the initial-release notes.
 
 ### Fixed
 
+- `SQLFreeStmt` returned `SQL_ERROR` for an unrecognised `Option` *before*
+  entering `panic_safe`, so there was no handle to post onto and `SQLGetDiagRec`
+  answered `SQL_NO_DATA`. The parse now happens inside `panic_safe` and posts
+  `HY092`, which the function's own documentation already promised.
+
 - `SQLFreeHandle` returned a bare `SQL_ERROR` with no diagnostic for
   `SQL_HANDLE_DESC` and `SQL_HANDLE_DBC_INFO_TOKEN`, so `SQLGetDiagRec` answered
   `SQL_NO_DATA` and the application had a failure it could neither report nor
