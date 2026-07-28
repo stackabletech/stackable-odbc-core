@@ -12,10 +12,11 @@ use crate::backend::{Backend, StatementBackend};
 use crate::errors::OdbcError;
 use crate::ffi::handle::{sql_alloc_handle, sql_free_handle};
 use crate::types::{
-    ColumnRow, ConnectParams, ForeignKeyRow, IdentifierType, InfoValue, Nullable, PrimaryKeyRow,
-    ProcedureRow, SQL_FALSE, SQL_INDEX_OTHER, SQL_PC_NOT_PSEUDO, SQL_PT_PROCEDURE,
-    SQL_SCOPE_CURROW, SQL_SCOPE_SESSION, SQL_SCOPE_TRANSACTION, SQL_TRUE, Scope, SpecialColumnRow,
-    SqlDataType, SqlReturn, StatisticsRow, TableRow, TypeInfoRow,
+    ColumnPrivilegeRow, ColumnRow, ConnectParams, ForeignKeyRow, IdentifierType, InfoValue,
+    Nullable, ParamType, PrimaryKeyRow, ProcedureColumnRow, ProcedureRow, SQL_FALSE,
+    SQL_INDEX_OTHER, SQL_PC_NOT_PSEUDO, SQL_PT_PROCEDURE, SQL_SCOPE_CURROW, SQL_SCOPE_SESSION,
+    SQL_SCOPE_TRANSACTION, SQL_TRUE, Scope, SpecialColumnRow, SqlDataType, SqlReturn,
+    StatisticsRow, TablePrivilegeRow, TableRow, TypeInfoRow,
 };
 
 // ---------------------------------------------------------------------------
@@ -1704,6 +1705,99 @@ impl Backend for MockCatalogBackend {
             ..Default::default()
         };
         Ok(vec![proc("z_proc"), proc("a_proc"), proc("m_proc")])
+    }
+
+    /// Out of spec order on `COLUMN_TYPE`, whose values are `ParamType`
+    /// discriminants; `COLUMN_NAME` labels each row. Every row shares a
+    /// procedure, so `COLUMN_TYPE` is the discriminating key — and it is an
+    /// integer, so a sort comparing it as text would put `ReturnValue` (5)
+    /// before `InputOutput` (2) undetected if the values were single digits
+    /// only. They are, which is why the labels rather than the values are what
+    /// the test reads.
+    fn procedure_columns(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+    ) -> Result<Vec<ProcedureColumnRow>, MockError> {
+        let col = |column_type: ParamType, name: &str| ProcedureColumnRow {
+            catalog: Some("cat".into()),
+            schema: Some("sch".into()),
+            procedure_name: "p".into(),
+            column_name: name.into(),
+            column_type: column_type as i16,
+            data_type: SqlDataType::INTEGER.0,
+            type_name: "INTEGER".into(),
+            nullable: Nullable::SqlNullable as i16,
+            sql_data_type: SqlDataType::INTEGER.0,
+            ordinal_position: 1,
+            ..Default::default()
+        };
+        Ok(vec![
+            col(ParamType::ReturnValue, "c"),
+            col(ParamType::Unknown, "a"),
+            col(ParamType::InputOutput, "b"),
+        ])
+    }
+
+    /// Out of spec order on `COLUMN_NAME` and, within one column, on
+    /// `PRIVILEGE`. Two rows share a table *and* a column and differ only in
+    /// `PRIVILEGE`, so the fifth sort key is genuinely exercised;
+    /// `IS_GRANTABLE` labels each row.
+    fn column_privileges(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+    ) -> Result<Vec<ColumnPrivilegeRow>, MockError> {
+        let priv_row = |column: &str, privilege: &str, label: &str| ColumnPrivilegeRow {
+            catalog: Some("cat".into()),
+            schema: Some("sch".into()),
+            table_name: "t".into(),
+            column_name: column.into(),
+            grantor: Some("owner".into()),
+            grantee: "user".into(),
+            privilege: privilege.into(),
+            is_grantable: Some(label.into()),
+        };
+        Ok(vec![
+            priv_row("z_col", "SELECT", "third"),
+            priv_row("a_col", "UPDATE", "second"),
+            priv_row("a_col", "SELECT", "first"),
+        ])
+    }
+
+    /// Out of spec order on `PRIVILEGE` and, within one privilege, on
+    /// `GRANTEE`. The spec sorts by PRIVILEGE *before* GRANTEE, so the two
+    /// `SELECT` rows must come out grantee-ordered while `UPDATE` follows both
+    /// regardless of its grantee — which a keys list truncated to the table
+    /// trio, or one with the last two keys swapped, gets wrong.
+    /// `IS_GRANTABLE` labels each row.
+    fn table_privileges(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+    ) -> Result<Vec<TablePrivilegeRow>, MockError> {
+        let priv_row = |privilege: &str, grantee: &str, label: &str| TablePrivilegeRow {
+            catalog: Some("cat".into()),
+            schema: Some("sch".into()),
+            table_name: "t".into(),
+            grantor: Some("owner".into()),
+            grantee: grantee.into(),
+            privilege: privilege.into(),
+            is_grantable: Some(label.into()),
+        };
+        Ok(vec![
+            priv_row("UPDATE", "a_user", "third"),
+            priv_row("SELECT", "z_user", "second"),
+            priv_row("SELECT", "a_user", "first"),
+        ])
     }
 
     /// Deliberately out of order, and distinct from the table names above, so

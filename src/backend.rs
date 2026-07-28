@@ -8,9 +8,10 @@ use odbc_sys::CDataType;
 
 use crate::errors::OdbcError;
 use crate::types::{
-    CatalogResultColumnWidths, ColumnDescriptor, ColumnRow, ColumnValue, ConnectParams,
-    ExecuteOutcome, FetchResult, ForeignKeyRow, IdentifierType, InfoValue, Nullable, PrimaryKeyRow,
-    ProcedureRow, Scope, SpecialColumnRow, StatisticsRow, TableRow, TypeInfoRow,
+    CatalogResultColumnWidths, ColumnDescriptor, ColumnPrivilegeRow, ColumnRow, ColumnValue,
+    ConnectParams, ExecuteOutcome, FetchResult, ForeignKeyRow, IdentifierType, InfoValue, Nullable,
+    PrimaryKeyRow, ProcedureColumnRow, ProcedureRow, Scope, SpecialColumnRow, StatisticsRow,
+    TablePrivilegeRow, TableRow, TypeInfoRow,
 };
 
 /// Core abstraction for database-specific logic.
@@ -475,6 +476,68 @@ pub trait Backend: Sized + Send + Sync + 'static {
         _schema: Option<&str>,
         _proc_name: Option<&str>,
     ) -> Result<Vec<ProcedureRow>, Self::Error> {
+        Ok(Vec::new())
+    }
+
+    /// Return the parameters and result-set columns of the matching stored
+    /// procedures.
+    ///
+    /// Called by `SQLProcedureColumnsW`. Defaulted to no rows for the same
+    /// reason as [`Backend::procedures`], and `SQL_ATTR_METADATA_ID` has
+    /// likewise already been applied to all four arguments.
+    ///
+    /// **Return the rows in any order.** Core sorts them into the spec's order
+    /// (PROCEDURE_CAT, PROCEDURE_SCHEM, PROCEDURE_NAME, COLUMN_TYPE) and
+    /// builds the result set, so a backend does not need an ORDER BY for
+    /// correctness.
+    fn procedure_columns(
+        _conn: &Self::Connection,
+        _cancel: &Self::CancelToken,
+        _catalog: Option<&str>,
+        _schema: Option<&str>,
+        _proc_name: Option<&str>,
+        _column: Option<&str>,
+    ) -> Result<Vec<ProcedureColumnRow>, Self::Error> {
+        Ok(Vec::new())
+    }
+
+    /// Return the column-level privileges on a single table.
+    ///
+    /// Called by `SQLColumnPrivilegesW`. Defaulted to no rows for the same
+    /// reason as [`Backend::procedures`], and `SQL_ATTR_METADATA_ID` has
+    /// likewise already been applied to all four arguments.
+    ///
+    /// **Return the rows in any order.** Core sorts them into the spec's order
+    /// (TABLE_CAT, TABLE_SCHEM, TABLE_NAME, COLUMN_NAME, PRIVILEGE) and builds
+    /// the result set, so a backend does not need an ORDER BY for correctness.
+    fn column_privileges(
+        _conn: &Self::Connection,
+        _cancel: &Self::CancelToken,
+        _catalog: Option<&str>,
+        _schema: Option<&str>,
+        _table: Option<&str>,
+        _column: Option<&str>,
+    ) -> Result<Vec<ColumnPrivilegeRow>, Self::Error> {
+        Ok(Vec::new())
+    }
+
+    /// Return the table-level privileges on the matching tables.
+    ///
+    /// Called by `SQLTablePrivilegesW`. Defaulted to no rows for the same
+    /// reason as [`Backend::procedures`], and `SQL_ATTR_METADATA_ID` has
+    /// likewise already been applied to all three arguments.
+    ///
+    /// **Return the rows in any order.** Core sorts them into the spec's order
+    /// (TABLE_CAT, TABLE_SCHEM, TABLE_NAME, PRIVILEGE, GRANTEE) and builds the
+    /// result set, so a backend does not need an ORDER BY for correctness.
+    /// Note that PRIVILEGE outranks GRANTEE, unlike `SQLColumnPrivileges`.
+    fn table_privileges(
+        _conn: &Self::Connection,
+        _cancel: &Self::CancelToken,
+        _catalog: Option<&str>,
+        _schema: Option<&str>,
+        _table: Option<&str>,
+    ) -> Result<Vec<TablePrivilegeRow>, Self::Error> {
         Ok(Vec::new())
     }
 

@@ -53,6 +53,17 @@ Everything a driver has to change for the catalog rework, in one place.
   with no stored procedures has none to report, and erroring instead would turn
   a working call into a failure.
 
+- `SQLProcedureColumns`, `SQLColumnPrivileges` and `SQLTablePrivileges` now
+  return real rows when a backend implements the new defaulted
+  `Backend::procedure_columns`, `Backend::column_privileges` and
+  `Backend::table_privileges`. Core owns each column layout and sorts each
+  result set into its spec order: PROCEDURE_CAT, PROCEDURE_SCHEM,
+  PROCEDURE_NAME, COLUMN_TYPE; TABLE_CAT, TABLE_SCHEM, TABLE_NAME, COLUMN_NAME,
+  PRIVILEGE; and TABLE_CAT, TABLE_SCHEM, TABLE_NAME, PRIVILEGE, GRANTEE
+  respectively — note that `SQLTablePrivileges` orders by PRIVILEGE *before*
+  GRANTEE. All three default to `Ok(Vec::new())`, so a driver that does not
+  override them behaves exactly as before.
+
 - `SQL_PT_UNKNOWN`, `SQL_PT_PROCEDURE` and `SQL_PT_FUNCTION`, the
   `PROCEDURE_TYPE` result-column values `odbc-sys` does not define.
   `SQLProcedureColumns`' `COLUMN_TYPE` needs no counterpart —

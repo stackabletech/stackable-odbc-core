@@ -9,19 +9,18 @@ use std::ffi::c_void;
 
 use crate::backend::{Backend, StatementBackend};
 use crate::errors::{IntoOdbc, OdbcError};
-use crate::handles::scope::HandleScope;
 use crate::handles::{StatementData, StatementHandle};
 use crate::panic::panic_safe;
 use crate::synthetic::SyntheticStatement;
 use crate::types::col_attr::{ColAttrValue, get_column_attribute};
 use crate::types::{
-    CatalogResultColumnWidths, ColumnDescriptor, ColumnRow, ColumnValue, ColumnsResultCol, Desc,
-    ForeignKeyRow, ForeignKeysResultCol, Nullable, PRIVILEGE_LEN, PrimaryKeyRow,
-    PrimaryKeysResultCol, ProcedureRow, SQL_ALL_CATALOGS, SQL_ALL_SCHEMAS, SQL_ALL_TABLE_TYPES,
-    SQL_FALSE, SQL_INDEX_UNIQUE, SQL_TRUE, SpecialColumnRow, SqlReturn, SqlState,
-    StatementAttribute, StatisticsRow, TableRow, TablesResultCol, ULen, YES_NO_LEN, character,
-    identifier, identifier_type_from_raw, integer, nullable_from_raw, scope_from_raw, smallint,
-    special_columns_columns, statistics_columns,
+    CatalogResultColumnWidths, ColumnDescriptor, ColumnPrivilegeRow, ColumnRow, ColumnValue,
+    ColumnsResultCol, Desc, ForeignKeyRow, ForeignKeysResultCol, Nullable, PRIVILEGE_LEN,
+    PrimaryKeyRow, PrimaryKeysResultCol, ProcedureColumnRow, ProcedureRow, SQL_ALL_CATALOGS,
+    SQL_ALL_SCHEMAS, SQL_ALL_TABLE_TYPES, SQL_FALSE, SQL_INDEX_UNIQUE, SQL_TRUE, SpecialColumnRow,
+    SqlReturn, SqlState, StatementAttribute, StatisticsRow, TablePrivilegeRow, TableRow,
+    TablesResultCol, ULen, YES_NO_LEN, character, identifier, identifier_type_from_raw, integer,
+    nullable_from_raw, scope_from_raw, smallint, special_columns_columns, statistics_columns,
 };
 use crate::utf16::{utf16_to_string, write_utf16};
 
@@ -891,43 +890,6 @@ pub unsafe fn sql_foreign_keys_w<B: Backend>(
     ret
 }
 
-/// Helper: validate that a statement handle is connected, then store a synthetic empty result set.
-///
-/// Used by catalog functions that return an empty result set (statistics, special columns) instead
-/// of querying the database.
-///
-/// Called from within a `panic_safe` closure, which already holds the
-/// group `scope` protects; this function borrows through that same scope
-/// rather than acquiring anything of its own.
-fn set_empty_result<B: Backend>(
-    scope: &mut HandleScope<'_>,
-    statement_handle: *mut c_void,
-    columns: Vec<ColumnDescriptor>,
-) -> Result<SqlReturn, OdbcError> {
-    let (stmt, conn) = scope.stmt_with_parent::<B>(statement_handle)?;
-    stmt.diagnostics.clear();
-
-    if stmt.cursor_open {
-        return Err(OdbcError::general(
-            "A cursor is already open on this statement",
-            SqlState::invalid_cursor_state(),
-        ));
-    }
-
-    if conn.connection.is_none() {
-        return Err(OdbcError::general(
-            "Connection is not open",
-            SqlState::function_sequence_error(),
-        ));
-    }
-
-    stmt.set_result_set(StatementData::Synthetic(SyntheticStatement::new(
-        columns,
-        vec![],
-    )));
-    Ok(SqlReturn::SUCCESS)
-}
-
 /// Generic implementation of SQLStatisticsW.
 ///
 /// Spec: <https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlstatistics-function>
@@ -1699,13 +1661,8 @@ pub(crate) fn procedures_columns(widths: &CatalogResultColumnWidths) -> Vec<Colu
 /// - HY000: General error; returned for any unexpected backend error.
 /// - HY001: Memory allocation error; returned if allocation fails.
 /// - HY008: Operation canceled (DM) (driver-manager-handled; not returned here).
-/// - HY009: Invalid use of null pointer. **Returned by this driver** for the one clause the
-///   spec's diagnostics table states *without* a `(DM)` marker: `SQL_ATTR_METADATA_ID` was
-///   `SQL_TRUE`, `CatalogName` was a null pointer, and `SQL_CATALOG_NAME` reports that
-///   catalog names are supported. The `SchemaName`/`ProcName` clause beside it *is*
-///   `(DM)`-marked and is deliberately not checked here, and this page states no
-///   unconditional null-argument clause at all — unlike `SQLColumnPrivileges`, whose
-///   `TableName` sentence carries no marker and *is* checked.
+/// - HY009: Invalid use of null pointer (DM) (driver-manager-handled; not returned by this
+///   driver).
 /// - HY010: Function sequence error — returned if connection is not open. DM cases (async, etc.)
 ///   are driver-manager-handled; not returned here.
 /// - HY013: Memory management error; returned if underlying allocation fails.
@@ -1731,7 +1688,7 @@ pub unsafe fn sql_procedures_w<B: Backend>(
     proc_name: *const u16,
     name_length3: i16,
 ) -> SqlReturn {
-    tracing::debug!("SQLProceduresW(stmt={:?})", statement_handle);
+    tracing::trace!("SQLProceduresW(stmt={:?})", statement_handle);
     // SAFETY: statement_handle is null or a valid StatementHandle<B>; kind and group
     // validated by scope.stmt_with_parent inside the closure.
     let ret = unsafe {
@@ -1756,6 +1713,13 @@ pub unsafe fn sql_procedures_w<B: Backend>(
             let catalog = parse_filter_param(catalog_name, name_length1)?;
             let schema = parse_filter_param(schema_name, name_length2)?;
             let proc = parse_filter_param(proc_name, name_length3)?;
+            tracing::debug!(
+                "SQLProceduresW(stmt={:?}, catalog={:?}, schema={:?}, proc={:?})",
+                statement_handle,
+                catalog,
+                schema,
+                proc,
+            );
 
             // The token exists once this statement makes its first
             // backend call; created here on demand, then reused for every
@@ -1798,6 +1762,11 @@ pub unsafe fn sql_procedures_w<B: Backend>(
 /// "not NULL" per the spec's column table: `PROCEDURE_NAME` (3),
 /// `COLUMN_NAME` (4), `COLUMN_TYPE` (5), `DATA_TYPE` (6), `TYPE_NAME` (7),
 /// `NULLABLE` (12), `SQL_DATA_TYPE` (15) and `ORDINAL_POSITION` (18).
+/// `SQLProcedureColumns`' spec sort order — "ordered by PROCEDURE_CAT,
+/// PROCEDURE_SCHEM, PROCEDURE_NAME, and COLUMN_TYPE", as zero-based column
+/// indices.
+const PROCEDURE_COLUMNS_SORT_KEYS: [usize; 4] = [0, 1, 2, 4];
+
 pub(crate) fn procedure_columns_columns(
     widths: &CatalogResultColumnWidths,
 ) -> Vec<ColumnDescriptor> {
@@ -1833,26 +1802,27 @@ pub(crate) fn procedure_columns_columns(
 ///
 /// Spec: <https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlprocedurecolumns-function>
 ///
-/// Returns an empty result set with the standard 19-column schema. The shared framework
-/// surfaces no stored-procedure metadata, so this satisfies the protocol contract (valid
-/// column descriptors, zero rows) while allowing BI tools to proceed without error.
+/// Queries the backend for stored-procedure parameter and result-column
+/// metadata and stores the result set in the statement handle. A backend that
+/// leaves [`Backend::procedure_columns`] defaulted returns no rows.
 ///
 /// # Parameters
 ///
 /// - `statement_handle`: Statement handle.
-/// - `_catalog_name` / `_name_length1`: Catalog name (ignored — returns empty result set).
-/// - `_schema_name` / `_name_length2`: Schema name (ignored — returns empty result set).
-/// - `_proc_name` / `_name_length3`: Procedure name (ignored — returns empty result set).
-/// - `_column_name` / `_name_length4`: Column name (ignored — returns empty result set).
+/// - `catalog_name` / `name_length1`: Catalog name (NULL = no filter; no search patterns).
+/// - `schema_name` / `name_length2`: Schema name search pattern (NULL = no filter).
+/// - `proc_name` / `name_length3`: Procedure name search pattern (NULL = no filter).
+/// - `column_name` / `name_length4`: Column name search pattern (NULL = no filter).
 ///
 /// # Spec compliance
 ///
 /// - 01000: General warning (driver-specific informational message); not returned here.
-/// - 08S01: Communication link failure; not applicable (no backend query).
+/// - 08S01: Communication link failure; propagated from the backend when its
+///   client library reports the link to the data source failed.
 /// - 24000: Invalid cursor state — returned if a cursor is already open on this statement.
-/// - 40001: Serialization failure; not applicable (no backend query).
-/// - 40003: Statement completion unknown; not applicable (no backend query).
-/// - HY000: General error; returned for any unexpected internal error.
+/// - 40001: Serialization failure; propagated from backend as `HY000`.
+/// - 40003: Statement completion unknown; propagated from backend as `HY000`.
+/// - HY000: General error; returned for any unexpected backend error.
 /// - HY001: Memory allocation error; returned if allocation fails.
 /// - HY008: Operation canceled (DM) (driver-manager-handled; not returned here).
 /// - HY009: Invalid use of null pointer (DM) (driver-manager-handled; not returned by this
@@ -1862,9 +1832,10 @@ pub(crate) fn procedure_columns_columns(
 /// - HY013: Memory management error; returned if underlying allocation fails.
 /// - HY090: Invalid string or buffer length (DM) (driver-manager-handled; not returned here).
 /// - HY117: Connection suspended (DM) (driver-manager-handled; not returned here).
-/// - HYC00: Optional feature not implemented; not applicable (empty result set always returned).
-/// - HYT00: Timeout expired; not applicable (no backend query).
-/// - HYT01: Connection timeout expired; not applicable (no backend query).
+/// - HYC00: Optional feature not implemented; propagated from backend if catalogs/schemas or
+///   search patterns are unsupported.
+/// - HYT00: Timeout expired; propagated from backend as `HY000`.
+/// - HYT01: Connection timeout expired; propagated from backend as `HY000`.
 /// - IM001: Driver does not support this function (DM) (driver-manager-handled; not returned here).
 /// - IM017: Polling disabled (DM) (driver-manager-handled; not returned here).
 /// - IM018: SQLCompleteAsync not called (DM) (driver-manager-handled; not returned here).
@@ -1875,25 +1846,77 @@ pub(crate) fn procedure_columns_columns(
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn sql_procedure_columns_w<B: Backend>(
     statement_handle: *mut c_void,
-    _catalog_name: *const u16,
-    _name_length1: i16,
-    _schema_name: *const u16,
-    _name_length2: i16,
-    _proc_name: *const u16,
-    _name_length3: i16,
-    _column_name: *const u16,
-    _name_length4: i16,
+    catalog_name: *const u16,
+    name_length1: i16,
+    schema_name: *const u16,
+    name_length2: i16,
+    proc_name: *const u16,
+    name_length3: i16,
+    column_name: *const u16,
+    name_length4: i16,
 ) -> SqlReturn {
-    tracing::debug!("SQLProcedureColumnsW(stmt={:?})", statement_handle);
+    tracing::trace!("SQLProcedureColumnsW(stmt={:?})", statement_handle);
     // SAFETY: statement_handle is null or a valid StatementHandle<B>; kind and group
-    // validated by scope.stmt_with_parent inside set_empty_result.
+    // validated by scope.stmt_with_parent inside the closure.
     let ret = unsafe {
         panic_safe::<B, _>(statement_handle, |scope| {
-            set_empty_result::<B>(
-                scope,
+            let (stmt, conn) = scope.stmt_with_parent::<B>(statement_handle)?;
+            stmt.diagnostics.clear();
+
+            if stmt.cursor_open {
+                return Err(OdbcError::general(
+                    "A cursor is already open on this statement",
+                    SqlState::invalid_cursor_state(),
+                ));
+            }
+
+            let Some(ref connection) = conn.connection else {
+                return Err(OdbcError::general(
+                    "Connection is not open",
+                    SqlState::function_sequence_error(),
+                ));
+            };
+
+            let catalog = parse_filter_param(catalog_name, name_length1)?;
+            let schema = parse_filter_param(schema_name, name_length2)?;
+            let proc = parse_filter_param(proc_name, name_length3)?;
+            let column = parse_filter_param(column_name, name_length4)?;
+            tracing::debug!(
+                "SQLProcedureColumnsW(stmt={:?}, catalog={:?}, schema={:?}, proc={:?}, \
+                 column={:?})",
                 statement_handle,
-                procedure_columns_columns(&B::catalog_result_column_widths()),
+                catalog,
+                schema,
+                proc,
+                column,
+            );
+
+            let cancel_token =
+                crate::handles::resolve_cancel_token::<B>(statement_handle, connection);
+            let cancel = crate::handles::cancel_as::<B>(&cancel_token)?;
+
+            let rows = B::procedure_columns(
+                connection,
+                cancel,
+                catalog.as_deref(),
+                schema.as_deref(),
+                proc.as_deref(),
+                column.as_deref(),
             )
+            .into_odbc()?;
+
+            let mut values: Vec<Vec<ColumnValue>> =
+                rows.iter().map(ProcedureColumnRow::to_values).collect();
+            crate::catalog_sort::sort_rows(
+                &mut values,
+                &PROCEDURE_COLUMNS_SORT_KEYS,
+                B::null_collation(connection),
+            );
+            stmt.set_result_set(StatementData::Synthetic(SyntheticStatement::new(
+                procedure_columns_columns(&B::catalog_result_column_widths()),
+                values,
+            )));
+            Ok(SqlReturn::SUCCESS)
         })
     };
     tracing::debug!("SQLProcedureColumnsW -> {:?}", ret);
@@ -1906,6 +1929,11 @@ pub unsafe fn sql_procedure_columns_w<B: Backend>(
 ///
 /// "not NULL" per the spec's column table: `TABLE_NAME` (3), `COLUMN_NAME`
 /// (4), `GRANTEE` (6) and `PRIVILEGE` (7).
+/// `SQLColumnPrivileges`' spec sort order — "ordered by TABLE_CAT,
+/// TABLE_SCHEM, TABLE_NAME, COLUMN_NAME, and PRIVILEGE", as zero-based column
+/// indices.
+const COLUMN_PRIVILEGES_SORT_KEYS: [usize; 5] = [0, 1, 2, 3, 6];
+
 pub(crate) fn column_privileges_columns(
     widths: &CatalogResultColumnWidths,
 ) -> Vec<ColumnDescriptor> {
@@ -1925,26 +1953,27 @@ pub(crate) fn column_privileges_columns(
 ///
 /// Spec: <https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlcolumnprivileges-function>
 ///
-/// Returns an empty result set with the standard 8-column schema. The shared framework
-/// surfaces no column-level privilege information, so this satisfies the protocol contract
-/// (valid column descriptors, zero rows) while allowing BI tools to proceed without error.
+/// Queries the backend for column-level privileges and stores the result set in
+/// the statement handle. A backend that leaves [`Backend::column_privileges`]
+/// defaulted returns no rows.
 ///
 /// # Parameters
 ///
 /// - `statement_handle`: Statement handle.
-/// - `_catalog_name` / `_name_length1`: Catalog name (ignored — returns empty result set).
-/// - `_schema_name` / `_name_length2`: Schema name (ignored — returns empty result set).
-/// - `_table_name` / `_name_length3`: Table name (ignored — returns empty result set).
-/// - `_column_name` / `_name_length4`: Column name pattern (ignored — returns empty result set).
+/// - `catalog_name` / `name_length1`: Catalog name (NULL = no filter; no search patterns).
+/// - `schema_name` / `name_length2`: Schema name (NULL = no filter; no search patterns).
+/// - `table_name` / `name_length3`: Table name (required; cannot be NULL; no search patterns).
+/// - `column_name` / `name_length4`: Column name search pattern (NULL = no filter).
 ///
 /// # Spec compliance
 ///
 /// - 01000: General warning (driver-specific informational message); not returned here.
-/// - 08S01: Communication link failure; not applicable (no backend query).
+/// - 08S01: Communication link failure; propagated from the backend when its
+///   client library reports the link to the data source failed.
 /// - 24000: Invalid cursor state — returned if a cursor is already open on this statement.
-/// - 40001: Serialization failure; not applicable (no backend query).
-/// - 40003: Statement completion unknown; not applicable (no backend query).
-/// - HY000: General error; returned for any unexpected internal error.
+/// - 40001: Serialization failure; propagated from backend as `HY000`.
+/// - 40003: Statement completion unknown; propagated from backend as `HY000`.
+/// - HY000: General error; returned for any unexpected backend error.
 /// - HY001: Memory allocation error; returned if allocation fails.
 /// - HY008: Operation canceled (DM) (driver-manager-handled; not returned here).
 /// - HY009: Invalid use of null pointer (DM) (driver-manager-handled; not returned by this
@@ -1954,9 +1983,10 @@ pub(crate) fn column_privileges_columns(
 /// - HY013: Memory management error; returned if underlying allocation fails.
 /// - HY090: Invalid string or buffer length (DM) (driver-manager-handled; not returned here).
 /// - HY117: Connection suspended (DM) (driver-manager-handled; not returned here).
-/// - HYC00: Optional feature not implemented; not applicable (empty result set always returned).
-/// - HYT00: Timeout expired; not applicable (no backend query).
-/// - HYT01: Connection timeout expired; not applicable (no backend query).
+/// - HYC00: Optional feature not implemented; propagated from backend if catalogs/schemas or
+///   search patterns are unsupported.
+/// - HYT00: Timeout expired; propagated from backend as `HY000`.
+/// - HYT01: Connection timeout expired; propagated from backend as `HY000`.
 /// - IM001: Driver does not support this function (DM) (driver-manager-handled; not returned here).
 /// - IM017: Polling disabled (DM) (driver-manager-handled; not returned here).
 /// - IM018: SQLCompleteAsync not called (DM) (driver-manager-handled; not returned here).
@@ -1967,25 +1997,77 @@ pub(crate) fn column_privileges_columns(
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn sql_column_privileges_w<B: Backend>(
     statement_handle: *mut c_void,
-    _catalog_name: *const u16,
-    _name_length1: i16,
-    _schema_name: *const u16,
-    _name_length2: i16,
-    _table_name: *const u16,
-    _name_length3: i16,
-    _column_name: *const u16,
-    _name_length4: i16,
+    catalog_name: *const u16,
+    name_length1: i16,
+    schema_name: *const u16,
+    name_length2: i16,
+    table_name: *const u16,
+    name_length3: i16,
+    column_name: *const u16,
+    name_length4: i16,
 ) -> SqlReturn {
-    tracing::debug!("SQLColumnPrivilegesW(stmt={:?})", statement_handle);
+    tracing::trace!("SQLColumnPrivilegesW(stmt={:?})", statement_handle);
     // SAFETY: statement_handle is null or a valid StatementHandle<B>; kind and group
-    // validated by scope.stmt_with_parent inside set_empty_result.
+    // validated by scope.stmt_with_parent inside the closure.
     let ret = unsafe {
         panic_safe::<B, _>(statement_handle, |scope| {
-            set_empty_result::<B>(
-                scope,
+            let (stmt, conn) = scope.stmt_with_parent::<B>(statement_handle)?;
+            stmt.diagnostics.clear();
+
+            if stmt.cursor_open {
+                return Err(OdbcError::general(
+                    "A cursor is already open on this statement",
+                    SqlState::invalid_cursor_state(),
+                ));
+            }
+
+            let Some(ref connection) = conn.connection else {
+                return Err(OdbcError::general(
+                    "Connection is not open",
+                    SqlState::function_sequence_error(),
+                ));
+            };
+
+            let catalog = parse_filter_param(catalog_name, name_length1)?;
+            let schema = parse_filter_param(schema_name, name_length2)?;
+            let table = parse_filter_param(table_name, name_length3)?;
+            let column = parse_filter_param(column_name, name_length4)?;
+            tracing::debug!(
+                "SQLColumnPrivilegesW(stmt={:?}, catalog={:?}, schema={:?}, table={:?}, \
+                 column={:?})",
                 statement_handle,
-                column_privileges_columns(&B::catalog_result_column_widths()),
+                catalog,
+                schema,
+                table,
+                column,
+            );
+
+            let cancel_token =
+                crate::handles::resolve_cancel_token::<B>(statement_handle, connection);
+            let cancel = crate::handles::cancel_as::<B>(&cancel_token)?;
+
+            let rows = B::column_privileges(
+                connection,
+                cancel,
+                catalog.as_deref(),
+                schema.as_deref(),
+                table.as_deref(),
+                column.as_deref(),
             )
+            .into_odbc()?;
+
+            let mut values: Vec<Vec<ColumnValue>> =
+                rows.iter().map(ColumnPrivilegeRow::to_values).collect();
+            crate::catalog_sort::sort_rows(
+                &mut values,
+                &COLUMN_PRIVILEGES_SORT_KEYS,
+                B::null_collation(connection),
+            );
+            stmt.set_result_set(StatementData::Synthetic(SyntheticStatement::new(
+                column_privileges_columns(&B::catalog_result_column_widths()),
+                values,
+            )));
+            Ok(SqlReturn::SUCCESS)
         })
     };
     tracing::debug!("SQLColumnPrivilegesW -> {:?}", ret);
@@ -1998,6 +2080,16 @@ pub unsafe fn sql_column_privileges_w<B: Backend>(
 ///
 /// "not NULL" per the spec's column table: `TABLE_NAME` (3), `GRANTEE` (5)
 /// and `PRIVILEGE` (6).
+/// `SQLTablePrivileges`' spec sort order — "ordered by TABLE_CAT,
+/// TABLE_SCHEM, TABLE_NAME, PRIVILEGE, and GRANTEE", as zero-based column
+/// indices.
+///
+/// The last two are **not** in ascending index order: `PRIVILEGE` is column 6
+/// and `GRANTEE` column 5, and the spec sorts by `PRIVILEGE` first. That is
+/// this function's order, and the opposite of `SQLColumnPrivileges`', which
+/// ends `COLUMN_NAME, PRIVILEGE` with no `GRANTEE` key at all.
+const TABLE_PRIVILEGES_SORT_KEYS: [usize; 5] = [0, 1, 2, 5, 4];
+
 pub(crate) fn table_privileges_columns(
     widths: &CatalogResultColumnWidths,
 ) -> Vec<ColumnDescriptor> {
@@ -2016,25 +2108,26 @@ pub(crate) fn table_privileges_columns(
 ///
 /// Spec: <https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqltableprivileges-function>
 ///
-/// Returns an empty result set with the standard 7-column schema. The shared framework
-/// surfaces no table-level privilege information, so this satisfies the protocol contract
-/// (valid column descriptors, zero rows) while allowing BI tools to proceed without error.
+/// Queries the backend for table-level privileges and stores the result set in
+/// the statement handle. A backend that leaves [`Backend::table_privileges`]
+/// defaulted returns no rows.
 ///
 /// # Parameters
 ///
 /// - `statement_handle`: Statement handle.
-/// - `_catalog_name` / `_name_length1`: Catalog name (ignored — returns empty result set).
-/// - `_schema_name` / `_name_length2`: Schema name (ignored — returns empty result set).
-/// - `_table_name` / `_name_length3`: Table name pattern (ignored — returns empty result set).
+/// - `catalog_name` / `name_length1`: Catalog name (NULL = no filter; no search patterns).
+/// - `schema_name` / `name_length2`: Schema name search pattern (NULL = no filter).
+/// - `table_name` / `name_length3`: Table name search pattern (NULL = no filter).
 ///
 /// # Spec compliance
 ///
 /// - 01000: General warning (driver-specific informational message); not returned here.
-/// - 08S01: Communication link failure; not applicable (no backend query).
+/// - 08S01: Communication link failure; propagated from the backend when its
+///   client library reports the link to the data source failed.
 /// - 24000: Invalid cursor state — returned if a cursor is already open on this statement.
-/// - 40001: Serialization failure; not applicable (no backend query).
-/// - 40003: Statement completion unknown; not applicable (no backend query).
-/// - HY000: General error; returned for any unexpected internal error.
+/// - 40001: Serialization failure; propagated from backend as `HY000`.
+/// - 40003: Statement completion unknown; propagated from backend as `HY000`.
+/// - HY000: General error; returned for any unexpected backend error.
 /// - HY001: Memory allocation error; returned if allocation fails.
 /// - HY008: Operation canceled (DM) (driver-manager-handled; not returned here).
 /// - HY009: Invalid use of null pointer (DM) (driver-manager-handled; not returned by this
@@ -2044,9 +2137,10 @@ pub(crate) fn table_privileges_columns(
 /// - HY013: Memory management error; returned if underlying allocation fails.
 /// - HY090: Invalid string or buffer length (DM) (driver-manager-handled; not returned here).
 /// - HY117: Connection suspended (DM) (driver-manager-handled; not returned here).
-/// - HYC00: Optional feature not implemented; not applicable (empty result set always returned).
-/// - HYT00: Timeout expired; not applicable (no backend query).
-/// - HYT01: Connection timeout expired; not applicable (no backend query).
+/// - HYC00: Optional feature not implemented; propagated from backend if catalogs/schemas or
+///   search patterns are unsupported.
+/// - HYT00: Timeout expired; propagated from backend as `HY000`.
+/// - HYT01: Connection timeout expired; propagated from backend as `HY000`.
 /// - IM001: Driver does not support this function (DM) (driver-manager-handled; not returned here).
 /// - IM017: Polling disabled (DM) (driver-manager-handled; not returned here).
 /// - IM018: SQLCompleteAsync not called (DM) (driver-manager-handled; not returned here).
@@ -2056,23 +2150,71 @@ pub(crate) fn table_privileges_columns(
 /// `statement_handle` must point to a valid `StatementHandle<B>`.
 pub unsafe fn sql_table_privileges_w<B: Backend>(
     statement_handle: *mut c_void,
-    _catalog_name: *const u16,
-    _name_length1: i16,
-    _schema_name: *const u16,
-    _name_length2: i16,
-    _table_name: *const u16,
-    _name_length3: i16,
+    catalog_name: *const u16,
+    name_length1: i16,
+    schema_name: *const u16,
+    name_length2: i16,
+    table_name: *const u16,
+    name_length3: i16,
 ) -> SqlReturn {
-    tracing::debug!("SQLTablePrivilegesW(stmt={:?})", statement_handle);
+    tracing::trace!("SQLTablePrivilegesW(stmt={:?})", statement_handle);
     // SAFETY: statement_handle is null or a valid StatementHandle<B>; kind and group
-    // validated by scope.stmt_with_parent inside set_empty_result.
+    // validated by scope.stmt_with_parent inside the closure.
     let ret = unsafe {
         panic_safe::<B, _>(statement_handle, |scope| {
-            set_empty_result::<B>(
-                scope,
+            let (stmt, conn) = scope.stmt_with_parent::<B>(statement_handle)?;
+            stmt.diagnostics.clear();
+
+            if stmt.cursor_open {
+                return Err(OdbcError::general(
+                    "A cursor is already open on this statement",
+                    SqlState::invalid_cursor_state(),
+                ));
+            }
+
+            let Some(ref connection) = conn.connection else {
+                return Err(OdbcError::general(
+                    "Connection is not open",
+                    SqlState::function_sequence_error(),
+                ));
+            };
+
+            let catalog = parse_filter_param(catalog_name, name_length1)?;
+            let schema = parse_filter_param(schema_name, name_length2)?;
+            let table = parse_filter_param(table_name, name_length3)?;
+            tracing::debug!(
+                "SQLTablePrivilegesW(stmt={:?}, catalog={:?}, schema={:?}, table={:?})",
                 statement_handle,
-                table_privileges_columns(&B::catalog_result_column_widths()),
+                catalog,
+                schema,
+                table,
+            );
+
+            let cancel_token =
+                crate::handles::resolve_cancel_token::<B>(statement_handle, connection);
+            let cancel = crate::handles::cancel_as::<B>(&cancel_token)?;
+
+            let rows = B::table_privileges(
+                connection,
+                cancel,
+                catalog.as_deref(),
+                schema.as_deref(),
+                table.as_deref(),
             )
+            .into_odbc()?;
+
+            let mut values: Vec<Vec<ColumnValue>> =
+                rows.iter().map(TablePrivilegeRow::to_values).collect();
+            crate::catalog_sort::sort_rows(
+                &mut values,
+                &TABLE_PRIVILEGES_SORT_KEYS,
+                B::null_collation(connection),
+            );
+            stmt.set_result_set(StatementData::Synthetic(SyntheticStatement::new(
+                table_privileges_columns(&B::catalog_result_column_widths()),
+                values,
+            )));
+            Ok(SqlReturn::SUCCESS)
         })
     };
     tracing::debug!("SQLTablePrivilegesW -> {:?}", ret);
@@ -2848,6 +2990,101 @@ mod tests {
 
             let names = fetch_column_as_strings::<MockCatalogBackend>(stmt, PROCEDURE_NAME_COLUMN);
             assert_eq!(names, vec!["a_proc", "m_proc", "z_proc"]);
+
+            cleanup_for::<MockCatalogBackend>(env, conn, stmt);
+        }
+    }
+
+    /// Spec: "SQLProcedureColumns returns the results as a standard result
+    /// set, ordered by PROCEDURE_CAT, PROCEDURE_SCHEM, PROCEDURE_NAME, and
+    /// COLUMN_TYPE."
+    #[test]
+    fn procedure_columns_result_is_sorted_by_spec_keys() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCatalogBackend>();
+            let ret = sql_procedure_columns_w::<MockCatalogBackend>(
+                stmt,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+
+            const COLUMN_NAME_COLUMN: u16 = 4;
+            let names = fetch_column_as_strings::<MockCatalogBackend>(stmt, COLUMN_NAME_COLUMN);
+            assert_eq!(
+                names,
+                vec!["a", "b", "c"],
+                "COLUMN_TYPE orders the rows, not COLUMN_NAME"
+            );
+
+            cleanup_for::<MockCatalogBackend>(env, conn, stmt);
+        }
+    }
+
+    /// Spec: "SQLColumnPrivileges returns the results as a standard result set,
+    /// ordered by TABLE_CAT, TABLE_SCHEM, TABLE_NAME, COLUMN_NAME, and
+    /// PRIVILEGE."
+    #[test]
+    fn column_privileges_result_is_sorted_by_spec_keys() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCatalogBackend>();
+            let ret = sql_column_privileges_w::<MockCatalogBackend>(
+                stmt,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+
+            const IS_GRANTABLE_COLUMN: u16 = 8;
+            let labels = fetch_column_as_strings::<MockCatalogBackend>(stmt, IS_GRANTABLE_COLUMN);
+            assert_eq!(
+                labels,
+                vec!["first", "second", "third"],
+                "COLUMN_NAME dominates, and PRIVILEGE breaks the tie within a column"
+            );
+
+            cleanup_for::<MockCatalogBackend>(env, conn, stmt);
+        }
+    }
+
+    /// Spec: "SQLTablePrivileges returns the results as a standard result set,
+    /// ordered by TABLE_CAT, TABLE_SCHEM, TABLE_NAME, PRIVILEGE, and GRANTEE."
+    /// PRIVILEGE comes *before* GRANTEE, so the sort keys are not in ascending
+    /// column order — that is the spec, not a transcription slip.
+    #[test]
+    fn table_privileges_result_is_sorted_by_spec_keys() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCatalogBackend>();
+            let ret = sql_table_privileges_w::<MockCatalogBackend>(
+                stmt,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+
+            const IS_GRANTABLE_COLUMN: u16 = 7;
+            let labels = fetch_column_as_strings::<MockCatalogBackend>(stmt, IS_GRANTABLE_COLUMN);
+            assert_eq!(
+                labels,
+                vec!["first", "second", "third"],
+                "PRIVILEGE dominates GRANTEE"
+            );
 
             cleanup_for::<MockCatalogBackend>(env, conn, stmt);
         }
