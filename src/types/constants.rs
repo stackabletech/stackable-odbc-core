@@ -661,6 +661,38 @@ pub const SQL_FILE_USAGE: u16 = InfoType::SqlFileUsage as u16;
 /// [`SQL_FILE_USAGE`].
 pub const SQL_QUOTED_IDENTIFIER_CASE: u16 = InfoType::SqlQuotedIdentifierCase as u16;
 
+// ---------------------------------------------------------------------------
+// SQLUSMALLINT info types that odbc-sys does not model
+// ---------------------------------------------------------------------------
+//
+// These four matter beyond naming. `SQLGetInfo`'s `BufferLength` is *ignored*
+// for a non-string value — the spec has the driver assume the buffer matches
+// the type it declares for that info type — so returning a `SQLUINTEGER` where
+// the spec declares `SQLUSMALLINT` writes four bytes into the two an
+// application correctly allocated. Being absent from `odbc_sys::InfoType`,
+// they have no variant for the shape-aware fallback in
+// `info_type_default_response` to consult, which is exactly how they reached
+// the `U32(0)` default. `SMALLINT_SHAPED_UNMODELLED_INFO_TYPES` there lists
+// them; keep the two in step.
+
+/// `SQL_ODBC_API_CONFORMANCE` (9) — the ODBC API conformance level
+/// (`SQL_OAC_*`). ODBC 2.x; still queried. `SQLUSMALLINT`.
+pub const SQL_ODBC_API_CONFORMANCE: u16 = 9;
+
+/// `SQL_ODBC_SAG_CLI_CONFORMANCE` (12) — whether the driver conforms to the SAG
+/// CLI specification (`SQL_OSCC_*`). ODBC 2.x. `SQLUSMALLINT`.
+pub const SQL_ODBC_SAG_CLI_CONFORMANCE: u16 = 12;
+
+/// `SQL_ODBC_SQL_CONFORMANCE` (15) — the ODBC SQL grammar conformance level
+/// (`SQL_OSC_*`). ODBC 2.x, superseded by `SQL_SQL_CONFORMANCE` (118) but still
+/// queried by 2.x-era clients. `SQLUSMALLINT`.
+pub const SQL_ODBC_SQL_CONFORMANCE: u16 = 15;
+
+/// `SQL_MAX_PROCEDURE_NAME_LEN` (33) — the maximum length of a procedure name,
+/// `0` for "no limit or unknown". `SQLUSMALLINT`, like every other
+/// `SQL_MAX_*_NAME_LEN`, all of which odbc-sys does model.
+pub const SQL_MAX_PROCEDURE_NAME_LEN: u16 = 33;
+
 /// `SQL_DRIVER_ODBC_VER` — the ODBC version this driver conforms to, in the
 /// spec's `##.##` form. Reported identically by the driver crates, and read
 /// by the Windows Driver Manager *before* `SQLDriverConnectW` to decide

@@ -192,6 +192,32 @@ fn info_type_default_response<B: Backend>(
         return Ok(InfoValue::U32(u32::MAX));
     }
 
+    // Four info types the spec declares `SQLUSMALLINT` that `odbc_sys::InfoType`
+    // does not model, so `info_type_from_raw` cannot supply their shape below.
+    //
+    // Getting this wrong is a buffer overrun, not a cosmetic mismatch:
+    // `SQLGetInfo`'s `BufferLength` is *ignored* for a non-string value — the
+    // driver is required to assume the buffer matches the type the spec
+    // declares — so answering `U32` here writes four bytes into the two an
+    // application correctly allocated for a `SQLUSMALLINT`.
+    //
+    // Listed rather than shape-derived because there is nothing to derive from:
+    // being absent from odbc-sys is precisely the problem. Keep in step with the
+    // constants' own doc comments in `types/constants.rs`.
+    const SMALLINT_SHAPED_UNMODELLED_INFO_TYPES: [u16; 4] = [
+        crate::types::SQL_ODBC_API_CONFORMANCE,
+        crate::types::SQL_ODBC_SAG_CLI_CONFORMANCE,
+        crate::types::SQL_ODBC_SQL_CONFORMANCE,
+        crate::types::SQL_MAX_PROCEDURE_NAME_LEN,
+    ];
+    if SMALLINT_SHAPED_UNMODELLED_INFO_TYPES.contains(&info_type) {
+        tracing::debug!(
+            "SQLGetInfoW: info type {info_type} is SQLUSMALLINT-shaped but unmodelled by \
+             odbc-sys; defaulting to U16(0)"
+        );
+        return Ok(InfoValue::U16(0));
+    }
+
     // A *named* InfoType that reaches here (because no backend answered it)
     // still gets a value in the shape the spec declares for it, never an
     // arbitrary U32 masquerading as e.g. a Y/N string (see the shape-aware
@@ -937,6 +963,48 @@ mod tests {
         );
         assert_eq!(buf[2..], [SENTINEL; 6], "{what} wrote past 2 bytes");
         u16::from_ne_bytes([buf[0], buf[1]])
+    }
+
+    /// Four info types the spec declares `SQLUSMALLINT` have no
+    /// `odbc_sys::InfoType` variant, so nothing gave the shape-aware fallback a
+    /// shape to honour and they took the generic `U32(0)`.
+    ///
+    /// That is a buffer overrun rather than a cosmetic mismatch: `SQLGetInfo`
+    /// *ignores* `BufferLength` for a non-string value — the driver must assume
+    /// the buffer matches the type the spec declares — so four bytes land in the
+    /// two an application correctly allocated. `read_u16_info`'s sentinel is
+    /// what catches the two extra bytes; asserting on `StringLengthPtr` alone
+    /// would not, since a `U32` answer reports a plausible `4`.
+    #[test]
+    fn smallint_shaped_info_types_unmodelled_by_odbc_sys_still_answer_in_two_bytes() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            let ret = connect_handle(conn);
+            assert_eq!(ret, SqlReturn::SUCCESS);
+
+            for (info_type, name) in [
+                (
+                    crate::types::SQL_ODBC_API_CONFORMANCE,
+                    "SQL_ODBC_API_CONFORMANCE",
+                ),
+                (
+                    crate::types::SQL_ODBC_SAG_CLI_CONFORMANCE,
+                    "SQL_ODBC_SAG_CLI_CONFORMANCE",
+                ),
+                (
+                    crate::types::SQL_ODBC_SQL_CONFORMANCE,
+                    "SQL_ODBC_SQL_CONFORMANCE",
+                ),
+                (
+                    crate::types::SQL_MAX_PROCEDURE_NAME_LEN,
+                    "SQL_MAX_PROCEDURE_NAME_LEN",
+                ),
+            ] {
+                let _ = read_u16_info::<MockBackend>(conn, info_type, name);
+            }
+
+            cleanup(env, conn, stmt);
+        }
     }
 
     #[test]

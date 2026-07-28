@@ -589,6 +589,21 @@ markers go away and this section becomes the initial-release notes.
 
 ### Fixed
 
+- `SQLGetInfoW` no longer writes four bytes into a two-byte buffer for
+  `SQL_ODBC_API_CONFORMANCE` (9), `SQL_ODBC_SAG_CLI_CONFORMANCE` (12),
+  `SQL_ODBC_SQL_CONFORMANCE` (15) and `SQL_MAX_PROCEDURE_NAME_LEN` (33). The
+  spec declares all four `SQLUSMALLINT`, and `SQLGetInfo` *ignores*
+  `BufferLength` for a non-string value — the driver is required to assume the
+  buffer matches the type the spec declares — so an application that correctly
+  allocated two bytes had two more overwritten past the end.
+
+  These four are the ones `odbc_sys::InfoType` does not model, so
+  `info_type_from_raw` returned `None` and the existing shape-aware fallback had
+  no shape to honour, dropping them on the generic `U32(0)`. They are now listed
+  explicitly, which is the only option available: being absent from odbc-sys is
+  precisely what leaves nothing to derive the shape from. `SQL_CURSOR_ROLLBACK_BEHAVIOR`
+  (24) is in the same position but was already answered by `common_get_info_raw`.
+
 - `SQLGetData` can retrieve variable-length data in parts, which is what the
   spec's whole "Retrieving Variable-Length Data in Parts" section describes and
   what the documented application pattern
