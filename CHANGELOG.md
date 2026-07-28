@@ -39,6 +39,8 @@ Everything a driver has to change for the catalog rework, in one place.
    redundant, though harmless.
 5. **Delete any `SQL_ATTR_METADATA_ID` handling.** Core normalises identifier
    arguments before calling the backend.
+6. **`Backend::tables`' last parameter is now `table_types: &[String]`.** Delete
+   any driver-side splitting of the raw `TableType` string; core does it once.
 
 ### Added
 
@@ -228,6 +230,14 @@ Everything a driver has to change for the catalog rework, in one place.
   correctness and can no longer get the column order wrong. Migration: return
   the rows your query produced as `TableRow`s and delete the statement
   construction.
+
+- **Breaking:** `Backend::tables`' `table_type` parameter is now
+  `table_types: &[String]` — the parsed value list rather than the raw string.
+  The spec defines `TableType` as comma-separated values, optionally
+  single-quoted (`'TABLE','VIEW'` or `TABLE, VIEW`); core now splits and trims
+  it once instead of every driver doing so. An empty slice means no table-type
+  filter, which is what `None` meant before. Migration: delete your own
+  splitting and match against the slice.
 
 - **Breaking:** `Backend::columns`, `primary_keys`, `foreign_keys`,
   `statistics` and `special_columns` now return `Vec<ColumnRow>`,

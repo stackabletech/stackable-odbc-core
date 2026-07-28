@@ -364,7 +364,7 @@ impl Backend for MockBackend {
         _: Option<&str>,
         _: Option<&str>,
         _: Option<&str>,
-        _: Option<&str>,
+        _: &[String],
     ) -> Result<Vec<TableRow>, MockError> {
         Err(MockError)
     }
@@ -562,7 +562,7 @@ impl Backend for MockNoCatalogBackend {
         _: Option<&str>,
         _: Option<&str>,
         _: Option<&str>,
-        _: Option<&str>,
+        _: &[String],
     ) -> Result<Vec<TableRow>, MockError> {
         Err(MockError)
     }
@@ -674,7 +674,7 @@ macro_rules! mock_keywords_backend {
                 _: Option<&str>,
                 _: Option<&str>,
                 _: Option<&str>,
-                _: Option<&str>,
+                _: &[String],
             ) -> Result<Vec<TableRow>, MockError> {
                 Err(MockError)
             }
@@ -815,7 +815,7 @@ impl Backend for MockAltBackend {
         _: Option<&str>,
         _: Option<&str>,
         _: Option<&str>,
-        _: Option<&str>,
+        _: &[String],
     ) -> Result<Vec<TableRow>, MockError> {
         Err(MockError)
     }
@@ -1022,7 +1022,7 @@ macro_rules! mock_isolation_backend {
                 _: Option<&str>,
                 _: Option<&str>,
                 _: Option<&str>,
-                _: Option<&str>,
+                _: &[String],
             ) -> Result<Vec<TableRow>, MockError> {
                 Err(MockError)
             }
@@ -1195,7 +1195,7 @@ macro_rules! mock_txn_backend {
                 _: Option<&str>,
                 _: Option<&str>,
                 _: Option<&str>,
-                _: Option<&str>,
+                _: &[String],
             ) -> Result<Vec<TableRow>, OdbcError> {
                 Err(OdbcError::NotImplemented {
                     feature: "mock txn backend".into(),
@@ -1401,7 +1401,7 @@ impl Backend for MockTypeInfoBackend {
         _: Option<&str>,
         _: Option<&str>,
         _: Option<&str>,
-        _: Option<&str>,
+        _: &[String],
     ) -> Result<Vec<TableRow>, MockError> {
         Err(MockError)
     }
@@ -1524,7 +1524,7 @@ impl Backend for MockCatalogBackend {
         _: Option<&str>,
         _: Option<&str>,
         _: Option<&str>,
-        _: Option<&str>,
+        _: &[String],
     ) -> Result<Vec<TableRow>, MockError> {
         Ok(vec![
             TableRow {
@@ -1736,7 +1736,9 @@ pub struct RecordedCatalogArgs {
     pub schema: Option<String>,
     pub table: Option<String>,
     pub column: Option<String>,
-    pub table_type: Option<String>,
+    /// `SQLTables`' `TableType`, as the parsed value list core passes down —
+    /// not the raw string the application supplied. Empty means no filter.
+    pub table_types: Vec<String>,
     pub fk_catalog: Option<String>,
     pub fk_schema: Option<String>,
     pub fk_table: Option<String>,
@@ -1837,13 +1839,13 @@ impl Backend for MockCatalogArgsBackend {
         catalog: Option<&str>,
         schema: Option<&str>,
         table: Option<&str>,
-        table_type: Option<&str>,
+        table_types: &[String],
     ) -> Result<Vec<TableRow>, MockError> {
         Self::record(RecordedCatalogArgs {
             catalog: catalog.map(str::to_string),
             schema: schema.map(str::to_string),
             table: table.map(str::to_string),
-            table_type: table_type.map(str::to_string),
+            table_types: table_types.to_vec(),
             ..Default::default()
         });
         Ok(Vec::new())
@@ -2054,7 +2056,7 @@ impl Backend for MockFunctionsBackend {
         _: Option<&str>,
         _: Option<&str>,
         _: Option<&str>,
-        _: Option<&str>,
+        _: &[String],
     ) -> Result<Vec<TableRow>, MockError> {
         Err(MockError)
     }
@@ -2192,7 +2194,7 @@ impl Backend for MockFailingCloseBackend {
         _: Option<&str>,
         _: Option<&str>,
         _: Option<&str>,
-        _: Option<&str>,
+        _: &[String],
     ) -> Result<Vec<TableRow>, OdbcError> {
         Err(OdbcError::NotImplemented {
             feature: "tables".into(),
@@ -2402,7 +2404,7 @@ impl Backend for MockLongDataBackend {
         _: Option<&str>,
         _: Option<&str>,
         _: Option<&str>,
-        _: Option<&str>,
+        _: &[String],
     ) -> Result<Vec<TableRow>, OdbcError> {
         Err(OdbcError::NotImplemented {
             feature: "tables".into(),
@@ -2526,7 +2528,7 @@ impl Backend for MockRecordingBackend {
         _: Option<&str>,
         _: Option<&str>,
         _: Option<&str>,
-        _: Option<&str>,
+        _: &[String],
     ) -> Result<Vec<TableRow>, MockError> {
         Err(MockError)
     }

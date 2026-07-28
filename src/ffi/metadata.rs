@@ -379,13 +379,21 @@ pub unsafe fn sql_tables_w<B: Backend>(
             let schema = normalise_catalog_arg::<B>(connection, schema, metadata_id);
             let table = normalise_catalog_arg::<B>(connection, table, metadata_id);
 
+            // The spec defines `TableType` as a value list, not a pattern, and
+            // `SQL_ATTR_METADATA_ID` never applies to it. Parsed here so that
+            // every driver does not have to.
+            let table_types = tt
+                .as_deref()
+                .map(crate::catalog_ident::parse_table_type_list)
+                .unwrap_or_default();
+
             let rows = B::tables(
                 connection,
                 cancel,
                 catalog.as_deref(),
                 schema.as_deref(),
                 table.as_deref(),
-                tt.as_deref(),
+                &table_types,
             )
             .into_odbc()?;
 
@@ -2872,10 +2880,71 @@ mod tests {
 
             let args = MockCatalogArgsBackend::recorded().expect("Backend::tables was called");
             assert_eq!(
-                args.table_type.as_deref(),
-                Some("'base_table','view'"),
-                "TableType is a value list and must pass through unchanged"
+                args.table_types,
+                vec!["base_table".to_string(), "view".to_string()],
+                "TableType is a value list, so only the list syntax is stripped — \
+                 no case folding and no pattern escaping"
             );
+            cleanup_for::<MockCatalogArgsBackend>(env, conn, stmt);
+        }
+    }
+
+    /// Spec, `SQLTables` `TableType`: "a list of comma-separated values for the
+    /// types of interest; each value can be enclosed in single quotation marks
+    /// (') or unquoted, for example, 'TABLE', 'VIEW' or TABLE, VIEW." Core
+    /// parses it once so that every driver does not.
+    #[test]
+    fn table_type_list_reaches_the_backend_parsed() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCatalogArgsBackend>();
+            // Mixes both spellings the spec's example gives, and pads with
+            // whitespace, so a parser that handles only one of them fails here.
+            let table_type = utf16_of("'TABLE', VIEW");
+            let ret = sql_tables_w::<MockCatalogArgsBackend>(
+                stmt,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                table_type.as_ptr(),
+                SQL_NTS_I16,
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+
+            let args = MockCatalogArgsBackend::recorded().expect("Backend::tables was called");
+            assert_eq!(
+                args.table_types,
+                vec!["TABLE".to_string(), "VIEW".to_string()],
+                "quoted and unquoted values both arrive parsed and trimmed"
+            );
+            cleanup_for::<MockCatalogArgsBackend>(env, conn, stmt);
+        }
+    }
+
+    /// An absent `TableType` is "no table-type filter", which the previous
+    /// signature spelled `None`. The empty slice carries the same meaning and
+    /// must not be confused with a filter that matches nothing.
+    #[test]
+    fn an_absent_table_type_argument_is_an_empty_slice() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCatalogArgsBackend>();
+            let ret = sql_tables_w::<MockCatalogArgsBackend>(
+                stmt,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+
+            let args = MockCatalogArgsBackend::recorded().expect("Backend::tables was called");
+            assert!(args.table_types.is_empty());
             cleanup_for::<MockCatalogArgsBackend>(env, conn, stmt);
         }
     }

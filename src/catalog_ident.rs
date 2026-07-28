@@ -92,13 +92,6 @@ fn escape_pattern_metacharacters(value: &str, escape: &str) -> String {
 /// `METADATA_ID` never applies here — the spec is explicit that `TableType`
 /// "is a value list argument, regardless of the setting of
 /// SQL_ATTR_METADATA_ID".
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "called by SQLTablesW once METADATA_ID is wired up"
-    )
-)]
 pub(crate) fn parse_table_type_list(value: &str) -> Vec<String> {
     value
         .split(',')
