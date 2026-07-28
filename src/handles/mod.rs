@@ -20,9 +20,11 @@
 //! Freeing bumps the slot's generation, so every outstanding token for that
 //! slot is permanently rejected, including after the slot is reused.
 //!
-//! The one case no scheme can defend is an application freeing a handle on one
-//! thread while another is mid-call on it. ODBC forbids that and the Driver
-//! Manager serialises calls per handle.
+//! An application freeing a handle on one thread while another is mid-call on
+//! it is exactly the case the per-connection group lock defends: `SQLFreeHandle`
+//! holds the group for the whole free, so a concurrent call on the same
+//! connection either completes first or blocks until the free is done. See
+//! `registry.rs` for the lock group itself.
 
 use std::any::Any;
 use std::ffi::c_void;
@@ -754,8 +756,9 @@ pub unsafe fn free_connection<B: Backend>(
     // Spec HY010: all statements must be freed first. Reading this from the
     // registry rather than a field of this handle means freeing a connection
     // never needs to reach its parent environment at all — the only place
-    // in the crate allowed to acquire a connection's lock and an
-    // environment's is `SQLEndTran(SQL_HANDLE_ENV)`, and only in that order.
+    // in the crate allowed to acquire both an environment's lock and a
+    // connection's is `SQLEndTran(SQL_HANDLE_ENV)`, and only environment
+    // before connection.
     if !registry().children_of(handle).is_empty() {
         conn.diagnostics.push(&OdbcError::general(
             "Cannot free connection with active statements",

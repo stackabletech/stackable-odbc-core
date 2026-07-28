@@ -46,9 +46,12 @@
 //! touch concurrently with a connection. That type — and only that type — needs
 //! to be safe for concurrent use.
 //!
-//! On unixODBC, a driver built on this crate can declare `Threading = 2` in
-//! `odbcinst.ini`. The default of `3` makes the Driver Manager serialise every
-//! call in the process, which this crate no longer needs.
+//! On unixODBC, a driver built on this crate **must** declare `Threading = 2`
+//! in `odbcinst.ini` for cross-thread `SQLCancel` to work at all. unixODBC's
+//! own `SQLCancel` only takes the statement lock at the default protection
+//! level `3`; at `2` it does not, which is what lets a cancel from another
+//! thread reach this crate's lock-free path instead of blocking behind the
+//! Driver Manager's own lock for the query it was asked to cancel.
 //!
 //! # Unicode
 //!

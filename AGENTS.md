@@ -490,6 +490,13 @@ mechanism:
   `HandleScope::with_child_group` (the nested-lock case below) and
   `sql_cancel`, which builds one only on the branch where its own `try_lock`
   succeeded.
+- **A `Backend` method must never re-enter a `SQLxxx` entry point on the same
+  connection.** Every `Backend` method, including `connect`, runs while
+  `panic_safe` holds that connection's group lock, and the lock is not
+  reentrant: calling back in, directly or through an application callback,
+  deadlocks the calling thread with no diagnostic and no `SqlReturn`, because
+  the thread never returns far enough to produce either. `Backend::cancel` is
+  the one exception, covered separately below.
 - **The one lock-ordering rule is environment before connection**, and
   `SQLEndTran(SQL_HANDLE_ENV)` is its only site: it holds the environment's
   group while walking that environment's connections via

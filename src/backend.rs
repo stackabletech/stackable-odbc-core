@@ -15,14 +15,29 @@ use crate::types::{
 /// Core abstraction for database-specific logic.
 /// Everything in stackable-odbc-core is generic over B: Backend.
 /// `Sized` is implicit (all traits require it by default), listed for symmetry with `StatementBackend` and to make the full contract visible in one place.
+///
+/// # Re-entrancy
+///
+/// Every method here runs while core holds the target connection's group
+/// lock (see `HandleScope` and `panic_safe` in `src/panic.rs`) — including
+/// [`Backend::connect`], which runs under the lock the freshly allocated
+/// connection handle already has, even though nothing yet depends on it. That
+/// lock is not reentrant. A method implementation that calls back into any
+/// `SQLxxx` entry point on the same connection — directly, or indirectly
+/// through a callback into application code that does so — deadlocks the
+/// calling thread permanently: there is no diagnostic and no `SqlReturn`,
+/// because the thread never returns from the lock acquisition to produce
+/// either. [`Backend::cancel`] is the one method exempt from this, and its
+/// own doc comment explains why.
 pub trait Backend: Sized + Send + Sync + 'static {
     /// The backend's live connection, whatever it needs to hold: a socket, a
     /// client-library handle, a file descriptor, a runtime plus a channel.
     ///
     /// Core stores one inside a `ConnectionHandle` and hands it back to every
     /// method by reference; it never inspects it. `Send + Sync` because an
-    /// application may use one connection from several threads, which the
-    /// Driver Manager serialises per handle but does not confine to one thread.
+    /// application may use one connection from several threads: core's own
+    /// per-connection group lock serialises calls into a `Backend` method,
+    /// but does not confine the connection to the thread that created it.
     type Connection: Send + Sync;
 
     /// The backend's executed or prepared statement, from which rows are read.
