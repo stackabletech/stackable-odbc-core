@@ -444,11 +444,7 @@ markers go away and this section becomes the initial-release notes.
   a backend whose cancellation needs a value only known at execution time (a
   query id, say): `cancel_token` returns an empty shared slot, and the
   statement-producing call that actually runs the query fills it, because it
-  now receives that exact token. Core resolves the token via a `pub(crate)`
-  `resolve_cancel_token` immediately before the backend call, once per
-  function (ten call sites in total, feeding the fourteen individual backend
-  calls across `exec_direct`/`prepare`/`execute`), so every one gets it the
-  same way.
+  now receives that exact token.
 
 ### Fixed
 

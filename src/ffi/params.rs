@@ -1117,14 +1117,7 @@ pub unsafe fn sql_param_data<B: Backend>(
             // later call on the same statement (see `resolve_cancel_token`).
             let cancel_token =
                 crate::handles::resolve_cancel_token::<B>(statement_handle, connection);
-            let cancel = cancel_token
-                .downcast_ref::<B::CancelToken>()
-                .ok_or_else(|| {
-                    OdbcError::general(
-                        "Statement's cancel token is not this backend's CancelToken type",
-                        SqlState::general_error(),
-                    )
-                })?;
+            let cancel = crate::handles::cancel_as::<B>(&cancel_token)?;
 
             // If statement was closed (e.g. SQLFreeStmt(SQL_CLOSE)), re-prepare.
             if stmt.statement.is_none() {

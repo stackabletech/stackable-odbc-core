@@ -185,14 +185,7 @@ pub unsafe fn sql_exec_direct_w<B: Backend>(
             // later call on the same statement (see `resolve_cancel_token`).
             let cancel_token =
                 crate::handles::resolve_cancel_token::<B>(statement_handle, connection);
-            let cancel = cancel_token
-                .downcast_ref::<B::CancelToken>()
-                .ok_or_else(|| {
-                    OdbcError::general(
-                        "Statement's cancel token is not this backend's CancelToken type",
-                        SqlState::general_error(),
-                    )
-                })?;
+            let cancel = crate::handles::cancel_as::<B>(&cancel_token)?;
 
             // `Backend::exec_direct` takes no parameters, so a parameterised
             // statement must go through prepare + execute, which binds them.
@@ -353,14 +346,7 @@ pub unsafe fn sql_prepare_w<B: Backend>(
             // later call on the same statement (see `resolve_cancel_token`).
             let cancel_token =
                 crate::handles::resolve_cancel_token::<B>(statement_handle, connection);
-            let cancel = cancel_token
-                .downcast_ref::<B::CancelToken>()
-                .ok_or_else(|| {
-                    OdbcError::general(
-                        "Statement's cancel token is not this backend's CancelToken type",
-                        SqlState::general_error(),
-                    )
-                })?;
+            let cancel = crate::handles::cancel_as::<B>(&cancel_token)?;
 
             // Ask backend to validate and prepare the statement.
             let prepared = B::prepare(connection, cancel, &sql).into_odbc()?;
@@ -520,14 +506,7 @@ pub unsafe fn sql_execute<B: Backend>(statement_handle: *mut c_void) -> SqlRetur
             // later call on the same statement (see `resolve_cancel_token`).
             let cancel_token =
                 crate::handles::resolve_cancel_token::<B>(statement_handle, connection);
-            let cancel = cancel_token
-                .downcast_ref::<B::CancelToken>()
-                .ok_or_else(|| {
-                    OdbcError::general(
-                        "Statement's cancel token is not this backend's CancelToken type",
-                        SqlState::general_error(),
-                    )
-                })?;
+            let cancel = crate::handles::cancel_as::<B>(&cancel_token)?;
 
             // `SQLFreeStmt(SQL_CLOSE)` clears `stmt.statement` (discards the result set)
             // but the prepared SQL survives in `stmt.prepared_sql`. Per ODBC spec, calling

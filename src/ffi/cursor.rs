@@ -1130,11 +1130,11 @@ mod tests {
         }
     }
 
-    /// The path this task actually adds: `sql_cancel` resolving a stored
-    /// token through the registry and handing it to `Backend::cancel`. No
-    /// production code creates this token yet (task 14 wires that in), so the
-    /// test seeds the registry directly, exactly what task 14's call sites
-    /// will do via `resolve_cancel_token`.
+    /// `sql_cancel`'s stopgap resolves a stored token through the registry and
+    /// hands it to `Backend::cancel`. This test seeds the registry directly
+    /// with `set_cancel` rather than going through a statement-producing call,
+    /// so it can exercise that read in isolation from the call that would
+    /// normally have created the token first.
     #[test]
     fn cancel_calls_backend_cancel_when_a_token_exists() {
         unsafe {

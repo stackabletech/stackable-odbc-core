@@ -619,7 +619,13 @@ pub unsafe fn alloc_statement<B: Backend>(
 /// for the whole duration of the backend call this feeds. That is what makes
 /// the check-then-set below race-free with no synchronisation of its own: two
 /// threads can never be inside this function for the same statement at the
-/// same time.
+/// same time. This is prose rather than a `&HandleScope` witness parameter
+/// only because the rest of the crate already makes it hard to violate: the
+/// `connection: &B::Connection` argument itself is obtainable in production
+/// only through `HandleScope::get`/`stmt_with_parent`, both of which require
+/// `&mut HandleScope`, and a `HandleScope` is only ever constructed while its
+/// group lock is held (`HandleScope::new` is `pub(crate)` with exactly two
+/// callers, both of which lock first).
 pub(crate) fn resolve_cancel_token<B: Backend>(
     stmt_token: *mut c_void,
     connection: &B::Connection,
@@ -630,6 +636,25 @@ pub(crate) fn resolve_cancel_token<B: Backend>(
     let created: StdArc<dyn Any + Send + Sync> = StdArc::new(B::cancel_token(connection));
     registry().set_cancel(stmt_token, StdArc::clone(&created));
     created
+}
+
+/// Downcast a type-erased cancel token back to the concrete `B::CancelToken`
+/// a statement-producing call needs to pass through.
+///
+/// The `Err` arm is unreachable in practice: every token this crate stores
+/// was built by `resolve_cancel_token::<B>` for this exact `B`, so the type
+/// always matches. It exists anyway because nothing makes that statically
+/// provable across the `dyn Any` erasure, and this crate denies
+/// `unwrap`/`expect` outside tests.
+pub(crate) fn cancel_as<B: Backend>(
+    token: &StdArc<dyn Any + Send + Sync>,
+) -> Result<&B::CancelToken, OdbcError> {
+    token.downcast_ref::<B::CancelToken>().ok_or_else(|| {
+        OdbcError::general(
+            "Statement's cancel token is not this backend's CancelToken type",
+            crate::types::SqlState::general_error(),
+        )
+    })
 }
 
 /// Free an environment handle. Fails with `SqlReturn::ERROR` if there are

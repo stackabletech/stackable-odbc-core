@@ -364,13 +364,17 @@ pub trait Backend: Sized + Send + Sync + 'static {
 
     /// Build the cancel token for a connection.
     ///
-    /// Core calls this once per statement — the first time the statement
-    /// makes a backend call (`exec_direct`, `prepare`, a catalog function,
-    /// ...), not at `SQLAllocHandle(SQL_HANDLE_STMT)`. A statement can be
-    /// allocated on a connection that is not yet open (`SQLAllocHandle`'s
-    /// 08003 for that case is Driver-Manager-owned, so core never checks it),
-    /// which leaves no `&Self::Connection` to build a token from until a
-    /// statement-producing call actually supplies one.
+    /// Core calls this immediately before the statement's first backend call
+    /// site (`exec_direct`, `prepare`, a catalog function, ...), not at
+    /// `SQLAllocHandle(SQL_HANDLE_STMT)`. A statement can be allocated on a
+    /// connection that is not yet open (`SQLAllocHandle`'s 08003 for that
+    /// case is Driver-Manager-owned, so core never checks it), which leaves
+    /// no `&Self::Connection` to build a token from until a
+    /// statement-producing call actually supplies one. Resolution can precede
+    /// a fallible step (parameter collection, say) that then fails before any
+    /// backend call happens; the token still gets built in that case, just
+    /// unused — harmless, since it is cheap and the statement may yet make a
+    /// real call later.
     ///
     /// Once built, the token is never replaced for the life of the
     /// statement, including across a later `SQLExecute` on the same handle: a
@@ -386,8 +390,11 @@ pub trait Backend: Sized + Send + Sync + 'static {
     ///
     /// A backend whose cancellation needs a value not known until execution
     /// (e.g. a query id) returns an empty shared slot here —
-    /// `Arc<Mutex<Option<QueryId>>>` — and fills it from `exec_direct` /
-    /// `prepare` / `execute`, each of which receives the same token.
+    /// `Arc<Mutex<Option<QueryId>>>` — and fills it from whichever of the nine
+    /// statement-producing methods actually runs the work (a catalog method
+    /// like `tables` is a real query with its own id on some backends, not
+    /// only `exec_direct`/`prepare`/`execute`), each of which receives the
+    /// same token.
     fn cancel_token(conn: &Self::Connection) -> Self::CancelToken;
 
     /// Cancel whatever the token refers to.

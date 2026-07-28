@@ -138,14 +138,7 @@ pub unsafe fn sql_tables_w<B: Backend>(
             // later call on the same statement (see `resolve_cancel_token`).
             let cancel_token =
                 crate::handles::resolve_cancel_token::<B>(statement_handle, connection);
-            let cancel = cancel_token
-                .downcast_ref::<B::CancelToken>()
-                .ok_or_else(|| {
-                    OdbcError::general(
-                        "Statement's cancel token is not this backend's CancelToken type",
-                        SqlState::general_error(),
-                    )
-                })?;
+            let cancel = crate::handles::cancel_as::<B>(&cancel_token)?;
 
             let result = B::tables(
                 connection,
@@ -265,14 +258,7 @@ pub unsafe fn sql_columns_w<B: Backend>(
             // later call on the same statement (see `resolve_cancel_token`).
             let cancel_token =
                 crate::handles::resolve_cancel_token::<B>(statement_handle, connection);
-            let cancel = cancel_token
-                .downcast_ref::<B::CancelToken>()
-                .ok_or_else(|| {
-                    OdbcError::general(
-                        "Statement's cancel token is not this backend's CancelToken type",
-                        SqlState::general_error(),
-                    )
-                })?;
+            let cancel = crate::handles::cancel_as::<B>(&cancel_token)?;
 
             let result = B::columns(
                 connection,
@@ -376,14 +362,7 @@ pub unsafe fn sql_primary_keys_w<B: Backend>(
             // later call on the same statement (see `resolve_cancel_token`).
             let cancel_token =
                 crate::handles::resolve_cancel_token::<B>(statement_handle, connection);
-            let cancel = cancel_token
-                .downcast_ref::<B::CancelToken>()
-                .ok_or_else(|| {
-                    OdbcError::general(
-                        "Statement's cancel token is not this backend's CancelToken type",
-                        SqlState::general_error(),
-                    )
-                })?;
+            let cancel = crate::handles::cancel_as::<B>(&cancel_token)?;
 
             let result = B::primary_keys(
                 connection,
@@ -507,14 +486,7 @@ pub unsafe fn sql_foreign_keys_w<B: Backend>(
             // later call on the same statement (see `resolve_cancel_token`).
             let cancel_token =
                 crate::handles::resolve_cancel_token::<B>(statement_handle, connection);
-            let cancel = cancel_token
-                .downcast_ref::<B::CancelToken>()
-                .ok_or_else(|| {
-                    OdbcError::general(
-                        "Statement's cancel token is not this backend's CancelToken type",
-                        SqlState::general_error(),
-                    )
-                })?;
+            let cancel = crate::handles::cancel_as::<B>(&cancel_token)?;
 
             let result = B::foreign_keys(
                 connection,
@@ -673,14 +645,7 @@ pub unsafe fn sql_statistics_w<B: Backend>(
             // later call on the same statement (see `resolve_cancel_token`).
             let cancel_token =
                 crate::handles::resolve_cancel_token::<B>(statement_handle, connection);
-            let cancel = cancel_token
-                .downcast_ref::<B::CancelToken>()
-                .ok_or_else(|| {
-                    OdbcError::general(
-                        "Statement's cancel token is not this backend's CancelToken type",
-                        SqlState::general_error(),
-                    )
-                })?;
+            let cancel = crate::handles::cancel_as::<B>(&cancel_token)?;
 
             match B::statistics(
                 connection,
@@ -851,14 +816,7 @@ pub unsafe fn sql_special_columns_w<B: Backend>(
             // later call on the same statement (see `resolve_cancel_token`).
             let cancel_token =
                 crate::handles::resolve_cancel_token::<B>(statement_handle, connection);
-            let cancel = cancel_token
-                .downcast_ref::<B::CancelToken>()
-                .ok_or_else(|| {
-                    OdbcError::general(
-                        "Statement's cancel token is not this backend's CancelToken type",
-                        SqlState::general_error(),
-                    )
-                })?;
+            let cancel = crate::handles::cancel_as::<B>(&cancel_token)?;
 
             match B::special_columns(
                 connection,

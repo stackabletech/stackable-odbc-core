@@ -99,10 +99,11 @@ pub struct MockStatement;
 /// a failure, so it cannot stand in for a backend's cancel actually erroring
 /// out).
 ///
-/// `saw_execution` is read only by [`MockRecordingBackend`]'s `exec_direct`,
-/// which stores `true` into whatever token it receives — proof that the
-/// token a statement-producing call is handed is the same one `SQLCancel`
-/// would later read back out of the registry, not merely some token.
+/// `saw_execution` is written only by [`MockRecordingBackend`]'s
+/// `exec_direct`, which stores `true` into whatever token it receives, and
+/// read only by the tests exercising it — proof that the token a
+/// statement-producing call is handed is the same one `SQLCancel` would
+/// later read back out of the registry, not merely some token.
 #[derive(Debug, Default)]
 pub struct MockCancelToken {
     pub cancelled: std::sync::atomic::AtomicBool,
