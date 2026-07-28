@@ -289,6 +289,20 @@ Everything a driver has to change for the catalog rework, in one place.
   the rows your query produced as `TableRow`s and delete the statement
   construction.
 
+- **Breaking (behavioural, not API):** a statement's cancel token is now minted
+  per execution rather than once per statement. A backend that stored
+  per-statement state on its `CancelToken` must move it onto its `Statement`.
+
+  This fixes a statement being permanently unusable after `SQLCancel`:
+  `Backend::cancel` marks the token, and a token reused by the next execution
+  stays marked, so every later call on that statement observed a cancellation
+  that was not its own. The spec requires the opposite — "After the statement
+  has been canceled, the application can call SQLExecute or SQLExecDirect
+  again." The previous create-once rule was defending against a `SQLCancel`
+  that reaches a finished execution and does nothing, which the spec states is
+  correct behaviour: "a call to SQLCancel when no processing is being done on
+  the statement ... has is [sic] no effect at all."
+
 - **Breaking:** `Backend::tables`' `table_type` parameter is now
   `table_types: &[String]` — the parsed value list rather than the raw string.
   The spec defines `TableType` as comma-separated values, optionally

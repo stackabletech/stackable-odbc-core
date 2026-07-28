@@ -303,9 +303,8 @@ pub unsafe fn sql_tables_w<B: Backend>(
 
             // The token exists once this statement makes its first
             // backend call; created here on demand, then reused for every
-            // later call on the same statement (see `resolve_cancel_token`).
-            let cancel_token =
-                crate::handles::resolve_cancel_token::<B>(statement_handle, connection);
+            // later call on the same statement (see `mint_cancel_token`).
+            let cancel_token = crate::handles::mint_cancel_token::<B>(statement_handle, connection);
             let cancel = crate::handles::cancel_as::<B>(&cancel_token)?;
 
             // Enumeration detection runs on the *raw* arguments, before any
@@ -515,9 +514,8 @@ pub unsafe fn sql_columns_w<B: Backend>(
 
             // The token exists once this statement makes its first
             // backend call; created here on demand, then reused for every
-            // later call on the same statement (see `resolve_cancel_token`).
-            let cancel_token =
-                crate::handles::resolve_cancel_token::<B>(statement_handle, connection);
+            // later call on the same statement (see `mint_cancel_token`).
+            let cancel_token = crate::handles::mint_cancel_token::<B>(statement_handle, connection);
             let cancel = crate::handles::cancel_as::<B>(&cancel_token)?;
 
             // Spec HY009 (not (DM)): METADATA_ID plus a null CatalogName on a
@@ -664,9 +662,8 @@ pub unsafe fn sql_primary_keys_w<B: Backend>(
 
             // The token exists once this statement makes its first
             // backend call; created here on demand, then reused for every
-            // later call on the same statement (see `resolve_cancel_token`).
-            let cancel_token =
-                crate::handles::resolve_cancel_token::<B>(statement_handle, connection);
+            // later call on the same statement (see `mint_cancel_token`).
+            let cancel_token = crate::handles::mint_cancel_token::<B>(statement_handle, connection);
             let cancel = crate::handles::cancel_as::<B>(&cancel_token)?;
 
             // Spec HY009 (not (DM)): METADATA_ID plus a null CatalogName on a
@@ -836,9 +833,8 @@ pub unsafe fn sql_foreign_keys_w<B: Backend>(
 
             // The token exists once this statement makes its first
             // backend call; created here on demand, then reused for every
-            // later call on the same statement (see `resolve_cancel_token`).
-            let cancel_token =
-                crate::handles::resolve_cancel_token::<B>(statement_handle, connection);
+            // later call on the same statement (see `mint_cancel_token`).
+            let cancel_token = crate::handles::mint_cancel_token::<B>(statement_handle, connection);
             let cancel = crate::handles::cancel_as::<B>(&cancel_token)?;
 
             // Spec HY009 (not (DM)): METADATA_ID plus a null catalog argument
@@ -1036,9 +1032,8 @@ pub unsafe fn sql_statistics_w<B: Backend>(
 
             // The token exists once this statement makes its first
             // backend call; created here on demand, then reused for every
-            // later call on the same statement (see `resolve_cancel_token`).
-            let cancel_token =
-                crate::handles::resolve_cancel_token::<B>(statement_handle, connection);
+            // later call on the same statement (see `mint_cancel_token`).
+            let cancel_token = crate::handles::mint_cancel_token::<B>(statement_handle, connection);
             let cancel = crate::handles::cancel_as::<B>(&cancel_token)?;
 
             match B::statistics(
@@ -1253,9 +1248,8 @@ pub unsafe fn sql_special_columns_w<B: Backend>(
 
             // The token exists once this statement makes its first
             // backend call; created here on demand, then reused for every
-            // later call on the same statement (see `resolve_cancel_token`).
-            let cancel_token =
-                crate::handles::resolve_cancel_token::<B>(statement_handle, connection);
+            // later call on the same statement (see `mint_cancel_token`).
+            let cancel_token = crate::handles::mint_cancel_token::<B>(statement_handle, connection);
             let cancel = crate::handles::cancel_as::<B>(&cancel_token)?;
 
             match B::special_columns(
@@ -1779,9 +1773,8 @@ pub unsafe fn sql_procedures_w<B: Backend>(
 
             // The token exists once this statement makes its first
             // backend call; created here on demand, then reused for every
-            // later call on the same statement (see `resolve_cancel_token`).
-            let cancel_token =
-                crate::handles::resolve_cancel_token::<B>(statement_handle, connection);
+            // later call on the same statement (see `mint_cancel_token`).
+            let cancel_token = crate::handles::mint_cancel_token::<B>(statement_handle, connection);
             let cancel = crate::handles::cancel_as::<B>(&cancel_token)?;
 
             // All three arguments are identifiers under METADATA_ID; this
@@ -1974,8 +1967,7 @@ pub unsafe fn sql_procedure_columns_w<B: Backend>(
                 "SQLProcedureColumnsW",
             )?;
 
-            let cancel_token =
-                crate::handles::resolve_cancel_token::<B>(statement_handle, connection);
+            let cancel_token = crate::handles::mint_cancel_token::<B>(statement_handle, connection);
             let cancel = crate::handles::cancel_as::<B>(&cancel_token)?;
 
             // All four arguments are identifiers under METADATA_ID.
@@ -2161,8 +2153,7 @@ pub unsafe fn sql_column_privileges_w<B: Backend>(
                 "SQLColumnPrivilegesW",
             )?;
 
-            let cancel_token =
-                crate::handles::resolve_cancel_token::<B>(statement_handle, connection);
+            let cancel_token = crate::handles::mint_cancel_token::<B>(statement_handle, connection);
             let cancel = crate::handles::cancel_as::<B>(&cancel_token)?;
 
             // All four arguments are identifiers under METADATA_ID.
@@ -2337,8 +2328,7 @@ pub unsafe fn sql_table_privileges_w<B: Backend>(
                 "SQLTablePrivilegesW",
             )?;
 
-            let cancel_token =
-                crate::handles::resolve_cancel_token::<B>(statement_handle, connection);
+            let cancel_token = crate::handles::mint_cancel_token::<B>(statement_handle, connection);
             let cancel = crate::handles::cancel_as::<B>(&cancel_token)?;
 
             // All three arguments are identifiers under METADATA_ID.

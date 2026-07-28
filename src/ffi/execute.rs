@@ -182,9 +182,8 @@ pub unsafe fn sql_exec_direct_w<B: Backend>(
 
             // The token exists once this statement makes its first
             // backend call; created here on demand, then reused for every
-            // later call on the same statement (see `resolve_cancel_token`).
-            let cancel_token =
-                crate::handles::resolve_cancel_token::<B>(statement_handle, connection);
+            // later call on the same statement (see `mint_cancel_token`).
+            let cancel_token = crate::handles::mint_cancel_token::<B>(statement_handle, connection);
             let cancel = crate::handles::cancel_as::<B>(&cancel_token)?;
 
             // `Backend::exec_direct` takes no parameters, so a parameterised
@@ -343,9 +342,8 @@ pub unsafe fn sql_prepare_w<B: Backend>(
 
             // The token exists once this statement makes its first
             // backend call; created here on demand, then reused for every
-            // later call on the same statement (see `resolve_cancel_token`).
-            let cancel_token =
-                crate::handles::resolve_cancel_token::<B>(statement_handle, connection);
+            // later call on the same statement (see `mint_cancel_token`).
+            let cancel_token = crate::handles::mint_cancel_token::<B>(statement_handle, connection);
             let cancel = crate::handles::cancel_as::<B>(&cancel_token)?;
 
             // Ask backend to validate and prepare the statement.
@@ -503,9 +501,8 @@ pub unsafe fn sql_execute<B: Backend>(statement_handle: *mut c_void) -> SqlRetur
 
             // The token exists once this statement makes its first
             // backend call; created here on demand, then reused for every
-            // later call on the same statement (see `resolve_cancel_token`).
-            let cancel_token =
-                crate::handles::resolve_cancel_token::<B>(statement_handle, connection);
+            // later call on the same statement (see `mint_cancel_token`).
+            let cancel_token = crate::handles::mint_cancel_token::<B>(statement_handle, connection);
             let cancel = crate::handles::cancel_as::<B>(&cancel_token)?;
 
             // `SQLFreeStmt(SQL_CLOSE)` clears `stmt.statement` (discards the result set)
@@ -1046,14 +1043,23 @@ mod tests {
         }
     }
 
-    /// Create-once-never-replace, pinned at the FFI entry point rather than
-    /// against the internal helper directly: a `SQLCancel` that already
-    /// cloned the token from a statement's first execution must still be
-    /// signalling the same run once a second `SQLExecDirectW` on the same
-    /// handle has started, not a fresh token that leaves the first execution
-    /// uncancellable.
+    /// Mint-per-execution, pinned at the FFI entry point rather than against
+    /// the internal helper directly: a second `SQLExecDirectW` on the same
+    /// handle gets its own token, so a `SQLCancel` aimed at the first
+    /// execution cannot reach into the second.
+    ///
+    /// This test asserted the opposite until M4, on the reasoning that a stale
+    /// token would leave `SQLCancel` signalling a finished execution while the
+    /// real one ran uncancelled. The spec makes that outcome correct rather
+    /// than a bug: "In ODBC 3.5, a call to SQLCancel when no processing is
+    /// being done on the statement ... has is [sic] no effect at all."
+    /// Cancelling a run that already finished is *required* to do nothing;
+    /// killing the unrelated run that replaced it is not. Create-once also
+    /// broke the spec's "After the statement has been canceled, the
+    /// application can call SQLExecute or SQLExecDirect again", because the
+    /// reused token stayed signalled forever.
     #[test]
-    fn a_second_execution_on_the_same_statement_reuses_the_first_calls_token() {
+    fn a_second_execution_on_the_same_statement_mints_a_fresh_token() {
         unsafe {
             let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockRecordingBackend>();
             with_handle::<MockRecordingBackend, ConnectionHandle<MockRecordingBackend>, _>(
@@ -1083,10 +1089,9 @@ mod tests {
                 .expect("token still stored after second execution");
 
             assert!(
-                std::sync::Arc::ptr_eq(&first, &second),
-                "a later execution on the same statement must not replace its cancel token, or a \
-                 SQLCancel that already cloned the first token would silently signal a finished \
-                 execution while the real one runs uncancelled"
+                !std::sync::Arc::ptr_eq(&first, &second),
+                "each execution owns its own cancel token, so a cancel aimed at one execution \
+                 cannot leak into the next — which is what makes a cancelled statement reusable"
             );
 
             cleanup_env_conn_stmt_for::<MockRecordingBackend>(env, conn, stmt);

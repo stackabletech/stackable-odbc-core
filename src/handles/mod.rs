@@ -665,12 +665,27 @@ pub unsafe fn alloc_statement<B: Backend>(
 /// `conn.connection.is_some()` and return HY010 before reaching here, so
 /// `connection` is always real by the time this runs.
 ///
-/// Create once, never replace: if the registry already holds a token for
-/// `stmt_token`, that `Arc` is returned as-is rather than building a second
-/// one. Minting a fresh token on a later call would let a `SQLCancel` that
-/// had already cloned the previous token signal an execution that is no
-/// longer the one running — silently cancelling nothing, which is the exact
-/// bug class this design exists to close.
+/// Mint per execution, replacing any previous token. One token therefore spans
+/// exactly one execution plus the cursor it opened, which is the unit an
+/// application means by "cancel this".
+///
+/// This replaced an earlier create-once-never-replace rule, whose stated
+/// reasoning was that a `SQLCancel` holding a token from a finished execution
+/// would "silently cancel nothing". The spec makes that outcome *required*, not
+/// a bug: "In ODBC 3.5, a call to SQLCancel when no processing is being done on
+/// the statement ... has is [sic] no effect at all." Doing nothing to a run
+/// that already completed is correct; reaching into the unrelated run that
+/// replaced it is not.
+///
+/// Create-once also broke a second spec rule outright. `Backend::cancel` marks
+/// the token, so a reused token stays marked and every later call on that
+/// statement observes a cancellation that is not its own — while the spec says
+/// "After the statement has been canceled, the application can call SQLExecute
+/// or SQLExecDirect again."
+///
+/// `Backend::cancel_token` still runs eagerly, with a real `&B::Connection` in
+/// hand; its ODBC-401 rationale is about *laziness*, not identity, so minting
+/// more often does not weaken it.
 ///
 /// # Locking
 ///
@@ -691,23 +706,42 @@ pub unsafe fn alloc_statement<B: Backend>(
 /// never obtains a `&B::Connection`, so it is irrelevant to the argument here
 /// beyond being one more site that upholds the same "lock before scope"
 /// precondition the other two do.
-pub(crate) fn resolve_cancel_token<B: Backend>(
+pub(crate) fn mint_cancel_token<B: Backend>(
     stmt_token: *mut c_void,
     connection: &B::Connection,
 ) -> StdArc<dyn Any + Send + Sync> {
-    if let Some(existing) = registry().cancel_of(stmt_token) {
-        return existing;
-    }
     let created: StdArc<dyn Any + Send + Sync> = StdArc::new(B::cancel_token(connection));
     registry().set_cancel(stmt_token, StdArc::clone(&created));
     created
+}
+
+/// Read the current execution's cancel token without minting one.
+///
+/// For calls that consume a cursor some earlier call produced — `SQLFetch`,
+/// `SQLGetData`, `SQLDescribeCol` and their neighbours. They belong to the
+/// execution that opened the cursor and must observe *its* token, not a fresh
+/// one that nothing has ever signalled.
+///
+/// `None` means no backend call has run on this statement yet, which is
+/// indistinguishable from "nothing to cancel" and is handled as such.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "called by the cursor-consuming ffi/ entry points once they are wired up"
+    )
+)]
+pub(crate) fn current_cancel_token(
+    stmt_token: *mut c_void,
+) -> Option<StdArc<dyn Any + Send + Sync>> {
+    registry().cancel_of(stmt_token)
 }
 
 /// Downcast a type-erased cancel token back to the concrete `B::CancelToken`
 /// a statement-producing call needs to pass through.
 ///
 /// The `Err` arm is unreachable in practice: every token this crate stores
-/// was built by `resolve_cancel_token::<B>` for this exact `B`, so the type
+/// was built by `mint_cancel_token::<B>` for this exact `B`, so the type
 /// always matches. It exists anyway because nothing makes that statically
 /// provable across the `dyn Any` erasure, and this crate denies
 /// `unwrap`/`expect` outside tests.
@@ -1145,12 +1179,17 @@ mod tests {
     }
 
     /// Allocation alone must not create a cancel token (see
-    /// `resolve_cancel_token`'s doc comment for why it cannot run at
+    /// `mint_cancel_token`'s doc comment for why it cannot run at
     /// `SQLAllocHandle` time), and two calls standing in for two different
-    /// statement-producing FFI entry points on the same statement must
-    /// observe the identical `Arc`, never a second, freshly minted one.
+    /// statement-producing FFI entry points on the same statement must each
+    /// get their **own** `Arc`.
+    ///
+    /// This asserted the opposite until M4. See `mint_cancel_token`'s doc
+    /// comment for the two spec sentences that overturned it — in short, a
+    /// reused token stays signalled after `SQLCancel`, and the spec requires
+    /// the next `SQLExecute` on that statement to work.
     #[test]
-    fn resolve_cancel_token_creates_once_and_never_replaces() {
+    fn mint_cancel_token_replaces_the_previous_token() {
         unsafe {
             let (env, conn, stmt) = alloc_env_conn_stmt();
             with_handle::<MockBackend, ConnectionHandle<MockBackend>, _>(conn, |c| {
@@ -1161,19 +1200,37 @@ mod tests {
                 registry::registry().cancel_of(stmt).is_none(),
                 "allocation alone must not create a cancel token"
             );
+            assert!(
+                current_cancel_token(stmt).is_none(),
+                "before any backend call there is nothing that could have been cancelled"
+            );
 
             let first = with_handle::<MockBackend, ConnectionHandle<MockBackend>, _>(conn, |c| {
                 let connection = c.connection.as_ref().expect("connected above");
-                resolve_cancel_token::<MockBackend>(stmt, connection)
+                mint_cancel_token::<MockBackend>(stmt, connection)
             });
             let second = with_handle::<MockBackend, ConnectionHandle<MockBackend>, _>(conn, |c| {
                 let connection = c.connection.as_ref().expect("connected above");
-                resolve_cancel_token::<MockBackend>(stmt, connection)
+                mint_cancel_token::<MockBackend>(stmt, connection)
             });
 
             assert!(
-                StdArc::ptr_eq(&first, &second),
-                "two statement-producing calls on the same statement must observe the same token"
+                !StdArc::ptr_eq(&first, &second),
+                "each statement-producing call owns its own token, so a cancel aimed at one \
+                 execution cannot leak into the next"
+            );
+            assert!(
+                registry::registry()
+                    .cancel_of(stmt)
+                    .is_some_and(|current| StdArc::ptr_eq(&current, &second)),
+                "the registry must hold the most recent token, not the first"
+            );
+            // `current_cancel_token` is what the cursor-consuming entry points
+            // read, and it must see the same most-recent token: a `SQLFetch`
+            // draining the cursor `second` opened has to observe `second`.
+            assert!(
+                current_cancel_token(stmt).is_some_and(|current| StdArc::ptr_eq(&current, &second)),
+                "a cursor-consuming call must observe the execution's own token"
             );
             assert!(
                 first
