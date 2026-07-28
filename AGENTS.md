@@ -223,10 +223,11 @@ cannot, a named constant is the correct answer, not a worse conversion.
 
 ### The catalog functions: core owns the result set
 
-The six catalog `Backend` methods — `tables`, `columns`, `primary_keys`,
-`foreign_keys`, `statistics`, `special_columns` — return **typed row structs**
-(`TableRow`, `ColumnRow`, …), not a `Self::Statement`. Four consequences for a
-driver author:
+The ten catalog `Backend` methods — `tables`, `columns`, `primary_keys`,
+`foreign_keys`, `statistics`, `special_columns`, `procedures`,
+`procedure_columns`, `column_privileges`, `table_privileges` — return **typed
+row structs** (`TableRow`, `ColumnRow`, …), not a `Self::Statement`. Four
+consequences for a driver author:
 
 - **Return the rows in any order.** Core sorts each result set into the order
   its spec page mandates (`SQLTables` by `TABLE_TYPE, TABLE_CAT, TABLE_SCHEM,
@@ -244,9 +245,29 @@ driver author:
 - **`SQL_ATTR_METADATA_ID` is core's job.** When it is `SQL_TRUE`, core has
   already stripped delimiters, case-folded per `identifier_case` and escaped
   `%`/`_` per `search_pattern_escape` before calling the backend, so these
-  methods always see ordinary pattern values. `SQLTables`' `TableType` is
-  exempt — the spec makes it a value list under both settings, and a driver
-  still parses it itself.
+  methods always see ordinary pattern values. `SQLTables`' `TableType` is the
+  one exemption in the family — the spec makes it a value list under both
+  settings — and even that no longer reaches a driver as a raw string: core
+  parses it and `tables` receives `table_types: &[String]`.
+
+The last four — `procedures`, `procedure_columns`, `column_privileges`,
+`table_privileges` — are **defaulted to `Ok(Vec::new())`**, not to
+`NotImplemented` like `primary_keys` and its neighbours. Their FFI functions
+returned an empty result set for every driver before the hooks existed, and a
+data source with no stored procedures or no privilege metadata genuinely has
+none to report, so erroring would turn a working call into a failure. An
+existing driver is unaffected until it opts in by overriding one.
+
+Their `HY009` handling is **not** uniform, and the difference is deliberate.
+All four return it for the spec's `SQL_ATTR_METADATA_ID` + null-`CatalogName` +
+catalogs-supported clause, which every one of the four pages states without a
+`(DM)` marker. Only `SQLColumnPrivileges` additionally rejects a null
+`TableName` unconditionally: it is the only one of the four whose page carries
+that sentence unmarked. `SQLTablePrivileges`, `SQLProcedures` and
+`SQLProcedureColumns` must **not** check it. This mirrors the split among the
+first six, where `SQLStatistics` and `SQLSpecialColumns` check a null
+`TableName` and `SQLPrimaryKeys` and `SQLForeignKeys` do not. Tests pin both
+directions; do not "fix" any of it into consistency.
 
 ### Capability methods are required, not defaulted
 

@@ -41,6 +41,13 @@ Everything a driver has to change for the catalog rework, in one place.
    arguments before calling the backend.
 6. **`Backend::tables`' last parameter is now `table_types: &[String]`.** Delete
    any driver-side splitting of the raw `TableType` string; core does it once.
+7. **Four more methods are new and defaulted:** `procedures`,
+   `procedure_columns`, `column_privileges` and `table_privileges`, returning
+   `Vec<ProcedureRow>`, `Vec<ProcedureColumnRow>`, `Vec<ColumnPrivilegeRow>` and
+   `Vec<TablePrivilegeRow>`. Nothing to do unless you want `SQLProcedures`,
+   `SQLProcedureColumns`, `SQLColumnPrivileges` or `SQLTablePrivileges` to
+   return rows: each defaults to an empty result set, which is what those four
+   functions returned before. Points 4 and 5 apply to them too.
 
 ### Added
 
