@@ -629,7 +629,7 @@ pub unsafe fn sql_primary_keys_w<B: Backend>(
     table_name: *const u16,
     name_length3: i16,
 ) -> SqlReturn {
-    tracing::debug!("SQLPrimaryKeysW(stmt={:?})", statement_handle);
+    tracing::trace!("SQLPrimaryKeysW(stmt={:?})", statement_handle);
     // SAFETY: statement_handle is null or a valid StatementHandle<B>; kind and group
     // validated by scope.stmt_with_parent inside the closure.
     let ret = unsafe {
@@ -654,6 +654,13 @@ pub unsafe fn sql_primary_keys_w<B: Backend>(
             let catalog = parse_filter_param(catalog_name, name_length1)?;
             let schema = parse_filter_param(schema_name, name_length2)?;
             let table = parse_filter_param(table_name, name_length3)?;
+            tracing::debug!(
+                "SQLPrimaryKeysW(stmt={:?}, catalog={:?}, schema={:?}, table={:?})",
+                statement_handle,
+                catalog,
+                schema,
+                table,
+            );
 
             // The token exists once this statement makes its first
             // backend call; created here on demand, then reused for every
@@ -787,7 +794,7 @@ pub unsafe fn sql_foreign_keys_w<B: Backend>(
     fk_table_name: *const u16,
     name_length6: i16,
 ) -> SqlReturn {
-    tracing::debug!("SQLForeignKeysW(stmt={:?})", statement_handle);
+    tracing::trace!("SQLForeignKeysW(stmt={:?})", statement_handle);
     // SAFETY: statement_handle is null or a valid StatementHandle<B>; kind and group
     // validated by scope.stmt_with_parent inside the closure.
     let ret = unsafe {
@@ -815,6 +822,17 @@ pub unsafe fn sql_foreign_keys_w<B: Backend>(
             let fk_catalog = parse_filter_param(fk_catalog_name, name_length4)?;
             let fk_schema = parse_filter_param(fk_schema_name, name_length5)?;
             let fk_table = parse_filter_param(fk_table_name, name_length6)?;
+            tracing::debug!(
+                "SQLForeignKeysW(stmt={:?}, pk_catalog={:?}, pk_schema={:?}, pk_table={:?}, \
+                 fk_catalog={:?}, fk_schema={:?}, fk_table={:?})",
+                statement_handle,
+                pk_catalog,
+                pk_schema,
+                pk_table,
+                fk_catalog,
+                fk_schema,
+                fk_table,
+            );
 
             // The token exists once this statement makes its first
             // backend call; created here on demand, then reused for every
@@ -988,8 +1006,9 @@ pub unsafe fn sql_statistics_w<B: Backend>(
             };
 
             // Spec HY009, both clauses driver-side here: `SQLStatistics` is one
-            // of only two catalog functions whose "TableName argument was a
-            // null pointer" sentence carries no (DM) marker.
+            // of only three catalog functions whose "TableName argument was a
+            // null pointer" sentence carries no (DM) marker — the others being
+            // `SQLSpecialColumns` and `SQLColumnPrivileges`.
             check_null_table_name(table_name, "SQLStatisticsW")?;
             let metadata_id = metadata_id_enabled(stmt);
             check_metadata_id_null_catalog::<B>(
@@ -1002,6 +1021,13 @@ pub unsafe fn sql_statistics_w<B: Backend>(
             let catalog = parse_filter_param(catalog_name, name_length1)?;
             let schema = parse_filter_param(schema_name, name_length2)?;
             let table = parse_filter_param(table_name, name_length3)?;
+            tracing::debug!(
+                "SQLStatisticsW(stmt={:?}, catalog={:?}, schema={:?}, table={:?})",
+                statement_handle,
+                catalog,
+                schema,
+                table,
+            );
 
             // `unique` and `_reserved` are not strings and are never normalised.
             let catalog = normalise_catalog_arg::<B>(connection, catalog, metadata_id);
@@ -1165,8 +1191,9 @@ pub unsafe fn sql_special_columns_w<B: Backend>(
             };
 
             // Spec HY009, both clauses driver-side here: `SQLSpecialColumns` is
-            // the other catalog function whose "TableName argument was a null
-            // pointer" sentence carries no (DM) marker. Checked before the
+            // one of three catalog functions whose "TableName argument was a
+            // null pointer" sentence carries no (DM) marker — the others being
+            // `SQLStatistics` and `SQLColumnPrivileges`. Checked before the
             // IdentifierType/Scope/Nullable arm below, so a null TableName is a
             // diagnosed error rather than being masked by the empty result set
             // that an unsupported characteristic produces.
@@ -1210,6 +1237,13 @@ pub unsafe fn sql_special_columns_w<B: Backend>(
             let catalog = parse_filter_param(catalog_name, name_length1)?;
             let schema = parse_filter_param(schema_name, name_length2)?;
             let table = parse_filter_param(table_name, name_length3)?;
+            tracing::debug!(
+                "SQLSpecialColumnsW(stmt={:?}, catalog={:?}, schema={:?}, table={:?})",
+                statement_handle,
+                catalog,
+                schema,
+                table,
+            );
 
             // `identifier_type`, `scope` and `nullable` are not strings and are
             // never normalised.
