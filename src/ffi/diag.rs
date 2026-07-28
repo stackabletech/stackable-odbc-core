@@ -152,11 +152,18 @@ pub unsafe fn sql_get_diag_rec_w<B: Backend>(
     let ret = unsafe {
         panic_safe::<B, _>(handle, |scope| {
             // Spec: SQL_ERROR if RecNumber is negative or 0.
+            //
+            // `Ok`, not `Err`: per this function's no-clear/no-push invariant
+            // (see the doc comment above), nothing in this closure may ever
+            // become an `Err`. An `Err` here would push a diagnostic through
+            // `panic_safe`'s error path, corrupting the very record set an
+            // application may be mid-iteration over.
             if rec_number <= 0 {
                 return Ok(SqlReturn::ERROR);
             }
 
-            // Spec: SQL_ERROR if BufferLength is less than zero.
+            // Spec: SQL_ERROR if BufferLength is less than zero. `Ok`, not
+            // `Err` -- same invariant as immediately above.
             if buffer_length < 0 {
                 return Ok(SqlReturn::ERROR);
             }
@@ -348,14 +355,21 @@ pub unsafe fn sql_get_diag_field_w<B: Backend>(
                 return Ok(SqlReturn::SUCCESS);
             }
 
-            // Record fields: need a valid record number
+            // Record fields: need a valid record number.
+            //
+            // `Ok`, not `Err`: same no-clear/no-push invariant as
+            // `sql_get_diag_rec_w` above. An `Err` here would push a
+            // diagnostic through `panic_safe`'s error path, corrupting the
+            // very record set an application may be mid-iteration over.
             if rec_number <= 0 {
                 return Ok(SqlReturn::ERROR);
             }
 
-            // Spec: SQL_ERROR if BufferLength < 0 for a character string field.
-            // Check conservatively here (before we know the field type) so that
-            // negative buffer lengths are never passed to write_utf16.
+            // Spec: SQL_ERROR if BufferLength < 0 for a character string
+            // field. Check conservatively here (before we know the field
+            // type) so that negative buffer lengths are never passed to
+            // write_utf16. `Ok`, not `Err` -- same invariant as immediately
+            // above.
             if buffer_length < 0 {
                 return Ok(SqlReturn::ERROR);
             }

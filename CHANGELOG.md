@@ -403,10 +403,12 @@ markers go away and this section becomes the initial-release notes.
   hold the connection's lock group for the duration, exactly as an FFI entry
   point would, and catch a panic instead of letting it unwind out of this
   crate into the driver's test binary. Signatures are unchanged; a caller
-  only sees this if the closure panics or if it calls one of these while
-  another thread is inside a call on the same connection, in which case it
-  now blocks rather than racing an unguarded read or write of the connection
-  handle.
+  only sees this if it calls one of these while another thread is inside a
+  call on the same connection, in which case it now blocks rather than racing
+  an unguarded read or write of the connection handle, or if the closure
+  panics, in which case the caught panic is reported as `Err(OdbcError::Panic)`
+  rather than silently discarded — previously the panic never reached this
+  code (it always ran to completion), so there was nothing to report.
 - `SQLGetDiagRecW` and `SQLGetDiagFieldW` now hold the queried handle's lock
   group while reading its diagnostics, so a concurrent call on the same
   handle can no longer read the diagnostic queue mid-mutation — previously

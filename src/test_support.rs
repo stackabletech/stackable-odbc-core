@@ -57,17 +57,28 @@ pub unsafe fn attach_connection<B: Backend>(
 ) -> Result<(), OdbcError> {
     let mut connection = Some(connection);
     let mut error = None;
-    unsafe {
-        let _ = crate::panic::panic_safe::<B, _>(connection_handle, |scope| {
+    let ret = unsafe {
+        crate::panic::panic_safe::<B, _>(connection_handle, |scope| {
             match scope.get::<ConnectionHandle<B>>(connection_handle) {
                 Ok(handle) => handle.connection = connection.take(),
                 Err(err) => error = Some(err),
             }
             Ok(SqlReturn::SUCCESS)
-        });
-    }
+        })
+    };
     match error {
         Some(err) => Err(err),
+        // The closure above never returns anything but `Ok(SqlReturn::SUCCESS)`,
+        // so a non-`SUCCESS` result with no `error` set means `panic_safe`
+        // caught a panic instead of running the closure to completion. The
+        // panic's unwind never reaches this caller -- that is the entire
+        // point of `panic_safe` -- so this return value is the only signal
+        // left that the attach did not happen; discarding it here would
+        // silently report success while `connection` (and any previously
+        // attached connection this call replaced) is dropped.
+        None if ret != SqlReturn::SUCCESS => Err(OdbcError::Panic {
+            message: "panic while attaching a connection".into(),
+        }),
         None => Ok(()),
     }
 }
@@ -90,17 +101,24 @@ pub unsafe fn detach_connection<B: Backend>(
 ) -> Result<Option<B::Connection>, OdbcError> {
     let mut taken = None;
     let mut error = None;
-    unsafe {
-        let _ = crate::panic::panic_safe::<B, _>(connection_handle, |scope| {
+    let ret = unsafe {
+        crate::panic::panic_safe::<B, _>(connection_handle, |scope| {
             match scope.get::<ConnectionHandle<B>>(connection_handle) {
                 Ok(handle) => taken = handle.connection.take(),
                 Err(err) => error = Some(err),
             }
             Ok(SqlReturn::SUCCESS)
-        });
-    }
+        })
+    };
     match error {
         Some(err) => Err(err),
+        // Same reasoning as `attach_connection`: a non-`SUCCESS` result with
+        // no `error` set is the only remaining evidence of a caught panic,
+        // and discarding it would report `Ok(None)` -- "nothing was attached"
+        // -- when the true outcome is unknown.
+        None if ret != SqlReturn::SUCCESS => Err(OdbcError::Panic {
+            message: "panic while detaching a connection".into(),
+        }),
         None => Ok(taken),
     }
 }

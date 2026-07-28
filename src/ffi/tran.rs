@@ -11,6 +11,21 @@ use crate::handles::{ConnectionHandle, EnvironmentHandle};
 use crate::panic::panic_safe;
 use crate::types::{SqlReturn, completion_type_from_raw, handle_type_from_raw};
 
+/// Bumped every time the per-connection loop below treats a connection as
+/// freed mid-walk (either exit of the merged arm in [`sql_end_tran`]'s
+/// `SQL_HANDLE_ENV` branch). `#[cfg(test)]` only, nothing like it exists in
+/// a production build.
+///
+/// Exists so `end_tran_on_an_environment_survives_a_connection_freed_mid_walk`
+/// can assert it actually exercised that arm, rather than passing vacuously
+/// if a scheduling shift ever moved the race so the connection was gone
+/// before the loop's `children_of` snapshot instead of during it -- exactly
+/// the failure mode that test's own construction hit on its first attempt,
+/// where neither arm ran and the test passed regardless of whether the fix
+/// was present.
+#[cfg(test)]
+static FREED_MID_WALK_HITS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 /// Apply the backend's declared cursor behaviour to every statement on a
 /// connection, after a successful `B::end_tran`.
 ///
@@ -445,6 +460,9 @@ pub unsafe fn sql_end_tran<B: Backend>(
                             // that variant, leaving nothing to explain the
                             // failure.
                             Ok(Err(OdbcError::InvalidHandle)) | Err(_) => {
+                                #[cfg(test)]
+                                FREED_MID_WALK_HITS
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                 tracing::debug!(
                                     "SQLEndTran: connection {:?} was freed before this \
                                      environment-level commit could reach it",
@@ -1576,6 +1594,7 @@ mod tests {
     fn end_tran_on_an_environment_survives_a_connection_freed_mid_walk() {
         unsafe {
             let (env, conn, stmt) = alloc_connected_stmt::<MockTxnCloseBackend>("DRIVER=mock;");
+            let hits_before = FREED_MID_WALK_HITS.load(std::sync::atomic::Ordering::Relaxed);
 
             let group = crate::handles::registry::registry()
                 .group_of(conn)
@@ -1625,6 +1644,19 @@ mod tests {
                 ret,
                 SqlReturn::SUCCESS,
                 "a connection freed mid-walk must not turn into an overall SQLEndTran failure"
+            );
+            // Anti-vacuity: without this, a scheduling shift that let the
+            // connection vanish before `children_of`'s snapshot (rather than
+            // during the loop) would still pass the two assertions above --
+            // trivially, since the loop would never have seen the connection
+            // at all -- while testing nothing about the merged arm this test
+            // exists to cover. This is exactly the failure mode the
+            // construction above hit on its first attempt.
+            let hits_after = FREED_MID_WALK_HITS.load(std::sync::atomic::Ordering::Relaxed);
+            assert!(
+                hits_after > hits_before,
+                "the merged Ok(Err(InvalidHandle)) | Err(_) arm never ran -- this test passed \
+                 vacuously rather than exercising the freed-mid-walk path"
             );
             with_handle::<MockTxnCloseBackend, EnvironmentHandle<MockTxnCloseBackend>, _>(
                 env,

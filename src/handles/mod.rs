@@ -786,6 +786,26 @@ mod tests {
         ret == SqlReturn::SUCCESS
     }
 
+    /// Like [`resolves_as`], for a test whose subject is *which* error comes
+    /// back rather than a bare pass/fail.
+    fn resolve_error<T: HasKind>(token: *mut c_void) -> Option<OdbcError> {
+        let mut error = None;
+        let ret = unsafe {
+            crate::panic::panic_safe::<MockBackend, _>(token, |scope| {
+                if let Err(err) = scope.get::<T>(token) {
+                    error = Some(err);
+                }
+                Ok(SqlReturn::SUCCESS)
+            })
+        };
+        debug_assert_eq!(
+            ret,
+            SqlReturn::SUCCESS,
+            "the closure above never returns Err"
+        );
+        error
+    }
+
     // -----------------------------------------------------------------------
     // Handle validation
     //
@@ -1007,7 +1027,13 @@ mod tests {
     }
 
     #[test]
-    fn null_handle_returns_invalid() {
+    fn null_handle_yields_no_group_to_hold() {
+        // `resolves_as` routes through `panic_safe`/`HandleScope`, so a null
+        // token exercises `holds()` finding no group to hold (the scope
+        // built for it is `HandleScope::new(None, None)`), not the
+        // registry's own null-token rejection in `resolve`/`resolve_any`,
+        // `scope.rs`'s `a_null_handle_scope_still_refuses_a_live_token` names
+        // that mechanism directly.
         assert!(!resolves_as::<EnvironmentHandle<MockBackend>>(
             std::ptr::null_mut()
         ));
@@ -1131,12 +1157,14 @@ mod tests {
     fn wrong_handle_type_is_rejected_as_invalid_handle() {
         // A valid environment handle presented where a statement is expected
         // must be rejected by the registry's kind check, not silently
-        // reinterpreted.
+        // reinterpreted, and specifically with `InvalidHandle`, not merely
+        // some error or other.
         unsafe {
             let mut env_ptr: *mut c_void = std::ptr::null_mut();
             let _ = alloc_environment::<MockBackend>(&mut env_ptr as *mut _);
 
-            assert!(!resolves_as::<StatementHandle<MockBackend>>(env_ptr));
+            let wrong = resolve_error::<StatementHandle<MockBackend>>(env_ptr);
+            assert!(matches!(wrong, Some(OdbcError::InvalidHandle)));
 
             let _ = free_env(env_ptr);
         }
