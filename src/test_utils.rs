@@ -3011,3 +3011,155 @@ impl Backend for MockCancelAwareBackend {
 
     minimal_capability_decls!();
 }
+
+// ---------------------------------------------------------------------------
+// A backend that blocks inside a call, so another thread can cancel it
+// ---------------------------------------------------------------------------
+
+/// Set by [`MockBlockingBackend::exec_direct`] once it is inside the backend
+/// call and holding the connection's group lock.
+///
+/// A plain `static` rather than a `thread_local!`, because the whole point is
+/// that two threads observe it. Exactly one test uses this backend, so there is
+/// no cross-test interference to guard against — and adding a second test that
+/// uses it would need this reset between them.
+static BLOCKING_CALL_STARTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Blocks inside `exec_direct` until its cancel token is signalled, so a test
+/// can prove the genuine cross-thread path rather than a simulation of it.
+///
+/// [`MockCancelAwareBackend`] models the same interleaving by having the
+/// backend signal its own token, which is deterministic and right for
+/// per-entry-point coverage. This one is the real thing: thread A is *inside*
+/// the backend holding the connection's group lock when thread B calls
+/// `SQLCancel`, which is the only way to exercise `sql_cancel`'s lock-free
+/// `try_lock`-failed branch end to end.
+pub struct MockBlockingBackend;
+
+impl MockBlockingBackend {
+    /// Spin until the blocking call has entered the backend. Bounded, so a
+    /// regression that stops `exec_direct` being reached fails the test rather
+    /// than hanging CI.
+    pub fn wait_until_started() {
+        for _ in 0..10_000 {
+            if BLOCKING_CALL_STARTED.load(std::sync::atomic::Ordering::SeqCst) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        panic!("the blocking backend call never started");
+    }
+}
+
+impl Backend for MockBlockingBackend {
+    type Connection = MockConnection;
+    type Statement = MockStatement;
+    type Error = MockError;
+    type CancelToken = MockCancelToken;
+
+    fn connect(_: &ConnectParams) -> Result<MockConnection, MockError> {
+        Ok(MockConnection)
+    }
+    fn disconnect(_: &mut MockConnection) -> Result<(), MockError> {
+        Ok(())
+    }
+    fn cancel_token(_conn: &Self::Connection) -> Self::CancelToken {
+        MockCancelToken::default()
+    }
+    fn cancel(token: &Self::CancelToken) -> Result<(), Self::Error> {
+        token
+            .cancelled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+    fn is_cancelled(token: &Self::CancelToken) -> bool {
+        token.cancelled.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    /// Announces that it has started, then waits to be cancelled and fails —
+    /// which is what a real client library does when a query is aborted
+    /// server-side.
+    ///
+    /// The wait is bounded: on timeout it fails *without* the token signalled,
+    /// so the test's `HY008` assertion fails with a useful message instead of
+    /// the suite hanging.
+    fn exec_direct(
+        _: &MockConnection,
+        cancel: &Self::CancelToken,
+        _: &str,
+    ) -> Result<MockStatement, MockError> {
+        BLOCKING_CALL_STARTED.store(true, std::sync::atomic::Ordering::SeqCst);
+        for _ in 0..10_000 {
+            if cancel.cancelled.load(std::sync::atomic::Ordering::SeqCst) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        Err(MockError)
+    }
+    fn prepare(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: &str,
+    ) -> Result<MockStatement, MockError> {
+        Err(MockError)
+    }
+    fn execute(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: &mut MockStatement,
+        _: &[crate::types::ColumnValue],
+    ) -> Result<crate::types::ExecuteOutcome, MockError> {
+        Err(MockError)
+    }
+    fn get_info(_: &MockConnection, _: crate::types::InfoType) -> Result<InfoValue, MockError> {
+        Err(MockError)
+    }
+    fn get_functions() -> Cow<'static, [crate::function_id::FunctionId]> {
+        Cow::Borrowed(&[])
+    }
+    fn get_type_info(_conn: &Self::Connection) -> Cow<'static, [TypeInfoRow]> {
+        Cow::Borrowed(&[])
+    }
+    fn tables(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: &[String],
+    ) -> Result<Vec<TableRow>, MockError> {
+        Err(MockError)
+    }
+    fn columns(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+    ) -> Result<Vec<ColumnRow>, MockError> {
+        Err(MockError)
+    }
+
+    fn supports_catalogs(_conn: &Self::Connection) -> bool {
+        false
+    }
+    fn supports_schemas(_conn: &Self::Connection) -> bool {
+        false
+    }
+    fn alter_table_support(_conn: &Self::Connection) -> u32 {
+        0
+    }
+    fn outer_join_capabilities(_conn: &Self::Connection) -> u32 {
+        0
+    }
+    fn default_txn_isolation(_conn: &Self::Connection) -> u32 {
+        0
+    }
+    fn txn_isolation_options(_conn: &Self::Connection) -> u32 {
+        0
+    }
+
+    minimal_capability_decls!();
+}

@@ -582,8 +582,8 @@ mod tests {
     use crate::handles::ConnectionHandle;
     use crate::handles::StatementHandle;
     use crate::test_utils::{
-        MockBackend, MockCancelAwareBackend, MockConnection, MockRecordingBackend,
-        alloc_env_conn_stmt, with_handle,
+        MockBackend, MockBlockingBackend, MockCancelAwareBackend, MockConnection,
+        MockRecordingBackend, alloc_env_conn_stmt, with_handle,
     };
     use odbc_sys::HandleType;
 
@@ -1113,6 +1113,65 @@ mod tests {
             );
 
             cleanup_env_conn_stmt_for::<MockRecordingBackend>(env, conn, stmt);
+        }
+    }
+
+    /// The end-to-end shape this crate's concurrency work exists for: thread A
+    /// is inside the backend holding the connection's group lock, thread B
+    /// calls `SQLCancel`, and A returns `HY008`.
+    ///
+    /// Spec, `SQLCancel`: "In a multithread application, the application can
+    /// cancel a function that is running on another thread. … If the original
+    /// function is canceled, it returns SQL_ERROR and SQLSTATE HY008 (Operation
+    /// canceled)."
+    ///
+    /// Every other `HY008` test simulates the interleaving with a flag on one
+    /// thread, which pins the reclassification but not the lock behaviour. This
+    /// one needs the real thing: `SQLCancel` must take its `try_lock`-failed
+    /// branch, because thread A genuinely holds the group.
+    #[test]
+    fn a_cancel_from_another_thread_makes_the_running_call_return_hy008() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockBlockingBackend>();
+            with_handle::<MockBlockingBackend, ConnectionHandle<MockBlockingBackend>, _>(
+                conn,
+                |c| {
+                    c.connection = Some(MockConnection);
+                },
+            );
+
+            // A raw pointer is not `Send`; the token is just an integer, so it
+            // travels as one and is rebuilt on the other side.
+            let stmt_addr = stmt as usize;
+            let executor = std::thread::spawn(move || {
+                let stmt = stmt_addr as *mut c_void;
+                let wide: Vec<u16> = "SELECT 1".encode_utf16().collect();
+                sql_exec_direct_w::<MockBlockingBackend>(stmt, wide.as_ptr(), wide.len() as i32)
+            });
+
+            MockBlockingBackend::wait_until_started();
+            assert_eq!(
+                crate::ffi::cursor::sql_cancel::<MockBlockingBackend>(stmt),
+                SqlReturn::SUCCESS,
+                "SQLCancel must not block on the group the executing thread holds",
+            );
+
+            let ret = executor.join().expect("executor thread did not panic");
+            assert_eq!(ret, SqlReturn::ERROR);
+
+            with_handle::<MockBlockingBackend, StatementHandle<MockBlockingBackend>, _>(
+                stmt,
+                |h| {
+                    let rec = h.diagnostics.get(0).expect("record 1 exists");
+                    assert_eq!(
+                        rec.sqlstate.as_str(),
+                        "HY008",
+                        "the cancelled call owes HY008; a different state means the wait timed \
+                         out and the backend failed for its own reasons"
+                    );
+                },
+            );
+            cleanup_env_conn_stmt_for::<MockBlockingBackend>(env, conn, stmt);
         }
     }
 
