@@ -16,8 +16,8 @@ use crate::sync::{Arc, Mutex, MutexGuard, RwLock, TryLockError};
 
 /// Which kind of ODBC handle a registry slot holds.
 ///
-/// Replaces the old magic tags. The kind lives in the registry rather than in
-/// the allocation, so checking it never touches the caller's value.
+/// The kind lives in the registry rather than in the allocation, so checking
+/// it never touches the caller's value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HandleKind {
     /// `SQL_HANDLE_ENV`
@@ -680,10 +680,14 @@ mod loom_tests {
     use loom::sync::atomic::{AtomicBool, Ordering};
     use loom::thread;
 
-    /// A statement and its connection share a group, so a call that touches
-    /// both takes exactly one lock. If they did not, this model would
-    /// deadlock on the interleaving where each thread holds one and wants the
-    /// other.
+    /// A statement and its connection share a group: `group_of` returns the
+    /// same lock for both tokens. One thread holds that lock via the
+    /// statement's token and resolves both the statement and its parent
+    /// connection through it; a second thread does the same via the
+    /// connection's token. Neither thread ever takes a second lock — `resolve`
+    /// only reads the registry's own read lock — so this model does not
+    /// exercise a two-lock deadlock; it checks that sharing one group between
+    /// a statement and its parent lets a single acquisition resolve both.
     #[test]
     fn one_acquisition_covers_a_statement_and_its_parent() {
         loom::model(|| {
@@ -938,9 +942,15 @@ mod loom_tests {
         });
     }
 
-    /// Environment before connection, the crate's one ordering rule. Two
-    /// threads taking the pair in the same order cannot deadlock; loom proves
-    /// it by exploring every interleaving rather than by not observing one.
+    /// Two hand-written lock sequences, each taking an environment's group
+    /// then a connection's group in that order, cannot deadlock against each
+    /// other; loom proves it by exploring every interleaving rather than by
+    /// not observing one. This model calls `GroupLock::lock` directly rather
+    /// than `HandleScope::with_child_group`, so it proves the ordering rule is
+    /// safe to follow, not that the crate's own nested-lock path
+    /// (`SQLEndTran(SQL_HANDLE_ENV)`, the rule's only real caller) actually
+    /// follows it — a regression that reversed the order there would not
+    /// make this model fail.
     #[test]
     fn env_before_connection_cannot_deadlock() {
         loom::model(|| {

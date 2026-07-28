@@ -65,9 +65,8 @@ pub(crate) unsafe fn cleanup_env_conn_stmt(env: *mut c_void, conn: *mut c_void, 
 /// Read or mutate a handle in a test, holding its group lock exactly as an FFI
 /// entry point would.
 ///
-/// Tests used to reach handle contents directly. Going through the same gate as
-/// production is what keeps a test from asserting on a state the driver cannot
-/// actually observe.
+/// Going through the same gate as production is what keeps a test from
+/// asserting on a state the driver cannot actually observe.
 pub(crate) fn with_handle<B: Backend, T: crate::handles::HasKind, R>(
     token: *mut c_void,
     f: impl FnOnce(&mut T) -> R,

@@ -621,8 +621,8 @@ pub unsafe fn alloc_statement<B: Backend>(
 /// connection that is not yet open, and there is no `&B::Connection` to hand
 /// it until one exists. Instead, core calls this from the first
 /// statement-producing call that has a connection in hand — `exec_direct`,
-/// `prepare`, `tables`, and the rest of the nine all check
-/// `conn.connection.is_some()` and return 08003 before reaching here, so
+/// `prepare`, `tables`, and the rest of the ten callers all check
+/// `conn.connection.is_some()` and return HY010 before reaching here, so
 /// `connection` is always real by the time this runs.
 ///
 /// Create once, never replace: if the registry already holds a token for
@@ -1080,7 +1080,7 @@ mod tests {
     /// A statement's parent must be a connection. Passing a live handle of
     /// any other kind must be rejected, or the new statement joins the wrong
     /// lock group — exactly the "a connection and its statements share one
-    /// lock" invariant every later task depends on.
+    /// lock" invariant the rest of the lock discipline depends on.
     #[test]
     fn alloc_statement_rejects_an_environment_as_parent() {
         unsafe {
@@ -1104,8 +1104,8 @@ mod tests {
         }
     }
 
-    /// Allocation alone must not create a cancel token (the corrected design:
-    /// see `resolve_cancel_token`'s doc comment for why it cannot run at
+    /// Allocation alone must not create a cancel token (see
+    /// `resolve_cancel_token`'s doc comment for why it cannot run at
     /// `SQLAllocHandle` time), and two calls standing in for two different
     /// statement-producing FFI entry points on the same statement must
     /// observe the identical `Arc`, never a second, freshly minted one.

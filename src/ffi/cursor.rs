@@ -1358,11 +1358,10 @@ mod tests {
 
     /// The spec's own bifurcation, exercised from the other side: when another
     /// thread holds the connection, `SQLCancel` must still reach the backend
-    /// without waiting for that thread to finish. Before this task's rewrite,
-    /// `sql_cancel` took the group lock unconditionally, so this test hangs
+    /// without waiting for that thread to finish. A `sql_cancel` that took the
+    /// group lock unconditionally would hang here instead of completing
     /// (verified with `timeout 30 cargo test --lib
-    /// cancel_signals_the_backend_while_another_thread_holds_the_group`,
-    /// which times out against the pre-fix code) rather than completing.
+    /// cancel_signals_the_backend_while_another_thread_holds_the_group`).
     #[test]
     fn cancel_signals_the_backend_while_another_thread_holds_the_group() {
         unsafe {
@@ -1464,7 +1463,7 @@ mod tests {
     /// clone survives the production teardown path, not only the registry
     /// primitive it is built from.
     ///
-    /// This does not, however, pin the ordering Task 15 cares about most —
+    /// This does not, however, pin the ordering that matters most —
     /// that `sql_cancel` clones the token *before* attempting `try_lock`.
     /// That ordering is two adjacent statements at the top of `sql_cancel`'s
     /// body with no branch between them; the only way to turn it into a

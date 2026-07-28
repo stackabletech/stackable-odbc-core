@@ -1,11 +1,11 @@
 # stackable-odbc-core
 
 The database-independent half of an ODBC driver. `stackable-odbc-core` provides ODBC
-protocol logic, handle allocation and tag validation, UTF-16 marshalling,
+protocol logic, handle allocation and token validation, UTF-16 marshalling,
 diagnostics, panic safety, and the generic implementations of the ODBC FFI
 entry points. A concrete driver crate implements the `Backend` and
-`StatementBackend` traits, then calls the `forward_ffi!` macro to export all 73
-C ABI entry points.
+`StatementBackend` traits, then calls the `forward_ffi!` macro to export all 72
+`SQL*` C ABI entry points, plus `ConfigDSNW` on Windows.
 
 This is a library crate, not a loadable ODBC driver on its own.
 
@@ -83,9 +83,9 @@ Adding a new database backend requires three steps:
    stackable_odbc_core::forward_ffi!(crate::backend::XyzBackend);
    ```
 
-   This single line expands to 73 `#[unsafe(no_mangle)] pub unsafe extern
-   "system"` C ABI entry points (72 `SQL*` functions, plus `ConfigDSNW` on
-   Windows), each
+   This single line expands to 72 `#[unsafe(no_mangle)] pub unsafe extern
+   "system"` C ABI entry points (`SQL*` functions), plus `ConfigDSNW` on
+   Windows, each
    forwarding to the corresponding generic implementation in `stackable-odbc-core`.
 
 When adding a new ODBC function to the framework later, add one entry to

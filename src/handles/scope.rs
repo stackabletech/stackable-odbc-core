@@ -395,11 +395,11 @@ mod tests {
         }
     }
 
-    /// `with_child_group`'s primary use (Task 11's `SQLEndTran(SQL_HANDLE_ENV)`):
-    /// nest a second, distinct group's lock inside a scope that already holds
-    /// a different one, and reach the child group's own handle through the
-    /// nested scope. This is the interface's only correctness test; the two
-    /// tests below cover the deadlock guard.
+    /// `with_child_group`'s primary use (`SQLEndTran(SQL_HANDLE_ENV)`): nest a
+    /// second, distinct group's lock inside a scope that already holds a
+    /// different one, and reach the child group's own handle through the
+    /// nested scope. This is the interface's only correctness test; the test
+    /// below covers the deadlock guard.
     #[test]
     fn with_child_group_locks_a_distinct_group_and_reaches_its_handle() {
         unsafe {
