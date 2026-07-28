@@ -38,12 +38,74 @@ pub unsafe fn write_column_value(
     buf_len: isize,
     len_ind_ptr: *mut isize,
 ) -> Result<SqlReturn, OdbcError> {
+    unsafe { write_column_value_at(value, target_type, target_ptr, buf_len, len_ind_ptr, 0) }
+        .map(|w| w.ret)
+}
+
+/// What one marshalling call delivered, for `SQLGetData`'s chunking loop.
+///
+/// Only `SQLGetData` needs this; the bound-column and `SQLParamData` paths call
+/// [`write_column_value`], which discards it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChunkWrite {
+    /// The value to return from the FFI function.
+    pub ret: SqlReturn,
+    /// Units delivered by this call — UTF-16 code units for `SQL_C_WCHAR`,
+    /// bytes for `SQL_C_CHAR` and `SQL_C_BINARY`, `0` for a fixed-width target.
+    /// The caller adds this to its running offset.
+    pub delivered: usize,
+    /// Whether this target type can be read in parts at all.
+    ///
+    /// `false` for every fixed-width target, which the spec forbids chunking:
+    /// "SQLGetData cannot be used to return fixed-length data in parts. If
+    /// SQLGetData is called more than one time in a row for a column containing
+    /// fixed-length data, it returns SQL_NO_DATA for all calls after the first."
+    pub chunkable: bool,
+}
+
+/// [`write_column_value`], resuming `offset` units into the value.
+///
+/// Character and binary targets are the only ones that can be read in parts, and
+/// all three of them funnel through `write_wchar` / `write_char` /
+/// `write_binary`, so the chunking is handled in one place here rather than
+/// spread across the fixed-width arms below — none of which can chunk.
+///
+/// # Safety
+/// Same contract as [`write_column_value`].
+pub unsafe fn write_column_value_at(
+    value: &ColumnValue,
+    target_type: CDataType,
+    target_ptr: *mut c_void,
+    buf_len: isize,
+    len_ind_ptr: *mut isize,
+    offset: usize,
+) -> Result<ChunkWrite, OdbcError> {
+    unsafe { write_fixed_or_chunked(value, target_type, target_ptr, buf_len, len_ind_ptr, offset) }
+}
+
+/// A non-chunkable outcome: the whole value in one call.
+fn whole(ret: SqlReturn) -> ChunkWrite {
+    ChunkWrite {
+        ret,
+        delivered: 0,
+        chunkable: false,
+    }
+}
+
+unsafe fn write_fixed_or_chunked(
+    value: &ColumnValue,
+    target_type: CDataType,
+    target_ptr: *mut c_void,
+    buf_len: isize,
+    len_ind_ptr: *mut isize,
+    offset: usize,
+) -> Result<ChunkWrite, OdbcError> {
     // NULL handling
     if matches!(value, ColumnValue::Null) {
         if !len_ind_ptr.is_null() {
             unsafe { std::ptr::write_unaligned(len_ind_ptr, NULL_DATA) };
         }
-        return Ok(SqlReturn::SUCCESS);
+        return Ok(whole(SqlReturn::SUCCESS));
     }
 
     // Default type: infer the natural C type from the ColumnValue variant
@@ -100,7 +162,54 @@ pub unsafe fn write_column_value(
             ));
         }
 
-        return unsafe { write_column_value(value, inferred, target_ptr, buf_len, len_ind_ptr) };
+        return unsafe {
+            write_fixed_or_chunked(value, inferred, target_ptr, buf_len, len_ind_ptr, offset)
+        };
+    }
+
+    // The three chunkable targets are handled here, ahead of the coercion match,
+    // because every character and binary conversion below funnelled into these
+    // same three writers anyway — the arms differed only in how they produced
+    // the string or byte form. Resuming at `offset` therefore belongs in one
+    // place rather than in each arm, and no fixed-width arm can chunk at all.
+    //
+    // For `ColumnValue::String` the string form *is* the value, which is why
+    // this borrows instead of going through `column_value_to_string` (that
+    // returns `s.clone()` for the `String` variant, so the two agree).
+    match target_type {
+        CDataType::WChar | CDataType::Char => {
+            let owned;
+            let s: &str = match value {
+                ColumnValue::String(s) => s,
+                _ => {
+                    owned = column_value_to_string(value);
+                    &owned
+                }
+            };
+            let (ret, delivered) = unsafe {
+                if target_type == CDataType::WChar {
+                    write_wchar(s, target_ptr, buf_len, len_ind_ptr, offset)?
+                } else {
+                    write_char(s, target_ptr, buf_len, len_ind_ptr, offset)?
+                }
+            };
+            return Ok(ChunkWrite {
+                ret,
+                delivered,
+                chunkable: true,
+            });
+        }
+        CDataType::Binary => {
+            let bytes = column_value_to_binary(value);
+            let (ret, delivered) =
+                unsafe { write_binary(&bytes, target_ptr, buf_len, len_ind_ptr, offset)? };
+            return Ok(ChunkWrite {
+                ret,
+                delivered,
+                chunkable: true,
+            });
+        }
+        _ => {}
     }
 
     // Type coercion: if the value doesn't match the requested type, convert
@@ -109,17 +218,7 @@ pub unsafe fn write_column_value(
     // SAFETY: All unsafe helper calls below operate on the same raw pointers
     // passed by the caller, whose validity is guaranteed by the function's
     // safety contract.
-    match (value, target_type) {
-        // --- String to WChar (UTF-16) ---
-        (ColumnValue::String(s), CDataType::WChar) => unsafe {
-            write_wchar(s, target_ptr, buf_len, len_ind_ptr)
-        },
-
-        // --- String to Char (UTF-8) ---
-        (ColumnValue::String(s), CDataType::Char) => unsafe {
-            write_char(s, target_ptr, buf_len, len_ind_ptr)
-        },
-
+    let fixed = match (value, target_type) {
         // --- String to datetime C types ---
         // Required by the ODBC conversion matrix: SQL_CHAR / SQL_VARCHAR
         // convert to every C type. Backends whose data source has no native
@@ -443,25 +542,9 @@ pub unsafe fn write_column_value(
             Ok(SqlReturn::SUCCESS)
         }
 
-        // --- Coercion: any value → Binary ---
-        // Mirrors the WChar/Char catch-alls: a single arm backed by column_value_to_binary
-        // so that adding a new ColumnValue variant never requires a new Binary arm here.
-        (_, CDataType::Binary) => unsafe {
-            let bytes = column_value_to_binary(value);
-            write_binary(&bytes, target_ptr, buf_len, len_ind_ptr)
-        },
-
-        // --- Coercion: any value → WChar ---
-        (_, CDataType::WChar) => {
-            let s = column_value_to_string(value);
-            unsafe { write_wchar(&s, target_ptr, buf_len, len_ind_ptr) }
-        }
-
-        // --- Coercion: numeric/bool to Char ---
-        (_, CDataType::Char) => {
-            let s = column_value_to_string(value);
-            unsafe { write_char(&s, target_ptr, buf_len, len_ind_ptr) }
-        }
+        // The `Binary`, `WChar` and `Char` catch-alls that used to close this
+        // match now sit ahead of it, where the chunking offset is applied; every
+        // target reaching here is fixed-width.
 
         // Unsupported conversion. Spec 07006: "The data value of a column in
         // the result set could not be converted to the data type specified
@@ -473,7 +556,9 @@ pub unsafe fn write_column_value(
             ),
             SqlState::restricted_data_type_attribute_violation(),
         )),
-    }
+    };
+
+    fixed.map(whole)
 }
 
 // ---------------------------------------------------------------------------
@@ -749,24 +834,40 @@ fn parse_sql_timestamp(s: &str) -> Result<Timestamp, OdbcError> {
 // Helper: write UTF-16 string
 // ---------------------------------------------------------------------------
 
+/// Writes `s` as UTF-16, starting `offset` code units in.
+///
+/// `offset` is how many UTF-16 code units earlier `SQLGetData` calls already
+/// delivered for this column; `0` is the whole value. Returns the code units
+/// written this call, which is what the caller adds to its running offset.
+///
+/// The length written to `len_ind_ptr` is the length *remaining at the start of
+/// this call*, not the length of the whole value, per the spec's step 7: "When
+/// `SQLGetData` is called multiple times in succession for the same column,
+/// this is the length of the data available at the start of the current call;
+/// that is, the length decreases with each subsequent call."
 unsafe fn write_wchar(
     s: &str,
     target_ptr: *mut c_void,
     buf_len: isize,
     len_ind_ptr: *mut isize,
-) -> Result<SqlReturn, OdbcError> {
+    offset: usize,
+) -> Result<(SqlReturn, usize), OdbcError> {
     // Pre-size to UTF-8 byte length, which is always >= UTF-16 code unit count.
     let mut wide = Vec::with_capacity(s.len());
     wide.extend(s.encode_utf16());
-    let total_bytes = (wide.len() * 2) as isize;
+    // An offset past the end yields an empty remainder rather than panicking:
+    // the caller stops at `done`, but a truncating write that lands exactly on
+    // the end would otherwise index one past it.
+    let remaining = wide.get(offset.min(wide.len())..).unwrap_or(&[]);
+    let total_bytes = (remaining.len() * 2) as isize;
 
-    // Always report the total byte length needed.
+    // Always report the byte length still to come.
     if !len_ind_ptr.is_null() {
         unsafe { std::ptr::write_unaligned(len_ind_ptr, total_bytes) };
     }
 
     if target_ptr.is_null() || buf_len <= 0 {
-        return Ok(SqlReturn::SUCCESS);
+        return Ok((SqlReturn::SUCCESS, 0));
     }
 
     // The null terminator is one UTF-16 code unit, so a buffer of fewer than
@@ -775,25 +876,25 @@ unsafe fn write_wchar(
     // null-termination character, SQLGetData returns SQL_SUCCESS_WITH_INFO
     // and SQLSTATE 01004."
     if buf_len < 2 {
-        return Ok(SqlReturn::SUCCESS_WITH_INFO);
+        return Ok((SqlReturn::SUCCESS_WITH_INFO, 0));
     }
 
     let out_ptr = target_ptr.cast::<u16>();
     // buf_len is in bytes; capacity in u16 code units (reserve one for null terminator)
     let capacity_units = ((buf_len as usize) / 2).saturating_sub(1);
-    let copy_count = wide.len().min(capacity_units);
+    let copy_count = remaining.len().min(capacity_units);
 
     unsafe {
         let out_bytes = out_ptr.cast::<u8>();
-        std::ptr::copy_nonoverlapping(wide.as_ptr().cast::<u8>(), out_bytes, copy_count * 2);
+        std::ptr::copy_nonoverlapping(remaining.as_ptr().cast::<u8>(), out_bytes, copy_count * 2);
         // null terminator
         std::ptr::write_unaligned(out_bytes.add(copy_count * 2).cast::<u16>(), 0u16);
     }
 
-    if copy_count < wide.len() {
-        Ok(SqlReturn::SUCCESS_WITH_INFO)
+    if copy_count < remaining.len() {
+        Ok((SqlReturn::SUCCESS_WITH_INFO, copy_count))
     } else {
-        Ok(SqlReturn::SUCCESS)
+        Ok((SqlReturn::SUCCESS, copy_count))
     }
 }
 
@@ -801,13 +902,26 @@ unsafe fn write_wchar(
 // Helper: write UTF-8 string
 // ---------------------------------------------------------------------------
 
+/// Writes `s` as UTF-8, starting `offset` bytes in. See [`write_wchar`] for what
+/// `offset`, the return value and the indicator length mean.
+///
+/// The offset is a byte count, so a chunk boundary can fall inside a multi-byte
+/// UTF-8 sequence and split it. That is the same split `SQL_C_CHAR` truncation
+/// already performs at the buffer edge, and it is what the ODBC contract asks
+/// for: the application is reassembling a byte stream and is told to concatenate
+/// the parts, so the sequence is whole again once it does. Deliberately not
+/// "fixed" by backing up to a character boundary — that would deliver fewer
+/// bytes than the buffer holds and, on a buffer smaller than one character,
+/// would deliver nothing and never terminate.
 unsafe fn write_char(
     s: &str,
     target_ptr: *mut c_void,
     buf_len: isize,
     len_ind_ptr: *mut isize,
-) -> Result<SqlReturn, OdbcError> {
-    let bytes = s.as_bytes();
+    offset: usize,
+) -> Result<(SqlReturn, usize), OdbcError> {
+    let all = s.as_bytes();
+    let bytes = all.get(offset.min(all.len())..).unwrap_or(&[]);
     let total_bytes = bytes.len() as isize;
 
     if !len_ind_ptr.is_null() {
@@ -815,7 +929,7 @@ unsafe fn write_char(
     }
 
     if target_ptr.is_null() || buf_len <= 0 {
-        return Ok(SqlReturn::SUCCESS);
+        return Ok((SqlReturn::SUCCESS, 0));
     }
 
     let out_ptr = target_ptr.cast::<u8>();
@@ -828,9 +942,9 @@ unsafe fn write_char(
     }
 
     if copy_count < bytes.len() {
-        Ok(SqlReturn::SUCCESS_WITH_INFO)
+        Ok((SqlReturn::SUCCESS_WITH_INFO, copy_count))
     } else {
-        Ok(SqlReturn::SUCCESS)
+        Ok((SqlReturn::SUCCESS, copy_count))
     }
 }
 
@@ -838,12 +952,20 @@ unsafe fn write_char(
 // Helper: write raw binary bytes
 // ---------------------------------------------------------------------------
 
+/// Writes raw bytes starting `offset` bytes in. See [`write_wchar`] for what
+/// `offset`, the return value and the indicator length mean.
+///
+/// Unlike the two character writers this reserves no terminator, per the spec's
+/// step 5: "If the length of binary data exceeds the length of the data buffer,
+/// `SQLGetData` truncates it to `BufferLength` bytes."
 unsafe fn write_binary(
     data: &[u8],
     target_ptr: *mut c_void,
     buf_len: isize,
     len_ind_ptr: *mut isize,
-) -> Result<SqlReturn, OdbcError> {
+    offset: usize,
+) -> Result<(SqlReturn, usize), OdbcError> {
+    let data = data.get(offset.min(data.len())..).unwrap_or(&[]);
     let total_bytes = data.len() as isize;
 
     if !len_ind_ptr.is_null() {
@@ -851,7 +973,7 @@ unsafe fn write_binary(
     }
 
     if target_ptr.is_null() || buf_len <= 0 {
-        return Ok(SqlReturn::SUCCESS);
+        return Ok((SqlReturn::SUCCESS, 0));
     }
 
     let out_ptr = target_ptr.cast::<u8>();
@@ -862,9 +984,9 @@ unsafe fn write_binary(
     }
 
     if copy_count < data.len() {
-        Ok(SqlReturn::SUCCESS_WITH_INFO)
+        Ok((SqlReturn::SUCCESS_WITH_INFO, copy_count))
     } else {
-        Ok(SqlReturn::SUCCESS)
+        Ok((SqlReturn::SUCCESS, copy_count))
     }
 }
 

@@ -121,6 +121,11 @@ fn apply_cursor_behavior<B: Backend>(
                 first_close_err.get_or_insert(e);
             }
             stmt.cursor_open = false;
+            // The cursor is gone, so a SQLGetData position into the row it was
+            // on is gone with it. The Delete branch below gets this from
+            // `discard_result_set`; this branch keeps the statement, so it has
+            // to say so itself.
+            stmt.get_data_cursor = None;
         } else {
             // Delete (Preserve returned early above): back to S1.
             stmt.discard_result_set();

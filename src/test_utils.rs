@@ -1667,6 +1667,188 @@ impl Backend for MockFailingCloseBackend {
 }
 
 // ---------------------------------------------------------------------------
+// MockLongDataBackend — a row whose columns SQLGetData can actually read
+// ---------------------------------------------------------------------------
+
+/// The character column [`MockLongDataStatement`] serves, long enough that a
+/// small buffer needs several `SQLGetData` calls to drain it.
+///
+/// Deliberately not a repetition of one character: reassembling it in the wrong
+/// order, or dropping a chunk, has to be detectable. It is pure ASCII so that
+/// the UTF-8 byte count and the UTF-16 code-unit count agree, which keeps a
+/// test's arithmetic the same for `SQL_C_CHAR` and `SQL_C_WCHAR`.
+pub const LONG_TEXT: &str = "abcdefghijklmnopqrstuvwxyz0123456789";
+
+/// The binary column [`MockLongDataStatement`] serves, for the `SQL_C_BINARY`
+/// chunking path, which reserves no null terminator and so has different
+/// arithmetic from the two character paths.
+pub const LONG_BYTES: &[u8] = &[
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+];
+
+/// One row with three columns: long text (1), a fixed-width `i32` (2), and long
+/// binary (3).
+///
+/// Exists because no other mock returns row data at all — `MockStatement` takes
+/// the trait defaults and answers `NotImplemented` — so nothing could exercise
+/// `SQLGetData` past its argument validation, let alone the multi-call loop the
+/// spec defines for retrieving variable-length data in parts.
+///
+/// `get_data` ignores the offset and always returns the whole value: chunking is
+/// core's job, and a mock that pre-sliced would be testing the mock. That it can
+/// answer for any column in any order, repeatedly, is what the driver contract
+/// already requires from `SQL_GD_ANY_COLUMN | SQL_GD_ANY_ORDER`.
+#[derive(Default)]
+pub struct MockLongDataStatement {
+    rows_left: u8,
+}
+
+impl StatementBackend for MockLongDataStatement {
+    type Error = OdbcError;
+
+    fn column_count(&self) -> i16 {
+        3
+    }
+
+    fn fetch(&mut self) -> Result<crate::types::FetchResult, OdbcError> {
+        if self.rows_left == 0 {
+            return Ok(crate::types::FetchResult::NoData);
+        }
+        self.rows_left -= 1;
+        Ok(crate::types::FetchResult::Row)
+    }
+
+    fn get_data(
+        &mut self,
+        col: u16,
+        _target_type: crate::types::CDataType,
+    ) -> Result<Cow<'_, crate::types::ColumnValue>, OdbcError> {
+        match col {
+            1 => Ok(Cow::Owned(crate::types::ColumnValue::String(
+                LONG_TEXT.to_string(),
+            ))),
+            2 => Ok(Cow::Owned(crate::types::ColumnValue::I32(4242))),
+            3 => Ok(Cow::Owned(crate::types::ColumnValue::Bytes(
+                LONG_BYTES.to_vec(),
+            ))),
+            _ => Err(OdbcError::general(
+                format!("no such column: {col}"),
+                crate::types::SqlState::invalid_descriptor_index(),
+            )),
+        }
+    }
+}
+
+/// Hands out [`MockLongDataStatement`]s, so a test can execute, fetch a row and
+/// read columns out of it through the real FFI entry points.
+pub struct MockLongDataBackend;
+
+impl Backend for MockLongDataBackend {
+    type Connection = MockConnection;
+    type Statement = MockLongDataStatement;
+    type Error = OdbcError;
+    type CancelToken = MockCancelToken;
+
+    fn connect(_: &ConnectParams) -> Result<MockConnection, OdbcError> {
+        Ok(MockConnection)
+    }
+    fn disconnect(_: &mut MockConnection) -> Result<(), OdbcError> {
+        Ok(())
+    }
+    fn cancel_token(_conn: &Self::Connection) -> Self::CancelToken {
+        MockCancelToken::default()
+    }
+    fn exec_direct(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: &str,
+    ) -> Result<MockLongDataStatement, OdbcError> {
+        // Two rows, so a test can prove the chunk position resets across a
+        // fetch rather than leaking into the next row.
+        Ok(MockLongDataStatement { rows_left: 2 })
+    }
+    fn prepare(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: &str,
+    ) -> Result<MockLongDataStatement, OdbcError> {
+        Ok(MockLongDataStatement { rows_left: 2 })
+    }
+    fn execute(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: &mut MockLongDataStatement,
+        _: &[crate::types::ColumnValue],
+    ) -> Result<crate::types::ExecuteOutcome, OdbcError> {
+        Ok(crate::types::ExecuteOutcome::default())
+    }
+    fn get_info(_: &MockConnection, _: crate::types::InfoType) -> Result<InfoValue, OdbcError> {
+        Err(OdbcError::NotImplemented {
+            feature: "get_info".into(),
+        })
+    }
+    fn get_functions() -> Cow<'static, [crate::function_id::FunctionId]> {
+        Cow::Borrowed(&[])
+    }
+    fn get_type_info(_conn: &Self::Connection) -> Cow<'static, [TypeInfoRow]> {
+        Cow::Borrowed(&[])
+    }
+
+    fn tables(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+    ) -> Result<MockLongDataStatement, OdbcError> {
+        Err(OdbcError::NotImplemented {
+            feature: "tables".into(),
+        })
+    }
+    fn columns(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+    ) -> Result<MockLongDataStatement, OdbcError> {
+        Err(OdbcError::NotImplemented {
+            feature: "columns".into(),
+        })
+    }
+
+    fn cursor_commit_behavior() -> crate::types::CursorBehavior {
+        crate::types::CursorBehavior::Close
+    }
+    fn cursor_rollback_behavior() -> crate::types::CursorBehavior {
+        crate::types::CursorBehavior::Close
+    }
+
+    fn supports_catalogs(_conn: &Self::Connection) -> bool {
+        false
+    }
+    fn supports_schemas(_conn: &Self::Connection) -> bool {
+        false
+    }
+    fn alter_table_support(_conn: &Self::Connection) -> u32 {
+        0
+    }
+    fn outer_join_capabilities(_conn: &Self::Connection) -> u32 {
+        0
+    }
+    fn default_txn_isolation(_conn: &Self::Connection) -> u32 {
+        crate::types::SQL_TXN_SERIALIZABLE
+    }
+    fn txn_isolation_options(_conn: &Self::Connection) -> u32 {
+        crate::types::SQL_TXN_SERIALIZABLE
+    }
+
+    minimal_capability_decls!();
+}
+
+// ---------------------------------------------------------------------------
 // MockRecordingBackend — proves a statement-producing call gets its own token
 // ---------------------------------------------------------------------------
 

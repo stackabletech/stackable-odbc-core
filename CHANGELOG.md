@@ -20,6 +20,12 @@ markers go away and this section becomes the initial-release notes.
 
 ### Added
 
+- `column_value::write_column_value_at` and the `ChunkWrite` it returns, the
+  offset-aware form of `write_column_value` that `SQLGetData`'s chunking loop
+  uses. `write_column_value` is unchanged and still the right call for the
+  bound-column and `SQLParamData` paths, which deliver a whole value in one go.
+  Also `handles::GetDataCursor`, the per-statement read position.
+
 - `bulk_operation_from_raw`, converting `SQLBulkOperations`'s raw `i16` into
   `odbc_sys::BulkOperation` at the FFI boundary like every other ABI value.
   `SQLSetPos`'s `Operation` and `LockType` deliberately have no equivalent:
@@ -567,6 +573,35 @@ markers go away and this section becomes the initial-release notes.
   compared against. Use `HeaderDiagnosticIdentifier::MessageText as i16`.
 
 ### Fixed
+
+- `SQLGetData` can retrieve variable-length data in parts, which is what the
+  spec's whole "Retrieving Variable-Length Data in Parts" section describes and
+  what the documented application pattern
+  `while ((rc = SQLGetData(...)) == SQL_SUCCESS_WITH_INFO)` depends on. Every
+  call previously restarted at the beginning of the value, so that loop never
+  terminated: an application reading a column larger than its buffer hung, and
+  one that ignored the truncation warning silently kept only the first chunk.
+
+  A statement now tracks how far `SQLGetData` has read. Each call delivers the
+  next part and returns `SQL_SUCCESS_WITH_INFO` with `01004`, the last part
+  returns `SQL_SUCCESS`, and a further call returns `SQL_NO_DATA`.
+  `*StrLen_or_Ind` reports the length still to come at the start of that call
+  rather than the whole value's length, per the spec's step 7 — it decreases as
+  the loop proceeds, which is what lets an application size its final read.
+
+  Three behaviours follow the spec rather than convenience. Fixed-width targets
+  are not chunkable: "SQLGetData cannot be used to return fixed-length data in
+  parts", so the second call for one returns `SQL_NO_DATA`. The position is per
+  statement rather than per column, because "successive calls to `SQLGetData`
+  will retrieve data from the last column requested; prior offsets become
+  invalid" — a per-column cache would preserve an offset the spec has already
+  invalidated. And it is discarded whenever the cursor moves or the result set
+  goes away.
+
+  No `Backend` change: chunking operates on the *converted* form, which only
+  core can measure, so a backend keeps returning whole values from `get_data`
+  and needs no offset. Streaming a value the backend never materialises would
+  need one, and can be added later as a defaulted method without a break.
 
 - `SQLParamData`, `SQLFetchScroll`, `SQLSetEnvAttr` and `SQLGetEnvAttr` now
   clear the handle's diagnostic records at the start of the call, as the spec

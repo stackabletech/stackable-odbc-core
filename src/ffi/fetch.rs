@@ -5,9 +5,9 @@ use std::ffi::c_void;
 use odbc_sys::FetchOrientation;
 
 use crate::backend::{Backend, StatementBackend};
-use crate::column_value::write_column_value;
+use crate::column_value::{write_column_value, write_column_value_at};
 use crate::errors::OdbcError;
-use crate::handles::StatementHandle;
+use crate::handles::{GetDataCursor, StatementHandle};
 use crate::panic::panic_safe;
 use crate::types::{ColumnValue, FetchResult, SqlReturn, SqlState, fetch_orientation_from_raw};
 
@@ -114,6 +114,12 @@ pub unsafe fn sql_fetch<B: Backend>(statement_handle: *mut c_void) -> SqlReturn 
                     SqlState::invalid_cursor_state(),
                 ));
             }
+
+            // The row is about to change, so any `SQLGetData` position into the
+            // outgoing row's value is meaningless against the incoming one.
+            // Cleared before the fetch rather than after, so an error partway
+            // through cannot leave a stale position behind.
+            stmt.get_data_cursor = None;
 
             match statement.fetch()? {
                 FetchResult::Row => {
@@ -293,6 +299,29 @@ pub unsafe fn sql_fetch_scroll<B: Backend>(
 /// Retrieves data for a single column in the current row. The data is
 /// converted to the requested C type and written into the caller's buffer.
 ///
+/// # Retrieving variable-length data in parts
+///
+/// A character or binary column too large for the caller's buffer is returned
+/// over several calls. Each call delivers the next part and returns
+/// `SQL_SUCCESS_WITH_INFO` with `01004`; the call that delivers the last part
+/// returns `SQL_SUCCESS`; a further call returns `SQL_NO_DATA`. `*StrLen_or_Ind`
+/// carries the length *still to come at the start of that call*, so it shrinks
+/// as the loop proceeds. This is what makes the documented application pattern
+///
+/// ```text
+/// while ((rc = SQLGetData(...)) == SQL_SUCCESS_WITH_INFO) { /* append */ }
+/// ```
+///
+/// terminate.
+///
+/// Three limits come straight from the spec rather than from this
+/// implementation. Fixed-width targets cannot be read in parts at all — the
+/// second call for one returns `SQL_NO_DATA`. The position is per *statement*,
+/// not per column: reading a different column discards it, so
+/// `SQLGetData(n)`, `SQLGetData(m)`, `SQLGetData(n)` restarts column `n` from
+/// the beginning. And it is dropped whenever the cursor moves or the result set
+/// is discarded, since an offset into one row's value means nothing in the next.
+///
 /// # Parameters
 ///
 /// - `statement_handle`: Statement handle (input).
@@ -444,6 +473,28 @@ pub unsafe fn sql_get_data<B: Backend>(
                     SqlState::invalid_application_buffer_type(),
                 )
             })?;
+
+            // Spec, "Retrieving Data with SQLGetData" step 1: "Returns
+            // SQL_NO_DATA if it has already returned all of the data for the
+            // column." This precedes even the NULL check, so it is the first
+            // thing done once the arguments are known good.
+            //
+            // A cursor for a *different* column is discarded rather than kept:
+            // "Successive calls to SQLGetData will retrieve data from the last
+            // column requested; prior offsets become invalid."
+            let mut cursor = match stmt.get_data_cursor {
+                Some(c) if c.column == col_or_param_num => c,
+                _ => GetDataCursor {
+                    column: col_or_param_num,
+                    delivered: 0,
+                    done: false,
+                },
+            };
+            if cursor.done {
+                stmt.get_data_cursor = Some(cursor);
+                return Ok(SqlReturn::NO_DATA);
+            }
+
             let value = statement.get_data(col_or_param_num, c_type)?;
             // Spec 22002: data is NULL but no indicator variable was supplied.
             if matches!(*value, ColumnValue::Null) && str_len_or_ind_ptr.is_null() {
@@ -452,20 +503,29 @@ pub unsafe fn sql_get_data<B: Backend>(
                     SqlState::indicator_variable_required(),
                 ));
             }
-            let result = write_column_value(
+            let write = write_column_value_at(
                 &value,
                 c_type,
                 target_value_ptr,
                 buffer_length,
                 str_len_or_ind_ptr,
+                cursor.delivered,
             )?;
 
+            // A fixed-width target is finished by definition — the spec forbids
+            // reading it in parts — and so is a chunkable one that reported
+            // anything other than truncation, since SQL_SUCCESS marks the last
+            // part. Either way the next call for this column is SQL_NO_DATA.
+            cursor.delivered += write.delivered;
+            cursor.done = !write.chunkable || write.ret != SqlReturn::SUCCESS_WITH_INFO;
+            stmt.get_data_cursor = Some(cursor);
+
             // Spec 01004: If data was truncated, push a diagnostic.
-            if result == SqlReturn::SUCCESS_WITH_INFO {
+            if write.ret == SqlReturn::SUCCESS_WITH_INFO {
                 stmt.diagnostics.push(&OdbcError::StringTruncated);
             }
 
-            Ok(result)
+            Ok(write.ret)
         })
     };
     tracing::debug!("SQLGetData -> {:?}", ret);
@@ -475,9 +535,317 @@ pub unsafe fn sql_get_data<B: Backend>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::{MockBackend, alloc_env_conn_stmt, cleanup_env_conn_stmt, with_handle};
+    use crate::ffi::handle::{sql_alloc_handle, sql_free_handle};
+    use crate::test_utils::{
+        LONG_BYTES, LONG_TEXT, MockBackend, MockLongDataBackend, alloc_env_conn_stmt,
+        cleanup_env_conn_stmt, with_handle,
+    };
     use crate::types::CDataType;
     use odbc_sys::HandleType;
+
+    /// Env + connection + statement for [`MockLongDataBackend`], executed and
+    /// positioned on the first row, so `SQLGetData` has something to read.
+    unsafe fn long_data_stmt() -> (*mut c_void, *mut c_void, *mut c_void) {
+        let mut env: *mut c_void = std::ptr::null_mut();
+        let mut conn: *mut c_void = std::ptr::null_mut();
+        let mut stmt: *mut c_void = std::ptr::null_mut();
+        unsafe {
+            let _ = sql_alloc_handle::<MockLongDataBackend>(
+                HandleType::Env as i16,
+                std::ptr::null_mut(),
+                &mut env,
+            );
+            let _ = sql_alloc_handle::<MockLongDataBackend>(HandleType::Dbc as i16, env, &mut conn);
+            let mut wide: Vec<u16> = "DRIVER=mock;".encode_utf16().collect();
+            wide.push(0);
+            let _ = crate::ffi::connect::sql_driver_connect_w::<MockLongDataBackend>(
+                conn,
+                std::ptr::null_mut(),
+                wide.as_ptr(),
+                crate::types::SQL_NTS as i16,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                0,
+            );
+            let _ =
+                sql_alloc_handle::<MockLongDataBackend>(HandleType::Stmt as i16, conn, &mut stmt);
+
+            let mut sql: Vec<u16> = "SELECT a, b, c FROM t".encode_utf16().collect();
+            sql.push(0);
+            let ret = crate::ffi::execute::sql_exec_direct_w::<MockLongDataBackend>(
+                stmt,
+                sql.as_ptr(),
+                crate::types::SQL_NTS,
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS, "precondition: execute");
+            let ret = sql_fetch::<MockLongDataBackend>(stmt);
+            assert_eq!(ret, SqlReturn::SUCCESS, "precondition: first row fetched");
+        }
+        (env, conn, stmt)
+    }
+
+    unsafe fn cleanup_long_data(env: *mut c_void, conn: *mut c_void, stmt: *mut c_void) {
+        unsafe {
+            let _ = sql_free_handle::<MockLongDataBackend>(HandleType::Stmt as i16, stmt);
+            let _ = crate::ffi::connect::sql_disconnect::<MockLongDataBackend>(conn);
+            let _ = sql_free_handle::<MockLongDataBackend>(HandleType::Dbc as i16, conn);
+            let _ = sql_free_handle::<MockLongDataBackend>(HandleType::Env as i16, env);
+        }
+    }
+
+    /// One `SQLGetData` call for `col` into a `buf_len`-byte `SQL_C_CHAR`
+    /// buffer, returning the code, the bytes before the null terminator, and the
+    /// indicator.
+    unsafe fn get_char_chunk(
+        stmt: *mut c_void,
+        col: u16,
+        buf_len: usize,
+    ) -> (SqlReturn, Vec<u8>, isize) {
+        let mut buf = vec![0u8; buf_len];
+        let mut ind: isize = 0;
+        let ret = unsafe {
+            sql_get_data::<MockLongDataBackend>(
+                stmt,
+                col,
+                CDataType::Char as i16,
+                buf.as_mut_ptr().cast::<c_void>(),
+                buf_len as isize,
+                &mut ind,
+            )
+        };
+        let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+        buf.truncate(end);
+        (ret, buf, ind)
+    }
+
+    /// The canonical ODBC long-data loop must terminate and reassemble the
+    /// value. Before chunking existed every call restarted at the beginning, so
+    /// this loop returned `SQL_SUCCESS_WITH_INFO` forever and an application
+    /// following the documented pattern hung.
+    #[test]
+    fn get_data_returns_a_long_value_in_parts_until_the_loop_terminates() {
+        unsafe {
+            let (env, conn, stmt) = long_data_stmt();
+
+            // 8-byte buffer => 7 payload bytes per call plus a null terminator.
+            let mut assembled = Vec::new();
+            let mut calls = 0;
+            loop {
+                let (ret, chunk, _) = get_char_chunk(stmt, 1, 8);
+                calls += 1;
+                assert!(
+                    calls <= 100,
+                    "SQLGetData never reported completion; the loop does not terminate"
+                );
+                assert!(
+                    ret == SqlReturn::SUCCESS || ret == SqlReturn::SUCCESS_WITH_INFO,
+                    "unexpected return {ret:?} on call {calls}"
+                );
+                assembled.extend_from_slice(&chunk);
+                if ret == SqlReturn::SUCCESS {
+                    break;
+                }
+            }
+
+            assert_eq!(
+                String::from_utf8(assembled).expect("chunks reassemble to UTF-8"),
+                LONG_TEXT,
+                "the reassembled value differs from what the backend served"
+            );
+            assert!(
+                calls > 1,
+                "precondition: the buffer must be small enough to force chunking"
+            );
+
+            cleanup_long_data(env, conn, stmt);
+        }
+    }
+
+    /// Spec: "If SQLGetData is called after this, it returns SQL_NO_DATA."
+    #[test]
+    fn get_data_after_the_last_part_returns_no_data() {
+        unsafe {
+            let (env, conn, stmt) = long_data_stmt();
+
+            // Bounded, like every other chunk loop in this module: an
+            // implementation that never reports completion must fail the test
+            // rather than hang the job until CI's timeout kills it.
+            let mut drained = false;
+            for _ in 0..100 {
+                let (ret, _, _) = get_char_chunk(stmt, 1, 8);
+                if ret == SqlReturn::SUCCESS {
+                    drained = true;
+                    break;
+                }
+            }
+            assert!(drained, "SQLGetData never reported the last part");
+
+            let (ret, _, _) = get_char_chunk(stmt, 1, 8);
+            assert_eq!(ret, SqlReturn::NO_DATA);
+            // And it stays NO_DATA rather than restarting.
+            let (ret, _, _) = get_char_chunk(stmt, 1, 8);
+            assert_eq!(ret, SqlReturn::NO_DATA);
+
+            cleanup_long_data(env, conn, stmt);
+        }
+    }
+
+    /// Spec: "SQLGetData cannot be used to return fixed-length data in parts. If
+    /// SQLGetData is called more than one time in a row for a column containing
+    /// fixed-length data, it returns SQL_NO_DATA for all calls after the first."
+    #[test]
+    fn get_data_for_fixed_width_data_returns_no_data_after_the_first_call() {
+        unsafe {
+            let (env, conn, stmt) = long_data_stmt();
+
+            let mut value: i32 = 0;
+            let mut ind: isize = 0;
+            let value_ptr = std::ptr::from_mut(&mut value).cast::<c_void>();
+            let first = sql_get_data::<MockLongDataBackend>(
+                stmt,
+                2,
+                CDataType::SLong as i16,
+                value_ptr,
+                4,
+                &mut ind,
+            );
+            assert_eq!(first, SqlReturn::SUCCESS);
+            assert_eq!(value, 4242);
+
+            let second = sql_get_data::<MockLongDataBackend>(
+                stmt,
+                2,
+                CDataType::SLong as i16,
+                value_ptr,
+                4,
+                &mut ind,
+            );
+            assert_eq!(second, SqlReturn::NO_DATA);
+
+            cleanup_long_data(env, conn, stmt);
+        }
+    }
+
+    /// Spec: "Successive calls to SQLGetData will retrieve data from the last
+    /// column requested; prior offsets become invalid ... the second call to
+    /// SQLGetData(icol=n) retrieves data from the start of the n column."
+    ///
+    /// A per-column position would preserve the offset here and fail.
+    #[test]
+    fn reading_another_column_restarts_the_first_one_from_the_beginning() {
+        unsafe {
+            let (env, conn, stmt) = long_data_stmt();
+
+            let (ret, first, _) = get_char_chunk(stmt, 1, 8);
+            assert_eq!(ret, SqlReturn::SUCCESS_WITH_INFO);
+            assert_eq!(first, LONG_TEXT.as_bytes()[..7]);
+
+            // Touch a different column, which invalidates column 1's offset.
+            let (_, _, _) = get_char_chunk(stmt, 3, 8);
+
+            let (ret, again, _) = get_char_chunk(stmt, 1, 8);
+            assert_eq!(ret, SqlReturn::SUCCESS_WITH_INFO);
+            assert_eq!(
+                again, first,
+                "column 1 resumed mid-value instead of restarting"
+            );
+
+            cleanup_long_data(env, conn, stmt);
+        }
+    }
+
+    /// Spec step 7: "When SQLGetData is called multiple times in succession for
+    /// the same column, this is the length of the data available at the start of
+    /// the current call; that is, the length decreases with each subsequent
+    /// call." Reporting the whole value's length every time would leave an
+    /// application unable to size its final read.
+    #[test]
+    fn the_indicator_reports_the_length_remaining_not_the_total() {
+        unsafe {
+            let (env, conn, stmt) = long_data_stmt();
+
+            let total = LONG_TEXT.len() as isize;
+            let (ret, _, first_ind) = get_char_chunk(stmt, 1, 8);
+            assert_eq!(ret, SqlReturn::SUCCESS_WITH_INFO);
+            assert_eq!(
+                first_ind, total,
+                "the first call still reports the whole length"
+            );
+
+            let (_, _, second_ind) = get_char_chunk(stmt, 1, 8);
+            assert_eq!(
+                second_ind,
+                total - 7,
+                "the indicator did not decrease by the 7 bytes already delivered"
+            );
+
+            cleanup_long_data(env, conn, stmt);
+        }
+    }
+
+    /// A position into the previous row's value means nothing in the next row.
+    #[test]
+    fn fetching_the_next_row_restarts_the_column() {
+        unsafe {
+            let (env, conn, stmt) = long_data_stmt();
+
+            let (ret, first, _) = get_char_chunk(stmt, 1, 8);
+            assert_eq!(ret, SqlReturn::SUCCESS_WITH_INFO);
+
+            assert_eq!(sql_fetch::<MockLongDataBackend>(stmt), SqlReturn::SUCCESS);
+
+            let (ret, after_fetch, _) = get_char_chunk(stmt, 1, 8);
+            assert_eq!(ret, SqlReturn::SUCCESS_WITH_INFO);
+            assert_eq!(
+                after_fetch, first,
+                "the new row resumed at the previous row's offset"
+            );
+
+            cleanup_long_data(env, conn, stmt);
+        }
+    }
+
+    /// `SQL_C_BINARY` reserves no null terminator, so it delivers `BufferLength`
+    /// bytes per call rather than `BufferLength - 1`. Chunking has to follow the
+    /// writer's own arithmetic rather than assume the character case.
+    #[test]
+    fn binary_data_is_returned_in_parts_and_reassembles() {
+        unsafe {
+            let (env, conn, stmt) = long_data_stmt();
+
+            let mut assembled = Vec::new();
+            let mut calls = 0;
+            loop {
+                let mut buf = [0u8; 5];
+                let mut ind: isize = 0;
+                let ret = sql_get_data::<MockLongDataBackend>(
+                    stmt,
+                    3,
+                    CDataType::Binary as i16,
+                    buf.as_mut_ptr().cast::<c_void>(),
+                    5,
+                    &mut ind,
+                );
+                calls += 1;
+                assert!(calls <= 100, "binary chunk loop does not terminate");
+                let take = if ret == SqlReturn::SUCCESS {
+                    ind as usize
+                } else {
+                    5
+                };
+                assembled.extend_from_slice(&buf[..take]);
+                if ret == SqlReturn::SUCCESS {
+                    break;
+                }
+            }
+
+            assert_eq!(assembled, LONG_BYTES);
+            assert!(calls > 1, "precondition: chunking must actually occur");
+
+            cleanup_long_data(env, conn, stmt);
+        }
+    }
 
     /// Read the SQLSTATE of the statement's first diagnostic record.
     unsafe fn first_sqlstate(stmt: *mut c_void) -> String {

@@ -307,6 +307,30 @@ pub struct ParameterBinding {
 unsafe impl Send for ParameterBinding {}
 unsafe impl Sync for ParameterBinding {}
 
+/// How far `SQLGetData` has read into a single column of the current row, so
+/// that a repeated call for the same column returns the *next* part.
+///
+/// See [`StatementHandle::get_data_cursor`] for why only one column is tracked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GetDataCursor {
+    /// The 1-based column this position refers to. A call for any other column
+    /// discards this cursor and starts that column from zero.
+    pub column: u16,
+    /// Units already delivered — UTF-16 code units for `SQL_C_WCHAR`, bytes for
+    /// `SQL_C_CHAR` and `SQL_C_BINARY`.
+    ///
+    /// The unit follows the C type the application asked for, and an
+    /// application that changes C type mid-column would reinterpret it. That
+    /// costs nothing to allow and nothing to police: the spec gives no meaning
+    /// to switching target type between parts, and the resulting offset is no
+    /// less defined than the partial value the application would be assembling.
+    pub delivered: usize,
+    /// Set once the whole value has been handed over, so the next call for this
+    /// same column returns `SQL_NO_DATA` rather than restarting it. Also set
+    /// immediately for a fixed-width target, which cannot be read in parts.
+    pub done: bool,
+}
+
 /// Tracks the state machine for data-at-execution parameter streaming
 /// (SQLParamData / SQLPutData).
 ///
@@ -388,6 +412,18 @@ pub struct StatementHandle<B: Backend> {
     /// Data-at-execution state for SQLParamData/SQLPutData.
     /// `Some` when SQLExecute/SQLExecDirectW returned SQL_NEED_DATA.
     pub data_at_exec: Option<DataAtExecState>,
+    /// How far `SQLGetData` has read into one column of the current row.
+    ///
+    /// One slot, not one per column, because that is exactly what the spec
+    /// mandates: "Successive calls to `SQLGetData` will retrieve data from the
+    /// last column requested; prior offsets become invalid" — so
+    /// `SQLGetData(n)`, `SQLGetData(m)`, `SQLGetData(n)` restarts column `n`
+    /// from the beginning. Keeping a position per column would *preserve* an
+    /// offset the spec says is invalid.
+    ///
+    /// Cleared whenever the cursor moves or the result set goes away, since a
+    /// position into the previous row's value means nothing in the next one.
+    pub get_data_cursor: Option<GetDataCursor>,
     pub diagnostics: DiagnosticQueue,
     /// Integer/pointer-valued statement attributes set via `SQLSetStmtAttr`.
     /// Values are stored as `usize` (pointer-sized). Defaults are applied at read time.
@@ -418,6 +454,7 @@ impl<B: Backend> StatementHandle<B> {
     pub fn set_result_set(&mut self, data: StatementData<B>) {
         self.cursor_open = data.column_count() > 0;
         self.statement = Some(data);
+        self.get_data_cursor = None;
     }
 
     /// Store a prepared-but-unexecuted backend statement (`SQLPrepareW`, or a
@@ -426,6 +463,7 @@ impl<B: Backend> StatementHandle<B> {
     pub fn set_prepared_statement(&mut self, data: StatementData<B>) {
         self.statement = Some(data);
         self.cursor_open = false;
+        self.get_data_cursor = None;
     }
 
     /// Discard the result set and close the cursor (`SQLCloseCursor`,
@@ -433,6 +471,7 @@ impl<B: Backend> StatementHandle<B> {
     pub fn discard_result_set(&mut self) {
         self.statement = None;
         self.cursor_open = false;
+        self.get_data_cursor = None;
     }
 
     /// True when `SQL_ATTR_NOSCAN` is `SQL_NOSCAN_ON` (escape scanning disabled).
@@ -568,6 +607,7 @@ pub unsafe fn alloc_statement<B: Backend>(
         param_bindings: std::collections::HashMap::new(),
         cursor_name: None,
         data_at_exec: None,
+        get_data_cursor: None,
         diagnostics: DiagnosticQueue::new(),
         attrs: std::collections::HashMap::new(),
         app_row_desc: alloc_desc(),
