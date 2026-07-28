@@ -7,7 +7,7 @@ use odbc_sys::{
     AttrOdbcVersion, CDataType, Desc, EnvironmentAttribute, FetchOrientation, FreeStmtOption,
     HandleType, InfoType, StatementAttribute,
 };
-use odbc_sys::{CompletionType, ParamType};
+use odbc_sys::{BulkOperation, CompletionType, ParamType};
 
 use crate::types::constants::*;
 use crate::types::{IdentifierType, Nullable, Scope};
@@ -374,6 +374,32 @@ pub fn completion_type_from_raw(value: i16) -> Option<CompletionType> {
     match value {
         0 => Some(CompletionType::Commit),
         1 => Some(CompletionType::Rollback),
+        _ => None,
+    }
+}
+
+// `SQLSetPos`'s Operation and LockType have no conversion here, and that is a
+// limitation of `odbc-sys` rather than an oversight. `odbc_sys::Operation` and
+// `odbc_sys::Lock` are newtype structs over a *private* `i16` with no accessor,
+// no `From`, and no `#[repr]` enum to cast through — so a converted value could
+// be compared against the three associated constants and nothing else. Neither
+// core nor a driver could recover the raw code to forward it, and a test could
+// not name a valid input at all. `SQLSetPos` therefore validates against
+// `SQL_POSITION` / `SQL_LOCK_*` in `constants.rs`, which are the only spelling
+// of those codes anything can actually use.
+
+/// Convert a raw `i16` from the ODBC ABI into an `odbc_sys::BulkOperation`.
+///
+/// Returns `None` for values that are not a recognised bulk operation, which
+/// is what `SQLBulkOperations` reports as `HY092`. This is the safe
+/// alternative to `transmute` for the `#[repr(u16)]` `BulkOperation` enum.
+#[must_use]
+pub fn bulk_operation_from_raw(value: i16) -> Option<BulkOperation> {
+    match value {
+        4 => Some(BulkOperation::Add),
+        5 => Some(BulkOperation::UpdateByBookmark),
+        6 => Some(BulkOperation::DeleteByBookmark),
+        7 => Some(BulkOperation::FetchByBookmark),
         _ => None,
     }
 }

@@ -14,9 +14,8 @@ use crate::panic::{panic_safe, panic_safe_unlocked};
 #[cfg(test)]
 use crate::types::Nullable;
 use crate::types::{
-    SQL_ADD, SQL_DELETE, SQL_DELETE_BY_BOOKMARK, SQL_FETCH_BY_BOOKMARK, SQL_LOCK_EXCLUSIVE,
-    SQL_LOCK_NO_CHANGE, SQL_LOCK_UNLOCK, SQL_POSITION, SQL_REFRESH, SQL_UPDATE,
-    SQL_UPDATE_BY_BOOKMARK, SqlReturn, SqlState,
+    SQL_DELETE, SQL_LOCK_EXCLUSIVE, SQL_LOCK_NO_CHANGE, SQL_LOCK_UNLOCK, SQL_POSITION, SQL_REFRESH,
+    SQL_UPDATE, SqlReturn, SqlState, bulk_operation_from_raw,
 };
 use crate::utf16::{utf16_to_string, write_utf16};
 
@@ -720,21 +719,17 @@ pub unsafe fn sql_bulk_operations<B: Backend>(
             let stmt = scope.get::<StatementHandle<B>>(statement_handle)?;
             stmt.diagnostics.clear();
 
-            tracing::debug!("SQLBulkOperations(operation={})", operation);
+            // Spec HY092: validate operation. Converting at the boundary is
+            // what makes the value typed for the rest of the function; an
+            // unrecognised code never reaches any logic below.
+            let operation = bulk_operation_from_raw(operation).ok_or_else(|| {
+                OdbcError::general(
+                    format!("Unknown bulk operation: {operation}"),
+                    SqlState::invalid_attribute_option_identifier(),
+                )
+            })?;
 
-            // Spec HY092: validate operation.
-            match operation {
-                SQL_ADD
-                | SQL_UPDATE_BY_BOOKMARK
-                | SQL_DELETE_BY_BOOKMARK
-                | SQL_FETCH_BY_BOOKMARK => {}
-                _ => {
-                    return Err(OdbcError::general(
-                        format!("Unknown bulk operation: {operation}"),
-                        SqlState::invalid_attribute_option_identifier(),
-                    ));
-                }
-            }
+            tracing::debug!("SQLBulkOperations(operation={:?})", operation);
 
             // HYC00: this driver does not support bulk operations.
             Err(OdbcError::general(
@@ -839,7 +834,10 @@ pub unsafe fn sql_set_pos<B: Backend>(
                 lock_type
             );
 
-            // Spec HY092: validate operation.
+            // Spec HY092: validate operation. Matched against the constants
+            // rather than converted to `odbc_sys::Operation` — see the comment
+            // over `SQL_POSITION` in `types/constants.rs` for why that type
+            // cannot carry this value.
             match operation {
                 SQL_POSITION | SQL_REFRESH | SQL_UPDATE | SQL_DELETE => {}
                 _ => {
@@ -876,6 +874,7 @@ pub unsafe fn sql_set_pos<B: Backend>(
 mod tests {
     use super::*;
     use crate::test_utils::{MockBackend, alloc_env_conn_stmt, cleanup_env_conn_stmt, with_handle};
+    use odbc_sys::BulkOperation;
 
     #[test]
     fn num_result_cols_without_execute_returns_error() {
@@ -1626,7 +1625,8 @@ mod tests {
     #[test]
     fn bulk_operations_null_handle_returns_invalid() {
         unsafe {
-            let ret = sql_bulk_operations::<MockBackend>(std::ptr::null_mut(), SQL_ADD);
+            let ret =
+                sql_bulk_operations::<MockBackend>(std::ptr::null_mut(), BulkOperation::Add as i16);
             assert_eq!(ret, SqlReturn::INVALID_HANDLE);
         }
     }
@@ -1635,7 +1635,7 @@ mod tests {
     fn bulk_operations_returns_hyc00() {
         unsafe {
             let (env, conn, stmt) = alloc_env_conn_stmt();
-            let ret = sql_bulk_operations::<MockBackend>(stmt, SQL_ADD);
+            let ret = sql_bulk_operations::<MockBackend>(stmt, BulkOperation::Add as i16);
             assert_eq!(ret, SqlReturn::ERROR);
             // Verify HYC00 diagnostic was set.
             with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {

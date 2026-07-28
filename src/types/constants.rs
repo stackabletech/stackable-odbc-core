@@ -3,8 +3,14 @@
 //! These mirror the definitions in the ODBC 3.x specification and in the
 //! system headers `sql.h` / `sqlext.h`. They supplement `odbc-sys` for
 //! values that `odbc-sys` does not expose as constants.
+//!
+//! Where `odbc-sys` *does* carry the value, derive from it rather than
+//! restating the literal — `SQL_DATETIME` and the `InfoType`-backed constants
+//! below are written that way. A restated literal is a second place for the
+//! value to be wrong, and a value that only one of the two places corrects is
+//! how a spec-compliance fix silently fails to take effect.
 
-use odbc_sys::InfoType;
+use odbc_sys::{InfoType, SqlDataType};
 
 /// SQL_ATTR_AUTOCOMMIT: manual-commit mode — the application commits or rolls
 /// back explicitly with `SQLEndTran`.
@@ -55,9 +61,16 @@ pub const SQL_TC_DDL_IGNORE: u32 = 4;
 /// `SQL_DATETIME` — the *verbose* type of every datetime SQL type, which is
 /// what `SQL_DESC_TYPE` reports where `SQL_DESC_CONCISE_TYPE` reports
 /// `SQL_TYPE_DATE` / `SQL_TYPE_TIME` / `SQL_TYPE_TIMESTAMP`.
-pub const SQL_DATETIME: i16 = 9;
+///
+/// Derived from `odbc-sys` rather than restated, per the module doc.
+pub const SQL_DATETIME: i16 = SqlDataType::DATETIME.0;
 /// `SQL_INTERVAL` — the *verbose* type of every interval SQL type, the
 /// counterpart of [`SQL_DATETIME`] for the `SQL_INTERVAL_*` concise types.
+///
+/// Stated as a literal because `odbc-sys` has no `SqlDataType::INTERVAL`, only
+/// the concise `EXT_INTERVAL_*` codes. This is the asymmetry the module doc's
+/// rule permits: derive where `odbc-sys` carries the value, state it where it
+/// does not.
 pub const SQL_INTERVAL: i16 = 10;
 
 /// `SQL_PARC_BATCH` — each parameter set in an array produces its own row count.
@@ -503,8 +516,17 @@ pub const SQL_DATA_AT_EXEC: isize = -2;
 pub const SQL_LEN_DATA_AT_EXEC_OFFSET: isize = -100;
 
 // ---------------------------------------------------------------------------
-// SQLSetPos operation codes (sql.h)
+// SQLSetPos operation and lock type codes (sql.h)
 // ---------------------------------------------------------------------------
+//
+// These restate values that `odbc_sys::Operation` and `odbc_sys::Lock` also
+// carry, which the crate's odbc-sys rule would normally forbid. The exception
+// is deliberate: both are newtype structs over a *private* `i16` with no
+// accessor, no `From`, and no `#[repr]` enum to cast through, so an
+// `odbc_sys::Operation` can be compared against its own associated constants
+// and used for nothing else. The raw `SQLUSMALLINT` these functions actually
+// receive cannot be produced from, or recovered out of, either type. Until
+// odbc-sys exposes the inner value these are the only usable spelling.
 
 /// `SQL_POSITION` — position the cursor on the specified row.
 pub const SQL_POSITION: u16 = 0;
@@ -515,10 +537,6 @@ pub const SQL_UPDATE: u16 = 2;
 /// `SQL_DELETE` — delete the current row.
 pub const SQL_DELETE: u16 = 3;
 
-// ---------------------------------------------------------------------------
-// SQLSetPos lock type codes (sql.h)
-// ---------------------------------------------------------------------------
-
 /// `SQL_LOCK_NO_CHANGE` — leave the lock state unchanged.
 pub const SQL_LOCK_NO_CHANGE: u16 = 0;
 /// `SQL_LOCK_EXCLUSIVE` — lock the row exclusively.
@@ -526,26 +544,13 @@ pub const SQL_LOCK_EXCLUSIVE: u16 = 1;
 /// `SQL_LOCK_UNLOCK` — unlock the row.
 pub const SQL_LOCK_UNLOCK: u16 = 2;
 
-// ---------------------------------------------------------------------------
-// SQLBulkOperations operation codes (sqlext.h)
-// ---------------------------------------------------------------------------
-
-/// `SQL_ADD` — insert new rows using values from bound buffers.
-pub const SQL_ADD: i16 = 4;
-/// `SQL_UPDATE_BY_BOOKMARK` — update rows identified by bookmark.
-pub const SQL_UPDATE_BY_BOOKMARK: i16 = 5;
-/// `SQL_DELETE_BY_BOOKMARK` — delete rows identified by bookmark.
-pub const SQL_DELETE_BY_BOOKMARK: i16 = 6;
-/// `SQL_FETCH_BY_BOOKMARK` — fetch rows identified by bookmark.
-pub const SQL_FETCH_BY_BOOKMARK: i16 = 7;
-
-// ---------------------------------------------------------------------------
-// SQLGetDiagField diag_identifier values (sqlext.h)
-// ---------------------------------------------------------------------------
-
-/// `SQL_DIAG_MESSAGE_TEXT` — `SQLGetDiagField` record field: the diagnostic
-/// message text for the record.
-pub const SQL_DIAG_MESSAGE_TEXT: i16 = 6;
+// `SQLBulkOperations`'s operation codes are deliberately absent, unlike the two
+// groups above: `odbc_sys::BulkOperation` is a `#[repr(u16)]` enum, so it casts
+// to the ABI width and is usable end to end. Convert with
+// `bulk_operation_from_raw`; name a value with `BulkOperation::Add as i16`.
+//
+// `SQL_DIAG_MESSAGE_TEXT` is likewise absent: it is
+// `odbc_sys::HeaderDiagnosticIdentifier::MessageText`.
 
 // ---------------------------------------------------------------------------
 // SQLColAttribute SQL_DESC_UNNAMED values (sql.h)

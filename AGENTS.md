@@ -199,9 +199,21 @@ Available conversion functions (all in `src/types/conversions.rs` unless noted):
 - `identifier_type_from_raw(i16) -> Option<IdentifierType>`
 - `nullable_from_raw(i16) -> Option<Nullable>`
 - `scope_from_raw(i16) -> Option<Scope>`
+- `bulk_operation_from_raw(i16) -> Option<BulkOperation>`
 - `function_id_from_raw(u16) -> Option<FunctionId>` (in `function_id.rs`)
 
 If `odbc-sys` adds a new enum that we need to convert from raw values, add a `xxx_from_raw` function following the same pattern. Do not use `transmute`.
+
+`SQLSetPos`'s `Operation` and `LockType` are the one documented exception, and
+the reason generalises: an `odbc-sys` type is only usable here if the raw ABI
+value can be recovered from it. `odbc_sys::Operation` and `odbc_sys::Lock` are
+newtype structs over a **private** `i16` — no accessor, no `From`, and not a
+`#[repr]` enum to cast through — so a converted value can be compared against
+their associated constants and used for nothing else, and no caller or test can
+name a valid input. Those two validate against `SQL_POSITION` / `SQL_LOCK_*` in
+`types/constants.rs`, which is the exception that block's comment records.
+Before adding a conversion, check that the target type can round-trip; if it
+cannot, a named constant is the correct answer, not a worse conversion.
 
 ## Adding a new driver
 

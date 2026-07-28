@@ -20,6 +20,17 @@ markers go away and this section becomes the initial-release notes.
 
 ### Added
 
+- `bulk_operation_from_raw`, converting `SQLBulkOperations`'s raw `i16` into
+  `odbc_sys::BulkOperation` at the FFI boundary like every other ABI value.
+  `SQLSetPos`'s `Operation` and `LockType` deliberately have no equivalent:
+  `odbc_sys::Operation` and `odbc_sys::Lock` are newtype structs over a private
+  `i16` with no accessor, no `From` and no `#[repr]` enum to cast through, so a
+  converted value could be compared against their associated constants and used
+  for nothing else — neither core nor a driver could recover the raw code to
+  forward it. Those two keep validating against `SQL_POSITION` / `SQL_LOCK_*`,
+  which is recorded at both sites so it is not "fixed" into a conversion that
+  cannot work.
+
 - `OdbcError::with_native_error` and `OdbcError::with_source`, plus the
   `OdbcError::native_error` and `OdbcError::cause` accessors. A driver holding
   its data source's own error code and the failure that caused it can now carry
@@ -123,6 +134,28 @@ markers go away and this section becomes the initial-release notes.
   once instead of being transcribed into each driver.
 
 ### Changed
+
+- **Breaking.** `types` re-exports its constants by name instead of through a
+  `pub use constants::*` glob. Under the glob every `pub const` added to
+  `types/constants.rs` joined the public API silently; the surface is now a
+  decision rather than a by-product. Because `constants` is a private module, a
+  constant left out of the list and not used inside core is `dead_code`, which
+  the clippy hook already fails on — so an omission is caught at the point it is
+  made rather than discovered by a driver.
+
+  No constant that a driver can reach today was removed by this change alone
+  (see **Removed** for the five that went, each for its own reason). In
+  particular the `SQL_AT_*`, `SQL_OJ_*`, `SQL_FN_*` and `SQL_SQ_*` bitmask
+  families are all still exported despite core never referencing them: they are
+  the vocabulary a driver needs to build the values `Backend`'s required
+  capability methods return as bare integers. Reference count is not a signal of
+  whether a constant is needed here.
+
+- **Breaking.** `SQL_DATETIME` is derived from `odbc_sys::SqlDataType::DATETIME`
+  rather than restated as `9`. Its counterpart `SQL_INTERVAL` stays a literal
+  because `odbc-sys` has no `SqlDataType::INTERVAL`, only the concise
+  `EXT_INTERVAL_*` codes. The type is unchanged (`i16`), so no caller is
+  affected; the point is that the value now has one definition instead of two.
 
 - **Breaking.** The `Backend` capability declarations take
   `&Self::Connection`. `SQLGetInfo` is a per-connection call, so what a data
@@ -498,6 +531,22 @@ markers go away and this section becomes the initial-release notes.
   query id, say): `cancel_token` returns an empty shared slot, and the
   statement-producing call that actually runs the query fills it, because it
   now receives that exact token.
+
+### Removed
+
+- **Breaking.** `SQL_ADD`, `SQL_UPDATE_BY_BOOKMARK`, `SQL_DELETE_BY_BOOKMARK`
+  and `SQL_FETCH_BY_BOOKMARK`. `odbc_sys::BulkOperation` is a `#[repr(u16)]`
+  enum carrying all four, so these were the redefinition the crate's odbc-sys
+  rule forbids. Replace a use with `BulkOperation::Add as i16` (the form the
+  spec-value table in AGENTS.md already prescribes), or convert an incoming raw
+  value with `bulk_operation_from_raw`.
+
+- **Breaking.** `SQL_DIAG_MESSAGE_TEXT`, which restated
+  `odbc_sys::HeaderDiagnosticIdentifier::MessageText` as the literal `6`. It was
+  already dead inside core: `ffi/diag.rs` defines its own private constant
+  derived from the odbc-sys variant and used that instead, so the exported one
+  had no reader and no protection against drifting from the value core actually
+  compared against. Use `HeaderDiagnosticIdentifier::MessageText as i16`.
 
 ### Fixed
 
