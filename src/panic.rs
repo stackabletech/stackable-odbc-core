@@ -63,6 +63,30 @@ where
     }
 }
 
+/// Catch panics at the FFI boundary without acquiring any lock.
+///
+/// [`panic_safe`] cannot serve `sql_cancel`: it acquires the target handle's
+/// group lock unconditionally, and the whole point of `sql_cancel`'s
+/// `try_lock` bifurcation is to keep running when that lock is held by
+/// another thread. This sibling exists so the no-unwinding-across-the-C-ABI
+/// guarantee stays a single implementation rather than growing a second copy
+/// with its own `catch_unwind`.
+///
+/// `sql_cancel` is its only caller. Every other FFI entry point goes through
+/// [`panic_safe`], which additionally clears and pushes diagnostics under a
+/// held group lock — state `sql_cancel`'s cross-thread path must not touch,
+/// per the spec's own carve-out for cancelling a function running on another
+/// thread.
+pub(crate) fn panic_safe_unlocked<F>(f: F) -> SqlReturn
+where
+    F: FnOnce() -> SqlReturn,
+{
+    match std::panic::catch_unwind(AssertUnwindSafe(f)) {
+        Ok(ret) => ret,
+        Err(_panic) => SqlReturn::ERROR,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

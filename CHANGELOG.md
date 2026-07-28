@@ -895,5 +895,35 @@ markers go away and this section becomes the initial-release notes.
   for that variant). It now records a general error, so a genuinely failing
   connection's own SQLSTATE is no longer suppressed by a corrupt entry
   encountered before it.
+- **Breaking.** `SQLCancel` no longer takes its statement's connection lock
+  unconditionally. It clones the statement's cancel token out of the registry,
+  then attempts the connection group with `try_lock` instead of a blocking
+  `lock`: when another thread holds it, `SQLCancel` signals `Backend::cancel`
+  and returns immediately, clearing no diagnostics and posting none, matching
+  the spec's own carve-out for "a function running on the statement on another
+  thread" ("only SQL_SUCCESS or SQL_ERROR can be returned; no diagnostic
+  information is returned"). Previously it blocked on the same lock the query
+  it was asked to cancel was holding, so a cross-thread `SQLCancel` could never
+  run concurrently with the call it targeted — the one scenario this crate's
+  whole locking design exists to make sound. When the connection is free,
+  `SQLCancel` takes the uncontended lock and runs its full path: clearing
+  diagnostics, discarding any pending data-at-execution state, and posting its
+  own diagnostic on a failing `Backend::cancel`.
+
+  Two consequences of the lock-free path are worth knowing about rather than
+  discovering:
+  - `try_lock` cannot tell "a sibling statement on this connection is busy"
+    apart from "my own operation is busy": either makes `SQLCancel` take the
+    cross-thread branch, so a merely-idle statement's data-at-execution state
+    is occasionally left uncleared where it strictly could have been. Harmless,
+    and explicitly spec-legal ("How the function is canceled depends on the
+    driver and the operating system").
+  - A `SQLGetDiagRecW`/`SQLGetDiagFieldW` call immediately following a
+    cross-thread `SQLCancel` now blocks until the cancelled call has unwound
+    through the backend, because both of those take the connection's lock and
+    reading the diagnostic queue while another thread pushes to it is
+    undefined behaviour. `SQLCancel` itself still returns promptly; the wait
+    moves to whichever call reads diagnostics next, bounded by the backend's
+    own cancel latency.
 
 [Unreleased]: https://github.com/stackabletech/stackable-odbc-core/commits/HEAD

@@ -8,7 +8,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use crate::backend::{Backend, StatementBackend};
 use crate::errors::{IntoOdbc, OdbcError};
 use crate::handles::StatementHandle;
-use crate::panic::panic_safe;
+use crate::handles::registry::{HandleKind, registry};
+use crate::handles::scope::HandleScope;
+use crate::panic::{panic_safe, panic_safe_unlocked};
 #[cfg(test)]
 use crate::types::Nullable;
 use crate::types::{
@@ -302,12 +304,55 @@ pub unsafe fn sql_close_cursor<B: Backend>(statement_handle: *mut c_void) -> Sql
 ///
 /// Spec: <https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlcancel-function>
 ///
-/// Cancels an in-progress statement. If the statement has a cancel token
-/// (created by the first backend call it made; see `Backend::cancel_token`),
-/// this calls `Backend::cancel` with it. A statement that has never made a
-/// backend call has no token yet, and cancelling it is a no-op that still
-/// returns SUCCESS — the spec's own answer for "no processing in progress"
-/// (ODBC 3.5: cancelling then "has no effect at all").
+/// Cancels processing on a statement. The spec names three things this can
+/// cancel: a function running asynchronously on the statement, a function on
+/// the statement that needs data, and **a function running on the statement
+/// on another thread**. This implementation tells the third case apart from
+/// the first two by whether it can take the statement's connection lock
+/// without waiting:
+///
+/// - **Another thread holds the lock.** Per spec, cancelling a function
+///   running on another thread "does not clear the diagnostic records of the
+///   being canceled function and does not post its own diagnostic records",
+///   and "only SQL_SUCCESS or SQL_ERROR can be returned". So this path only
+///   signals `Backend::cancel` with the statement's token and touches no
+///   handle state — which is also the only sound thing to do, since another
+///   thread is in the middle of mutating that state. Taking the lock
+///   unconditionally here would make cancel wait for the very call it was
+///   asked to interrupt, which is why `try_lock` is load-bearing rather than
+///   an optimisation.
+/// - **The lock is free.** Nobody else is inside this connection, so this is
+///   the data-at-execution case, or ODBC 3.5's "no processing in progress, no
+///   effect at all" case. The full path runs: diagnostics are cleared (this
+///   function's own entry-clear, the same as every other FFI call makes — the
+///   cross-thread branch above is the spec's deliberate exception, not this
+///   one), any pending data-at-execution state is discarded, `Backend::cancel`
+///   runs, and its own diagnostic is posted if that fails.
+///
+/// The statement's cancel token is cloned out of the registry before either
+/// branch is chosen, and before the connection lock is even attempted. That
+/// ordering is load-bearing: the clone is what keeps the token alive if
+/// `SQLDisconnect` or `SQLFreeHandle` runs concurrently and tears the
+/// statement or its connection down mid-call — see `Registry::cancel_of`'s
+/// doc comment for the SQLite precedent this mirrors. Resolving the token
+/// after attempting the lock would leave a window in which the statement (and
+/// its token) could already be gone.
+///
+/// # Consequences of running lock-free
+///
+/// - `try_lock` cannot distinguish "a sibling statement on this connection is
+///   busy" from "my own statement's own operation is busy": either makes this
+///   function take the cross-thread branch, so a merely-idle statement's
+///   data-at-execution state is occasionally left uncleared where it strictly
+///   could have been cleared. Harmless, and explicitly spec-legal ("How the
+///   function is canceled depends on the driver and the operating system").
+/// - A `SQLGetDiagRecW`/`SQLGetDiagFieldW` call immediately following a
+///   cross-thread cancel now blocks until the cancelled call has unwound
+///   through the backend: both of those take the connection's lock, and
+///   reading the diagnostic queue while another thread pushes to it is
+///   undefined behaviour, so there is no sound alternative. `SQLCancel`
+///   itself still returns promptly; the wait moves to whichever call reads
+///   diagnostics next, bounded by the backend's own cancel latency.
 ///
 /// # Parameters
 ///
@@ -317,57 +362,111 @@ pub unsafe fn sql_close_cursor<B: Backend>(statement_handle: *mut c_void) -> Sql
 ///
 /// Diagnostics table from the ODBC spec:
 ///
-/// - 01000 (general warning): driver-specific informational message — not produced here.
-/// - HY000 (general error): returned via `OdbcError::general` for unexpected failures.
-/// - HY001 (memory allocation error): not applicable; Rust allocation panics are caught by
-///   `panic_safe`.
-/// - HY010 (function sequence error): (driver-manager-handled; not returned here)
-/// - HY013 (memory management error): not applicable; Rust memory access cannot fail silently.
-/// - HY018 (server declined cancel request): propagated from `Backend::cancel` — mapping a
-///   declined cancellation to this SQLSTATE is the backend's error-mapping function's job, not
-///   core's.
-/// - HY117 (connection suspended): (driver-manager-handled; not returned here)
-/// - HYT01 (connection timeout): not applicable; the framework is in-process.
-/// - IM001 (driver does not support function): (driver-manager-handled; not returned here)
+/// - 01000 (general warning): driver-specific informational message
+///   (`SQL_SUCCESS_WITH_INFO`) — not produced here; this function only ever
+///   returns `SQL_SUCCESS`, `SQL_ERROR` or `SQL_INVALID_HANDLE`.
+/// - HY000 (general error): may surface from the backend's own error-mapping
+///   function for an otherwise-unclassified `Backend::cancel` failure.
+/// - HY001 (memory allocation error): not applicable; Rust allocation panics
+///   are caught by `panic_safe_unlocked`, this function's own panic guard
+///   (`panic_safe` cannot be used here — see that function's doc comment for
+///   why).
+/// - HY010 (function sequence error): the spec's whole entry for this
+///   SQLSTATE is `(DM)`-prefixed (an asynchronous function on the associated
+///   connection handle still executing); driver-manager-handled, not returned
+///   here.
+/// - HY013 (memory management error): not applicable; Rust memory access
+///   cannot fail silently.
+/// - HY018 (server declined cancel request): propagated from `Backend::cancel`
+///   — mapping a declined cancellation to this SQLSTATE is the backend's
+///   error-mapping function's job, not core's.
+/// - HY117 (connection suspended): `(DM)`; not returned here.
+/// - HYT01 (connection timeout expired): may surface from `Backend::cancel` if
+///   signalling the data source itself times out.
+/// - IM001 (driver does not support this function): `(DM)`; not returned here.
 ///
 /// # Safety
 ///
-/// `statement_handle` must point to a valid `StatementHandle<B>`.
-// TODO(task-15): SQLCancel must not take the group lock; rewritten with the
-// cancel token.
+/// `statement_handle` must be null or a token issued by `sql_alloc_handle`.
 pub unsafe fn sql_cancel<B: Backend>(statement_handle: *mut c_void) -> SqlReturn {
     tracing::debug!("SQLCancel(stmt={:?})", statement_handle);
-    // SAFETY: statement_handle is either null or a valid StatementHandle<B> pointer
-    // previously allocated by sql_alloc_handle. scope.get validates kind and group
-    // before any cast, and panic_safe catches any panics.
-    let ret = unsafe {
-        panic_safe::<B, _>(statement_handle, |scope| {
-            let stmt = scope.get::<StatementHandle<B>>(statement_handle)?;
-            stmt.diagnostics.clear();
 
-            // Stopgap: still resolves the token through the group lock this
-            // scope already holds. Task 15 removes the lock from this path
-            // and reads the token without going through the scope at all.
-            //
-            // A statement with no token yet (never made a backend call, or
-            // the connection was never open) has nothing to cancel, per the
-            // spec's own answer for "cancel with no processing in progress".
-            if let Some(token) = crate::handles::registry::registry().cancel_of(statement_handle)
-                && let Some(token) = token.downcast_ref::<B::CancelToken>()
-            {
-                match B::cancel(token).into_odbc() {
-                    Ok(()) => {}
-                    // NotImplemented is fine; no pending operation to cancel.
-                    Err(crate::errors::OdbcError::NotImplemented { .. }) => {}
-                    Err(e) => return Err(e),
-                }
-            }
+    // Cloned out of the registry before anything else — in particular, before
+    // the `try_lock` below — so this `Arc` keeps the backend's token alive
+    // even if `SQLDisconnect` or `SQLFreeHandle` frees this statement or its
+    // connection on another thread while this call is in flight. `None` here
+    // covers a stale/foreign token as well as a live statement that has made
+    // no backend call yet; both are indistinguishable from "nothing to
+    // cancel" and handled identically by `signal_cancel` below.
+    let token = registry()
+        .cancel_of(statement_handle)
+        .and_then(|t| t.downcast::<B::CancelToken>().ok());
 
-            Ok(SqlReturn::SUCCESS)
-        })
+    // A live statement always has a lock group; a null, stale or wrong-kind
+    // handle does not. This check has to happen before either branch below,
+    // because neither a successful nor a failed `try_lock` can tell "invalid
+    // handle" apart from "idle" or "busy" on its own.
+    let Some(group) = registry().group_of_kind(statement_handle, HandleKind::Stmt) else {
+        tracing::debug!("SQLCancel -> {:?}", SqlReturn::INVALID_HANDLE);
+        return SqlReturn::INVALID_HANDLE;
     };
+
+    let guard = group.try_lock();
+
+    let ret = panic_safe_unlocked(|| match guard {
+        // Another thread holds the connection: signal only, per spec.
+        None => match signal_cancel::<B>(&token) {
+            Ok(()) => SqlReturn::SUCCESS,
+            Err(e) => {
+                tracing::warn!("SQLCancel: backend cancel failed while connection busy: {e}");
+                SqlReturn::ERROR
+            }
+        },
+        // Nobody else is here: the data-at-execution / no-processing case.
+        Some(guard) => {
+            let mut scope = HandleScope::new(Some(group.clone()), Some(&guard));
+            let ret = match scope.get::<StatementHandle<B>>(statement_handle) {
+                Ok(stmt) => {
+                    stmt.diagnostics.clear();
+                    // Spec: after cancelling a statement that needed data,
+                    // the application may call SQLExecute/SQLExecDirect
+                    // again, so any pending data-at-execution state must be
+                    // discarded along with it.
+                    stmt.data_at_exec = None;
+                    match signal_cancel::<B>(&token) {
+                        Ok(()) => SqlReturn::SUCCESS,
+                        Err(e) => {
+                            stmt.diagnostics.push(&e);
+                            SqlReturn::ERROR
+                        }
+                    }
+                }
+                Err(_) => SqlReturn::INVALID_HANDLE,
+            };
+            drop(guard);
+            ret
+        }
+    });
+
     tracing::debug!("SQLCancel -> {:?}", ret);
     ret
+}
+
+/// Call `Backend::cancel` if `token` names one, folding `NotImplemented` in
+/// alongside "no token yet" as "nothing to cancel".
+///
+/// Shared by both of `sql_cancel`'s branches so that fold-in exists in exactly
+/// one place rather than being duplicated per branch.
+fn signal_cancel<B: Backend>(
+    token: &Option<std::sync::Arc<B::CancelToken>>,
+) -> Result<(), OdbcError> {
+    let Some(token) = token else {
+        return Ok(());
+    };
+    match B::cancel(token).into_odbc() {
+        Ok(()) | Err(OdbcError::NotImplemented { .. }) => Ok(()),
+        Err(e) => Err(e),
+    }
 }
 
 /// Generic implementation of SQLGetCursorNameW.
@@ -1070,10 +1169,11 @@ mod tests {
             });
 
             // This statement has no cancel token (nothing has stored one), so
-            // `sql_cancel` takes the no-token early return regardless of
-            // cursor state, it is not a general claim that cancelling an
-            // open cursor is always a no-op. `cancel_calls_backend_cancel_...`
-            // below is what exercises `Backend::cancel` actually running.
+            // `signal_cancel` finds nothing to call and `sql_cancel` returns
+            // SUCCESS without touching the cursor; it is not a general claim
+            // that cancelling an open cursor is always a no-op.
+            // `cancel_calls_backend_cancel_...` below is what exercises
+            // `Backend::cancel` actually running.
             let ret = sql_cancel::<MockBackend>(stmt);
             assert_eq!(ret, SqlReturn::SUCCESS);
             // Cursor must still be open; cancel does not close it.
@@ -1130,11 +1230,11 @@ mod tests {
         }
     }
 
-    /// `sql_cancel`'s stopgap resolves a stored token through the registry and
-    /// hands it to `Backend::cancel`. This test seeds the registry directly
-    /// with `set_cancel` rather than going through a statement-producing call,
-    /// so it can exercise that read in isolation from the call that would
-    /// normally have created the token first.
+    /// `sql_cancel` resolves the statement's stored token through the
+    /// registry and hands it to `Backend::cancel`. This test seeds the
+    /// registry directly with `set_cancel` rather than going through a
+    /// statement-producing call, so it can exercise that read in isolation
+    /// from the call that would normally have created the token first.
     #[test]
     fn cancel_calls_backend_cancel_when_a_token_exists() {
         unsafe {
@@ -1157,7 +1257,7 @@ mod tests {
         }
     }
 
-    /// The error-propagation arm of `sql_cancel`'s stopgap: `Backend::cancel`
+    /// The error-propagation arm of `signal_cancel`: `Backend::cancel`
     /// returning `Err` must reach the caller as `SQL_ERROR` rather than being
     /// swallowed like `NotImplemented` is. `MockBackend` cannot produce this,
     /// since its `Error` is `MockError`, which converts to `OdbcError` as
@@ -1231,6 +1331,132 @@ mod tests {
             });
 
             cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
+    /// As [`cancel_clears_diagnostics`], stated in the words of the spec's own
+    /// bifurcation: with nobody else inside the connection, `SQLCancel` takes
+    /// the full path and clears diagnostics unconditionally -- the same
+    /// entry-clear every other FFI function performs. Only the cross-thread
+    /// branch (`cancel_signals_the_backend_while_another_thread_holds_the_group`
+    /// below) is the spec's deliberate exception to that.
+    #[test]
+    fn cancel_on_an_idle_statement_clears_diagnostics() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |h| {
+                h.diagnostics.push(&crate::errors::OdbcError::NotConnected);
+            });
+
+            let ret = sql_cancel::<MockBackend>(stmt);
+            assert_eq!(ret, SqlReturn::SUCCESS);
+
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |h| {
+                assert_eq!(h.diagnostics.len(), 0);
+            });
+            cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
+    /// The spec's own bifurcation, exercised from the other side: when another
+    /// thread holds the connection, `SQLCancel` must still reach the backend
+    /// without waiting for that thread to finish. Before this task's rewrite,
+    /// `sql_cancel` took the group lock unconditionally, so this test hangs
+    /// (verified with `timeout 30 cargo test --lib
+    /// cancel_signals_the_backend_while_another_thread_holds_the_group`,
+    /// which times out against the pre-fix code) rather than completing.
+    #[test]
+    fn cancel_signals_the_backend_while_another_thread_holds_the_group() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+
+            let token = std::sync::Arc::new(crate::test_utils::MockCancelToken::default());
+            registry().set_cancel(
+                stmt,
+                std::sync::Arc::clone(&token) as std::sync::Arc<dyn std::any::Any + Send + Sync>,
+            );
+
+            // Occupy the group, as a thread mid-execute would.
+            let group = registry().group_of(stmt).expect("live");
+            let (holding_tx, holding_rx) = std::sync::mpsc::channel::<()>();
+            let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+            let holder = std::thread::spawn(move || {
+                let _guard = group.lock();
+                holding_tx.send(()).expect("main thread still waiting");
+                release_rx.recv().expect("main thread still running");
+            });
+            holding_rx
+                .recv()
+                .expect("worker thread panicked before locking");
+
+            let ret = sql_cancel::<MockBackend>(stmt);
+            assert_eq!(ret, SqlReturn::SUCCESS);
+            assert!(
+                token.cancelled.load(Ordering::SeqCst),
+                "the backend must be signalled even with the group held"
+            );
+
+            release_tx
+                .send(())
+                .expect("worker thread still waiting to release");
+            holder.join().expect("worker thread panicked");
+
+            cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
+    /// A cancel that has already cloned its token must survive the statement
+    /// being freed underneath it -- the SQLite close-during-interrupt hazard
+    /// `Registry::cancel_of`'s doc comment names. Unlike
+    /// `a_cloned_cancel_token_survives_the_handle_being_freed`
+    /// (`handles::registry`'s own unit test, which drives `Registry::unregister`
+    /// directly), this goes through the real `SQLFreeHandle` cascade -- the
+    /// statement, then its connection, then the environment -- to prove the
+    /// clone survives the production teardown path, not only the registry
+    /// primitive it is built from.
+    #[test]
+    fn a_cloned_token_outlives_the_statement() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+
+            let token = std::sync::Arc::new(crate::test_utils::MockCancelToken::default());
+            registry().set_cancel(
+                stmt,
+                std::sync::Arc::clone(&token) as std::sync::Arc<dyn std::any::Any + Send + Sync>,
+            );
+
+            let held = registry().cancel_of(stmt).expect("token");
+            assert_eq!(
+                crate::handles::free_statement::<MockBackend>(stmt),
+                SqlReturn::SUCCESS
+            );
+
+            // Still usable: this is the call `SQLCancel` would be making.
+            let held_token = held
+                .downcast_ref::<crate::test_utils::MockCancelToken>()
+                .expect("type");
+            held_token.cancelled.store(true, Ordering::SeqCst);
+            assert!(token.cancelled.load(Ordering::SeqCst));
+
+            // The rest of the cascade: `free_environment`/`free_connection`
+            // need a `&mut HandleScope`, so drive them the way an application
+            // does, through `sql_free_handle`, rather than reaching for the
+            // lower-level `handles::free_*` primitives `free_statement` above
+            // is the exception to (it needs no scope at all).
+            assert_eq!(
+                crate::ffi::handle::sql_free_handle::<MockBackend>(
+                    odbc_sys::HandleType::Dbc as i16,
+                    conn
+                ),
+                SqlReturn::SUCCESS
+            );
+            assert_eq!(
+                crate::ffi::handle::sql_free_handle::<MockBackend>(
+                    odbc_sys::HandleType::Env as i16,
+                    env
+                ),
+                SqlReturn::SUCCESS
+            );
         }
     }
 

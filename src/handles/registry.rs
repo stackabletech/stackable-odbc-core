@@ -91,10 +91,6 @@ fn decode_token(token: *mut c_void) -> (usize, u32) {
 /// half-written value of a real type sitting in the guard for that next
 /// caller to read out.
 pub(crate) struct GroupLock {
-    #[allow(
-        dead_code,
-        reason = "read by lock()/try_lock(), which have no caller until the ffi/*.rs migrations (tasks 5-11) and SQLCancel (task 15) take the group lock this type guards"
-    )]
     inner: Mutex<()>,
 }
 
@@ -115,10 +111,6 @@ impl GroupLock {
     ///
     /// `SQLCancel` uses this to answer the one question that separates the
     /// spec's two cancel cases: is another thread inside this connection?
-    #[allow(
-        dead_code,
-        reason = "no caller until SQLCancel (task 15) stops taking the group lock and uses this instead"
-    )]
     pub(crate) fn try_lock(&self) -> Option<MutexGuard<'_, ()>> {
         match self.inner.try_lock() {
             Ok(guard) => Some(guard),
