@@ -652,3 +652,253 @@ mod tests {
         handle.join().expect("worker thread panicked");
     }
 }
+
+/// loom models of this module's lock discipline.
+///
+/// Run with `RUSTFLAGS="--cfg loom" cargo test --lib loom_tests`; see
+/// AGENTS.md's "Concurrency: the lock discipline" section for the design
+/// these check. The `loom_tests` filter is required, not cosmetic: every
+/// other unit test in the crate also runs under `--cfg loom` once it is set,
+/// and calls the process-wide registry outside a `loom::model`, which panics
+/// (see [`registry`]'s doc comment) — the filter keeps this crate's ordinary
+/// tests out of a build they were never meant to run under.
+///
+/// Every model builds its own [`Registry`] rather than calling [`registry`]:
+/// that function panics outside an active `loom::model` closure, and cannot
+/// be called safely from inside one either, because loom replays the same
+/// closure many times to explore interleavings while a `static` only runs its
+/// initializer once — see `registry`'s own doc comment. A model therefore
+/// never drives `alloc_environment`, `alloc_connection`, `alloc_statement`,
+/// the `free_*` functions in `handles::mod`, `HandleScope`, `panic_safe`, or
+/// `sql_cancel` — all of them resolve that process-wide singleton internally.
+/// What follows proves properties of [`Registry`] and [`GroupLock`], where the
+/// lock discipline actually lives, not of the FFI entry points that sit on
+/// top of them.
+#[cfg(all(test, loom))]
+mod loom_tests {
+    use super::*;
+    use loom::sync::atomic::{AtomicBool, Ordering};
+    use loom::thread;
+
+    /// A statement and its connection share a group, so a call that touches
+    /// both takes exactly one lock. If they did not, this model would
+    /// deadlock on the interleaving where each thread holds one and wants the
+    /// other.
+    #[test]
+    fn one_acquisition_covers_a_statement_and_its_parent() {
+        loom::model(|| {
+            let reg = Arc::new(Registry::new());
+            let group = GroupLock::new();
+            let (conn, _, _) = reg
+                .register(HandleKind::Dbc, 0x1000, Arc::clone(&group), None)
+                .expect("registered");
+            let (stmt, _, _) = reg
+                .register(
+                    HandleKind::Stmt,
+                    0x2000,
+                    Arc::clone(&group),
+                    Some(conn as usize),
+                )
+                .expect("registered");
+
+            let a = {
+                let reg = Arc::clone(&reg);
+                thread::spawn(move || {
+                    let g = reg.group_of(stmt).expect("live");
+                    let _guard = g.lock();
+                    assert!(reg.resolve(stmt, HandleKind::Stmt).is_some());
+                    assert!(reg.resolve(conn, HandleKind::Dbc).is_some());
+                })
+            };
+            let b = {
+                let reg = Arc::clone(&reg);
+                thread::spawn(move || {
+                    let g = reg.group_of(conn).expect("live");
+                    let _guard = g.lock();
+                    assert!(reg.resolve(conn, HandleKind::Dbc).is_some());
+                })
+            };
+            a.join().expect("thread a panicked");
+            b.join().expect("thread b panicked");
+        });
+    }
+
+    /// `SQLCancel` must reach the backend on every interleaving, including the
+    /// one where the other thread holds the group for the whole model. A
+    /// cancel that waited for the lock would be a cancel that waits for the
+    /// query it is cancelling.
+    #[test]
+    fn cancel_never_waits_for_the_group() {
+        loom::model(|| {
+            let reg = Arc::new(Registry::new());
+            let group = GroupLock::new();
+            let (stmt, _, _) = reg
+                .register(HandleKind::Stmt, 0x1000, Arc::clone(&group), None)
+                .expect("registered");
+            let flag = StdArc::new(AtomicBool::new(false));
+            reg.set_cancel(stmt, StdArc::clone(&flag) as StdArc<dyn Any + Send + Sync>);
+
+            let executor = {
+                let g = Arc::clone(&group);
+                thread::spawn(move || {
+                    let _guard = g.lock();
+                })
+            };
+            let canceller = {
+                let reg = Arc::clone(&reg);
+                thread::spawn(move || {
+                    let token = reg.cancel_of(stmt).expect("token still set");
+                    token
+                        .downcast_ref::<AtomicBool>()
+                        .expect("type")
+                        .store(true, Ordering::SeqCst);
+                })
+            };
+
+            executor.join().expect("executor panicked");
+            canceller.join().expect("canceller panicked");
+            assert!(flag.load(Ordering::SeqCst), "cancel must always land");
+        });
+    }
+
+    /// The clone taken before any lock is what makes a cancel safe against a
+    /// free on another thread. This is the SQLite close-during-interrupt
+    /// hazard as a model rather than a comment: [`Registry::cancel_of`]'s
+    /// clone racing [`Registry::unregister`] is the actual interleaving
+    /// `sql_cancel` (`ffi::cursor`) exposes to a concurrent
+    /// `SQLFreeHandle`/`SQLDisconnect`, since freeing a statement never takes
+    /// the group lock (`free_statement_allocation`, `handles::mod`) any more
+    /// than `sql_cancel`'s cross-thread branch does.
+    ///
+    /// This is the strongest model available for the ordering `sql_cancel`
+    /// uses (clone the token, *then* attempt `try_lock`): every step in that
+    /// sequence — `cancel_of`, `group_of_kind`, `try_lock` — is a bounds- and
+    /// generation-checked lookup that returns an owned value or `None`, never
+    /// a stale reference, so no interleaving of either call order with a
+    /// concurrent `unregister` produces a state distinguishable from this one.
+    /// What the ordering actually narrows is the window in which a
+    /// sufficiently fast concurrent free makes `cancel_of` observe `None`
+    /// instead of `Some` — a race in *outcome*, not in soundness, and both
+    /// outcomes are safe. There is consequently no assertion that holds for
+    /// this order and fails for its reverse; a swapped `sql_cancel` still
+    /// only ever reads a live token or correctly gets nothing. Reviewing the
+    /// two lines in `sql_cancel` is what continues to guard that ordering.
+    #[test]
+    fn a_cancel_token_survives_a_concurrent_free() {
+        loom::model(|| {
+            let reg = Arc::new(Registry::new());
+            let (stmt, _, _) = reg
+                .register(HandleKind::Stmt, 0x1000, GroupLock::new(), None)
+                .expect("registered");
+            let live = StdArc::new(AtomicBool::new(true));
+            reg.set_cancel(stmt, StdArc::clone(&live) as StdArc<dyn Any + Send + Sync>);
+
+            let freer = {
+                let reg = Arc::clone(&reg);
+                thread::spawn(move || {
+                    reg.unregister(stmt, HandleKind::Stmt);
+                })
+            };
+            let canceller = {
+                let reg = Arc::clone(&reg);
+                thread::spawn(move || {
+                    if let Some(token) = reg.cancel_of(stmt) {
+                        // Holding the clone, the target must still be alive.
+                        assert!(StdArc::strong_count(&token) >= 1);
+                    }
+                })
+            };
+
+            freer.join().expect("freer panicked");
+            canceller.join().expect("canceller panicked");
+        });
+    }
+
+    /// `SQLEndTran(SQL_HANDLE_ENV)` walking a connection that is freed
+    /// underneath it must skip that connection, not report failure.
+    ///
+    /// The race has two exits and they are easy to conflate: the registry may
+    /// already show the slot retired when the group is resolved, or the
+    /// resolve may succeed and the *lock* then block on the freeing thread, so
+    /// the staleness is only discovered on the subsequent handle lookup. Both
+    /// must reach the same skip.
+    ///
+    /// This is the model the freed-connection fix has no unit test for: the
+    /// interleaving cannot be forced single-threaded, because any
+    /// deterministic reproduction re-exercises the first exit rather than the
+    /// second.
+    #[test]
+    fn a_connection_freed_mid_end_tran_is_skipped_not_reported() {
+        loom::model(|| {
+            let reg = Arc::new(Registry::new());
+            let env_group = GroupLock::new();
+            let (env, _, _) = reg
+                .register(HandleKind::Env, 0x1000, env_group, None)
+                .expect("registered");
+            let conn_group = GroupLock::new();
+            let (conn, _, _) = reg
+                .register(
+                    HandleKind::Dbc,
+                    0x2000,
+                    Arc::clone(&conn_group),
+                    Some(env as usize),
+                )
+                .expect("registered");
+
+            let freer = {
+                let reg = Arc::clone(&reg);
+                thread::spawn(move || {
+                    reg.unregister(conn, HandleKind::Dbc);
+                })
+            };
+
+            // The walk: snapshot, then resolve each child's group, then look
+            // it up.
+            let walker = {
+                let reg = Arc::clone(&reg);
+                thread::spawn(move || {
+                    for token in reg.children_of(env) {
+                        let Some(group) = reg.group_of(token) else {
+                            continue; // exit one: already retired
+                        };
+                        let _guard = group.lock();
+                        if reg.resolve(token, HandleKind::Dbc).is_none() {
+                            continue; // exit two: stale after the lock
+                        }
+                    }
+                })
+            };
+
+            freer.join().expect("freer panicked");
+            walker.join().expect("walker panicked");
+            // Reaching here on every interleaving is the assertion: neither
+            // exit panics, blocks forever, or produces a handle the walk
+            // would misreport.
+        });
+    }
+
+    /// Environment before connection, the crate's one ordering rule. Two
+    /// threads taking the pair in the same order cannot deadlock; loom proves
+    /// it by exploring every interleaving rather than by not observing one.
+    #[test]
+    fn env_before_connection_cannot_deadlock() {
+        loom::model(|| {
+            let env_group = GroupLock::new();
+            let conn_group = GroupLock::new();
+
+            let t = {
+                let e = Arc::clone(&env_group);
+                let c = Arc::clone(&conn_group);
+                thread::spawn(move || {
+                    let _env = e.lock();
+                    let _conn = c.lock();
+                })
+            };
+            {
+                let _env = env_group.lock();
+                let _conn = conn_group.lock();
+            }
+            t.join().expect("thread panicked");
+        });
+    }
+}

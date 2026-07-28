@@ -156,8 +156,8 @@ jobs:
     timeout-minutes: 20
     needs: [unit-tests]
     steps:
-      # odbc-sys links against libodbc/libodbcinst, so linking the loom test
-      # binary needs the same host dependency as the other jobs.
+      # odbc-sys links against libodbc/libodbcinst, so linking the test binary
+      # needs the same host dependency as the other jobs.
       - name: Install host dependencies
         uses: awalsh128/cache-apt-pkgs-action@acb598e5ddbc6f68a970c5da0688d2f3a9f04d05 # v1.6.0
         with:
@@ -180,8 +180,12 @@ jobs:
 
       # `--cfg loom` swaps every lock in `src/sync.rs` for loom's instrumented
       # equivalent, so this is a full rebuild of the crate and cannot share a
-      # cache with the normal test job.
-      - run: RUSTFLAGS="--cfg loom" cargo test --test loom_handles
+      # cache with the normal test job. The models live in
+      # `src/handles/registry.rs` as `#[cfg(all(test, loom))]`; the `loom_tests`
+      # filter is required, not cosmetic, because every other unit test in the
+      # crate still calls the process-wide registry outside a `loom::model`,
+      # which panics once `Registry::new` resolves to loom's `RwLock`.
+      - run: RUSTFLAGS="--cfg loom" cargo test --lib loom_tests
         env:
           LOOM_MAX_PREEMPTIONS: "3"
 
