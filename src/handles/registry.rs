@@ -372,10 +372,6 @@ impl Registry {
     }
 
     /// Attach a cancel token to a live handle. Replaces any previous one.
-    #[allow(
-        dead_code,
-        reason = "no production caller until task 14 wires handles::resolve_cancel_token into the nine statement-producing call sites; exercised today only by resolve_cancel_token's own unit test"
-    )]
     pub(crate) fn set_cancel(&self, token: *mut c_void, cancel: StdArc<dyn Any + Send + Sync>) {
         if token.is_null() {
             return;

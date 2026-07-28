@@ -1112,9 +1112,23 @@ pub unsafe fn sql_param_data<B: Backend>(
                 ));
             };
 
+            // The token exists once this statement makes its first
+            // backend call; created here on demand, then reused for every
+            // later call on the same statement (see `resolve_cancel_token`).
+            let cancel_token =
+                crate::handles::resolve_cancel_token::<B>(statement_handle, connection);
+            let cancel = cancel_token
+                .downcast_ref::<B::CancelToken>()
+                .ok_or_else(|| {
+                    OdbcError::general(
+                        "Statement's cancel token is not this backend's CancelToken type",
+                        SqlState::general_error(),
+                    )
+                })?;
+
             // If statement was closed (e.g. SQLFreeStmt(SQL_CLOSE)), re-prepare.
             if stmt.statement.is_none() {
-                let prepared = B::prepare(connection, &sql).into_odbc()?;
+                let prepared = B::prepare(connection, cancel, &sql).into_odbc()?;
                 stmt.set_prepared_statement(crate::handles::StatementData::Backend(prepared));
             }
 
@@ -1124,7 +1138,7 @@ pub unsafe fn sql_param_data<B: Backend>(
 
             match stmt_data {
                 crate::handles::StatementData::Backend(backend_stmt) => {
-                    B::execute(connection, backend_stmt, &params).into_odbc()?;
+                    B::execute(connection, cancel, backend_stmt, &params).into_odbc()?;
                 }
                 crate::handles::StatementData::Synthetic(_) => {
                     return Err(OdbcError::general(

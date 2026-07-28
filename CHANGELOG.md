@@ -436,6 +436,20 @@ markers go away and this section becomes the initial-release notes.
   `type CancelToken = ();` and `fn cancel_token(_: &Self::Connection) {}` and
   move on (`cancel` itself already defaults to `NotImplemented`).
 
+  All nine statement-producing methods (`exec_direct`, `prepare`, `execute`,
+  `tables`, `columns`, `primary_keys`, `foreign_keys`, `statistics`,
+  `special_columns`) now take `cancel: &Self::CancelToken` immediately after
+  `conn`. `get_type_info` does not, since it returns a `&'static` slice with no
+  I/O to cancel. This is what makes `cancel_token`'s doc comment followable for
+  a backend whose cancellation needs a value only known at execution time (a
+  query id, say): `cancel_token` returns an empty shared slot, and the
+  statement-producing call that actually runs the query fills it, because it
+  now receives that exact token. Core resolves the token via a `pub(crate)`
+  `resolve_cancel_token` immediately before the backend call, once per
+  function (ten call sites in total, feeding the fourteen individual backend
+  calls across `exec_direct`/`prepare`/`execute`), so every one gets it the
+  same way.
+
 ### Fixed
 
 - `SQLGetData` and `SQLFetch` perform the temporal struct conversions the

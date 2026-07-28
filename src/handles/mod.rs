@@ -620,10 +620,6 @@ pub unsafe fn alloc_statement<B: Backend>(
 /// the check-then-set below race-free with no synchronisation of its own: two
 /// threads can never be inside this function for the same statement at the
 /// same time.
-#[allow(
-    dead_code,
-    reason = "no production caller until task 14 wires this into the nine statement-producing call sites; exercised today by its own unit test"
-)]
 pub(crate) fn resolve_cancel_token<B: Backend>(
     stmt_token: *mut c_void,
     connection: &B::Connection,

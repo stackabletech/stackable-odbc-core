@@ -180,6 +180,20 @@ pub unsafe fn sql_exec_direct_w<B: Backend>(
                 }
             }
 
+            // The token exists once this statement makes its first
+            // backend call; created here on demand, then reused for every
+            // later call on the same statement (see `resolve_cancel_token`).
+            let cancel_token =
+                crate::handles::resolve_cancel_token::<B>(statement_handle, connection);
+            let cancel = cancel_token
+                .downcast_ref::<B::CancelToken>()
+                .ok_or_else(|| {
+                    OdbcError::general(
+                        "Statement's cancel token is not this backend's CancelToken type",
+                        SqlState::general_error(),
+                    )
+                })?;
+
             // `Backend::exec_direct` takes no parameters, so a parameterised
             // statement must go through prepare + execute, which binds them.
             // Routing it to exec_direct would send the literal `?` to the
@@ -187,8 +201,8 @@ pub unsafe fn sql_exec_direct_w<B: Backend>(
             let result = if param_count > 0 {
                 // SAFETY: caller guarantees all bound buffer pointers remain valid.
                 let params = crate::ffi::params::collect_params(&stmt.param_bindings, param_count)?;
-                let mut prepared = B::prepare(connection, &sql).into_odbc()?;
-                let outcome = B::execute(connection, &mut prepared, &params).into_odbc()?;
+                let mut prepared = B::prepare(connection, cancel, &sql).into_odbc()?;
+                let outcome = B::execute(connection, cancel, &mut prepared, &params).into_odbc()?;
                 // SAFETY: the application's bound output buffer pointers remain
                 // valid per the caller contract (same guarantee collect_params relies on).
                 // Already inside the enclosing `unsafe` context, like collect_params above.
@@ -198,7 +212,7 @@ pub unsafe fn sql_exec_direct_w<B: Backend>(
                 )?;
                 prepared
             } else {
-                B::exec_direct(connection, &sql).into_odbc()?
+                B::exec_direct(connection, cancel, &sql).into_odbc()?
             };
             // Opens a cursor only if the statement actually returned columns.
             stmt.set_result_set(crate::handles::StatementData::Backend(result));
@@ -334,8 +348,22 @@ pub unsafe fn sql_prepare_w<B: Backend>(
             };
             let param_count = crate::ffi::params::count_params(&sql);
 
+            // The token exists once this statement makes its first
+            // backend call; created here on demand, then reused for every
+            // later call on the same statement (see `resolve_cancel_token`).
+            let cancel_token =
+                crate::handles::resolve_cancel_token::<B>(statement_handle, connection);
+            let cancel = cancel_token
+                .downcast_ref::<B::CancelToken>()
+                .ok_or_else(|| {
+                    OdbcError::general(
+                        "Statement's cancel token is not this backend's CancelToken type",
+                        SqlState::general_error(),
+                    )
+                })?;
+
             // Ask backend to validate and prepare the statement.
-            let prepared = B::prepare(connection, &sql).into_odbc()?;
+            let prepared = B::prepare(connection, cancel, &sql).into_odbc()?;
 
             // Prepared, not executed (S2/S3): no cursor is open, and a
             // re-prepare closes any cursor the previous execution left open.
@@ -487,6 +515,20 @@ pub unsafe fn sql_execute<B: Backend>(statement_handle: *mut c_void) -> SqlRetur
                 ));
             };
 
+            // The token exists once this statement makes its first
+            // backend call; created here on demand, then reused for every
+            // later call on the same statement (see `resolve_cancel_token`).
+            let cancel_token =
+                crate::handles::resolve_cancel_token::<B>(statement_handle, connection);
+            let cancel = cancel_token
+                .downcast_ref::<B::CancelToken>()
+                .ok_or_else(|| {
+                    OdbcError::general(
+                        "Statement's cancel token is not this backend's CancelToken type",
+                        SqlState::general_error(),
+                    )
+                })?;
+
             // `SQLFreeStmt(SQL_CLOSE)` clears `stmt.statement` (discards the result set)
             // but the prepared SQL survives in `stmt.prepared_sql`. Per ODBC spec, calling
             // `SQLExecute` after `SQL_CLOSE` re-executes the same prepared statement.
@@ -497,7 +539,7 @@ pub unsafe fn sql_execute<B: Backend>(statement_handle: *mut c_void) -> SqlRetur
                         SqlState::function_sequence_error(),
                     )
                 })?;
-                let prepared = B::prepare(connection, sql).into_odbc()?;
+                let prepared = B::prepare(connection, cancel, sql).into_odbc()?;
                 stmt.set_prepared_statement(crate::handles::StatementData::Backend(prepared));
             }
 
@@ -510,7 +552,7 @@ pub unsafe fn sql_execute<B: Backend>(statement_handle: *mut c_void) -> SqlRetur
 
             let outcome = match stmt_data {
                 crate::handles::StatementData::Backend(backend_stmt) => {
-                    B::execute(connection, backend_stmt, &params).into_odbc()?
+                    B::execute(connection, cancel, backend_stmt, &params).into_odbc()?
                 }
                 crate::handles::StatementData::Synthetic(_) => {
                     return Err(OdbcError::general(
@@ -545,8 +587,44 @@ pub unsafe fn sql_execute<B: Backend>(statement_handle: *mut c_void) -> SqlRetur
 mod tests {
     use super::*;
     use crate::ffi::handle::sql_free_handle;
-    use crate::test_utils::{MockBackend, alloc_env_conn_stmt, with_handle};
+    use crate::handles::ConnectionHandle;
+    use crate::test_utils::{
+        MockBackend, MockConnection, MockRecordingBackend, alloc_env_conn_stmt, with_handle,
+    };
     use odbc_sys::HandleType;
+
+    /// As [`alloc_env_conn_stmt`], but generic over `B`. Needed for
+    /// [`MockRecordingBackend`], which is not `MockBackend`.
+    unsafe fn alloc_env_conn_stmt_for<B: Backend>() -> (*mut c_void, *mut c_void, *mut c_void) {
+        unsafe {
+            let mut env: *mut c_void = std::ptr::null_mut();
+            let _ = crate::ffi::handle::sql_alloc_handle::<B>(
+                HandleType::Env as i16,
+                std::ptr::null_mut(),
+                &mut env,
+            );
+            let mut conn: *mut c_void = std::ptr::null_mut();
+            let _ =
+                crate::ffi::handle::sql_alloc_handle::<B>(HandleType::Dbc as i16, env, &mut conn);
+            let mut stmt: *mut c_void = std::ptr::null_mut();
+            let _ =
+                crate::ffi::handle::sql_alloc_handle::<B>(HandleType::Stmt as i16, conn, &mut stmt);
+            (env, conn, stmt)
+        }
+    }
+
+    /// As `cleanup`, but generic over `B`, for `alloc_env_conn_stmt_for`.
+    unsafe fn cleanup_env_conn_stmt_for<B: Backend>(
+        env: *mut c_void,
+        conn: *mut c_void,
+        stmt: *mut c_void,
+    ) {
+        unsafe {
+            let _ = sql_free_handle::<B>(HandleType::Stmt as i16, stmt);
+            let _ = sql_free_handle::<B>(HandleType::Dbc as i16, conn);
+            let _ = sql_free_handle::<B>(HandleType::Env as i16, env);
+        }
+    }
 
     /// Helper: connect a handle using a valid connection string.
     unsafe fn connect_handle(conn: *mut c_void) -> SqlReturn {
@@ -939,6 +1017,91 @@ mod tests {
             );
 
             cleanup(env, conn, stmt);
+        }
+    }
+
+    /// A backend that cancels by query id needs the token *before* the work
+    /// starts, so it can record what to cancel. Passing it to the
+    /// statement-producing methods is what makes that possible; a token
+    /// handed back afterwards would arrive after the window it exists for.
+    #[test]
+    fn a_statement_producing_call_receives_the_statements_cancel_token() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockRecordingBackend>();
+            with_handle::<MockRecordingBackend, ConnectionHandle<MockRecordingBackend>, _>(
+                conn,
+                |c| {
+                    c.connection = Some(MockConnection);
+                },
+            );
+
+            let sql = "SELECT 1";
+            let wide: Vec<u16> = sql.encode_utf16().collect();
+            let ret =
+                sql_exec_direct_w::<MockRecordingBackend>(stmt, wide.as_ptr(), wide.len() as i32);
+            assert_eq!(ret, SqlReturn::SUCCESS);
+
+            let token = crate::handles::registry::registry()
+                .cancel_of(stmt)
+                .expect("token stored");
+            let token = token
+                .downcast_ref::<crate::test_utils::MockCancelToken>()
+                .expect("backend's own type");
+            assert!(
+                token
+                    .saw_execution
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                "exec_direct must receive the same token the statement carries"
+            );
+
+            cleanup_env_conn_stmt_for::<MockRecordingBackend>(env, conn, stmt);
+        }
+    }
+
+    /// Create-once-never-replace, pinned at the FFI entry point rather than
+    /// against the internal helper directly: a `SQLCancel` that already
+    /// cloned the token from a statement's first execution must still be
+    /// signalling the same run once a second `SQLExecDirectW` on the same
+    /// handle has started, not a fresh token that leaves the first execution
+    /// uncancellable.
+    #[test]
+    fn a_second_execution_on_the_same_statement_reuses_the_first_calls_token() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockRecordingBackend>();
+            with_handle::<MockRecordingBackend, ConnectionHandle<MockRecordingBackend>, _>(
+                conn,
+                |c| {
+                    c.connection = Some(MockConnection);
+                },
+            );
+
+            let sql = "SELECT 1";
+            let wide: Vec<u16> = sql.encode_utf16().collect();
+
+            assert_eq!(
+                sql_exec_direct_w::<MockRecordingBackend>(stmt, wide.as_ptr(), wide.len() as i32),
+                SqlReturn::SUCCESS
+            );
+            let first = crate::handles::registry::registry()
+                .cancel_of(stmt)
+                .expect("token stored after first execution");
+
+            assert_eq!(
+                sql_exec_direct_w::<MockRecordingBackend>(stmt, wide.as_ptr(), wide.len() as i32),
+                SqlReturn::SUCCESS
+            );
+            let second = crate::handles::registry::registry()
+                .cancel_of(stmt)
+                .expect("token still stored after second execution");
+
+            assert!(
+                std::sync::Arc::ptr_eq(&first, &second),
+                "a later execution on the same statement must not replace its cancel token, or a \
+                 SQLCancel that already cloned the first token would silently signal a finished \
+                 execution while the real one runs uncancelled"
+            );
+
+            cleanup_env_conn_stmt_for::<MockRecordingBackend>(env, conn, stmt);
         }
     }
 }

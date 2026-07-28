@@ -98,10 +98,16 @@ pub struct MockStatement;
 /// `OdbcError`, which `sql_cancel` treats as "nothing to cancel" rather than
 /// a failure, so it cannot stand in for a backend's cancel actually erroring
 /// out).
+///
+/// `saw_execution` is read only by [`MockRecordingBackend`]'s `exec_direct`,
+/// which stores `true` into whatever token it receives — proof that the
+/// token a statement-producing call is handed is the same one `SQLCancel`
+/// would later read back out of the registry, not merely some token.
 #[derive(Debug, Default)]
 pub struct MockCancelToken {
     pub cancelled: std::sync::atomic::AtomicBool,
     pub should_fail: std::sync::atomic::AtomicBool,
+    pub saw_execution: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Debug)]
@@ -278,14 +284,23 @@ impl Backend for MockBackend {
             .store(true, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
-    fn exec_direct(_: &MockConnection, _: &str) -> Result<MockStatement, MockError> {
+    fn exec_direct(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: &str,
+    ) -> Result<MockStatement, MockError> {
         Err(MockError)
     }
-    fn prepare(_: &MockConnection, _: &str) -> Result<MockStatement, MockError> {
+    fn prepare(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: &str,
+    ) -> Result<MockStatement, MockError> {
         Ok(MockStatement)
     }
     fn execute(
         _: &MockConnection,
+        _: &Self::CancelToken,
         _: &mut MockStatement,
         _: &[crate::types::ColumnValue],
     ) -> Result<crate::types::ExecuteOutcome, MockError> {
@@ -302,6 +317,7 @@ impl Backend for MockBackend {
     }
     fn tables(
         _: &MockConnection,
+        _: &Self::CancelToken,
         _: Option<&str>,
         _: Option<&str>,
         _: Option<&str>,
@@ -311,6 +327,7 @@ impl Backend for MockBackend {
     }
     fn columns(
         _: &MockConnection,
+        _: &Self::CancelToken,
         _: Option<&str>,
         _: Option<&str>,
         _: Option<&str>,
@@ -458,14 +475,23 @@ impl Backend for MockNoCatalogBackend {
             .store(true, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
-    fn exec_direct(_: &MockConnection, _: &str) -> Result<MockStatement, MockError> {
+    fn exec_direct(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: &str,
+    ) -> Result<MockStatement, MockError> {
         Err(MockError)
     }
-    fn prepare(_: &MockConnection, _: &str) -> Result<MockStatement, MockError> {
+    fn prepare(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: &str,
+    ) -> Result<MockStatement, MockError> {
         Ok(MockStatement)
     }
     fn execute(
         _: &MockConnection,
+        _: &Self::CancelToken,
         _: &mut MockStatement,
         _: &[crate::types::ColumnValue],
     ) -> Result<crate::types::ExecuteOutcome, MockError> {
@@ -482,6 +508,7 @@ impl Backend for MockNoCatalogBackend {
     }
     fn tables(
         _: &MockConnection,
+        _: &Self::CancelToken,
         _: Option<&str>,
         _: Option<&str>,
         _: Option<&str>,
@@ -491,6 +518,7 @@ impl Backend for MockNoCatalogBackend {
     }
     fn columns(
         _: &MockConnection,
+        _: &Self::CancelToken,
         _: Option<&str>,
         _: Option<&str>,
         _: Option<&str>,
@@ -556,14 +584,23 @@ macro_rules! mock_keywords_backend {
                 token.cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
                 Ok(())
             }
-            fn exec_direct(_: &MockConnection, _: &str) -> Result<MockStatement, MockError> {
+            fn exec_direct(
+                _: &MockConnection,
+                _: &Self::CancelToken,
+                _: &str,
+            ) -> Result<MockStatement, MockError> {
                 Err(MockError)
             }
-            fn prepare(_: &MockConnection, _: &str) -> Result<MockStatement, MockError> {
+            fn prepare(
+                _: &MockConnection,
+                _: &Self::CancelToken,
+                _: &str,
+            ) -> Result<MockStatement, MockError> {
                 Ok(MockStatement)
             }
             fn execute(
                 _: &MockConnection,
+                _: &Self::CancelToken,
                 _: &mut MockStatement,
                 _: &[crate::types::ColumnValue],
             ) -> Result<crate::types::ExecuteOutcome, MockError> {
@@ -583,6 +620,7 @@ macro_rules! mock_keywords_backend {
             }
             fn tables(
                 _: &MockConnection,
+                _: &Self::CancelToken,
                 _: Option<&str>,
                 _: Option<&str>,
                 _: Option<&str>,
@@ -592,6 +630,7 @@ macro_rules! mock_keywords_backend {
             }
             fn columns(
                 _: &MockConnection,
+                _: &Self::CancelToken,
                 _: Option<&str>,
                 _: Option<&str>,
                 _: Option<&str>,
@@ -689,14 +728,23 @@ impl Backend for MockAltBackend {
             .store(true, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
-    fn exec_direct(_: &MockConnection, _: &str) -> Result<MockStatement, MockError> {
+    fn exec_direct(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: &str,
+    ) -> Result<MockStatement, MockError> {
         Err(MockError)
     }
-    fn prepare(_: &MockConnection, _: &str) -> Result<MockStatement, MockError> {
+    fn prepare(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: &str,
+    ) -> Result<MockStatement, MockError> {
         Ok(MockStatement)
     }
     fn execute(
         _: &MockConnection,
+        _: &Self::CancelToken,
         _: &mut MockStatement,
         _: &[crate::types::ColumnValue],
     ) -> Result<crate::types::ExecuteOutcome, MockError> {
@@ -713,6 +761,7 @@ impl Backend for MockAltBackend {
     }
     fn tables(
         _: &MockConnection,
+        _: &Self::CancelToken,
         _: Option<&str>,
         _: Option<&str>,
         _: Option<&str>,
@@ -722,6 +771,7 @@ impl Backend for MockAltBackend {
     }
     fn columns(
         _: &MockConnection,
+        _: &Self::CancelToken,
         _: Option<&str>,
         _: Option<&str>,
         _: Option<&str>,
@@ -881,15 +931,21 @@ macro_rules! mock_isolation_backend {
             }
             fn exec_direct(
                 _: &MockIsolationConnection,
+                _: &Self::CancelToken,
                 _: &str,
             ) -> Result<MockStatement, MockError> {
                 Err(MockError)
             }
-            fn prepare(_: &MockIsolationConnection, _: &str) -> Result<MockStatement, MockError> {
+            fn prepare(
+                _: &MockIsolationConnection,
+                _: &Self::CancelToken,
+                _: &str,
+            ) -> Result<MockStatement, MockError> {
                 Ok(MockStatement)
             }
             fn execute(
                 _: &MockIsolationConnection,
+                _: &Self::CancelToken,
                 _: &mut MockStatement,
                 _: &[crate::types::ColumnValue],
             ) -> Result<crate::types::ExecuteOutcome, MockError> {
@@ -909,6 +965,7 @@ macro_rules! mock_isolation_backend {
             }
             fn tables(
                 _: &MockIsolationConnection,
+                _: &Self::CancelToken,
                 _: Option<&str>,
                 _: Option<&str>,
                 _: Option<&str>,
@@ -918,6 +975,7 @@ macro_rules! mock_isolation_backend {
             }
             fn columns(
                 _: &MockIsolationConnection,
+                _: &Self::CancelToken,
                 _: Option<&str>,
                 _: Option<&str>,
                 _: Option<&str>,
@@ -1042,14 +1100,23 @@ macro_rules! mock_txn_backend {
             // "SQLExecDirect was allowed" from "SQLExecDirect was rejected".
             // `MockStatement` reports zero columns, so it stands for a
             // non-result-set statement and opens no cursor.
-            fn exec_direct(_: &MockTxnConnection, _: &str) -> Result<MockStatement, OdbcError> {
+            fn exec_direct(
+                _: &MockTxnConnection,
+                _: &Self::CancelToken,
+                _: &str,
+            ) -> Result<MockStatement, OdbcError> {
                 Ok(MockStatement)
             }
-            fn prepare(_: &MockTxnConnection, _: &str) -> Result<MockStatement, OdbcError> {
+            fn prepare(
+                _: &MockTxnConnection,
+                _: &Self::CancelToken,
+                _: &str,
+            ) -> Result<MockStatement, OdbcError> {
                 Ok(MockStatement)
             }
             fn execute(
                 _: &MockTxnConnection,
+                _: &Self::CancelToken,
                 _: &mut MockStatement,
                 _: &[crate::types::ColumnValue],
             ) -> Result<crate::types::ExecuteOutcome, OdbcError> {
@@ -1071,6 +1138,7 @@ macro_rules! mock_txn_backend {
             }
             fn tables(
                 _: &MockTxnConnection,
+                _: &Self::CancelToken,
                 _: Option<&str>,
                 _: Option<&str>,
                 _: Option<&str>,
@@ -1082,6 +1150,7 @@ macro_rules! mock_txn_backend {
             }
             fn columns(
                 _: &MockTxnConnection,
+                _: &Self::CancelToken,
                 _: Option<&str>,
                 _: Option<&str>,
                 _: Option<&str>,
@@ -1242,14 +1311,23 @@ impl Backend for MockTypeInfoBackend {
             .store(true, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
-    fn exec_direct(_: &MockConnection, _: &str) -> Result<MockStatement, MockError> {
+    fn exec_direct(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: &str,
+    ) -> Result<MockStatement, MockError> {
         Err(MockError)
     }
-    fn prepare(_: &MockConnection, _: &str) -> Result<MockStatement, MockError> {
+    fn prepare(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: &str,
+    ) -> Result<MockStatement, MockError> {
         Ok(MockStatement)
     }
     fn execute(
         _: &MockConnection,
+        _: &Self::CancelToken,
         _: &mut MockStatement,
         _: &[crate::types::ColumnValue],
     ) -> Result<crate::types::ExecuteOutcome, MockError> {
@@ -1266,6 +1344,7 @@ impl Backend for MockTypeInfoBackend {
     }
     fn tables(
         _: &MockConnection,
+        _: &Self::CancelToken,
         _: Option<&str>,
         _: Option<&str>,
         _: Option<&str>,
@@ -1275,6 +1354,7 @@ impl Backend for MockTypeInfoBackend {
     }
     fn columns(
         _: &MockConnection,
+        _: &Self::CancelToken,
         _: Option<&str>,
         _: Option<&str>,
         _: Option<&str>,
@@ -1339,14 +1419,23 @@ impl Backend for MockFunctionsBackend {
             .store(true, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
-    fn exec_direct(_: &MockConnection, _: &str) -> Result<MockStatement, MockError> {
+    fn exec_direct(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: &str,
+    ) -> Result<MockStatement, MockError> {
         Err(MockError)
     }
-    fn prepare(_: &MockConnection, _: &str) -> Result<MockStatement, MockError> {
+    fn prepare(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: &str,
+    ) -> Result<MockStatement, MockError> {
         Ok(MockStatement)
     }
     fn execute(
         _: &MockConnection,
+        _: &Self::CancelToken,
         _: &mut MockStatement,
         _: &[crate::types::ColumnValue],
     ) -> Result<crate::types::ExecuteOutcome, MockError> {
@@ -1375,6 +1464,7 @@ impl Backend for MockFunctionsBackend {
     }
     fn tables(
         _: &MockConnection,
+        _: &Self::CancelToken,
         _: Option<&str>,
         _: Option<&str>,
         _: Option<&str>,
@@ -1384,6 +1474,7 @@ impl Backend for MockFunctionsBackend {
     }
     fn columns(
         _: &MockConnection,
+        _: &Self::CancelToken,
         _: Option<&str>,
         _: Option<&str>,
         _: Option<&str>,
@@ -1476,14 +1567,23 @@ impl Backend for MockFailingCloseBackend {
             .store(true, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
-    fn exec_direct(_: &MockConnection, _: &str) -> Result<MockFailingCloseStatement, OdbcError> {
+    fn exec_direct(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: &str,
+    ) -> Result<MockFailingCloseStatement, OdbcError> {
         Ok(MockFailingCloseStatement)
     }
-    fn prepare(_: &MockConnection, _: &str) -> Result<MockFailingCloseStatement, OdbcError> {
+    fn prepare(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: &str,
+    ) -> Result<MockFailingCloseStatement, OdbcError> {
         Ok(MockFailingCloseStatement)
     }
     fn execute(
         _: &MockConnection,
+        _: &Self::CancelToken,
         _: &mut MockFailingCloseStatement,
         _: &[crate::types::ColumnValue],
     ) -> Result<crate::types::ExecuteOutcome, OdbcError> {
@@ -1502,6 +1602,7 @@ impl Backend for MockFailingCloseBackend {
     }
     fn tables(
         _: &MockConnection,
+        _: &Self::CancelToken,
         _: Option<&str>,
         _: Option<&str>,
         _: Option<&str>,
@@ -1513,6 +1614,7 @@ impl Backend for MockFailingCloseBackend {
     }
     fn columns(
         _: &MockConnection,
+        _: &Self::CancelToken,
         _: Option<&str>,
         _: Option<&str>,
         _: Option<&str>,
@@ -1553,6 +1655,119 @@ impl Backend for MockFailingCloseBackend {
     }
     fn txn_isolation_options(_conn: &Self::Connection) -> u32 {
         crate::types::SQL_TXN_SERIALIZABLE
+    }
+
+    minimal_capability_decls!();
+}
+
+// ---------------------------------------------------------------------------
+// MockRecordingBackend — proves a statement-producing call gets its own token
+// ---------------------------------------------------------------------------
+
+/// A backend whose `exec_direct` records the [`MockCancelToken`] it was
+/// handed, by setting [`MockCancelToken::saw_execution`].
+///
+/// Exists to pin the property `Backend::cancel_token`'s doc comment promises
+/// a driver author: a statement-producing call receives *this statement's*
+/// token, not merely a token, so a backend whose cancellation needs a value
+/// only known at execution time (a query id, say) can actually record it
+/// there. `MockBackend::exec_direct` cannot stand in for this — it discards
+/// every argument and returns `Err` unconditionally.
+pub struct MockRecordingBackend;
+
+impl Backend for MockRecordingBackend {
+    type Connection = MockConnection;
+    type Statement = MockStatement;
+    type Error = MockError;
+    type CancelToken = MockCancelToken;
+
+    fn connect(_: &ConnectParams) -> Result<MockConnection, MockError> {
+        Ok(MockConnection)
+    }
+    fn disconnect(_: &mut MockConnection) -> Result<(), MockError> {
+        Ok(())
+    }
+    fn cancel_token(_conn: &Self::Connection) -> Self::CancelToken {
+        MockCancelToken::default()
+    }
+    fn cancel(token: &Self::CancelToken) -> Result<(), Self::Error> {
+        token
+            .cancelled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+    fn exec_direct(
+        _: &MockConnection,
+        cancel: &Self::CancelToken,
+        _: &str,
+    ) -> Result<MockStatement, MockError> {
+        cancel
+            .saw_execution
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(MockStatement)
+    }
+    fn prepare(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: &str,
+    ) -> Result<MockStatement, MockError> {
+        Ok(MockStatement)
+    }
+    fn execute(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: &mut MockStatement,
+        _: &[crate::types::ColumnValue],
+    ) -> Result<crate::types::ExecuteOutcome, MockError> {
+        Ok(crate::types::ExecuteOutcome::default())
+    }
+    fn get_info(_: &MockConnection, _: crate::types::InfoType) -> Result<InfoValue, MockError> {
+        Err(MockError)
+    }
+    fn get_functions() -> &'static [crate::function_id::FunctionId] {
+        &[]
+    }
+    fn get_type_info(_conn: &Self::Connection) -> &'static [TypeInfoRow] {
+        &[]
+    }
+    fn tables(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+    ) -> Result<MockStatement, MockError> {
+        Err(MockError)
+    }
+    fn columns(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+    ) -> Result<MockStatement, MockError> {
+        Err(MockError)
+    }
+
+    fn supports_catalogs(_conn: &Self::Connection) -> bool {
+        true
+    }
+    fn supports_schemas(_conn: &Self::Connection) -> bool {
+        true
+    }
+    fn alter_table_support(_conn: &Self::Connection) -> u32 {
+        0
+    }
+    fn outer_join_capabilities(_conn: &Self::Connection) -> u32 {
+        0
+    }
+    fn default_txn_isolation(_conn: &Self::Connection) -> u32 {
+        0
+    }
+    fn txn_isolation_options(_conn: &Self::Connection) -> u32 {
+        0
     }
 
     minimal_capability_decls!();

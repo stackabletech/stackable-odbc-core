@@ -84,14 +84,24 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// Executes a SQL statement directly without preparation.
     ///
     /// Called by `SQLExecDirectW`. Returns a statement that can be used to iterate results
-    /// via [`StatementBackend`].
-    fn exec_direct(conn: &Self::Connection, sql: &str) -> Result<Self::Statement, Self::Error>;
+    /// via [`StatementBackend`]. `cancel` is this statement's token; record whatever
+    /// `Backend::cancel` will need to identify this work.
+    fn exec_direct(
+        conn: &Self::Connection,
+        cancel: &Self::CancelToken,
+        sql: &str,
+    ) -> Result<Self::Statement, Self::Error>;
 
     /// Prepares a SQL statement for later execution.
     ///
     /// Called by `SQLPrepareW`. Returns a prepared statement object (`Self::Statement`)
-    /// that can be executed via [`Backend::execute`].
-    fn prepare(conn: &Self::Connection, sql: &str) -> Result<Self::Statement, Self::Error>;
+    /// that can be executed via [`Backend::execute`]. `cancel` is this statement's token;
+    /// record whatever `Backend::cancel` will need to identify this work.
+    fn prepare(
+        conn: &Self::Connection,
+        cancel: &Self::CancelToken,
+        sql: &str,
+    ) -> Result<Self::Statement, Self::Error>;
 
     /// Executes a previously prepared statement with the given parameter values.
     ///
@@ -103,9 +113,11 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// produces `SQL_PARAM_OUTPUT` / `SQL_PARAM_INPUT_OUTPUT` values populates
     /// [`ExecuteOutcome::output_params`]; `stackable-odbc-core` then writes each value back
     /// into the application's bound parameter buffer, the symmetric counterpart
-    /// of the `params` input above.
+    /// of the `params` input above. `cancel` is this statement's token; record
+    /// whatever `Backend::cancel` will need to identify this work.
     fn execute(
         conn: &Self::Connection,
+        cancel: &Self::CancelToken,
         stmt: &mut Self::Statement,
         params: &[ColumnValue],
     ) -> Result<ExecuteOutcome, Self::Error>;
@@ -204,9 +216,11 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// Returns a result set describing tables matching the given filter criteria.
     ///
     /// Called by `SQLTablesW`. All filter parameters are optional; `None` means no filter
-    /// on that dimension.
+    /// on that dimension. `cancel` is this statement's token; record whatever
+    /// `Backend::cancel` will need to identify this work.
     fn tables(
         conn: &Self::Connection,
+        cancel: &Self::CancelToken,
         catalog: Option<&str>,
         schema: Option<&str>,
         table: Option<&str>,
@@ -216,9 +230,11 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// Returns a result set describing columns matching the given filter criteria.
     ///
     /// Called by `SQLColumnsW`. All filter parameters are optional; `None` means no filter
-    /// on that dimension.
+    /// on that dimension. `cancel` is this statement's token; record whatever
+    /// `Backend::cancel` will need to identify this work.
     fn columns(
         conn: &Self::Connection,
+        cancel: &Self::CancelToken,
         catalog: Option<&str>,
         schema: Option<&str>,
         table: Option<&str>,
@@ -228,9 +244,12 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// Return the primary key columns for the given table.
     ///
     /// Called by `SQLPrimaryKeysW`. Backends that do not support this can leave the
-    /// default implementation which returns `NotImplemented`.
+    /// default implementation which returns `NotImplemented`. `cancel` is this
+    /// statement's token; record whatever `Backend::cancel` will need to identify
+    /// this work.
     fn primary_keys(
         _conn: &Self::Connection,
+        _cancel: &Self::CancelToken,
         _catalog: Option<&str>,
         _schema: Option<&str>,
         _table: Option<&str>,
@@ -245,9 +264,12 @@ pub trait Backend: Sized + Send + Sync + 'static {
     ///
     /// Called by `SQLForeignKeysW`. Either `pk_table` or `fk_table` (or both) may be supplied.
     /// Backends that do not support this can leave the default implementation which returns
-    /// `NotImplemented`.
+    /// `NotImplemented`. `cancel` is this statement's token; record whatever
+    /// `Backend::cancel` will need to identify this work.
+    #[allow(clippy::too_many_arguments)]
     fn foreign_keys(
         _conn: &Self::Connection,
+        _cancel: &Self::CancelToken,
         _pk_catalog: Option<&str>,
         _pk_schema: Option<&str>,
         _pk_table: Option<&str>,
@@ -267,8 +289,11 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// (true) vs `SQL_INDEX_ALL` (false). Backends that do not expose index
     /// metadata leave the default; the FFI layer then returns a spec-legitimate
     /// empty result set (a table with no indexes is a valid empty response).
+    /// `cancel` is this statement's token; record whatever `Backend::cancel`
+    /// will need to identify this work.
     fn statistics(
         _conn: &Self::Connection,
+        _cancel: &Self::CancelToken,
         _catalog: Option<&str>,
         _schema: Option<&str>,
         _table: Option<&str>,
@@ -285,9 +310,13 @@ pub trait Backend: Sized + Send + Sync + 'static {
     ///
     /// Called by `SQLSpecialColumnsW`. The default returns `NotImplemented`,
     /// which the FFI layer converts to an empty result set, the spec's defined
-    /// response when no such columns exist.
+    /// response when no such columns exist. `cancel` is this statement's
+    /// token; record whatever `Backend::cancel` will need to identify this
+    /// work.
+    #[allow(clippy::too_many_arguments)]
     fn special_columns(
         _conn: &Self::Connection,
+        _cancel: &Self::CancelToken,
         _identifier_type: IdentifierType,
         _catalog: Option<&str>,
         _schema: Option<&str>,

@@ -133,8 +133,23 @@ pub unsafe fn sql_tables_w<B: Backend>(
                 ));
             };
 
+            // The token exists once this statement makes its first
+            // backend call; created here on demand, then reused for every
+            // later call on the same statement (see `resolve_cancel_token`).
+            let cancel_token =
+                crate::handles::resolve_cancel_token::<B>(statement_handle, connection);
+            let cancel = cancel_token
+                .downcast_ref::<B::CancelToken>()
+                .ok_or_else(|| {
+                    OdbcError::general(
+                        "Statement's cancel token is not this backend's CancelToken type",
+                        SqlState::general_error(),
+                    )
+                })?;
+
             let result = B::tables(
                 connection,
+                cancel,
                 catalog.as_deref(),
                 schema.as_deref(),
                 table.as_deref(),
@@ -245,8 +260,23 @@ pub unsafe fn sql_columns_w<B: Backend>(
                 ));
             };
 
+            // The token exists once this statement makes its first
+            // backend call; created here on demand, then reused for every
+            // later call on the same statement (see `resolve_cancel_token`).
+            let cancel_token =
+                crate::handles::resolve_cancel_token::<B>(statement_handle, connection);
+            let cancel = cancel_token
+                .downcast_ref::<B::CancelToken>()
+                .ok_or_else(|| {
+                    OdbcError::general(
+                        "Statement's cancel token is not this backend's CancelToken type",
+                        SqlState::general_error(),
+                    )
+                })?;
+
             let result = B::columns(
                 connection,
+                cancel,
                 catalog.as_deref(),
                 schema.as_deref(),
                 table.as_deref(),
@@ -341,8 +371,23 @@ pub unsafe fn sql_primary_keys_w<B: Backend>(
             let schema = parse_filter_param(schema_name, name_length2)?;
             let table = parse_filter_param(table_name, name_length3)?;
 
+            // The token exists once this statement makes its first
+            // backend call; created here on demand, then reused for every
+            // later call on the same statement (see `resolve_cancel_token`).
+            let cancel_token =
+                crate::handles::resolve_cancel_token::<B>(statement_handle, connection);
+            let cancel = cancel_token
+                .downcast_ref::<B::CancelToken>()
+                .ok_or_else(|| {
+                    OdbcError::general(
+                        "Statement's cancel token is not this backend's CancelToken type",
+                        SqlState::general_error(),
+                    )
+                })?;
+
             let result = B::primary_keys(
                 connection,
+                cancel,
                 catalog.as_deref(),
                 schema.as_deref(),
                 table.as_deref(),
@@ -457,8 +502,23 @@ pub unsafe fn sql_foreign_keys_w<B: Backend>(
             let fk_schema = parse_filter_param(fk_schema_name, name_length5)?;
             let fk_table = parse_filter_param(fk_table_name, name_length6)?;
 
+            // The token exists once this statement makes its first
+            // backend call; created here on demand, then reused for every
+            // later call on the same statement (see `resolve_cancel_token`).
+            let cancel_token =
+                crate::handles::resolve_cancel_token::<B>(statement_handle, connection);
+            let cancel = cancel_token
+                .downcast_ref::<B::CancelToken>()
+                .ok_or_else(|| {
+                    OdbcError::general(
+                        "Statement's cancel token is not this backend's CancelToken type",
+                        SqlState::general_error(),
+                    )
+                })?;
+
             let result = B::foreign_keys(
                 connection,
+                cancel,
                 pk_catalog.as_deref(),
                 pk_schema.as_deref(),
                 pk_table.as_deref(),
@@ -608,8 +668,23 @@ pub unsafe fn sql_statistics_w<B: Backend>(
             let schema = parse_filter_param(schema_name, name_length2)?;
             let table = parse_filter_param(table_name, name_length3)?;
 
+            // The token exists once this statement makes its first
+            // backend call; created here on demand, then reused for every
+            // later call on the same statement (see `resolve_cancel_token`).
+            let cancel_token =
+                crate::handles::resolve_cancel_token::<B>(statement_handle, connection);
+            let cancel = cancel_token
+                .downcast_ref::<B::CancelToken>()
+                .ok_or_else(|| {
+                    OdbcError::general(
+                        "Statement's cancel token is not this backend's CancelToken type",
+                        SqlState::general_error(),
+                    )
+                })?;
+
             match B::statistics(
                 connection,
+                cancel,
                 catalog.as_deref(),
                 schema.as_deref(),
                 table.as_deref(),
@@ -771,8 +846,23 @@ pub unsafe fn sql_special_columns_w<B: Backend>(
             let schema = parse_filter_param(schema_name, name_length2)?;
             let table = parse_filter_param(table_name, name_length3)?;
 
+            // The token exists once this statement makes its first
+            // backend call; created here on demand, then reused for every
+            // later call on the same statement (see `resolve_cancel_token`).
+            let cancel_token =
+                crate::handles::resolve_cancel_token::<B>(statement_handle, connection);
+            let cancel = cancel_token
+                .downcast_ref::<B::CancelToken>()
+                .ok_or_else(|| {
+                    OdbcError::general(
+                        "Statement's cancel token is not this backend's CancelToken type",
+                        SqlState::general_error(),
+                    )
+                })?;
+
             match B::special_columns(
                 connection,
+                cancel,
                 identifier_type,
                 catalog.as_deref(),
                 schema.as_deref(),
