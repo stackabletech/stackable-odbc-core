@@ -702,7 +702,16 @@ fn guid_struct_to_bytes(g: &odbc_sys::Guid) -> [u8; 16] {
 
 /// Collect bound parameter values in order 1..=param_count.
 ///
-/// Unbound parameters are emitted as `ColumnValue::Null`.
+/// Unbound parameters are emitted as `ColumnValue::Null`, and so are
+/// `SQL_PARAM_OUTPUT` ones: an output-only parameter has no input value, and its
+/// buffer is where the *driver* is expected to put something. Reading it is not
+/// merely meaningless, it is unsound — the application never had to initialise
+/// it, so for `SQL_C_CHAR` with an absent or `SQL_NTS` indicator
+/// [`read_param_value`] would scan uninitialised memory for a terminator that
+/// need not be inside the buffer at all.
+///
+/// This is the mirror image of [`write_output_params`], which refuses to write
+/// through an input-only binding for the same reason in the other direction.
 ///
 /// # Safety
 ///
@@ -711,14 +720,21 @@ pub(crate) unsafe fn collect_params(
     bindings: &std::collections::HashMap<u16, ParameterBinding>,
     param_count: u16,
 ) -> Result<Vec<ColumnValue>, OdbcError> {
+    use odbc_sys::ParamType;
+
     let mut params = Vec::with_capacity(param_count as usize);
     for i in 1..=param_count {
-        if let Some(binding) = bindings.get(&i) {
-            // SAFETY: the caller guarantees all ParameterBinding value and indicator
-            // pointers in `bindings` point to valid memory of the appropriate type.
-            params.push(unsafe { read_param_value(binding) });
-        } else {
-            params.push(ColumnValue::Null);
+        match bindings.get(&i) {
+            // `InputOutput` is read: it carries an input value the application
+            // did initialise, and `write_output_params` writes the result back
+            // through the same binding afterwards.
+            Some(binding) if binding.input_output_type != ParamType::Output => {
+                // SAFETY: the caller guarantees all ParameterBinding value and indicator
+                // pointers in `bindings` point to valid memory of the appropriate type.
+                params.push(unsafe { read_param_value(binding) });
+            }
+            Some(_) => params.push(ColumnValue::Null),
+            None => params.push(ColumnValue::Null),
         }
     }
     Ok(params)
@@ -736,7 +752,9 @@ pub(crate) unsafe fn collect_params(
 /// `SQL_PARAM_INPUT_OUTPUT`; a binding that is input-only, or absent entirely, is
 /// skipped, so a backend cannot clobber a buffer the application did not offer
 /// for output. This is the symmetric counterpart of [`collect_params`], which
-/// reads input values *out* of the same bindings.
+/// reads input values *out* of the same bindings and applies the mirror-image
+/// filter: it skips `SQL_PARAM_OUTPUT` bindings, whose buffers the application
+/// never had to initialise.
 ///
 /// TODO(spec): output values are written as soon as `execute` returns. The ODBC
 /// spec (and the SQL Server driver) only guarantee that output parameters are
@@ -1668,6 +1686,95 @@ mod tests {
         };
         let val = unsafe { read_param_value(&binding) };
         assert_eq!(val, ColumnValue::I32(42));
+    }
+
+    /// An output-only parameter contributes no input value.
+    ///
+    /// The application binds a buffer for the *driver* to fill; it never had to
+    /// put anything in it. Reading it is meaningless for `SQL_C_SLONG` and
+    /// unsound for `SQL_C_CHAR` — see the next test.
+    #[test]
+    fn collect_params_does_not_read_an_output_only_binding() {
+        let mut buf: i32 = 1234;
+        let binding = ParameterBinding {
+            input_output_type: odbc_sys::ParamType::Output,
+            c_type: odbc_sys::CDataType::SLong,
+            sql_type: SqlDataType(4),
+            col_size: 10,
+            decimal_digits: 0,
+            value_ptr: std::ptr::from_mut(&mut buf).cast::<c_void>(),
+            buffer_length: 4,
+            str_len_or_ind_ptr: std::ptr::null_mut(),
+        };
+        let mut bindings = std::collections::HashMap::new();
+        bindings.insert(1u16, binding);
+
+        let params = unsafe { collect_params(&bindings, 1) }.unwrap();
+
+        assert_eq!(
+            params,
+            vec![ColumnValue::Null],
+            "the output buffer's contents were sent to the backend as an input value"
+        );
+    }
+
+    /// An `SQL_PARAM_INPUT_OUTPUT` binding *is* read: it carries a real input
+    /// value, and `write_output_params` writes the result back through the same
+    /// binding afterwards. The fix for output-only bindings must not catch this
+    /// one too.
+    #[test]
+    fn collect_params_still_reads_an_input_output_binding() {
+        let mut buf: i32 = 1234;
+        let binding = ParameterBinding {
+            input_output_type: odbc_sys::ParamType::InputOutput,
+            c_type: odbc_sys::CDataType::SLong,
+            sql_type: SqlDataType(4),
+            col_size: 10,
+            decimal_digits: 0,
+            value_ptr: std::ptr::from_mut(&mut buf).cast::<c_void>(),
+            buffer_length: 4,
+            str_len_or_ind_ptr: std::ptr::null_mut(),
+        };
+        let mut bindings = std::collections::HashMap::new();
+        bindings.insert(1u16, binding);
+
+        let params = unsafe { collect_params(&bindings, 1) }.unwrap();
+
+        assert_eq!(params, vec![ColumnValue::I32(1234)]);
+    }
+
+    /// The unsound case, and the reason this is a fix rather than a tidy-up.
+    ///
+    /// An output-only `SQL_C_CHAR` buffer with no indicator is read as a
+    /// null-terminated C string. The application never wrote a terminator —
+    /// it bound the buffer for the driver to fill — so `CStr::from_ptr` walks
+    /// off the end looking for one. Here the buffer holds no zero byte at all
+    /// and is followed by a guard region that also holds none, so the scan must
+    /// leave the allocation to terminate.
+    ///
+    /// Under Miri this test is the check: reading out of bounds is reported
+    /// rather than merely producing a wrong string.
+    #[test]
+    fn collect_params_does_not_scan_an_uninitialised_output_char_buffer() {
+        // No zero byte anywhere, so a terminator scan cannot stop inside it.
+        let mut arena = vec![0xAAu8; 64];
+        let binding = ParameterBinding {
+            input_output_type: odbc_sys::ParamType::Output,
+            c_type: odbc_sys::CDataType::Char,
+            sql_type: SqlDataType(12),
+            col_size: 8,
+            decimal_digits: 0,
+            value_ptr: arena.as_mut_ptr().cast::<c_void>(),
+            buffer_length: 8,
+            // Absent indicator: read_param_value falls back to CStr::from_ptr.
+            str_len_or_ind_ptr: std::ptr::null_mut(),
+        };
+        let mut bindings = std::collections::HashMap::new();
+        bindings.insert(1u16, binding);
+
+        let params = unsafe { collect_params(&bindings, 1) }.unwrap();
+
+        assert_eq!(params, vec![ColumnValue::Null]);
     }
 
     #[test]

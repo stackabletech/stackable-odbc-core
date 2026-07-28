@@ -589,6 +589,22 @@ markers go away and this section becomes the initial-release notes.
 
 ### Fixed
 
+- `SQL_PARAM_OUTPUT` parameters are no longer read as input values on execute.
+  An output-only parameter has no input to send: the application binds that
+  buffer for the *driver* to fill and never has to initialise it. Core read it
+  anyway and passed whatever it found to `Backend::execute`.
+
+  For `SQL_C_CHAR` with an absent or `SQL_NTS` indicator that was undefined
+  behaviour, not just a wrong value — the read falls back to `CStr::from_ptr`,
+  which scans for a terminator the application had no reason to write, so the
+  scan runs past the end of the buffer. Miri reports the out-of-bounds access on
+  the regression test when the fix is removed.
+
+  `collect_params` now emits `ColumnValue::Null` for an `SQL_PARAM_OUTPUT`
+  binding, the mirror image of `write_output_params` refusing to write back
+  through an input-only one. `SQL_PARAM_INPUT_OUTPUT` is still read, since it
+  does carry an input value.
+
 - `SQLGetInfoW` no longer writes four bytes into a two-byte buffer for
   `SQL_ODBC_API_CONFORMANCE` (9), `SQL_ODBC_SAG_CLI_CONFORMANCE` (12),
   `SQL_ODBC_SQL_CONFORMANCE` (15) and `SQL_MAX_PROCEDURE_NAME_LEN` (33). The
