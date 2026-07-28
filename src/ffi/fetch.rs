@@ -1013,17 +1013,25 @@ mod tests {
 
             // Two i32 slots; bind column 2 (the fixed-width 4242) to slot 0 and
             // then shift writes into slot 1 with an offset.
+            //
+            // Every access after the bind goes through `slots_ptr`, never
+            // through `slots`. The driver holds that raw pointer across the
+            // fetches, and writing through the local would invalidate it under
+            // Stacked Borrows — Miri rejects the test, not the driver. An ODBC
+            // application has no such constraint: it owns the buffer outright.
             let mut slots: [i32; 2] = [0, 0];
             let mut indicators: [isize; 2] = [0, 0];
+            let slots_ptr = slots.as_mut_ptr();
             let offset = std::mem::size_of::<i32>();
             let mut bind_offset: usize = 0;
+            let slot = |i: usize| std::ptr::read(slots_ptr.add(i));
 
             assert_eq!(
                 crate::ffi::bind::sql_bind_col::<MockLongDataBackend>(
                     stmt,
                     2,
                     CDataType::SLong as i16,
-                    slots.as_mut_ptr().cast::<c_void>(),
+                    slots_ptr.cast::<c_void>(),
                     4,
                     indicators.as_mut_ptr(),
                 ),
@@ -1041,16 +1049,18 @@ mod tests {
 
             // Offset 0: the value lands in slot 0.
             assert_eq!(sql_fetch::<MockLongDataBackend>(stmt), SqlReturn::SUCCESS);
-            assert_eq!(slots, [4242, 0]);
+            assert_eq!((slot(0), slot(1)), (4242, 0));
 
-            // The application moves the offset between fetches, which is the
-            // whole reason the attribute is a *pointer* to the offset.
-            slots = [0, 0];
+            // Clear through the same pointer the driver was given, then move the
+            // offset — which is the whole reason the attribute is a pointer *to*
+            // the offset rather than the offset itself.
+            std::ptr::write(slots_ptr, 0);
+            std::ptr::write(slots_ptr.add(1), 0);
             bind_offset = offset;
             assert_eq!(sql_fetch::<MockLongDataBackend>(stmt), SqlReturn::SUCCESS);
             assert_eq!(
-                slots,
-                [0, 4242],
+                (slot(0), slot(1)),
+                (0, 4242),
                 "the bind offset was ignored; the value landed at the base address"
             );
             // `sql_fetch` reads `bind_offset` through the raw pointer it was
