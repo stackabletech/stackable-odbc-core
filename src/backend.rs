@@ -401,9 +401,31 @@ pub trait Backend: Sized + Send + Sync + 'static {
     ///
     /// Called by `SQLCancel`, possibly while another thread is executing on
     /// the same statement. It receives neither a connection nor a statement —
-    /// deliberately: that signature is what keeps this call off the guarded
-    /// state entirely, so core never takes the connection's lock to invoke
-    /// it. Any state a backend needs to clear after a cancellation (e.g.
+    /// deliberately: that signature keeps this call off the *guarded state*
+    /// (there is no `&mut Self::Statement` or `&Self::Connection` reachable
+    /// through it, so a backend cannot reach into a handle another thread may
+    /// be mutating).
+    ///
+    /// That is **not** the same as "core never holds the connection's lock
+    /// while calling this" — whether it does depends on which of
+    /// `SQLCancel`'s two cases applies:
+    ///
+    /// - **Another thread holds the connection** (the cross-thread cancel the
+    ///   spec singles out): core calls this holding **no lock at all**.
+    /// - **The connection is idle** (a data-at-execution cancel, or "no
+    ///   processing in progress"): core calls this **while holding the
+    ///   connection's group lock**, because it needs that same scope
+    ///   afterward to post the resulting diagnostic.
+    ///
+    /// A `cancel` implementation must therefore never block on anything that
+    /// itself waits for this connection's lock — calling back into another
+    /// `SQLxxx` entry point on the same connection, for instance — or the
+    /// idle-path case deadlocks the calling thread. Blocking on something
+    /// outside the connection (a network round-trip to the data source
+    /// asking it to cancel a query, say) is fine on both paths; it just means
+    /// `SQLCancel` itself does not return until that finishes.
+    ///
+    /// Any state a backend needs to clear after a cancellation (e.g.
     /// streaming/pagination state) has to live in the token itself, or behind
     /// synchronisation the backend owns.
     ///

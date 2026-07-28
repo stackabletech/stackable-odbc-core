@@ -593,6 +593,14 @@ mod tests {
     }
 
     /// As `cleanup`, but generic over `B`, for `alloc_env_conn_stmt_for`.
+    ///
+    /// Disconnects before freeing the connection, exactly as `cleanup` below
+    /// does: `free_connection` refuses HY010 while `conn.connection.is_some()`
+    /// (spec-correct — `SQLDisconnect` must run first), so a caller that sets
+    /// `connection` directly (as the cancel-token tests do, via
+    /// `with_handle`) and skips this leaks the connection box, and then the
+    /// environment box behind it, since `free_environment` also correctly
+    /// refuses while it still has a live child.
     unsafe fn cleanup_env_conn_stmt_for<B: Backend>(
         env: *mut c_void,
         conn: *mut c_void,
@@ -600,6 +608,7 @@ mod tests {
     ) {
         unsafe {
             let _ = sql_free_handle::<B>(HandleType::Stmt as i16, stmt);
+            let _ = crate::ffi::connect::sql_disconnect::<B>(conn);
             let _ = sql_free_handle::<B>(HandleType::Dbc as i16, conn);
             let _ = sql_free_handle::<B>(HandleType::Env as i16, env);
         }

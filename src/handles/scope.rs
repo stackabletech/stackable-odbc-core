@@ -1,14 +1,15 @@
 //! Access to handle contents, gated on holding the owning connection's lock.
 //!
 //! A `HandleScope` is the only way to obtain `&mut` to a handle. The only way
-//! to obtain one is through the two callers of the `pub(crate)`
+//! to obtain one is through the three callers of the `pub(crate)`
 //! `HandleScope::new` in this crate — [`panic_safe`], which builds the
-//! outermost scope for an FFI call, and [`HandleScope::with_child_group`],
-//! which builds a nested scope for the one legitimate case of holding two
-//! groups at once. Both lock the group immediately before constructing the
-//! scope and tie its lifetime to that lock (see [`HandleScope::new`]), which
-//! is what makes "the group lock is held" a fact the compiler checks rather
-//! than a rule a comment states.
+//! outermost scope for an FFI call; [`HandleScope::with_child_group`], which
+//! builds a nested scope for the one legitimate case of holding two groups at
+//! once; and `sql_cancel`, which builds one only on the branch where its own
+//! `try_lock` succeeded. All three lock the group immediately before
+//! constructing the scope and tie its lifetime to that lock (see
+//! [`HandleScope::new`]), which is what makes "the group lock is held" a fact
+//! the compiler checks rather than a rule a comment states.
 //!
 //! [`panic_safe`]: crate::panic::panic_safe
 
@@ -25,15 +26,18 @@ use crate::sync::{Arc, MutexGuard};
 /// Proof that the caller holds one lock group, and the gateway to the handles
 /// inside it.
 ///
-/// `HandleScope::new` is `pub(crate)`, with exactly two callers in this crate:
-/// [`panic_safe`], which builds the outermost scope for an FFI call,
-/// and [`Self::with_child_group`], which builds a nested scope for the one
-/// legitimate case of holding two groups at once. Both lock the group
-/// immediately before constructing the scope and pass a borrow of that lock
-/// as `new`'s `guard` parameter, which is what ties the lifetime `'a` to it:
-/// a `HandleScope<'a>` cannot be constructed, returned, or used once its
-/// originating guard is gone, so a live `HandleScope` always corresponds to a
-/// held group lock — or, for a null handle, to nothing needing one.
+/// `HandleScope::new` is `pub(crate)`, with exactly three callers in this
+/// crate: [`panic_safe`], which builds the outermost scope for an FFI call;
+/// [`Self::with_child_group`], which builds a nested scope for the one
+/// legitimate case of holding two groups at once; and `sql_cancel`
+/// (`ffi::cursor`), which builds one only on the branch where its own
+/// `try_lock` succeeded — never on the branch where another thread holds the
+/// group. All three lock the group immediately before constructing the scope
+/// and pass a borrow of that lock as `new`'s `guard` parameter, which is what
+/// ties the lifetime `'a` to it: a `HandleScope<'a>` cannot be constructed,
+/// returned, or used once its originating guard is gone, so a live
+/// `HandleScope` always corresponds to a held group lock — or, for a null
+/// handle, to nothing needing one.
 ///
 /// [`panic_safe`]: crate::panic::panic_safe
 pub struct HandleScope<'a> {
@@ -55,7 +59,7 @@ impl<'a> HandleScope<'a> {
     /// this scope reaches handles through the registry, not through the
     /// guard, so the parameter exists purely to carry the lifetime.
     ///
-    /// `pub(crate)` so that only this module's two callers can claim to hold
+    /// `pub(crate)` so that only this crate's three callers can claim to hold
     /// a lock.
     pub(crate) fn new(
         group: Option<Arc<GroupLock>>,

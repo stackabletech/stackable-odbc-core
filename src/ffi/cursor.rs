@@ -367,10 +367,12 @@ pub unsafe fn sql_close_cursor<B: Backend>(statement_handle: *mut c_void) -> Sql
 ///   returns `SQL_SUCCESS`, `SQL_ERROR` or `SQL_INVALID_HANDLE`.
 /// - HY000 (general error): may surface from the backend's own error-mapping
 ///   function for an otherwise-unclassified `Backend::cancel` failure.
-/// - HY001 (memory allocation error): not applicable; Rust allocation panics
-///   are caught by `panic_safe_unlocked`, this function's own panic guard
+/// - HY001 (memory allocation error): not applicable; a Rust allocation panic
+///   here is caught by `panic_safe_unlocked`, this function's own panic guard
 ///   (`panic_safe` cannot be used here — see that function's doc comment for
-///   why).
+///   why). Unlike `panic_safe`, that catch posts no diagnostic record at all,
+///   so this SQLSTATE is never actually produced — the panic surfaces only as
+///   a bare `SQL_ERROR`.
 /// - HY010 (function sequence error): the spec's whole entry for this
 ///   SQLSTATE is `(DM)`-prefixed (an asynchronous function on the associated
 ///   connection handle still executing); driver-manager-handled, not returned
@@ -411,9 +413,18 @@ pub unsafe fn sql_cancel<B: Backend>(statement_handle: *mut c_void) -> SqlReturn
         return SqlReturn::INVALID_HANDLE;
     };
 
+    // Owned by this function's own frame, not moved into the closure below:
+    // matching on `&guard` (rather than `guard`) throughout means the closure
+    // only ever borrows it. That is what keeps this call off the list of
+    // paths that can poison the group lock (`GroupLock`'s doc comment): a
+    // panic inside the closure unwinds no further than `panic_safe_unlocked`'s
+    // `catch_unwind`, which sits *above* this frame, so `guard` is never in a
+    // frame the unwind passes through and its `Drop` never runs as part of an
+    // unwind. It drops normally, without poisoning, when this function
+    // returns — the same reasoning `panic_safe`'s own `_guard` relies on.
     let guard = group.try_lock();
 
-    let ret = panic_safe_unlocked(|| match guard {
+    let ret = panic_safe_unlocked(|| match &guard {
         // Another thread holds the connection: signal only, per spec.
         None => match signal_cancel::<B>(&token) {
             Ok(()) => SqlReturn::SUCCESS,
@@ -424,8 +435,8 @@ pub unsafe fn sql_cancel<B: Backend>(statement_handle: *mut c_void) -> SqlReturn
         },
         // Nobody else is here: the data-at-execution / no-processing case.
         Some(guard) => {
-            let mut scope = HandleScope::new(Some(group.clone()), Some(&guard));
-            let ret = match scope.get::<StatementHandle<B>>(statement_handle) {
+            let mut scope = HandleScope::new(Some(group.clone()), Some(guard));
+            match scope.get::<StatementHandle<B>>(statement_handle) {
                 Ok(stmt) => {
                     stmt.diagnostics.clear();
                     // Spec: after cancelling a statement that needed data,
@@ -442,9 +453,7 @@ pub unsafe fn sql_cancel<B: Backend>(statement_handle: *mut c_void) -> SqlReturn
                     }
                 }
                 Err(_) => SqlReturn::INVALID_HANDLE,
-            };
-            drop(guard);
-            ret
+            }
         }
     });
 
@@ -1308,7 +1317,12 @@ mod tests {
         }
     }
 
-    /// SQLCancel clears the diagnostic queue even when there is nothing to cancel.
+    /// The spec's own bifurcation, stated from the idle side: with nobody
+    /// else inside the connection, `SQLCancel` takes the full path and clears
+    /// diagnostics unconditionally, even with nothing to cancel — the same
+    /// entry-clear every other FFI function performs. Only the cross-thread
+    /// branch (`cancel_signals_the_backend_while_another_thread_holds_the_group`
+    /// below) is the spec's deliberate exception to that.
     #[test]
     fn cancel_clears_diagnostics() {
         unsafe {
@@ -1330,30 +1344,6 @@ mod tests {
                 assert_eq!(handle.diagnostics.len(), 0);
             });
 
-            cleanup_env_conn_stmt(env, conn, stmt);
-        }
-    }
-
-    /// As [`cancel_clears_diagnostics`], stated in the words of the spec's own
-    /// bifurcation: with nobody else inside the connection, `SQLCancel` takes
-    /// the full path and clears diagnostics unconditionally -- the same
-    /// entry-clear every other FFI function performs. Only the cross-thread
-    /// branch (`cancel_signals_the_backend_while_another_thread_holds_the_group`
-    /// below) is the spec's deliberate exception to that.
-    #[test]
-    fn cancel_on_an_idle_statement_clears_diagnostics() {
-        unsafe {
-            let (env, conn, stmt) = alloc_env_conn_stmt();
-            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |h| {
-                h.diagnostics.push(&crate::errors::OdbcError::NotConnected);
-            });
-
-            let ret = sql_cancel::<MockBackend>(stmt);
-            assert_eq!(ret, SqlReturn::SUCCESS);
-
-            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |h| {
-                assert_eq!(h.diagnostics.len(), 0);
-            });
             cleanup_env_conn_stmt(env, conn, stmt);
         }
     }
@@ -1405,15 +1395,77 @@ mod tests {
         }
     }
 
+    /// The other half of the cross-thread branch's spec obligation: not just
+    /// that the backend is signalled (the test above), but that a record
+    /// already posted by the function being canceled is left in place and
+    /// that `SQLCancel` posts none of its own — "does not clear the
+    /// diagnostic records of the being canceled function and does not post
+    /// its own diagnostic records". Same handshake, with a diagnostic pushed
+    /// before the holder thread ever takes the group, so this exercises the
+    /// one thing the busy branch must *not* do, not just the one thing it
+    /// must.
+    #[test]
+    fn cancel_leaves_diagnostics_untouched_while_another_thread_holds_the_group() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |h| {
+                h.diagnostics.push(&crate::errors::OdbcError::NotConnected);
+            });
+
+            let group = registry().group_of(stmt).expect("live");
+            let (holding_tx, holding_rx) = std::sync::mpsc::channel::<()>();
+            let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+            let holder = std::thread::spawn(move || {
+                let _guard = group.lock();
+                holding_tx.send(()).expect("main thread still waiting");
+                release_rx.recv().expect("main thread still running");
+            });
+            holding_rx
+                .recv()
+                .expect("worker thread panicked before locking");
+
+            let ret = sql_cancel::<MockBackend>(stmt);
+            assert_eq!(ret, SqlReturn::SUCCESS);
+
+            release_tx
+                .send(())
+                .expect("worker thread still waiting to release");
+            holder.join().expect("worker thread panicked");
+
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |h| {
+                assert_eq!(
+                    h.diagnostics.len(),
+                    1,
+                    "the cross-thread branch must neither clear the existing \
+                     record nor post one of its own"
+                );
+            });
+
+            cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
     /// A cancel that has already cloned its token must survive the statement
-    /// being freed underneath it -- the SQLite close-during-interrupt hazard
+    /// being freed underneath it — the SQLite close-during-interrupt hazard
     /// `Registry::cancel_of`'s doc comment names. Unlike
     /// `a_cloned_cancel_token_survives_the_handle_being_freed`
     /// (`handles::registry`'s own unit test, which drives `Registry::unregister`
-    /// directly), this goes through the real `SQLFreeHandle` cascade -- the
-    /// statement, then its connection, then the environment -- to prove the
+    /// directly), this goes through the real `SQLFreeHandle` cascade — the
+    /// statement, then its connection, then the environment — to prove the
     /// clone survives the production teardown path, not only the registry
     /// primitive it is built from.
+    ///
+    /// This does not, however, pin the ordering Task 15 cares about most —
+    /// that `sql_cancel` clones the token *before* attempting `try_lock`.
+    /// That ordering is two adjacent statements at the top of `sql_cancel`'s
+    /// body with no branch between them; the only way to turn it into a
+    /// runtime-observable property would be a test-only hook that pauses
+    /// `sql_cancel` between the clone and the `try_lock` so a concurrent free
+    /// can be forced into that exact window, which is exactly the kind of
+    /// contrived, production-only-for-tests instrumentation this crate
+    /// avoids elsewhere. It is left unpinned by a test; reviewing the two
+    /// lines is what guards it.
     #[test]
     fn a_cloned_token_outlives_the_statement() {
         unsafe {

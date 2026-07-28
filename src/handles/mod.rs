@@ -624,8 +624,13 @@ pub unsafe fn alloc_statement<B: Backend>(
 /// `connection: &B::Connection` argument itself is obtainable in production
 /// only through `HandleScope::get`/`stmt_with_parent`, both of which require
 /// `&mut HandleScope`, and a `HandleScope` is only ever constructed while its
-/// group lock is held (`HandleScope::new` is `pub(crate)` with exactly two
-/// callers, both of which lock first).
+/// group lock is held (`HandleScope::new` is `pub(crate)` with exactly three
+/// callers — `panic_safe`, `HandleScope::with_child_group`, and `sql_cancel`
+/// — all three of which lock first). This function is never reached through
+/// `sql_cancel`'s own scope: that scope only ever calls `scope.get::<StatementHandle<B>>`,
+/// never obtains a `&B::Connection`, so it is irrelevant to the argument here
+/// beyond being one more site that upholds the same "lock before scope"
+/// precondition the other two do.
 pub(crate) fn resolve_cancel_token<B: Backend>(
     stmt_token: *mut c_void,
     connection: &B::Connection,

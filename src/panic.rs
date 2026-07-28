@@ -77,6 +77,16 @@ where
 /// held group lock — state `sql_cancel`'s cross-thread path must not touch,
 /// per the spec's own carve-out for cancelling a function running on another
 /// thread.
+///
+/// Unlike `panic_safe`, a caught panic here pushes **no** diagnostic record —
+/// it returns a bare `SQL_ERROR` and nothing else. `panic_safe` can push
+/// [`OdbcError::Panic`] because it always holds a scope to push it through;
+/// this function holds no lock at all on `sql_cancel`'s cross-thread branch,
+/// so there is nothing sound to push through, and on the idle branch the
+/// scope (and the lock it depends on) has already gone out of scope by the
+/// time `catch_unwind` returns control here. A panicking `cancel` is
+/// therefore reported to the application only as `SQL_ERROR`, with no
+/// SQLSTATE a later `SQLGetDiagRec` could read back.
 pub(crate) fn panic_safe_unlocked<F>(f: F) -> SqlReturn
 where
     F: FnOnce() -> SqlReturn,
