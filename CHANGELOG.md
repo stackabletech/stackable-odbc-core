@@ -797,6 +797,19 @@ Everything a driver has to change for the catalog rework, in one place.
 
 ### Fixed
 
+- The 32 `HY008` doc comments across `src/ffi/` claimed the state could not
+  arise, on one of two false grounds: that "the `Backend` trait is synchronous"
+  — which says nothing about another thread cancelling — or that it was
+  `(DM)`-handled, which the spec contradicts, since its `HY008` row carries no
+  `(DM)` marker on any of these pages. Each now states which of the row's two
+  clauses applies and why, in one of three shapes: the call reclassifies, it is
+  connection-level and has no token to observe, or it makes no fallible backend
+  call for a cancellation to be reported through.
+
+- `SQLDescribeParam` now returns `HY008` on a cross-thread cancel.
+  `Backend::describe_param` is a fallible backend call, so a backend answering
+  it over the wire could be cancelled mid-lookup and reported `HY000`.
+
 - `SQLAllocHandle` returned a bare `SQL_ERROR` with no diagnostic for
   `SQL_HANDLE_DESC` and `SQL_HANDLE_DBC_INFO_TOKEN`. It now posts `HYC00`, which
   this function's diagnostics table lists un-annotated for exactly that case.

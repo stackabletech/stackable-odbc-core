@@ -44,7 +44,10 @@ static CURSOR_NAME_COUNTER: AtomicU32 = AtomicU32::new(1);
 /// - HY000 (general error): returned via `OdbcError::general` for unexpected failures.
 /// - HY001 (memory allocation error): not applicable; Rust allocation panics are caught by
 ///   `panic_safe`.
-/// - HY008 (operation canceled): (driver-manager-handled; not returned here)
+/// - HY008: Operation canceled; not returned here. This call makes no fallible backend call —
+///   `StatementBackend::column_count` returns a plain `i16` — so there is no error for a
+///   cancellation to be reported through. The asynchronous clause is inapplicable: core never
+///   returns `SQL_STILL_EXECUTING`.
 /// - HY010 (function sequence error): returned with SQLSTATE `HY010` when no result set is
 ///   available (statement not yet executed). The `(DM)` variants (async in progress, etc.) are
 ///   driver-manager-handled; not returned here.
@@ -208,7 +211,10 @@ pub unsafe fn sql_row_count<B: Backend>(
 /// - HY000 (general error): returned via `OdbcError::general` for unexpected failures.
 /// - HY001 (memory allocation error): not applicable; Rust allocation panics are caught by
 ///   `panic_safe`.
-/// - HY008 (operation canceled): (driver-manager-handled; not returned here)
+/// - HY008: Operation canceled; not returned here. This call makes no fallible backend call —
+///   `SQLMoreResults` is a core stub that reports `SQL_NO_DATA` without asking the backend — so
+///   there is no error for a cancellation to be reported through. The asynchronous clause is
+///   inapplicable: core never returns `SQL_STILL_EXECUTING`.
 /// - HY010 (function sequence error): (driver-manager-handled; not returned here)
 /// - HY013 (memory management error): not applicable; Rust memory access cannot fail silently.
 /// - HY117 (connection suspended): (driver-manager-handled; not returned here)
@@ -684,7 +690,10 @@ pub unsafe fn sql_set_cursor_name_w<B: Backend>(
 /// - HY000 (general error): returned via `OdbcError::general` for unexpected failures.
 /// - HY001 (memory allocation error): not applicable; Rust allocation panics are caught by
 ///   `panic_safe`.
-/// - HY008 (operation canceled): (driver-manager-handled; not returned here)
+/// - HY008: Operation canceled; not returned here. This call makes no fallible backend call —
+///   `SQLBulkOperations` reports `HYC00` without asking the backend — so there is no error for a
+///   cancellation to be reported through. The asynchronous clause is inapplicable: core never
+///   returns `SQL_STILL_EXECUTING`.
 /// - HY010 (function sequence error): (driver-manager-handled; not returned here)
 /// - HY011 (attribute cannot be set now): not applicable.
 /// - HY013 (memory management error): not applicable; Rust memory access cannot fail silently.
@@ -786,7 +795,10 @@ pub unsafe fn sql_bulk_operations<B: Backend>(
 /// - HY000 (general error): returned via `OdbcError::general` for unexpected failures.
 /// - HY001 (memory allocation error): not applicable; Rust allocation panics are caught by
 ///   `panic_safe`.
-/// - HY008 (operation canceled): (driver-manager-handled; not returned here)
+/// - HY008: Operation canceled; not returned here. This call makes no fallible backend call —
+///   `SQLSetPos` reports `HYC00` without asking the backend — so there is no error for a
+///   cancellation to be reported through. The asynchronous clause is inapplicable: core never
+///   returns `SQL_STILL_EXECUTING`.
 /// - HY010 (function sequence error): (driver-manager-handled; not returned here)
 /// - HY011 (attribute cannot be set now): not applicable.
 /// - HY013 (memory management error): not applicable; Rust memory access cannot fail silently.

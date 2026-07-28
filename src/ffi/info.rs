@@ -504,7 +504,10 @@ pub(crate) fn type_info_columns(widths: &CatalogResultColumnWidths) -> Vec<Colum
 ///   rather than SQL_ERROR/HY004. This is a common driver behavior: the result set column
 ///   structure is the same regardless of the filter, and returning an empty set is less
 ///   disruptive than rejecting values that may be driver-specific extensions.
-/// - HY008 (operation canceled): (driver-manager-handled; not returned here)
+/// - HY008: Operation canceled; not returned here. This call makes no fallible backend call —
+///   `Backend::get_type_info` returns its rows infallibly, as a `Cow` — so there is no error for a
+///   cancellation to be reported through. The asynchronous clause is inapplicable: core never
+///   returns `SQL_STILL_EXECUTING`.
 /// - HY010 (function sequence error): (driver-manager-handled; not returned here)
 /// - HY013 (memory management error): not explicitly returned; Rust panics on OOM.
 /// - HY117 (connection suspended): (driver-manager-handled; not returned here)

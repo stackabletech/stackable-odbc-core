@@ -220,7 +220,13 @@ fn table_enumeration(
 /// - 40003: Statement completion unknown; propagated from backend as `HY000`.
 /// - HY000: General error; returned for any unexpected backend error.
 /// - HY001: Memory allocation error; returned if allocation fails.
-/// - HY008: Operation canceled (DM) (driver-manager-handled; not returned here).
+/// - HY008: Operation canceled. The row's first clause — asynchronous processing, then the
+///   function called again — is not applicable: core implements no asynchronous execution and
+///   never returns `SQL_STILL_EXECUTING`. The second clause, `SQLCancel` called on the
+///   statement "from a different thread in a multithread application", **is returned by this
+///   driver**: the row carries no `(DM)` marker, and when a backend call fails with
+///   `Backend::is_cancelled` reporting its token signalled, core reports `HY008` in place of
+///   the backend's own SQLSTATE.
 /// - HY009: Invalid use of null pointer. **Returned by this driver** for the one clause the
 ///   spec's diagnostics table states *without* a `(DM)` marker: `SQL_ATTR_METADATA_ID` was
 ///   `SQL_TRUE`, `CatalogName` was a null pointer, and `SQL_CATALOG_NAME` reports that
@@ -441,7 +447,13 @@ pub unsafe fn sql_tables_w<B: Backend>(
 /// - 40003: Statement completion unknown; propagated from backend as `HY000`.
 /// - HY000: General error; returned for any unexpected backend error.
 /// - HY001: Memory allocation error; returned if allocation fails.
-/// - HY008: Operation canceled (DM) (driver-manager-handled; not returned here).
+/// - HY008: Operation canceled. The row's first clause — asynchronous processing, then the
+///   function called again — is not applicable: core implements no asynchronous execution and
+///   never returns `SQL_STILL_EXECUTING`. The second clause, `SQLCancel` called on the
+///   statement "from a different thread in a multithread application", **is returned by this
+///   driver**: the row carries no `(DM)` marker, and when a backend call fails with
+///   `Backend::is_cancelled` reporting its token signalled, core reports `HY008` in place of
+///   the backend's own SQLSTATE.
 /// - HY009: Invalid use of null pointer. **Returned by this driver** for the one clause the
 ///   spec's diagnostics table states *without* a `(DM)` marker: `SQL_ATTR_METADATA_ID` was
 ///   `SQL_TRUE`, `CatalogName` was a null pointer, and `SQL_CATALOG_NAME` reports that
@@ -589,7 +601,13 @@ pub unsafe fn sql_columns_w<B: Backend>(
 /// - 40003: Statement completion unknown; propagated from backend as `HY000`.
 /// - HY000: General error; returned for any unexpected backend error.
 /// - HY001: Memory allocation error; returned if allocation fails.
-/// - HY008: Operation canceled (DM) (driver-manager-handled; not returned here).
+/// - HY008: Operation canceled. The row's first clause — asynchronous processing, then the
+///   function called again — is not applicable: core implements no asynchronous execution and
+///   never returns `SQL_STILL_EXECUTING`. The second clause, `SQLCancel` called on the
+///   statement "from a different thread in a multithread application", **is returned by this
+///   driver**: the row carries no `(DM)` marker, and when a backend call fails with
+///   `Backend::is_cancelled` reporting its token signalled, core reports `HY008` in place of
+///   the backend's own SQLSTATE.
 /// - HY009: Invalid use of null pointer. **Returned by this driver** for the one clause the
 ///   spec's diagnostics table states *without* a `(DM)` marker: `SQL_ATTR_METADATA_ID` was
 ///   `SQL_TRUE`, `CatalogName` was a null pointer, and `SQL_CATALOG_NAME` reports that
@@ -746,7 +764,13 @@ pub unsafe fn sql_primary_keys_w<B: Backend>(
 /// - 40003: Statement completion unknown; propagated from backend as `HY000`.
 /// - HY000: General error; returned for any unexpected backend error.
 /// - HY001: Memory allocation error; returned if allocation fails.
-/// - HY008: Operation canceled (DM) (driver-manager-handled; not returned here).
+/// - HY008: Operation canceled. The row's first clause — asynchronous processing, then the
+///   function called again — is not applicable: core implements no asynchronous execution and
+///   never returns `SQL_STILL_EXECUTING`. The second clause, `SQLCancel` called on the
+///   statement "from a different thread in a multithread application", **is returned by this
+///   driver**: the row carries no `(DM)` marker, and when a backend call fails with
+///   `Backend::is_cancelled` reporting its token signalled, core reports `HY008` in place of
+///   the backend's own SQLSTATE.
 /// - HY009: Invalid use of null pointer. **Returned by this driver** for the one clause the
 ///   spec's diagnostics table states *without* a `(DM)` marker: `SQL_ATTR_METADATA_ID` was
 ///   `SQL_TRUE`, a catalog argument was a null pointer, and `SQL_CATALOG_NAME` reports that
@@ -936,7 +960,13 @@ pub unsafe fn sql_foreign_keys_w<B: Backend>(
 /// - 40003: Statement completion unknown; propagated from backend as `HY000`.
 /// - HY000: General error; returned for any unexpected backend error.
 /// - HY001: Memory allocation error; returned if allocation fails.
-/// - HY008: Operation canceled (DM) (driver-manager-handled; not returned here).
+/// - HY008: Operation canceled. The row's first clause — asynchronous processing, then the
+///   function called again — is not applicable: core implements no asynchronous execution and
+///   never returns `SQL_STILL_EXECUTING`. The second clause, `SQLCancel` called on the
+///   statement "from a different thread in a multithread application", **is returned by this
+///   driver**: the row carries no `(DM)` marker, and when a backend call fails with
+///   `Backend::is_cancelled` reporting its token signalled, core reports `HY008` in place of
+///   the backend's own SQLSTATE.
 /// - HY009: Invalid use of null pointer. **Both** of the spec's clauses are unmarked here, so
 ///   both are returned by this driver: (1) the `TableName` argument was a null pointer —
 ///   note that `SQLPrimaryKeys` and `SQLForeignKeys` carry this same sentence *with* a `(DM)`
@@ -1116,7 +1146,13 @@ pub unsafe fn sql_statistics_w<B: Backend>(
 /// - 40003: Statement completion unknown; propagated from backend as `HY000`.
 /// - HY000: General error; returned for any unexpected backend error.
 /// - HY001: Memory allocation error; returned if allocation fails.
-/// - HY008: Operation canceled (DM) (driver-manager-handled; not returned here).
+/// - HY008: Operation canceled. The row's first clause — asynchronous processing, then the
+///   function called again — is not applicable: core implements no asynchronous execution and
+///   never returns `SQL_STILL_EXECUTING`. The second clause, `SQLCancel` called on the
+///   statement "from a different thread in a multithread application", **is returned by this
+///   driver**: the row carries no `(DM)` marker, and when a backend call fails with
+///   `Backend::is_cancelled` reporting its token signalled, core reports `HY008` in place of
+///   the backend's own SQLSTATE.
 /// - HY009: Invalid use of null pointer. **Both** of the spec's clauses are unmarked here, so
 ///   both are returned by this driver: (1) the `TableName` argument was a null pointer —
 ///   note that `SQLPrimaryKeys` and `SQLForeignKeys` carry this same sentence *with* a `(DM)`
@@ -1330,7 +1366,13 @@ pub unsafe fn sql_special_columns_w<B: Backend>(
 /// - 08S01: Communication link failure; not applicable (no backend query at describe time).
 /// - HY000: General error; returned for any unexpected internal error.
 /// - HY001: Memory allocation error; returned if allocation fails.
-/// - HY008: Operation canceled (DM) (driver-manager-handled; not returned here).
+/// - HY008: Operation canceled; not returned here, despite reaching a fallible backend call.
+///   `StatementBackend::describe_col` is reached through a `map_err` that replaces *any* error
+///   with `07009` and a "column out of range" message, so a cancellation is indistinguishable
+///   from a bad column number by the time core sees it. Reclassifying would be a no-op without
+///   first deciding what a non-range failure should report, which is `SQLDescribeCol`'s
+///   question rather than cancellation's. The asynchronous clause is inapplicable: core never
+///   returns `SQL_STILL_EXECUTING`.
 /// - HY010: Function sequence error (DM) (driver-manager-handled; not returned here).
 /// - HY013: Memory management error; returned if underlying allocation fails.
 /// - HY090: Invalid string or buffer length (DM) (driver-manager-handled; not returned by this
@@ -1486,8 +1528,13 @@ pub unsafe fn sql_describe_col_w<B: Backend>(
 ///   when `column_number` is greater than the number of result set columns (not DM-annotated).
 /// - HY000: General error; returned for any unexpected internal error.
 /// - HY001: Memory allocation error; returned if allocation fails.
-/// - HY008: Operation canceled; not returned here (the `Backend` trait is synchronous, so
-///   asynchronous cancellation never applies — not DM-annotated in the spec).
+/// - HY008: Operation canceled; not returned here, despite reaching a fallible backend call.
+///   `StatementBackend::describe_col` is reached through a `map_err` that replaces *any* error
+///   with `07009` and a "column out of range" message, so a cancellation is indistinguishable
+///   from a bad column number by the time core sees it. Reclassifying would be a no-op without
+///   first deciding what a non-range failure should report, which is `SQLDescribeCol`'s
+///   question rather than cancellation's. The asynchronous clause is inapplicable: core never
+///   returns `SQL_STILL_EXECUTING`.
 /// - HY010: Function sequence error (DM) (driver-manager-handled; not returned here).
 /// - HY013: Memory management error; returned if underlying allocation fails.
 /// - HY090: Invalid string or buffer length (DM) (driver-manager-handled; not returned here).
@@ -1699,7 +1746,13 @@ pub(crate) fn procedures_columns(widths: &CatalogResultColumnWidths) -> Vec<Colu
 /// - 40003: Statement completion unknown; propagated from backend as `HY000`.
 /// - HY000: General error; returned for any unexpected backend error.
 /// - HY001: Memory allocation error; returned if allocation fails.
-/// - HY008: Operation canceled (DM) (driver-manager-handled; not returned here).
+/// - HY008: Operation canceled. The row's first clause — asynchronous processing, then the
+///   function called again — is not applicable: core implements no asynchronous execution and
+///   never returns `SQL_STILL_EXECUTING`. The second clause, `SQLCancel` called on the
+///   statement "from a different thread in a multithread application", **is returned by this
+///   driver**: the row carries no `(DM)` marker, and when a backend call fails with
+///   `Backend::is_cancelled` reporting its token signalled, core reports `HY008` in place of
+///   the backend's own SQLSTATE.
 /// - HY009: Invalid use of null pointer. **Returned by this driver** for the one clause the
 ///   spec's diagnostics table states *without* a `(DM)` marker: `SQL_ATTR_METADATA_ID` was
 ///   `SQL_TRUE`, `CatalogName` was a null pointer, and `SQL_CATALOG_NAME` reports that
@@ -1888,7 +1941,13 @@ pub(crate) fn procedure_columns_columns(
 /// - 40003: Statement completion unknown; propagated from backend as `HY000`.
 /// - HY000: General error; returned for any unexpected backend error.
 /// - HY001: Memory allocation error; returned if allocation fails.
-/// - HY008: Operation canceled (DM) (driver-manager-handled; not returned here).
+/// - HY008: Operation canceled. The row's first clause — asynchronous processing, then the
+///   function called again — is not applicable: core implements no asynchronous execution and
+///   never returns `SQL_STILL_EXECUTING`. The second clause, `SQLCancel` called on the
+///   statement "from a different thread in a multithread application", **is returned by this
+///   driver**: the row carries no `(DM)` marker, and when a backend call fails with
+///   `Backend::is_cancelled` reporting its token signalled, core reports `HY008` in place of
+///   the backend's own SQLSTATE.
 /// - HY009: Invalid use of null pointer. **Returned by this driver** for the one clause the
 ///   spec's diagnostics table states *without* a `(DM)` marker: `SQL_ATTR_METADATA_ID` was
 ///   `SQL_TRUE`, `CatalogName` was a null pointer, and `SQL_CATALOG_NAME` reports that
@@ -2065,7 +2124,13 @@ pub(crate) fn column_privileges_columns(
 /// - 40003: Statement completion unknown; propagated from backend as `HY000`.
 /// - HY000: General error; returned for any unexpected backend error.
 /// - HY001: Memory allocation error; returned if allocation fails.
-/// - HY008: Operation canceled (DM) (driver-manager-handled; not returned here).
+/// - HY008: Operation canceled. The row's first clause — asynchronous processing, then the
+///   function called again — is not applicable: core implements no asynchronous execution and
+///   never returns `SQL_STILL_EXECUTING`. The second clause, `SQLCancel` called on the
+///   statement "from a different thread in a multithread application", **is returned by this
+///   driver**: the row carries no `(DM)` marker, and when a backend call fails with
+///   `Backend::is_cancelled` reporting its token signalled, core reports `HY008` in place of
+///   the backend's own SQLSTATE.
 /// - HY009: Invalid use of null pointer. **Returned by this driver** for *both* clauses the
 ///   spec's diagnostics table states without a `(DM)` marker — this is the only one of the
 ///   four functions in this family with two:
@@ -2254,7 +2319,13 @@ pub(crate) fn table_privileges_columns(
 /// - 40003: Statement completion unknown; propagated from backend as `HY000`.
 /// - HY000: General error; returned for any unexpected backend error.
 /// - HY001: Memory allocation error; returned if allocation fails.
-/// - HY008: Operation canceled (DM) (driver-manager-handled; not returned here).
+/// - HY008: Operation canceled. The row's first clause — asynchronous processing, then the
+///   function called again — is not applicable: core implements no asynchronous execution and
+///   never returns `SQL_STILL_EXECUTING`. The second clause, `SQLCancel` called on the
+///   statement "from a different thread in a multithread application", **is returned by this
+///   driver**: the row carries no `(DM)` marker, and when a backend call fails with
+///   `Backend::is_cancelled` reporting its token signalled, core reports `HY008` in place of
+///   the backend's own SQLSTATE.
 /// - HY009: Invalid use of null pointer. **Returned by this driver** for the one clause the
 ///   spec's diagnostics table states *without* a `(DM)` marker: `SQL_ATTR_METADATA_ID` was
 ///   `SQL_TRUE`, `CatalogName` was a null pointer, and `SQL_CATALOG_NAME` reports that

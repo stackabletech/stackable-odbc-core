@@ -8,7 +8,7 @@ use odbc_sys::SqlDataType;
 
 use crate::{
     backend::{Backend, StatementBackend},
-    cancel::reclassify_cancelled,
+    cancel::{reclassify_cancelled, reclassify_cancelled_opt},
     errors::OdbcError,
     handles::{ParameterBinding, StatementHandle},
     panic::panic_safe,
@@ -193,7 +193,10 @@ pub unsafe fn sql_bind_parameter<B: Backend>(
 ///   locally without a round-trip to the data source
 /// - `HY000` General error — returned for unexpected failures
 /// - `HY001` Memory allocation error — (driver-manager-handled; not returned here)
-/// - `HY008` Operation canceled — (driver-manager-handled; not returned here)
+/// - HY008: Operation canceled; not returned here. This call makes no fallible backend call —
+///   `SQLNumParams` reads the parameter count cached at prepare time — so there is no error for a
+///   cancellation to be reported through. The asynchronous clause is inapplicable: core never
+///   returns `SQL_STILL_EXECUTING`.
 /// - `HY010` Function sequence error — returned when `sql_num_params` is called before
 ///   `SQLPrepare` or `SQLExecDirect` (i.e., `stmt.param_count` is `None`)
 /// - `HY013` Memory management error — (driver-manager-handled; not returned here)
@@ -274,7 +277,13 @@ pub unsafe fn sql_num_params<B: Backend>(
 /// - 08S01: Communication link failure — not applicable (no backend query).
 /// - HY000: General error — returned for unexpected failures.
 /// - HY001: Memory allocation error — not applicable; Rust allocation panics are caught by `panic_safe`.
-/// - HY008: Operation canceled — (driver-manager-handled; not returned here).
+/// - HY008: Operation canceled. The row's first clause — asynchronous processing, then the
+///   function called again — is not applicable: core implements no asynchronous execution and
+///   never returns `SQL_STILL_EXECUTING`. The second clause, `SQLCancel` called on the
+///   statement "from a different thread in a multithread application", **is returned by this
+///   driver**: the row carries no `(DM)` marker, and when a backend call fails with
+///   `Backend::is_cancelled` reporting its token signalled, core reports `HY008` in place of
+///   the backend's own SQLSTATE.
 /// - HY010: Function sequence error — returned when no SQL has been prepared.
 /// - HY013: Memory management error — not applicable.
 /// - HY117: Connection suspended — (DM) (driver-manager-handled; not returned here).
@@ -328,11 +337,22 @@ pub unsafe fn sql_describe_param<B: Backend>(
             // Ask the backend first. `None` — and a backend that never
             // overrides the hook — falls back to a generic VARCHAR, which is
             // usable but wrong for any parameter that is not a string.
+            // Like `SQLFetch`, this runs against a statement an earlier
+            // `SQLPrepare` set up, so it observes that call's token rather than
+            // minting one. `B::describe_param` takes no token itself — it is a
+            // metadata lookup, not a query — but a backend that answers it over
+            // the wire can still be cancelled mid-lookup.
+            let cancel_token = crate::handles::current_cancel_token(statement_handle);
+            let cancel = cancel_token
+                .as_ref()
+                .map(crate::handles::cancel_as::<B>)
+                .transpose()?;
+
             let described = match (conn.connection.as_ref(), stmt.prepared_sql.as_deref()) {
-                (Some(connection), Some(sql)) => {
-                    B::describe_param(connection, sql, parameter_number)
-                        .map_err(Into::<OdbcError>::into)?
-                }
+                (Some(connection), Some(sql)) => reclassify_cancelled_opt::<B, _, _>(
+                    B::describe_param(connection, sql, parameter_number),
+                    cancel,
+                )?,
                 // No connection or no stored text: nothing to ask with. Not an
                 // error — `param_count` above already established the statement
                 // is prepared, and the fallback still answers the call.
@@ -1058,7 +1078,13 @@ pub unsafe fn sql_put_data<B: Backend>(
 /// - HY000: General error — propagated from backend.
 /// - HY001: Memory allocation error — not applicable; Rust allocation panics are caught by
 ///   `panic_safe`.
-/// - HY008: Operation canceled — (driver-manager-handled; not returned here).
+/// - HY008: Operation canceled. The row's first clause — asynchronous processing, then the
+///   function called again — is not applicable: core implements no asynchronous execution and
+///   never returns `SQL_STILL_EXECUTING`. The second clause, `SQLCancel` called on the
+///   statement "from a different thread in a multithread application", **is returned by this
+///   driver**: the row carries no `(DM)` marker, and when a backend call fails with
+///   `Backend::is_cancelled` reporting its token signalled, core reports `HY008` in place of
+///   the backend's own SQLSTATE.
 /// - HY010: Function sequence error — returned when no data-at-execution operation is in
 ///   progress. (DM cases for async: driver-manager-handled; not returned here.)
 /// - HY013: Memory management error — not applicable.

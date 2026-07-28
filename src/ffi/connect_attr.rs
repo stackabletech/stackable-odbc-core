@@ -155,7 +155,11 @@ fn validate_txn_isolation<B: Backend>(
 /// - HY000 General error: returned for unexpected internal errors.
 /// - HY001 Memory allocation error: not returned; Rust panics on allocation
 ///   failure, which is caught by `panic_safe` and converted to `SQL_ERROR`/HY000.
-/// - HY008 Operation canceled: not returned; the `Backend` trait is synchronous.
+/// - HY008: Operation canceled; not returned here. Cancelling a connection-level call needs
+///   `SQLCancelHandle` on a connection handle, which this driver does not export, so no cancel
+///   token exists for this call to observe — `SQLCancel` takes a statement handle and cannot
+///   reach one. The asynchronous clause is likewise inapplicable: core never returns
+///   `SQL_STILL_EXECUTING`.
 /// - HY009 Invalid use of null pointer: HY009 is not applicable here:
 ///   `SQL_ATTR_CURRENT_CATALOG` is the only string attribute handled, and null
 ///   means "clear the catalog" (a valid operation).

@@ -610,6 +610,26 @@ mechanism:
   cross-thread branch, so a merely-idle statement's data-at-execution state
   is occasionally left uncleared where it strictly could have been —
   harmless, and explicitly spec-legal.
+- **A cancelled call reports `HY008`, and the token is minted per execution.**
+  `Backend::cancel` signals; `Backend::is_cancelled` observes. They are a pair —
+  a backend implementing the first and not the second still cancels the work,
+  but the application sees whatever SQLSTATE the driver's error mapping
+  produced instead of "operation canceled". Core asks `is_cancelled` **only
+  after a backend call returned an error**: the spec permits a cancelled
+  execution to finish anyway ("it is possible for the execution to succeed and
+  return SQL_SUCCESS while the cancel is also successful"), so `Ok` is never
+  reclassified. The single implementation is `crate::cancel`.
+
+  `mint_cancel_token` builds a **new** token at every statement-producing call,
+  and the cursor-consuming calls read that execution's token rather than
+  minting one. An earlier revision created one token per statement and never
+  replaced it, which left a cancelled statement permanently unusable —
+  `Backend::cancel` marks the token, and the next execution reused it. The spec
+  requires the opposite ("After the statement has been canceled, the
+  application can call SQLExecute or SQLExecDirect again"), and the outcome
+  that rule was protecting against is itself spec-mandated: "a call to
+  SQLCancel when no processing is being done on the statement ... has is [sic]
+  no effect at all."
 - **Every lock in the crate is imported from `src/sync.rs`**, never directly
   from `std::sync`, so that building a test with `--cfg loom` swaps every one
   of them for loom's instrumented equivalent. A lock imported around that

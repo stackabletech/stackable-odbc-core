@@ -133,7 +133,13 @@ unsafe fn report_rows_fetched_only<B: Backend>(stmt: &StatementHandle<B>, count:
 /// - 40003 (statement completion unknown): propagated from the backend.
 /// - HY000 (general error): propagated from the backend.
 /// - HY001 (memory allocation error): not returned; Rust panics on allocation failure.
-/// - HY008 (operation canceled): not applicable; the `Backend` trait is synchronous.
+/// - HY008: Operation canceled. The row's first clause — asynchronous processing, then the
+///   function called again — is not applicable: core implements no asynchronous execution and
+///   never returns `SQL_STILL_EXECUTING`. The second clause, `SQLCancel` called on the
+///   statement "from a different thread in a multithread application", **is returned by this
+///   driver**: the row carries no `(DM)` marker, and when a backend call fails with
+///   `Backend::is_cancelled` reporting its token signalled, core reports `HY008` in place of
+///   the backend's own SQLSTATE.
 /// - HY010 (function sequence error): returned when `stmt.statement` is `None`, i.e. no
 ///   result set is open. (DM) variants (async context, `SQLExtendedFetch` mixing) are
 ///   driver-manager-handled; not returned here.
@@ -347,7 +353,13 @@ pub unsafe fn sql_fetch<B: Backend>(statement_handle: *mut c_void) -> SqlReturn 
 /// - 40001, 40003: delegated to `sql_fetch`.
 /// - HY000 (general error): propagated from the backend.
 /// - HY001 (memory allocation error): not returned; Rust panics on allocation failure.
-/// - HY008 (operation canceled): not applicable; the `Backend` trait is synchronous.
+/// - HY008: Operation canceled. The row's first clause — asynchronous processing, then the
+///   function called again — is not applicable: core implements no asynchronous execution and
+///   never returns `SQL_STILL_EXECUTING`. The second clause, `SQLCancel` called on the
+///   statement "from a different thread in a multithread application", **is returned by this
+///   driver**: the row carries no `(DM)` marker, and when a backend call fails with
+///   `Backend::is_cancelled` reporting its token signalled, core reports `HY008` in place of
+///   the backend's own SQLSTATE.
 /// - HY010 (function sequence error): delegated to `sql_fetch` for `SQL_FETCH_NEXT`. (DM)
 ///   variants are driver-manager-handled; not returned here.
 /// - HY013 (memory management error): not returned.
@@ -502,7 +514,13 @@ pub unsafe fn sql_fetch_scroll<B: Backend>(
 /// - HY003 (program type out of range): returned both when `target_type` is not a recognized C
 ///   data type, and via `write_column_value`'s numeric-pivot catch-all for a `CDataType` with no
 ///   numeric arm. (DM) variants (column 0 with wrong bookmark type) are driver-manager-handled.
-/// - HY008 (operation canceled): not applicable; the `Backend` trait is synchronous.
+/// - HY008: Operation canceled. The row's first clause — asynchronous processing, then the
+///   function called again — is not applicable: core implements no asynchronous execution and
+///   never returns `SQL_STILL_EXECUTING`. The second clause, `SQLCancel` called on the
+///   statement "from a different thread in a multithread application", **is returned by this
+///   driver**: the row carries no `(DM)` marker, and when a backend call fails with
+///   `Backend::is_cancelled` reporting its token signalled, core reports `HY008` in place of
+///   the backend's own SQLSTATE.
 /// - HY009 (invalid use of null pointer): not checked; `target_value_ptr` null is not
 ///   validated. (DM) — driver-manager-handled.
 /// - HY010 (function sequence error): driver-manager-handled; not returned here.

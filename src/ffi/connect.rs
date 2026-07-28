@@ -52,8 +52,11 @@ use crate::utf16::{utf16_to_string, write_utf16};
 /// - 28000: Invalid authorization specification — may be returned by the backend via `B::connect`.
 /// - HY000: General error — returned for any backend error with no specific SQLSTATE.
 /// - HY001: Memory allocation failure — not returned here (Rust panics on alloc failure).
-/// - HY008: Operation cancelled (async) — (driver-manager-handled; not returned here);
-///   the `Backend` trait has no async connection path.
+/// - HY008: Operation canceled; not returned here. Cancelling a connection-level call needs
+///   `SQLCancelHandle` on a connection handle, which this driver does not export, so no cancel
+///   token exists for this call to observe — `SQLCancel` takes a statement handle and cannot
+///   reach one. The asynchronous clause is likewise inapplicable: core never returns
+///   `SQL_STILL_EXECUTING`.
 /// - HY009: Invalid use of null pointer — returned when `in_connection_string` is null.
 /// - HY010: Function sequence error (async in progress) — (driver-manager-handled; not returned here).
 /// - HY013: Memory management error — not returned here (Rust panics on alloc failure).
@@ -207,8 +210,11 @@ pub unsafe fn sql_driver_connect_w<B: Backend>(
 /// - 28000: Invalid authorization specification — may be returned by the backend via `B::connect`.
 /// - HY000: General error — returned for any backend error with no specific SQLSTATE.
 /// - HY001: Memory allocation failure — (driver-manager-handled; not returned here).
-/// - HY008: Operation cancelled (async) — (driver-manager-handled; not returned here);
-///   the `Backend` trait has no async connection path.
+/// - HY008: Operation canceled; not returned here. Cancelling a connection-level call needs
+///   `SQLCancelHandle` on a connection handle, which this driver does not export, so no cancel
+///   token exists for this call to observe — `SQLCancel` takes a statement handle and cannot
+///   reach one. The asynchronous clause is likewise inapplicable: core never returns
+///   `SQL_STILL_EXECUTING`.
 /// - HY010: Function sequence error (async in progress) — (driver-manager-handled; not returned here).
 /// - HY013: Memory management error — not returned here (Rust panics on alloc failure).
 /// - HY090: Invalid string or buffer length — returned when `name_length1`, `name_length2`, or
@@ -370,8 +376,11 @@ pub unsafe fn sql_connect_w<B: Backend>(
 /// - 28000: Invalid authorization specification — may be returned by the backend via `B::connect`.
 /// - HY000: General error — returned for any backend error with no specific SQLSTATE.
 /// - HY001: Memory allocation failure — not returned here (Rust panics on alloc failure).
-/// - HY008: Operation cancelled (async) — (driver-manager-handled; not returned here);
-///   the `Backend` trait has no async connection path.
+/// - HY008: Operation canceled; not returned here. Cancelling a connection-level call needs
+///   `SQLCancelHandle` on a connection handle, which this driver does not export, so no cancel
+///   token exists for this call to observe — `SQLCancel` takes a statement handle and cannot
+///   reach one. The asynchronous clause is likewise inapplicable: core never returns
+///   `SQL_STILL_EXECUTING`.
 /// - HY009: Invalid use of null pointer — returned when `in_connection_string` is null.
 /// - HY010: Function sequence error (async in progress) — (driver-manager-handled; not returned here).
 /// - HY013: Memory management error — not returned here (Rust panics on alloc failure).
@@ -683,7 +692,11 @@ fn read_dsn_keys(dsn: &str) -> Vec<(String, String)> {
 ///   which is not currently tracked. Deferred.
 /// - HY000: General error — returned for any backend `disconnect` error with no specific SQLSTATE.
 /// - HY001: Memory allocation failure — not returned here (Rust panics on alloc failure).
-/// - HY008: Operation cancelled (async) — not returned here (the `Backend` trait is synchronous).
+/// - HY008: Operation canceled; not returned here. Cancelling a connection-level call needs
+///   `SQLCancelHandle` on a connection handle, which this driver does not export, so no cancel
+///   token exists for this call to observe — `SQLCancel` takes a statement handle and cannot
+///   reach one. The asynchronous clause is likewise inapplicable: core never returns
+///   `SQL_STILL_EXECUTING`.
 /// - HY010: Function sequence error (async in progress) — (driver-manager-handled; not returned here).
 /// - HY013: Memory management error — not returned here (Rust panics on alloc failure).
 /// - HY117: Connection suspended due to unknown transaction state — (driver-manager-handled; not returned here).

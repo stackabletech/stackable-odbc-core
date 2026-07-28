@@ -339,8 +339,11 @@ enum EndTranOutcome {
 /// - **HY001** — Memory allocation error. Returned by the backend if memory cannot be
 ///   allocated.
 ///
-/// - **HY008** — Operation canceled (async). Not applicable; the `Backend` trait is
-///   synchronous and has no async execution path.
+/// - HY008: Operation canceled; not returned here. Cancelling a connection-level call needs
+///   `SQLCancelHandle` on a connection handle, which this driver does not export, so no cancel
+///   token exists for this call to observe — `SQLCancel` takes a statement handle and cannot
+///   reach one. The asynchronous clause is likewise inapplicable: core never returns
+///   `SQL_STILL_EXECUTING`.
 ///
 /// - **HY010** — Function sequence error (async). Not applicable; the `Backend` trait is
 ///   synchronous and has no async execution path.
