@@ -12,7 +12,7 @@ use crate::{
     handles::{ParameterBinding, StatementHandle},
     panic::panic_safe,
     types::{
-        ColumnValue, Nullable, SQL_DATA_AT_EXEC, SQL_DEFAULT_PARAM_SIZE,
+        ColumnValue, ParamDescriptor, SQL_DATA_AT_EXEC, SQL_DEFAULT_PARAM_SIZE,
         SQL_LEN_DATA_AT_EXEC_OFFSET, SQL_NTS, SQL_NULL_DATA, SqlReturn, SqlState, ULen,
         c_data_type_from_raw, param_type_from_raw,
     },
@@ -303,7 +303,7 @@ pub unsafe fn sql_describe_param<B: Backend>(
     // (kind and group validated by scope.get inside the closure).
     let ret = unsafe {
         panic_safe::<B, _>(statement_handle, |scope| {
-            let stmt = scope.get::<StatementHandle<B>>(statement_handle)?;
+            let (stmt, conn) = scope.stmt_with_parent::<B>(statement_handle)?;
             stmt.diagnostics.clear();
 
             // Spec: HY010 — no SQL has been prepared.
@@ -324,18 +324,45 @@ pub unsafe fn sql_describe_param<B: Backend>(
                 ));
             }
 
-            // Return generic SQL_VARCHAR type info.
+            // Ask the backend first. `None` — and a backend that never
+            // overrides the hook — falls back to a generic VARCHAR, which is
+            // usable but wrong for any parameter that is not a string.
+            let described = match (conn.connection.as_ref(), stmt.prepared_sql.as_deref()) {
+                (Some(connection), Some(sql)) => {
+                    B::describe_param(connection, sql, parameter_number)
+                        .map_err(Into::<OdbcError>::into)?
+                }
+                // No connection or no stored text: nothing to ask with. Not an
+                // error — `param_count` above already established the statement
+                // is prepared, and the fallback still answers the call.
+                _ => None,
+            };
+
+            let descriptor = described.unwrap_or_else(|| {
+                tracing::warn!(
+                    "SQLDescribeParam(param={}): backend did not describe this parameter; \
+                     reporting VARCHAR({}) (see Backend::describe_param)",
+                    parameter_number,
+                    SQL_DEFAULT_PARAM_SIZE
+                );
+                ParamDescriptor::new(SqlDataType::VARCHAR)
+                    .with_parameter_size(u64::from(SQL_DEFAULT_PARAM_SIZE))
+            });
+
             if !data_type_ptr.is_null() {
-                std::ptr::write_unaligned(data_type_ptr, SqlDataType::VARCHAR.0);
+                std::ptr::write_unaligned(data_type_ptr, descriptor.data_type().0);
             }
             if !parameter_size_ptr.is_null() {
-                std::ptr::write_unaligned(parameter_size_ptr, SQL_DEFAULT_PARAM_SIZE as ULen);
+                std::ptr::write_unaligned(
+                    parameter_size_ptr,
+                    ULen::try_from(descriptor.parameter_size()).unwrap_or(ULen::MAX),
+                );
             }
             if !decimal_digits_ptr.is_null() {
-                std::ptr::write_unaligned(decimal_digits_ptr, 0_i16);
+                std::ptr::write_unaligned(decimal_digits_ptr, descriptor.decimal_digits());
             }
             if !nullable_ptr.is_null() {
-                std::ptr::write_unaligned(nullable_ptr, Nullable::SqlNullable as i16);
+                std::ptr::write_unaligned(nullable_ptr, descriptor.nullable() as i16);
             }
 
             Ok(SqlReturn::SUCCESS)
@@ -1161,7 +1188,7 @@ mod tests {
     use super::*;
     use crate::{
         ffi::{execute::sql_prepare_w, handle::sql_free_handle},
-        test_utils::{MockBackend, alloc_env_conn_stmt, with_handle},
+        test_utils::{MockBackend, MockLongDataBackend, alloc_env_conn_stmt, with_handle},
         types::{CDataType, ParamType},
     };
 
@@ -1387,8 +1414,129 @@ mod tests {
             assert_eq!(data_type, SqlDataType::VARCHAR.0);
             assert_eq!(param_size, SQL_DEFAULT_PARAM_SIZE as ULen);
             assert_eq!(decimal_digits, 0);
-            assert_eq!(nullable, Nullable::SqlNullable as i16);
+            assert_eq!(nullable, crate::types::Nullable::SqlNullable as i16);
             cleanup(env, conn, stmt);
+        }
+    }
+
+    /// The backend's answer must reach the application unchanged. Core reported
+    /// a hard-wired `VARCHAR(4000)` for every parameter before
+    /// `Backend::describe_param` existed, which a client that sizes its buffers
+    /// from this turns into a number sent as text.
+    #[test]
+    fn describe_param_reports_what_the_backend_describes() {
+        unsafe {
+            let (env, conn, stmt) = alloc_long_data_env();
+
+            let mut data_type: i16 = 0;
+            let mut param_size: ULen = 0;
+            let mut decimal_digits: i16 = -1;
+            let mut nullable: i16 = -1;
+            let ret = sql_describe_param::<MockLongDataBackend>(
+                stmt,
+                1,
+                &mut data_type,
+                &mut param_size,
+                &mut decimal_digits,
+                &mut nullable,
+            );
+
+            assert_eq!(ret, SqlReturn::SUCCESS);
+            assert_eq!(data_type, SqlDataType::DECIMAL.0);
+            assert_eq!(param_size, 18 as ULen);
+            assert_eq!(decimal_digits, 4);
+            assert_eq!(nullable, crate::types::Nullable::SqlNoNulls as i16);
+
+            cleanup_long_data_env(env, conn, stmt);
+        }
+    }
+
+    /// A backend that declines to describe one parameter still gets core's
+    /// generic answer for it, rather than an error — the call is supported
+    /// either way, which is what `SQL_DESCRIBE_PARAMETER` = "Y" states.
+    #[test]
+    fn describe_param_falls_back_when_the_backend_declines() {
+        unsafe {
+            let (env, conn, stmt) = alloc_long_data_env();
+
+            let mut data_type: i16 = 0;
+            let mut param_size: ULen = 0;
+            let mut decimal_digits: i16 = -1;
+            let mut nullable: i16 = -1;
+            let ret = sql_describe_param::<MockLongDataBackend>(
+                stmt,
+                2,
+                &mut data_type,
+                &mut param_size,
+                &mut decimal_digits,
+                &mut nullable,
+            );
+
+            assert_eq!(ret, SqlReturn::SUCCESS);
+            assert_eq!(data_type, SqlDataType::VARCHAR.0);
+            assert_eq!(param_size, SQL_DEFAULT_PARAM_SIZE as ULen);
+            assert_eq!(nullable, crate::types::Nullable::SqlNullable as i16);
+
+            cleanup_long_data_env(env, conn, stmt);
+        }
+    }
+
+    /// Env + connection + statement prepared with two parameter markers, for
+    /// [`MockLongDataBackend`], whose `describe_param` answers for the first.
+    unsafe fn alloc_long_data_env() -> (*mut c_void, *mut c_void, *mut c_void) {
+        let mut env: *mut c_void = std::ptr::null_mut();
+        let mut conn: *mut c_void = std::ptr::null_mut();
+        let mut stmt: *mut c_void = std::ptr::null_mut();
+        unsafe {
+            let _ = crate::ffi::handle::sql_alloc_handle::<MockLongDataBackend>(
+                HandleType::Env as i16,
+                std::ptr::null_mut(),
+                &mut env,
+            );
+            let _ = crate::ffi::handle::sql_alloc_handle::<MockLongDataBackend>(
+                HandleType::Dbc as i16,
+                env,
+                &mut conn,
+            );
+            let wide: Vec<u16> = "DRIVER=mock;".encode_utf16().collect();
+            let _ = crate::ffi::connect::sql_driver_connect_w::<MockLongDataBackend>(
+                conn,
+                std::ptr::null_mut(),
+                wide.as_ptr(),
+                wide.len() as i16,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                0,
+            );
+            let _ = crate::ffi::handle::sql_alloc_handle::<MockLongDataBackend>(
+                HandleType::Stmt as i16,
+                conn,
+                &mut stmt,
+            );
+            let sql = "SELECT * FROM t WHERE a = ? AND b = ?";
+            let wide: Vec<u16> = sql.encode_utf16().collect();
+            let ret = sql_prepare_w::<MockLongDataBackend>(stmt, wide.as_ptr(), wide.len() as i32);
+            assert_eq!(ret, SqlReturn::SUCCESS, "precondition: prepare");
+        }
+        (env, conn, stmt)
+    }
+
+    unsafe fn cleanup_long_data_env(env: *mut c_void, conn: *mut c_void, stmt: *mut c_void) {
+        unsafe {
+            let _ = crate::ffi::handle::sql_free_handle::<MockLongDataBackend>(
+                HandleType::Stmt as i16,
+                stmt,
+            );
+            let _ = crate::ffi::connect::sql_disconnect::<MockLongDataBackend>(conn);
+            let _ = crate::ffi::handle::sql_free_handle::<MockLongDataBackend>(
+                HandleType::Dbc as i16,
+                conn,
+            );
+            let _ = crate::ffi::handle::sql_free_handle::<MockLongDataBackend>(
+                HandleType::Env as i16,
+                env,
+            );
         }
     }
 

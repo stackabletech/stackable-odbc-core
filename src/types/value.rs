@@ -957,6 +957,89 @@ impl ColumnDescriptor {
     }
 }
 
+// ---------------------------------------------------------------------------
+// ParamDescriptor
+// ---------------------------------------------------------------------------
+
+/// Describes one parameter marker of a prepared statement: the four values
+/// `SQLDescribeParam` reports to the application.
+///
+/// Built with [`ParamDescriptor::new`] and the `with_*` builders; the fields are
+/// crate-private and the type is `#[non_exhaustive]`, for the same reason as
+/// [`ColumnDescriptor`]. Read a field back through its accessor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ParamDescriptor {
+    pub(crate) data_type: SqlDataType,
+    pub(crate) parameter_size: u64,
+    pub(crate) decimal_digits: i16,
+    pub(crate) nullable: Nullable,
+}
+
+impl ParamDescriptor {
+    /// A parameter of `data_type` with no declared size or scale, nullable.
+    ///
+    /// `SQL_NULLABLE` rather than `SQL_NULLABLE_UNKNOWN` because that is what
+    /// the spec has a driver report when it cannot determine nullability: "If
+    /// the driver cannot determine the nullability of a parameter, it returns
+    /// SQL_NULLABLE."
+    #[must_use]
+    pub fn new(data_type: SqlDataType) -> Self {
+        Self {
+            data_type,
+            parameter_size: 0,
+            decimal_digits: 0,
+            nullable: Nullable::SqlNullable,
+        }
+    }
+
+    /// Sets the parameter's size (precision), in the units the ODBC column-size
+    /// rules define for its type.
+    #[must_use]
+    pub fn with_parameter_size(mut self, parameter_size: u64) -> Self {
+        self.parameter_size = parameter_size;
+        self
+    }
+
+    /// Sets the parameter's decimal digits (scale).
+    #[must_use]
+    pub fn with_decimal_digits(mut self, decimal_digits: i16) -> Self {
+        self.decimal_digits = decimal_digits;
+        self
+    }
+
+    /// Sets whether the parameter accepts NULL.
+    #[must_use]
+    pub fn with_nullable(mut self, nullable: Nullable) -> Self {
+        self.nullable = nullable;
+        self
+    }
+
+    /// The parameter's SQL data type.
+    #[must_use]
+    pub fn data_type(&self) -> SqlDataType {
+        self.data_type
+    }
+
+    /// The parameter's size (precision).
+    #[must_use]
+    pub fn parameter_size(&self) -> u64 {
+        self.parameter_size
+    }
+
+    /// The parameter's decimal digits (scale).
+    #[must_use]
+    pub fn decimal_digits(&self) -> i16 {
+        self.decimal_digits
+    }
+
+    /// Whether the parameter accepts NULL.
+    #[must_use]
+    pub fn nullable(&self) -> Nullable {
+        self.nullable
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

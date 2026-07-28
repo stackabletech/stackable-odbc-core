@@ -20,6 +20,21 @@ markers go away and this section becomes the initial-release notes.
 
 ### Added
 
+- `Backend::describe_param` and the `ParamDescriptor` it returns, so a backend
+  can answer `SQLDescribeParam` for real. Core previously reported a hard-wired
+  `VARCHAR(SQL_DEFAULT_PARAM_SIZE)` for every parameter of every statement,
+  while `SQLGetInfo(SQL_DESCRIBE_PARAMETER)` advertised `"Y"` and no hook
+  existed to override it — a client that sizes its buffers from this sends a
+  number as text and gets a type error back from the data source.
+
+  Defaulted to `Ok(None)`, so it is additive: an existing driver keeps
+  compiling and keeps the old behaviour. `None` for an individual parameter is
+  also the right answer for a backend that can describe some but not all of
+  them — core's fallback is a documented, uniform guess, whereas a wrong
+  specific type is indistinguishable from a real answer. `SQL_DESCRIBE_PARAMETER`
+  stays `"Y"` either way: the spec defines it as whether the driver supports the
+  *call*, not how precisely it answers.
+
 - `column_value::write_column_value_at` and the `ChunkWrite` it returns, the
   offset-aware form of `write_column_value` that `SQLGetData`'s chunking loop
   uses. `write_column_value` is unchanged and still the right call for the

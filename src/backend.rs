@@ -562,6 +562,33 @@ pub trait Backend: Sized + Send + Sync + 'static {
         crate::escape::EscapeDialect::ansi_default()
     }
 
+    /// Describes the 1-based `parameter_number`-th parameter marker of `sql`,
+    /// for `SQLDescribeParam`.
+    ///
+    /// `sql` is the prepared statement text as the backend received it (after
+    /// escape translation). `Ok(None)` means "this backend cannot tell", which
+    /// is the default and which leaves core reporting a generic
+    /// `VARCHAR(SQL_DEFAULT_PARAM_SIZE)` — usable, but wrong for any parameter
+    /// that is not a string, which is what leads a client that sizes its buffers
+    /// from this to send a number as text and get a type error back from the
+    /// data source.
+    ///
+    /// Override this wherever the data source can be asked. A backend that can
+    /// describe *some* parameters should answer `Ok(None)` for the rest rather
+    /// than guess: core's fallback is at least a documented, uniform guess,
+    /// whereas a wrong specific type is indistinguishable from a real answer.
+    ///
+    /// Note that `SQLGetInfo(SQL_DESCRIBE_PARAMETER)` reports `"Y"` either way.
+    /// That is not a claim about accuracy — the spec defines it as whether the
+    /// driver supports the *call*, and core always answers it.
+    fn describe_param(
+        _conn: &Self::Connection,
+        _sql: &str,
+        _parameter_number: u16,
+    ) -> Result<Option<crate::types::ParamDescriptor>, Self::Error> {
+        Ok(None)
+    }
+
     /// The data-source-dependent widths of this driver's catalog result-set
     /// columns, and the SQL type its character columns report.
     ///
@@ -1463,17 +1490,17 @@ mod tests {
     const EXPECTED: &[(InfoType, Expected)] = &[
         // --- String values ---
         (InfoType::DriverOdbcVer,                 Expected::Str(SQL_DRIVER_ODBC_VER_STRING)),
-        (InfoType::SearchPatternEscape,            Expected::Str("\\")),
-        (InfoType::IdentifierQuoteChar,            Expected::Str("\"")),
+        (InfoType::SearchPatternEscape,           Expected::Str("\\")),
+        (InfoType::IdentifierQuoteChar,           Expected::Str("\"")),
         (InfoType::CatalogTerm,                   Expected::Str("catalog")),
         (InfoType::SchemaTerm,                    Expected::Str("schema")),
-        (InfoType::CatalogNameSeparator,           Expected::Str(".")),
+        (InfoType::CatalogNameSeparator,          Expected::Str(".")),
         (InfoType::ColumnAlias,                   Expected::Str("Y")),
-        (InfoType::OrderByColumnsInSelect,         Expected::Str("N")),
+        (InfoType::OrderByColumnsInSelect,        Expected::Str("N")),
         (InfoType::DataSourceName,                Expected::Str("")),
         (InfoType::ServerName,                    Expected::Str("")),
         (InfoType::UserName,                      Expected::Str("")),
-        (InfoType::DataSourceReadOnly,             Expected::Str("N")),
+        (InfoType::DataSourceReadOnly,            Expected::Str("N")),
         // "Y" guarantees the user has SELECT on every table SQLTables returns.
         // Core cannot make that promise for a backend, and it depends on the
         // connected principal, so the mock declares the honest "N".

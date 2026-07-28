@@ -1794,6 +1794,28 @@ impl Backend for MockLongDataBackend {
         Cow::Borrowed(&[])
     }
 
+    /// Describes parameter 1 and declines the rest, so one mock covers both
+    /// branches: the backend's answer reaching the application unchanged, and
+    /// core's generic `VARCHAR` fallback for a parameter the backend cannot
+    /// describe. A mock that answered for every parameter could not show the
+    /// fallback is still reachable.
+    fn describe_param(
+        _conn: &Self::Connection,
+        _sql: &str,
+        parameter_number: u16,
+    ) -> Result<Option<crate::types::ParamDescriptor>, OdbcError> {
+        if parameter_number == 1 {
+            Ok(Some(
+                crate::types::ParamDescriptor::new(crate::types::SqlDataType::DECIMAL)
+                    .with_parameter_size(18)
+                    .with_decimal_digits(4)
+                    .with_nullable(crate::types::Nullable::SqlNoNulls),
+            ))
+        } else {
+            Ok(None)
+        }
+    }
+
     fn tables(
         _: &MockConnection,
         _: &Self::CancelToken,
