@@ -14,10 +14,12 @@ use crate::panic::panic_safe;
 use crate::synthetic::SyntheticStatement;
 use crate::types::col_attr::{ColAttrValue, get_column_attribute};
 use crate::types::{
-    CatalogResultColumnWidths, ColumnDescriptor, ColumnValue, Desc, Nullable, PRIVILEGE_LEN,
-    SQL_INDEX_UNIQUE, SqlReturn, SqlState, TableRow, TablesResultCol, ULen, YES_NO_LEN, character,
-    identifier, identifier_type_from_raw, integer, nullable_from_raw, scope_from_raw, smallint,
-    special_columns_columns, statistics_columns,
+    CatalogResultColumnWidths, ColumnDescriptor, ColumnRow, ColumnValue, ColumnsResultCol, Desc,
+    ForeignKeyRow, ForeignKeysResultCol, Nullable, PRIVILEGE_LEN, PrimaryKeyRow,
+    PrimaryKeysResultCol, SQL_INDEX_UNIQUE, SpecialColumnRow, SqlReturn, SqlState, StatisticsRow,
+    TableRow, TablesResultCol, ULen, YES_NO_LEN, character, identifier, identifier_type_from_raw,
+    integer, nullable_from_raw, scope_from_raw, smallint, special_columns_columns,
+    statistics_columns,
 };
 use crate::utf16::{utf16_to_string, write_utf16};
 
@@ -271,7 +273,7 @@ pub unsafe fn sql_columns_w<B: Backend>(
                 crate::handles::resolve_cancel_token::<B>(statement_handle, connection);
             let cancel = crate::handles::cancel_as::<B>(&cancel_token)?;
 
-            let result = B::columns(
+            let rows = B::columns(
                 connection,
                 cancel,
                 catalog.as_deref(),
@@ -281,7 +283,18 @@ pub unsafe fn sql_columns_w<B: Backend>(
             )
             .into_odbc()?;
 
-            stmt.set_result_set(StatementData::Backend(result));
+            let mut values: Vec<Vec<ColumnValue>> = rows.iter().map(ColumnRow::to_values).collect();
+            // Spec: ordered by TABLE_CAT, TABLE_SCHEM, TABLE_NAME,
+            // ORDINAL_POSITION — zero-based column indices 0, 1, 2, 16.
+            crate::catalog_sort::sort_rows(
+                &mut values,
+                &[0, 1, 2, 16],
+                B::null_collation(connection),
+            );
+            stmt.set_result_set(StatementData::Synthetic(SyntheticStatement::new(
+                ColumnsResultCol::all_descriptors(&B::catalog_result_column_widths()),
+                values,
+            )));
             Ok(SqlReturn::SUCCESS)
         })
     };
@@ -375,7 +388,7 @@ pub unsafe fn sql_primary_keys_w<B: Backend>(
                 crate::handles::resolve_cancel_token::<B>(statement_handle, connection);
             let cancel = crate::handles::cancel_as::<B>(&cancel_token)?;
 
-            let result = B::primary_keys(
+            let rows = B::primary_keys(
                 connection,
                 cancel,
                 catalog.as_deref(),
@@ -384,7 +397,19 @@ pub unsafe fn sql_primary_keys_w<B: Backend>(
             )
             .into_odbc()?;
 
-            stmt.set_result_set(StatementData::Backend(result));
+            let mut values: Vec<Vec<ColumnValue>> =
+                rows.iter().map(PrimaryKeyRow::to_values).collect();
+            // Spec: ordered by TABLE_CAT, TABLE_SCHEM, TABLE_NAME, KEY_SEQ
+            // — zero-based column indices 0, 1, 2, 4.
+            crate::catalog_sort::sort_rows(
+                &mut values,
+                &[0, 1, 2, 4],
+                B::null_collation(connection),
+            );
+            stmt.set_result_set(StatementData::Synthetic(SyntheticStatement::new(
+                PrimaryKeysResultCol::all_descriptors(&B::catalog_result_column_widths()),
+                values,
+            )));
             Ok(SqlReturn::SUCCESS)
         })
     };
@@ -499,7 +524,7 @@ pub unsafe fn sql_foreign_keys_w<B: Backend>(
                 crate::handles::resolve_cancel_token::<B>(statement_handle, connection);
             let cancel = crate::handles::cancel_as::<B>(&cancel_token)?;
 
-            let result = B::foreign_keys(
+            let rows = B::foreign_keys(
                 connection,
                 cancel,
                 pk_catalog.as_deref(),
@@ -511,7 +536,29 @@ pub unsafe fn sql_foreign_keys_w<B: Backend>(
             )
             .into_odbc()?;
 
-            stmt.set_result_set(StatementData::Backend(result));
+            let mut values: Vec<Vec<ColumnValue>> =
+                rows.iter().map(ForeignKeyRow::to_values).collect();
+            // Spec: "If the foreign keys associated with a primary key are
+            // requested, the result set is ordered by FKTABLE_CAT,
+            // FKTABLE_SCHEM, FKTABLE_NAME, and KEY_SEQ. If the primary keys
+            // associated with a foreign key are requested, the result set is
+            // ordered by PKTABLE_CAT, PKTABLE_SCHEM, PKTABLE_NAME, and
+            // KEY_SEQ."
+            //
+            // TODO(spec): when BOTH pk_table and fk_table are supplied the
+            // spec states neither order. The FK order is used, because that
+            // case "should be one key at most" per the same page, making the
+            // choice unobservable for a conforming data source.
+            let keys: &[usize] = if pk_table.is_some() {
+                &[4, 5, 6, 8] // FKTABLE_CAT, FKTABLE_SCHEM, FKTABLE_NAME, KEY_SEQ
+            } else {
+                &[0, 1, 2, 8] // PKTABLE_CAT, PKTABLE_SCHEM, PKTABLE_NAME, KEY_SEQ
+            };
+            crate::catalog_sort::sort_rows(&mut values, keys, B::null_collation(connection));
+            stmt.set_result_set(StatementData::Synthetic(SyntheticStatement::new(
+                ForeignKeysResultCol::all_descriptors(&B::catalog_result_column_widths()),
+                values,
+            )));
             Ok(SqlReturn::SUCCESS)
         })
     };
@@ -670,8 +717,21 @@ pub unsafe fn sql_statistics_w<B: Backend>(
             // still recognise core's own variant inside the backend's error.
             .into_odbc()
             {
-                Ok(result) => {
-                    stmt.set_result_set(StatementData::Backend(result));
+                Ok(rows) => {
+                    let mut values: Vec<Vec<ColumnValue>> =
+                        rows.iter().map(StatisticsRow::to_values).collect();
+                    // Spec: ordered by NON_UNIQUE, TYPE, INDEX_QUALIFIER,
+                    // INDEX_NAME, ORDINAL_POSITION — zero-based column
+                    // indices 3, 6, 4, 5, 7.
+                    crate::catalog_sort::sort_rows(
+                        &mut values,
+                        &[3, 6, 4, 5, 7],
+                        B::null_collation(connection),
+                    );
+                    stmt.set_result_set(StatementData::Synthetic(SyntheticStatement::new(
+                        statistics_columns(&B::catalog_result_column_widths()),
+                        values,
+                    )));
                     Ok(SqlReturn::SUCCESS)
                 }
                 Err(OdbcError::NotImplemented { .. }) => {
@@ -843,8 +903,19 @@ pub unsafe fn sql_special_columns_w<B: Backend>(
             // still recognise core's own variant inside the backend's error.
             .into_odbc()
             {
-                Ok(result) => {
-                    stmt.set_result_set(StatementData::Backend(result));
+                Ok(rows) => {
+                    let mut values: Vec<Vec<ColumnValue>> =
+                        rows.iter().map(SpecialColumnRow::to_values).collect();
+                    // Spec: ordered by SCOPE — zero-based column index 0.
+                    crate::catalog_sort::sort_rows(
+                        &mut values,
+                        &[0],
+                        B::null_collation(connection),
+                    );
+                    stmt.set_result_set(StatementData::Synthetic(SyntheticStatement::new(
+                        special_columns_columns(&B::catalog_result_column_widths()),
+                        values,
+                    )));
                     Ok(SqlReturn::SUCCESS)
                 }
                 Err(OdbcError::NotImplemented { .. }) => empty(stmt),
@@ -1840,6 +1911,206 @@ mod tests {
                 names,
                 vec!["b_table", "z_table", "a_view"],
                 "TABLE_TYPE must dominate TABLE_NAME"
+            );
+
+            cleanup_for::<MockCatalogBackend>(env, conn, stmt);
+        }
+    }
+
+    /// Spec: "SQLColumns returns the results as a standard result set, ordered
+    /// by TABLE_CAT, TABLE_SCHEM, TABLE_NAME, and ORDINAL_POSITION." The
+    /// ordinals within `t_one` are 10, 2, 1 — compared as text they would sort
+    /// 1, 10, 2.
+    #[test]
+    fn columns_result_is_sorted_by_spec_keys() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCatalogBackend>();
+            let ret = sql_columns_w::<MockCatalogBackend>(
+                stmt,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+
+            const COLUMN_NAME_COLUMN: u16 = 4;
+            let names = fetch_column_as_strings::<MockCatalogBackend>(stmt, COLUMN_NAME_COLUMN);
+            assert_eq!(
+                names,
+                vec!["z_first", "a", "b", "j"],
+                "TABLE_NAME must dominate, and ORDINAL_POSITION must compare numerically"
+            );
+
+            cleanup_for::<MockCatalogBackend>(env, conn, stmt);
+        }
+    }
+
+    /// Spec: "SQLPrimaryKeys returns the results as a standard result set,
+    /// ordered by TABLE_CAT, TABLE_SCHEM, TABLE_NAME, and KEY_SEQ."
+    #[test]
+    fn primary_keys_result_is_sorted_by_spec_keys() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCatalogBackend>();
+            let ret = sql_primary_keys_w::<MockCatalogBackend>(
+                stmt,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+
+            const COLUMN_NAME_COLUMN: u16 = 4;
+            let names = fetch_column_as_strings::<MockCatalogBackend>(stmt, COLUMN_NAME_COLUMN);
+            assert_eq!(
+                names,
+                vec!["a", "b", "c", "x"],
+                "TABLE_NAME must dominate KEY_SEQ"
+            );
+
+            cleanup_for::<MockCatalogBackend>(env, conn, stmt);
+        }
+    }
+
+    /// Spec: "If the foreign keys associated with a primary key are requested,
+    /// the result set is ordered by FKTABLE_CAT, FKTABLE_SCHEM, FKTABLE_NAME,
+    /// and KEY_SEQ." That is the `PKTableName`-supplied case.
+    #[test]
+    fn foreign_keys_result_is_fk_ordered_when_pk_table_is_supplied() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCatalogBackend>();
+            let pk_table: Vec<u16> = "p_a".encode_utf16().collect();
+            let ret = sql_foreign_keys_w::<MockCatalogBackend>(
+                stmt,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                pk_table.as_ptr(),
+                i16::try_from(pk_table.len()).expect("table name fits in i16"),
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+
+            const FK_NAME_COLUMN: u16 = 12;
+            let names = fetch_column_as_strings::<MockCatalogBackend>(stmt, FK_NAME_COLUMN);
+            assert_eq!(
+                names,
+                vec!["third", "second", "first"],
+                "FKTABLE_NAME must order the result set"
+            );
+
+            cleanup_for::<MockCatalogBackend>(env, conn, stmt);
+        }
+    }
+
+    /// Spec: "If the primary keys associated with a foreign key are requested,
+    /// the result set is ordered by PKTABLE_CAT, PKTABLE_SCHEM, PKTABLE_NAME,
+    /// and KEY_SEQ." That is the `FKTableName`-only case.
+    #[test]
+    fn foreign_keys_result_is_pk_ordered_when_only_fk_table_is_supplied() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCatalogBackend>();
+            let fk_table: Vec<u16> = "f_a".encode_utf16().collect();
+            let ret = sql_foreign_keys_w::<MockCatalogBackend>(
+                stmt,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                fk_table.as_ptr(),
+                i16::try_from(fk_table.len()).expect("table name fits in i16"),
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+
+            const FK_NAME_COLUMN: u16 = 12;
+            let names = fetch_column_as_strings::<MockCatalogBackend>(stmt, FK_NAME_COLUMN);
+            assert_eq!(
+                names,
+                vec!["second", "first", "third"],
+                "PKTABLE_NAME must order the result set"
+            );
+
+            cleanup_for::<MockCatalogBackend>(env, conn, stmt);
+        }
+    }
+
+    /// Spec: "SQLStatistics returns the results as a standard result set,
+    /// ordered by NON_UNIQUE, TYPE, INDEX_QUALIFIER, INDEX_NAME, and
+    /// ORDINAL_POSITION."
+    #[test]
+    fn statistics_result_is_sorted_by_spec_keys() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCatalogBackend>();
+            let ret = sql_statistics_w::<MockCatalogBackend>(
+                stmt,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                SQL_INDEX_ALL,
+                0,
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+
+            const COLUMN_NAME_COLUMN: u16 = 9;
+            let names = fetch_column_as_strings::<MockCatalogBackend>(stmt, COLUMN_NAME_COLUMN);
+            assert_eq!(
+                names,
+                vec!["b", "a", "c", "d"],
+                "NON_UNIQUE must dominate, then INDEX_NAME, then ORDINAL_POSITION"
+            );
+
+            cleanup_for::<MockCatalogBackend>(env, conn, stmt);
+        }
+    }
+
+    /// Spec: "SQLSpecialColumns returns the results as a standard result set,
+    /// ordered by SCOPE."
+    #[test]
+    fn special_columns_result_is_sorted_by_spec_keys() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCatalogBackend>();
+            let ret = sql_special_columns_w::<MockCatalogBackend>(
+                stmt,
+                SQL_BEST_ROWID,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                SQL_SCOPE_CURROW,
+                Nullable::SqlNullable as u16,
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+
+            const COLUMN_NAME_COLUMN: u16 = 2;
+            let names = fetch_column_as_strings::<MockCatalogBackend>(stmt, COLUMN_NAME_COLUMN);
+            assert_eq!(
+                names,
+                vec!["a", "b", "c"],
+                "SCOPE must order the result set"
             );
 
             cleanup_for::<MockCatalogBackend>(env, conn, stmt);

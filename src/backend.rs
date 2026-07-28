@@ -8,8 +8,9 @@ use odbc_sys::CDataType;
 
 use crate::errors::OdbcError;
 use crate::types::{
-    CatalogResultColumnWidths, ColumnDescriptor, ColumnValue, ConnectParams, ExecuteOutcome,
-    FetchResult, IdentifierType, InfoValue, Nullable, Scope, TableRow, TypeInfoRow,
+    CatalogResultColumnWidths, ColumnDescriptor, ColumnRow, ColumnValue, ConnectParams,
+    ExecuteOutcome, FetchResult, ForeignKeyRow, IdentifierType, InfoValue, Nullable, PrimaryKeyRow,
+    Scope, SpecialColumnRow, StatisticsRow, TableRow, TypeInfoRow,
 };
 
 /// Core abstraction for database-specific logic.
@@ -264,11 +265,15 @@ pub trait Backend: Sized + Send + Sync + 'static {
         table_type: Option<&str>,
     ) -> Result<Vec<TableRow>, Self::Error>;
 
-    /// Returns a result set describing columns matching the given filter criteria.
+    /// Returns the rows describing columns matching the given filter criteria.
     ///
     /// Called by `SQLColumnsW`. All filter parameters are optional; `None` means no filter
     /// on that dimension. `cancel` is this statement's token; record whatever
     /// `Backend::cancel` will need to identify this work.
+    ///
+    /// **Return the rows in any order.** Core sorts them into the spec's order
+    /// (TABLE_CAT, TABLE_SCHEM, TABLE_NAME, ORDINAL_POSITION) and builds the
+    /// result set, so a backend does not need an ORDER BY for correctness.
     fn columns(
         conn: &Self::Connection,
         cancel: &Self::CancelToken,
@@ -276,7 +281,7 @@ pub trait Backend: Sized + Send + Sync + 'static {
         schema: Option<&str>,
         table: Option<&str>,
         column: Option<&str>,
-    ) -> Result<Self::Statement, Self::Error>;
+    ) -> Result<Vec<ColumnRow>, Self::Error>;
 
     /// Return the primary key columns for the given table.
     ///
@@ -284,13 +289,17 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// default implementation which returns `NotImplemented`. `cancel` is this
     /// statement's token; record whatever `Backend::cancel` will need to identify
     /// this work.
+    ///
+    /// **Return the rows in any order.** Core sorts them into the spec's order
+    /// (TABLE_CAT, TABLE_SCHEM, TABLE_NAME, KEY_SEQ) and builds the result set,
+    /// so a backend does not need an ORDER BY for correctness.
     fn primary_keys(
         _conn: &Self::Connection,
         _cancel: &Self::CancelToken,
         _catalog: Option<&str>,
         _schema: Option<&str>,
         _table: Option<&str>,
-    ) -> Result<Self::Statement, Self::Error> {
+    ) -> Result<Vec<PrimaryKeyRow>, Self::Error> {
         Err(OdbcError::NotImplemented {
             feature: "primary_keys".into(),
         }
@@ -303,6 +312,13 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// Backends that do not support this can leave the default implementation which returns
     /// `NotImplemented`. `cancel` is this statement's token; record whatever
     /// `Backend::cancel` will need to identify this work.
+    ///
+    /// **Return the rows in any order.** Core sorts them into the spec's order
+    /// and builds the result set, so a backend does not need an ORDER BY for
+    /// correctness. Which of the two orders the spec defines applies is
+    /// decided by core from the arguments: FKTABLE_CAT, FKTABLE_SCHEM,
+    /// FKTABLE_NAME, KEY_SEQ when `pk_table` was supplied, and PKTABLE_CAT,
+    /// PKTABLE_SCHEM, PKTABLE_NAME, KEY_SEQ otherwise.
     #[allow(clippy::too_many_arguments)]
     fn foreign_keys(
         _conn: &Self::Connection,
@@ -313,7 +329,7 @@ pub trait Backend: Sized + Send + Sync + 'static {
         _fk_catalog: Option<&str>,
         _fk_schema: Option<&str>,
         _fk_table: Option<&str>,
-    ) -> Result<Self::Statement, Self::Error> {
+    ) -> Result<Vec<ForeignKeyRow>, Self::Error> {
         Err(OdbcError::NotImplemented {
             feature: "foreign_keys".into(),
         }
@@ -328,6 +344,11 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// empty result set (a table with no indexes is a valid empty response).
     /// `cancel` is this statement's token; record whatever `Backend::cancel`
     /// will need to identify this work.
+    ///
+    /// **Return the rows in any order.** Core sorts them into the spec's order
+    /// (NON_UNIQUE, TYPE, INDEX_QUALIFIER, INDEX_NAME, ORDINAL_POSITION) and
+    /// builds the result set, so a backend does not need an ORDER BY for
+    /// correctness.
     fn statistics(
         _conn: &Self::Connection,
         _cancel: &Self::CancelToken,
@@ -335,7 +356,7 @@ pub trait Backend: Sized + Send + Sync + 'static {
         _schema: Option<&str>,
         _table: Option<&str>,
         _unique_only: bool,
-    ) -> Result<Self::Statement, Self::Error> {
+    ) -> Result<Vec<StatisticsRow>, Self::Error> {
         Err(OdbcError::NotImplemented {
             feature: "statistics".into(),
         }
@@ -350,6 +371,10 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// response when no such columns exist. `cancel` is this statement's
     /// token; record whatever `Backend::cancel` will need to identify this
     /// work.
+    ///
+    /// **Return the rows in any order.** Core sorts them into the spec's order
+    /// (SCOPE) and builds the result set, so a backend does not need an ORDER
+    /// BY for correctness.
     #[allow(clippy::too_many_arguments)]
     fn special_columns(
         _conn: &Self::Connection,
@@ -360,7 +385,7 @@ pub trait Backend: Sized + Send + Sync + 'static {
         _table: Option<&str>,
         _scope: Scope,
         _nullable: Nullable,
-    ) -> Result<Self::Statement, Self::Error> {
+    ) -> Result<Vec<SpecialColumnRow>, Self::Error> {
         Err(OdbcError::NotImplemented {
             feature: "special_columns".into(),
         }

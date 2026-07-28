@@ -164,6 +164,17 @@ markers go away and this section becomes the initial-release notes.
   the rows your query produced as `TableRow`s and delete the statement
   construction.
 
+- **Breaking:** `Backend::columns`, `primary_keys`, `foreign_keys`,
+  `statistics` and `special_columns` now return `Vec<ColumnRow>`,
+  `Vec<PrimaryKeyRow>`, `Vec<ForeignKeyRow>`, `Vec<StatisticsRow>` and
+  `Vec<SpecialColumnRow>` respectively, instead of `Self::Statement`. As with
+  `tables`, core sorts each result set into its spec order and owns the column
+  layout. `SQLForeignKeys` uses the FK ordering (FKTABLE_CAT, FKTABLE_SCHEM,
+  FKTABLE_NAME, KEY_SEQ) when `PKTableName` was supplied and the PK ordering
+  otherwise. Migration: return the rows your query produced as the matching row
+  struct and delete the statement construction; any ORDER BY added purely for
+  ODBC compliance can go.
+
 - An infinite `f32`/`f64` read as `SQL_C_CHAR` or `SQL_C_WCHAR` now renders as
   `Infinity`/`-Infinity` rather than Rust's `inf`/`-inf`. The ODBC spec defines
   no textual form for a non-finite float, so this is decided by ecosystem fit:

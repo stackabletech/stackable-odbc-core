@@ -11,7 +11,12 @@ use odbc_sys::HandleType;
 use crate::backend::{Backend, StatementBackend};
 use crate::errors::OdbcError;
 use crate::ffi::handle::{sql_alloc_handle, sql_free_handle};
-use crate::types::{ConnectParams, InfoValue, Nullable, SqlReturn, TableRow, TypeInfoRow};
+use crate::types::{
+    ColumnRow, ConnectParams, ForeignKeyRow, IdentifierType, InfoValue, Nullable, PrimaryKeyRow,
+    SQL_FALSE, SQL_INDEX_OTHER, SQL_PC_NOT_PSEUDO, SQL_SCOPE_CURROW, SQL_SCOPE_SESSION,
+    SQL_SCOPE_TRANSACTION, SQL_TRUE, Scope, SpecialColumnRow, SqlDataType, SqlReturn,
+    StatisticsRow, TableRow, TypeInfoRow,
+};
 
 // ---------------------------------------------------------------------------
 // Handle allocation helpers
@@ -334,7 +339,7 @@ impl Backend for MockBackend {
         _: Option<&str>,
         _: Option<&str>,
         _: Option<&str>,
-    ) -> Result<MockStatement, MockError> {
+    ) -> Result<Vec<ColumnRow>, MockError> {
         Err(MockError)
     }
 
@@ -529,7 +534,7 @@ impl Backend for MockNoCatalogBackend {
         _: Option<&str>,
         _: Option<&str>,
         _: Option<&str>,
-    ) -> Result<MockStatement, MockError> {
+    ) -> Result<Vec<ColumnRow>, MockError> {
         Err(MockError)
     }
 
@@ -641,7 +646,7 @@ macro_rules! mock_keywords_backend {
                 _: Option<&str>,
                 _: Option<&str>,
                 _: Option<&str>,
-            ) -> Result<MockStatement, MockError> {
+            ) -> Result<Vec<ColumnRow>, MockError> {
                 Err(MockError)
             }
 
@@ -782,7 +787,7 @@ impl Backend for MockAltBackend {
         _: Option<&str>,
         _: Option<&str>,
         _: Option<&str>,
-    ) -> Result<MockStatement, MockError> {
+    ) -> Result<Vec<ColumnRow>, MockError> {
         Err(MockError)
     }
 
@@ -986,7 +991,7 @@ macro_rules! mock_isolation_backend {
                 _: Option<&str>,
                 _: Option<&str>,
                 _: Option<&str>,
-            ) -> Result<MockStatement, MockError> {
+            ) -> Result<Vec<ColumnRow>, MockError> {
                 Err(MockError)
             }
 
@@ -1161,7 +1166,7 @@ macro_rules! mock_txn_backend {
                 _: Option<&str>,
                 _: Option<&str>,
                 _: Option<&str>,
-            ) -> Result<MockStatement, OdbcError> {
+            ) -> Result<Vec<ColumnRow>, OdbcError> {
                 Err(OdbcError::NotImplemented {
                     feature: "mock txn backend".into(),
                 })
@@ -1365,7 +1370,7 @@ impl Backend for MockTypeInfoBackend {
         _: Option<&str>,
         _: Option<&str>,
         _: Option<&str>,
-    ) -> Result<MockStatement, MockError> {
+    ) -> Result<Vec<ColumnRow>, MockError> {
         Err(MockError)
     }
 
@@ -1403,6 +1408,18 @@ impl Backend for MockTypeInfoBackend {
 /// what `SQLTables` does on every test that touches it, and the existing ones
 /// assume it returns nothing.
 pub struct MockCatalogBackend;
+
+// `SQL_TRUE`/`SQL_FALSE` and the `SQL_SCOPE_*` constants are declared at the
+// width of the argument that carries them — `u32` for the attribute values,
+// `u16` for `SQLSpecialColumns`' `Scope` argument. The `NON_UNIQUE` and
+// `SCOPE` *result* columns are Smallint. Same spec values, narrower column;
+// `i16::try_from` is not usable in a `const` initialiser, and none of these
+// five values can truncate.
+const NON_UNIQUE_TRUE: i16 = SQL_TRUE as i16;
+const NON_UNIQUE_FALSE: i16 = SQL_FALSE as i16;
+const SCOPE_CURROW: i16 = SQL_SCOPE_CURROW as i16;
+const SCOPE_TRANSACTION: i16 = SQL_SCOPE_TRANSACTION as i16;
+const SCOPE_SESSION: i16 = SQL_SCOPE_SESSION as i16;
 
 impl Backend for MockCatalogBackend {
     type Connection = MockConnection;
@@ -1491,6 +1508,10 @@ impl Backend for MockCatalogBackend {
             },
         ])
     }
+    /// Out of spec order on both the table name and the ordinal position, and
+    /// the ordinals are `10, 2, 1` within one table: compared as text those
+    /// sort `1, 10, 2`, which is the realistic bug this row set exists to
+    /// catch.
     fn columns(
         _: &MockConnection,
         _: &Self::CancelToken,
@@ -1498,8 +1519,130 @@ impl Backend for MockCatalogBackend {
         _: Option<&str>,
         _: Option<&str>,
         _: Option<&str>,
-    ) -> Result<MockStatement, MockError> {
-        Err(MockError)
+    ) -> Result<Vec<ColumnRow>, MockError> {
+        let col = |table: &str, name: &str, ordinal: i32| ColumnRow {
+            catalog: Some("cat".into()),
+            schema: Some("sch".into()),
+            table_name: table.into(),
+            column_name: name.into(),
+            ordinal_position: ordinal,
+            ..Default::default()
+        };
+        Ok(vec![
+            col("t_one", "j", 10),
+            col("t_one", "b", 2),
+            col("t_one", "a", 1),
+            col("a_table", "z_first", 1),
+        ])
+    }
+    /// Out of spec order on both `TABLE_NAME` and `KEY_SEQ`.
+    fn primary_keys(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+    ) -> Result<Vec<PrimaryKeyRow>, MockError> {
+        let pk = |table: &str, column: &str, key_seq: i16| PrimaryKeyRow {
+            catalog: Some("cat".into()),
+            schema: Some("sch".into()),
+            table_name: table.into(),
+            column_name: column.into(),
+            key_seq,
+            pk_name: None,
+        };
+        Ok(vec![
+            pk("t_two", "x", 1),
+            pk("t_one", "c", 3),
+            pk("t_one", "a", 1),
+            pk("t_one", "b", 2),
+        ])
+    }
+    /// The `PKTABLE_NAME` and `FKTABLE_NAME` orders disagree row for row, so a
+    /// test can tell which of the two spec orders was applied. `FK_NAME`
+    /// labels each row.
+    fn foreign_keys(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+    ) -> Result<Vec<ForeignKeyRow>, MockError> {
+        let fk = |pk_table: &str, fk_table: &str, label: &str| ForeignKeyRow {
+            pk_catalog: Some("cat".into()),
+            pk_schema: Some("sch".into()),
+            pk_table_name: pk_table.into(),
+            pk_column_name: "id".into(),
+            fk_catalog: Some("cat".into()),
+            fk_schema: Some("sch".into()),
+            fk_table_name: fk_table.into(),
+            fk_column_name: "ref_id".into(),
+            key_seq: 1,
+            fk_name: Some(label.into()),
+            ..Default::default()
+        };
+        Ok(vec![
+            fk("p_b", "f_c", "first"),
+            fk("p_a", "f_b", "second"),
+            fk("p_c", "f_a", "third"),
+        ])
+    }
+    /// Out of spec order on `NON_UNIQUE`, `INDEX_NAME` and `ORDINAL_POSITION`
+    /// at once; `COLUMN_NAME` labels each row.
+    fn statistics(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: bool,
+    ) -> Result<Vec<StatisticsRow>, MockError> {
+        let stat = |non_unique: i16, index_name: &str, ordinal: i16, column: &str| StatisticsRow {
+            catalog: Some("cat".into()),
+            schema: Some("sch".into()),
+            table_name: "t".into(),
+            non_unique: Some(non_unique),
+            index_qualifier: Some("q".into()),
+            index_name: Some(index_name.into()),
+            index_type: SQL_INDEX_OTHER,
+            ordinal_position: Some(ordinal),
+            column_name: Some(column.into()),
+            ..Default::default()
+        };
+        Ok(vec![
+            stat(NON_UNIQUE_TRUE, "i_u", 1, "d"),
+            stat(NON_UNIQUE_FALSE, "i_b", 2, "c"),
+            stat(NON_UNIQUE_FALSE, "i_a", 1, "b"),
+            stat(NON_UNIQUE_FALSE, "i_b", 1, "a"),
+        ])
+    }
+    /// Out of spec order on `SCOPE`; `COLUMN_NAME` labels each row.
+    fn special_columns(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: IdentifierType,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Scope,
+        _: Nullable,
+    ) -> Result<Vec<SpecialColumnRow>, MockError> {
+        let special = |scope: i16, column: &str| SpecialColumnRow {
+            scope: Some(scope),
+            column_name: column.into(),
+            data_type: SqlDataType::INTEGER.0,
+            type_name: "INTEGER".into(),
+            pseudo_column: Some(SQL_PC_NOT_PSEUDO),
+            ..Default::default()
+        };
+        Ok(vec![
+            special(SCOPE_SESSION, "c"),
+            special(SCOPE_CURROW, "a"),
+            special(SCOPE_TRANSACTION, "b"),
+        ])
     }
 
     fn supports_catalogs(_conn: &Self::Connection) -> bool {
@@ -1618,7 +1761,7 @@ impl Backend for MockFunctionsBackend {
         _: Option<&str>,
         _: Option<&str>,
         _: Option<&str>,
-    ) -> Result<MockStatement, MockError> {
+    ) -> Result<Vec<ColumnRow>, MockError> {
         Err(MockError)
     }
 
@@ -1758,7 +1901,7 @@ impl Backend for MockFailingCloseBackend {
         _: Option<&str>,
         _: Option<&str>,
         _: Option<&str>,
-    ) -> Result<MockFailingCloseStatement, OdbcError> {
+    ) -> Result<Vec<ColumnRow>, OdbcError> {
         Err(OdbcError::NotImplemented {
             feature: "columns".into(),
         })
@@ -1968,7 +2111,7 @@ impl Backend for MockLongDataBackend {
         _: Option<&str>,
         _: Option<&str>,
         _: Option<&str>,
-    ) -> Result<MockLongDataStatement, OdbcError> {
+    ) -> Result<Vec<ColumnRow>, OdbcError> {
         Err(OdbcError::NotImplemented {
             feature: "columns".into(),
         })
@@ -2090,7 +2233,7 @@ impl Backend for MockRecordingBackend {
         _: Option<&str>,
         _: Option<&str>,
         _: Option<&str>,
-    ) -> Result<MockStatement, MockError> {
+    ) -> Result<Vec<ColumnRow>, MockError> {
         Err(MockError)
     }
 
