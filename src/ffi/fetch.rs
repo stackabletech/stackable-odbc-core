@@ -104,7 +104,7 @@ pub unsafe fn sql_fetch<B: Backend>(statement_handle: *mut c_void) -> SqlReturn 
             //
             // `cursor_open`, not `statement.is_some()`: a statement outlives
             // its cursor. `set_result_set` leaves `cursor_open` false when the
-            // backend reports zero columns -- an UPDATE, ODBC state S4 -- and
+            // backend reports zero columns — an UPDATE, ODBC state S4 — and
             // `set_prepared_statement` leaves it false in the prepared states
             // S2/S3. Both keep a statement, so testing for one would drive the
             // backend in exactly the two states this SQLSTATE names.
@@ -553,7 +553,7 @@ mod tests {
             assert_eq!(first_sqlstate(stmt), "24000");
 
             // SQLDisconnect frees every statement on the connection as a side
-            // effect, so `stmt` is already gone by here -- pass null rather
+            // effect, so `stmt` is already gone by here — pass null rather
             // than the now-stale token, per `cleanup_env_conn_stmt`'s
             // documented "must be live, not already freed" precondition.
             let _ = crate::ffi::connect::sql_disconnect::<MockBackend>(conn);

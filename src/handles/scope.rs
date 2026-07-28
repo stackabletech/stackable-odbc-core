@@ -140,7 +140,7 @@ impl<'a> HandleScope<'a> {
         // A statement and a connection are different `HandleKind`s, hence
         // different `Box` allocations from different `alloc_*` calls, so these
         // addresses can never be equal. This only pins the weaker fact that
-        // they are literally different allocations -- the reason the two
+        // they are literally different allocations — the reason the two
         // references cannot alias is that neither handle is reachable from the
         // other (see the doc comment above), which distinct addresses alone
         // would not establish.
@@ -149,7 +149,7 @@ impl<'a> HandleScope<'a> {
         // against the registry and confirmed it belongs to the group this
         // scope holds, so neither is stale or foreign. The second `get` call
         // takes `&mut self`, but `self` is just `{ group, _guard: PhantomData }`
-        // -- it holds no pointer into either handle's memory -- so reborrowing
+        // — it holds no pointer into either handle's memory — so reborrowing
         // it to make that call touches nothing `stmt_addr` points at.
         // `stmt_addr` itself was produced by casting `addr as *mut T` inside
         // the *first* `get` call, never derived from `self`, so it carries no
@@ -269,7 +269,7 @@ mod tests {
     /// group must be refused, because the scope does not hold that group's
     /// lock. Without this, `scope.get` would validate a token's kind and
     /// liveness but not its group, reaching a handle no lock protects it
-    /// from -- the exact unguarded access this type exists to close off.
+    /// from — the exact unguarded access this type exists to close off.
     #[test]
     fn a_token_outside_the_locked_group_is_refused() {
         unsafe {
@@ -330,7 +330,7 @@ mod tests {
 
             // `SQLDisconnect` frees every statement on the connection as part
             // of tearing it down, so `stmt` is already gone (a stale token, not
-            // a double-free -- `unregister` returns `None` before any
+            // a double-free — `unregister` returns `None` before any
             // `Box::from_raw`) by the time `cleanup_env_conn_stmt` reaches it;
             // pass null in its place rather than the now-stale `stmt` value, so
             // this call site does not contradict `cleanup_env_conn_stmt`'s
@@ -355,7 +355,7 @@ mod tests {
     }
 
     /// The other half of the null-handle case: a scope holding no group must
-    /// still refuse a token from a real, live group -- `holds` must treat "no
+    /// still refuse a token from a real, live group — `holds` must treat "no
     /// group held" as "nothing is reachable," not as "anything goes."
     #[test]
     fn a_null_handle_scope_still_refuses_a_live_token() {
@@ -413,7 +413,7 @@ mod tests {
                     "the nested scope must be able to reach the child group's own handle"
                 );
                 // The outer scope's own group is still held and usable
-                // afterward -- with_child_group must not have released it.
+                // afterward — with_child_group must not have released it.
                 scope.get::<EnvironmentHandle<MockBackend>>(env)?;
                 Ok(SqlReturn::SUCCESS)
             });
@@ -424,7 +424,7 @@ mod tests {
 
     /// `crate::sync::Mutex` is not reentrant, so passing a token from the
     /// group this scope already holds would deadlock the calling thread
-    /// forever, with no diagnostic and no `SqlReturn` -- exactly the hazard
+    /// forever, with no diagnostic and no `SqlReturn` — exactly the hazard
     /// `with_child_group`'s guard exists to close, and identically in every
     /// build profile: removing the early return here hangs this test rather
     /// than failing it, which is exactly why the guard runs unconditionally

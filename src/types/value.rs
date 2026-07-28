@@ -209,7 +209,7 @@ pub enum ColumnValue {
         /// Fractional seconds in nanoseconds, matching `Timestamp::fraction`'s unit.
         ///
         /// `SQL_TIME_STRUCT` (`odbc_sys::Time`) has no fraction field, so this
-        /// value can never reach a `SQL_C_TYPE_TIME` target -- writing it there
+        /// value can never reach a `SQL_C_TYPE_TIME` target — writing it there
         /// truncates the fraction and reports SQLSTATE 01S07. It survives
         /// intact, however, when the value is rendered as a string for
         /// `SQL_C_CHAR` / `SQL_C_WCHAR` targets.

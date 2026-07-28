@@ -566,14 +566,14 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// columns, and the SQL type its character columns report.
     ///
     /// Every catalog result set the driver can produce derives from this one
-    /// value -- `SQLTables`, `SQLColumns`, `SQLPrimaryKeys`, `SQLForeignKeys`,
+    /// value — `SQLTables`, `SQLColumns`, `SQLPrimaryKeys`, `SQLForeignKeys`,
     /// `SQLStatistics`, `SQLSpecialColumns`, `SQLProcedures`,
     /// `SQLProcedureColumns`, `SQLColumnPrivileges`, `SQLTablePrivileges` and
-    /// `SQLGetTypeInfo` -- so they cannot describe the same column two ways.
+    /// `SQLGetTypeInfo` — so they cannot describe the same column two ways.
     ///
     /// The default suits a data source with no identifier length limit. A
-    /// driver for a source that *does* impose one -- PostgreSQL's 63-character
-    /// `NAMEDATALEN - 1`, say -- overrides this, and both its catalog result
+    /// driver for a source that *does* impose one — PostgreSQL's 63-character
+    /// `NAMEDATALEN - 1`, say — overrides this, and both its catalog result
     /// sets and its `SQL_MAX_*_NAME_LEN` answers follow from the one override.
     ///
     /// Deliberately takes no connection, unlike the capability methods below.
@@ -708,7 +708,7 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// here: the spec defines `SQL_IC_UPPER` (1), `SQL_IC_LOWER` (2),
     /// `SQL_IC_SENSITIVE` (3) and `SQL_IC_MIXED` (4), and `0` is none of them.
     /// Unlike the capability methods where zero is a substantive claim, there
-    /// is no value core could pick that is merely *understated* -- every choice
+    /// is no value core could pick that is merely *understated* — every choice
     /// is a different assertion about how the data source folds identifiers,
     /// and an application uses it to decide how to quote generated SQL.
     ///
@@ -1074,12 +1074,12 @@ pub trait StatementBackend: Send + Sync {
 /// to avoid duplicating these ~60 arms. Returns `None` for anything driver-specific.
 ///
 /// Generic over the calling backend so that the answers can be derived from its
-/// own declarations -- call it as `default_get_info::<Self>(info_type)`.
+/// own declarations — call it as `default_get_info::<Self>(info_type)`.
 ///
 /// The catalog column widths come from [`Backend::catalog_result_column_widths`]
 /// rather than from a parameter. They are already a `Backend` declaration, and
 /// taking them separately would let a caller hand over widths that disagree with
-/// the ones the same backend reports everywhere else -- which is exactly what
+/// the ones the same backend reports everywhere else — which is exactly what
 /// the `SQL_MAX_*_NAME_LEN` group is derived from.
 pub fn default_get_info<B: Backend>(
     conn: Option<&B::Connection>,
@@ -1191,7 +1191,7 @@ pub fn default_get_info<B: Backend>(
         InfoType::CollationSeq => Some(InfoValue::String(String::new())),
         InfoType::DescribeParameter => Some(InfoValue::String("Y".into())),
         // Spec-declared "Y"/"N" strings, which need an arm each: the
-        // shape-aware fallback would give them `""` -- the right shape, but not
+        // shape-aware fallback would give them `""` — the right shape, but not
         // a value in any of their value lists.
         InfoType::MultResultSets => Some(InfoValue::String("N".into())),
         InfoType::MaxRowSizeIncludesLong => Some(InfoValue::String("N".into())),
@@ -1209,7 +1209,7 @@ pub fn default_get_info<B: Backend>(
         // --- U16 types identical in all drivers ---
         // Enum-valued info types where zero is a substantive answer
         // (SQL_GB_NOT_SUPPORTED, SQL_NC_HIGH, SQL_CN_NONE, SQL_NNC_NULL), not
-        // "unknown" -- so the backend has to state them rather than inherit a
+        // "unknown" — so the backend has to state them rather than inherit a
         // claim it never made. See the `Backend` docs for each.
         InfoType::GroupBy => Some(InfoValue::U16(B::group_by(conn?))),
         InfoType::NullCollation => Some(InfoValue::U16(B::null_collation(conn?))),
@@ -1225,7 +1225,7 @@ pub fn default_get_info<B: Backend>(
         InfoType::MaxColumnNameLen => Some(InfoValue::U16(
             B::catalog_result_column_widths().identifier_len,
         )),
-        // Deliberately not `widths.identifier_len` -- a cursor name is an
+        // Deliberately not `widths.identifier_len` — a cursor name is an
         // ODBC-level convention the application invents, not a data-source
         // identifier the backend's catalog stores. See
         // `SQL_MAX_CURSOR_NAME_LEN`'s doc comment for the full rationale.
@@ -1248,7 +1248,7 @@ pub fn default_get_info<B: Backend>(
         InfoType::MaxUserNameLen => Some(InfoValue::U16(0)),
         InfoType::ActiveEnvironments => Some(InfoValue::U16(0)),
         // SQL_CURSOR_SENSITIVITY is `An SQLUINTEGER value` per the SQLGetInfo
-        // spec, not SQLUSMALLINT -- found by the info-type conformance test
+        // spec, not SQLUSMALLINT — found by the info-type conformance test
         // (`stackable-odbc-core::conformance`), which enumerates every InfoType's
         // declared shape rather than relying on a hand-picked subset. `U16`
         // here would hand a numeric type expecting 4 bytes only 2, leaving
@@ -1265,7 +1265,7 @@ pub fn default_get_info<B: Backend>(
         InfoType::AlterTable => Some(InfoValue::U32(B::alter_table_support(conn?))),
         InfoType::OuterJoinCapabilities => Some(InfoValue::U32(B::outer_join_capabilities(conn?))),
         // Limits, where the spec defines 0 as "no specified limit or the limit
-        // is unknown" -- correct as a shared default, unlike the two above.
+        // is unknown" — correct as a shared default, unlike the two above.
         InfoType::MaxIndexSize => Some(InfoValue::U32(0)),
         InfoType::MaxRowSize => Some(InfoValue::U32(0)),
         InfoType::MaxStatementLen => Some(InfoValue::U32(0)),
@@ -1294,7 +1294,7 @@ pub fn default_get_info<B: Backend>(
         //
         // `SQLGetData` here can read any column, in any order, bound or not:
         // `sql_get_data` checks neither column order nor binding state.
-        // `SQL_GD_BLOCK` is deliberately absent -- it describes reading a row
+        // `SQL_GD_BLOCK` is deliberately absent — it describes reading a row
         // from a block cursor, and `sql_set_stmt_attr_w` substitutes 1 back for
         // any `SQL_ATTR_ROW_ARRAY_SIZE`, so no multi-row rowset can exist.
         InfoType::GetDataExtensions => Some(InfoValue::U32(
@@ -1385,7 +1385,7 @@ fn data_source_specific_keywords<B: Backend>(conn: &B::Connection) -> String {
 /// Returns `None` if the info type is not handled here.
 ///
 /// Generic over the calling backend so that `SQL_CURSOR_ROLLBACK_BEHAVIOR` can be
-/// derived from [`Backend::cursor_rollback_behavior`] -- call it as
+/// derived from [`Backend::cursor_rollback_behavior`] — call it as
 /// `common_get_info_raw::<Self>(info_type)`.
 pub fn common_get_info_raw<B: Backend>(
     conn: Option<&B::Connection>,
@@ -1418,15 +1418,15 @@ pub fn common_get_info_raw<B: Backend>(
         // two open at once. A backend that can answers before delegating.
         SQL_MULTIPLE_ACTIVE_TXN => Some(InfoValue::String("N".into())),
         // The data source's own reserved words, minus everything ODBC already
-        // reserves -- the subtraction the spec defines for this info type,
+        // reserves — the subtraction the spec defines for this info type,
         // applied once here rather than in each backend. The list itself is a
         // capability, so it comes from `Backend::keywords`; core only owns the
         // rule.
         SQL_KEYWORDS => Some(InfoValue::String(data_source_specific_keywords::<B>(conn?))),
         // The remaining character-string info types with no
         // `odbc_sys::InfoType` variant. Empty is a valid value for both:
-        // there is no shared name for the current database, and -- given
-        // SQL_PROCEDURES above answers "N" -- no procedures to have a vendor
+        // there is no shared name for the current database, and — given
+        // SQL_PROCEDURES above answers "N" — no procedures to have a vendor
         // term for. Every data source has tables, so SQL_TABLE_TERM gets the
         // generic term rather than "".
         SQL_DATABASE_NAME => Some(InfoValue::String(String::new())),
@@ -1516,7 +1516,7 @@ mod tests {
         (InfoType::ActiveEnvironments,            Expected::U16(0)),
         (InfoType::MaxIdentifierLen,              Expected::U16(DEFAULT_IDENTIFIER_LEN)),
         // --- U32 values ---
-        // CursorSensitivity is SQLUINTEGER per spec, not SQLUSMALLINT -- see
+        // CursorSensitivity is SQLUINTEGER per spec, not SQLUSMALLINT — see
         // the matching comment on its arm in `default_get_info`.
         (InfoType::CursorSensitivity,             Expected::U32(SQL_INSENSITIVE as u32)),
         (InfoType::Subqueries,                    Expected::U32(SQL_SQ_COMPARISON | SQL_SQ_EXISTS | SQL_SQ_IN | SQL_SQ_QUANTIFIED | SQL_SQ_CORRELATED_SUBQUERIES)),
@@ -2141,7 +2141,7 @@ mod tests {
     ///   it to supply them through `get_info_pre_connect`.
     /// - **Capability bitmaps a backend must claim for itself.** `0` reads as
     ///   "supports none of these", which is the only honest answer core can
-    ///   give for a backend that has said nothing -- overstating here is what
+    ///   give for a backend that has said nothing — overstating here is what
     ///   makes a BI tool push down SQL the data source then rejects. Several
     ///   are also genuinely *per-connection* (a server version can gate them),
     ///   which a static capability method could not express; those belong in
@@ -2225,12 +2225,12 @@ mod tests {
                 // Core decides it, and did not say why.
                 (true, None) => undeclared.push(info_type),
                 // Backend-derived (or unanswered) but still listed as a core
-                // fact -- the entry outlived the hard-coded value it described.
+                // fact — the entry outlived the hard-coded value it described.
                 (false, Some(_)) => stale.push(info_type),
                 (false, None) => {
                     // Neither backend answers it at all. `default_get_info`
                     // returns `None`, so `sql_get_info_w` falls through to the
-                    // shape-aware default -- `0` or `""` -- which for many info
+                    // shape-aware default — `0` or `""` — which for many info
                     // types is a substantive claim about the data source that
                     // core is in no position to make. Only the comparison above
                     // sees arms that *exist*, so without this a type with no arm
@@ -2257,8 +2257,8 @@ mod tests {
             undeclared_gap.is_empty(),
             "these info types have no arm at all, so they reach the shape-aware \
              default (`0` / `\"\"`) with nothing naming that as the intended \
-             answer. Either give each an arm -- derived from a `Backend` method \
-             if it is a claim about the data source -- or list it in \
+             answer. Either give each an arm — derived from a `Backend` method \
+             if it is a claim about the data source — or list it in \
              SHAPE_DEFAULT_IS_THE_ANSWER with the reason the default is \
              correct: {undeclared_gap:?}"
         );
@@ -2346,7 +2346,7 @@ mod tests {
 
     /// The five identifier-length info types follow the backend's declared
     /// catalog widths, not a baked-in 128, so a driver cannot report 63 in its
-    /// catalog result sets and 128 here -- two different answers about one
+    /// catalog result sets and 128 here — two different answers about one
     /// limit.
     #[test]
     fn max_name_len_info_types_follow_the_backends_declared_widths() {

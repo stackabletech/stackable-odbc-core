@@ -156,8 +156,8 @@ fn translate_slice(
     depth: usize,
 ) -> Result<String, OdbcError> {
     // Checked here rather than in `translate_escape` because every recursive
-    // path -- the `{oj}` body, the `{fn}` argument list and the tail after a
-    // rewritten call -- re-enters through this function.
+    // path — the `{oj}` body, the `{fn}` argument list and the tail after a
+    // rewritten call — re-enters through this function.
     if depth > MAX_ESCAPE_DEPTH {
         return Err(OdbcError::general(
             format!("Escape sequences nested deeper than {MAX_ESCAPE_DEPTH} levels"),
@@ -622,7 +622,7 @@ mod tests {
 
     #[test]
     fn rewrite_scalar_fn_can_emit_a_bare_keyword_for_a_zero_argument_call() {
-        // No trailing "()" -- the whole point: `current_date()` is a syntax
+        // No trailing "()" — the whole point: `current_date()` is a syntax
         // error in the dialects that need this.
         assert_eq!(rtr("SELECT {fn CURDATE()}"), "SELECT current_date");
         assert_eq!(rtr("SELECT {fn USERNAME()}"), "SELECT current_user");

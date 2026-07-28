@@ -141,7 +141,7 @@ pub unsafe fn sql_driver_connect_w<B: Backend>(
                     // told the connect failed, and this teardown error would
                     // replace the actual reason. It is worth a line because a
                     // failed teardown here can leak a session on the server that
-                    // no SQLDisconnect will ever reclaim -- the application never
+                    // no SQLDisconnect will ever reclaim — the application never
                     // got a live connection to disconnect. Loggable at all only
                     // because `Backend::Error` is now bounded by `std::error::Error`.
                     if let Err(teardown) = B::disconnect(&mut c) {
@@ -309,7 +309,7 @@ pub unsafe fn sql_connect_w<B: Backend>(
                     // told the connect failed, and this teardown error would
                     // replace the actual reason. It is worth a line because a
                     // failed teardown here can leak a session on the server that
-                    // no SQLDisconnect will ever reclaim -- the application never
+                    // no SQLDisconnect will ever reclaim — the application never
                     // got a live connection to disconnect. Loggable at all only
                     // because `Backend::Error` is now bounded by `std::error::Error`.
                     if let Err(teardown) = B::disconnect(&mut c) {
@@ -507,7 +507,7 @@ pub unsafe fn sql_browse_connect_w<B: Backend>(
                     // told the connect failed, and this teardown error would
                     // replace the actual reason. It is worth a line because a
                     // failed teardown here can leak a session on the server that
-                    // no SQLDisconnect will ever reclaim -- the application never
+                    // no SQLDisconnect will ever reclaim — the application never
                     // got a live connection to disconnect. Loggable at all only
                     // because `Backend::Error` is now bounded by `std::error::Error`.
                     if let Err(teardown) = B::disconnect(&mut c) {

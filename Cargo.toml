@@ -57,7 +57,7 @@ features = ["test-support"]
 #
 # Default-off because it is test code. Compiled unconditionally it lands in
 # every driver's production binary, and it reaches an `unreachable!()` through a
-# public `unsafe fn` taking a caller-supplied `u16` -- a panic path a shipped
+# public `unsafe fn` taking a caller-supplied `u16` — a panic path a shipped
 # driver has no reason to carry. Driver test suites enable it under
 # `[dev-dependencies]`.
 test-support = []

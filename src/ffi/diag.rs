@@ -163,7 +163,7 @@ pub unsafe fn sql_get_diag_rec_w<B: Backend>(
             }
 
             // Spec: SQL_ERROR if BufferLength is less than zero. `Ok`, not
-            // `Err` -- same invariant as immediately above.
+            // `Err` — same invariant as immediately above.
             if buffer_length < 0 {
                 return Ok(SqlReturn::ERROR);
             }
@@ -368,7 +368,7 @@ pub unsafe fn sql_get_diag_field_w<B: Backend>(
             // Spec: SQL_ERROR if BufferLength < 0 for a character string
             // field. Check conservatively here (before we know the field
             // type) so that negative buffer lengths are never passed to
-            // write_utf16. `Ok`, not `Err` -- same invariant as immediately
+            // write_utf16. `Ok`, not `Err` — same invariant as immediately
             // above.
             if buffer_length < 0 {
                 return Ok(SqlReturn::ERROR);
@@ -1162,7 +1162,7 @@ mod tests {
         // deriving them from `odbc-sys` cannot silently move one. The two
         // record fields carry the risk: they sit at -1247 and -1248, nowhere
         // near the header fields they are listed beside, and the value a
-        // careless transcription reaches for -- 12 -- is a real identifier,
+        // careless transcription reaches for — 12 — is a real identifier,
         // `SQL_DIAG_DYNAMIC_FUNCTION_CODE`. A wrong value here answers the
         // wrong field rather than failing to match.
         assert_eq!(SQL_DIAG_COLUMN_NUMBER, -1247);

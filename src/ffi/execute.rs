@@ -357,9 +357,9 @@ pub unsafe fn sql_prepare_w<B: Backend>(
             stmt.prepared_sql = Some(sql);
             stmt.param_count = Some(param_count);
             // Parameter bindings deliberately survive. SQLBindParameter's spec
-            // names the only three things that unbind a parameter -- another
+            // names the only three things that unbind a parameter — another
             // SQLBindParameter, SQLFreeStmt(SQL_RESET_PARAMS), and
-            // SQLSetDescField setting the APD's SQL_DESC_COUNT to 0 -- and
+            // SQLSetDescField setting the APD's SQL_DESC_COUNT to 0 — and
             // SQLPrepare is not among them. SQLPrepare's own Comments confirm
             // it from the other side: "an application should unbind all
             // parameters that applied to an old SQL statement before preparing
@@ -820,7 +820,7 @@ mod tests {
         // and SQLSetDescField setting the APD's SQL_DESC_COUNT to 0. SQLPrepare
         // is not among them, and SQLPrepare's own Comments tell the application
         // to "unbind all parameters that applied to an old SQL statement before
-        // preparing a new SQL statement" -- advice only a driver that keeps them
+        // preparing a new SQL statement" — advice only a driver that keeps them
         // could need.
         //
         // Clearing them here would break the ordinary

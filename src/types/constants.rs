@@ -331,7 +331,7 @@ pub const SQL_U_UNION_ALL: u32 = 0x0000_0002;
 //
 // Only two of the three are ODBC 2.x leftovers. `SQL_AT_ADD_COLUMN` and
 // `SQL_AT_DROP_COLUMN` do not appear in the ODBC 3.0 SQL_ALTER_TABLE value
-// list at all -- the 3.x replacements are `SQL_AT_ADD_COLUMN_SINGLE` and the
+// list at all — the 3.x replacements are `SQL_AT_ADD_COLUMN_SINGLE` and the
 // `SQL_AT_DROP_COLUMN_*` pair. `SQL_AT_ADD_CONSTRAINT` is *not* deprecated:
 // the 3.0 list carries it, and a data source that accepts
 // `ADD COLUMN f integer NOT NULL` needs exactly that bit.

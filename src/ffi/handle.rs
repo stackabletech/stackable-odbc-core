@@ -81,7 +81,7 @@ pub unsafe fn sql_alloc_handle<B: Backend>(
     // runs Box allocation and backend construction, and a panic must not unwind
     // across the extern "system" boundary (undefined behaviour). input_handle is
     // the new child's parent (null for SQL_HANDLE_ENV, which has none), so this
-    // holds exactly the group the registration below joins -- SQL_HANDLE_DBC
+    // holds exactly the group the registration below joins — SQL_HANDLE_DBC
     // locks the environment, SQL_HANDLE_STMT locks the connection, and neither
     // nests. The output pointer is set to SQL_NULL_HANDLE up front so every
     // error path, including a caught panic, leaves it null, and only the
@@ -228,7 +228,7 @@ pub unsafe fn sql_free_handle<B: Backend>(handle_type: i16, handle: *mut c_void)
     // not unwind across the extern "system" boundary (undefined behaviour). `handle`
     // itself is passed to panic_safe (rather than null), because `handle` names its
     // own lock group regardless of whether it turns out to be an environment, a
-    // connection or a statement -- resolving that group is exactly what
+    // connection or a statement — resolving that group is exactly what
     // `free_environment`/`free_connection` need `scope` for, and what holds the lock
     // for the duration of `free_statement`'s registry unregister and `Box::from_raw`.
     let ret = unsafe {

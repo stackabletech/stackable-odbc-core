@@ -547,7 +547,7 @@ pub unsafe fn alloc_statement<B: Backend>(
         None => return SqlReturn::INVALID_HANDLE,
     };
     // Owned by the statement: dropping the StatementHandle frees them, so no
-    // teardown path can forget to -- do not add a manual free in
+    // teardown path can forget to — do not add a manual free in
     // disconnect/free-handle paths.
     // Each descriptor gets its own registry slot: `SQLGetStmtAttrW` hands
     // these out to the application, so they need tokens of their own or the

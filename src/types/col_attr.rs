@@ -532,7 +532,7 @@ mod tests {
     fn col_attr_nullable_reports_the_unknown_case_the_bool_could_not() {
         // The reason `nullable` is an enum: SQL_NULLABLE_UNKNOWN is what the
         // spec requires for a computed or outer-joined column, and a `bool`
-        // forced it to be reported as SQL_NO_NULLS -- telling an application it
+        // forced it to be reported as SQL_NO_NULLS — telling an application it
         // could skip a NULL check it needs.
         let desc = ColumnDescriptor::new("computed", SqlDataType::INTEGER)
             .with_nullable(Nullable::SqlNullableUnknown);
@@ -864,7 +864,7 @@ mod tests {
         // fractional-seconds count is reported via SQL_DESC_PRECISION
         // instead, per the two tests above), but this driver still exposes
         // `desc.scale` verbatim through SQL_DESC_SCALE rather than forcing it
-        // to 0 -- pinning that `precision_for`'s special case does not affect
+        // to 0 — pinning that `precision_for`'s special case does not affect
         // the `Desc::Scale` arm.
         let desc = timestamp_desc(6, 26);
         let n = expect_numeric(get_column_attribute(&desc, 5, Desc::Scale).unwrap());

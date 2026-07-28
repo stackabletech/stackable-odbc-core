@@ -44,7 +44,7 @@ pub(crate) unsafe fn alloc_env_conn_stmt() -> (*mut c_void, *mut c_void, *mut c_
 /// [`alloc_env_conn_stmt`], in child-before-parent order.
 ///
 /// Any of the three may instead be `SQL_NULL_HANDLE` (null) for "already torn
-/// down by other means, nothing to do here" -- e.g. a test that disconnected
+/// down by other means, nothing to do here" — e.g. a test that disconnected
 /// the connection itself, which frees its statements as a side effect. The
 /// underlying `sql_free_handle` calls reject null without dereferencing it, so
 /// this degrades to a no-op rather than freeing anything twice.
@@ -193,7 +193,7 @@ macro_rules! minimal_capability_decls {
             false
         }
         // Conforms to no SQL-92 level, which is consistent with the values
-        // above -- an entry-level claim would contradict SQL_CN_NONE and
+        // above — an entry-level claim would contradict SQL_CN_NONE and
         // SQL_NNC_NULL.
         fn sql_conformance(_conn: &Self::Connection) -> u32 {
             0
@@ -387,7 +387,7 @@ impl Backend for MockBackend {
         crate::types::SQL_NNC_NON_NULL // was SQL_NNC_NULL (0)
     }
     fn expressions_in_order_by(_conn: &Self::Connection) -> bool {
-        true // was "" -- neither "Y" nor "N"
+        true // was "" — neither "Y" nor "N"
     }
     fn sql_conformance(_conn: &Self::Connection) -> u32 {
         crate::types::SQL_SC_SQL92_ENTRY
@@ -1030,7 +1030,7 @@ mock_isolation_backend!(
 );
 // Declares two levels but genuinely never implements `set_txn_isolation`, so
 // it stands for the backend author who reports a capability and forgets to
-// wire it up -- and inherits the real trait default, not a copy of it.
+// wire it up — and inherits the real trait default, not a copy of it.
 mock_isolation_backend!(
     MockUnappliedIsolationBackend,
     options = crate::types::SQL_TXN_READ_COMMITTED | crate::types::SQL_TXN_SERIALIZABLE,
@@ -1054,7 +1054,7 @@ pub struct MockTxnConnection {
 /// behaviours. `end_tran` succeeds unless the connection was opened with
 /// `ENDTRANFAIL=1`, in which case it fails with a generic HY000. Pass
 /// `error = ...` for a backend whose `end_tran` reports something more
-/// specific -- e.g. `OdbcError::NotConnected`, to exercise a *backend*
+/// specific — e.g. `OdbcError::NotConnected`, to exercise a *backend*
 /// reporting the same variant core's own "no open connection" pre-check uses
 /// internally (see `end_tran_on_connection`'s `EndTranOutcome`).
 macro_rules! mock_txn_backend {
@@ -1080,7 +1080,7 @@ macro_rules! mock_txn_backend {
             /// a real error with a message and SQLSTATE, and routing that
             /// through `MockError` would collapse it to `NotImplemented`. Using
             /// `OdbcError` directly also exercises the case of a backend whose
-            /// error type simply *is* core's -- which the bounds allow, since
+            /// error type simply *is* core's — which the bounds allow, since
             /// `OdbcError` converts to and from itself.
             type Error = OdbcError;
             type CancelToken = MockCancelToken;
@@ -1400,7 +1400,7 @@ impl Backend for MockTypeInfoBackend {
 ///
 /// `MockBackend::get_functions` returns an empty slice, which meant every
 /// existing `SQLGetFunctions` test walked a loop with no iterations and no
-/// mapping arm ever ran -- the gap that let `SQLGetConnectOption` sit at the
+/// mapping arm ever ran — the gap that let `SQLGetConnectOption` sit at the
 /// wrong index in the 2.x array.
 pub struct MockFunctionsBackend;
 

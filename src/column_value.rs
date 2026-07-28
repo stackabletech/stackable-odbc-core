@@ -604,7 +604,7 @@ unsafe fn write_fixed<T: Copy>(
 // Unparseable text is 22018; text that parses but carries an out-of-range field
 // is 22007. Both codes are scoped by the spec to a character column source
 // (see the SQLGetData diagnostics table), which is exactly the case handled
-// in this module -- stackable-odbc-core has no numeric datetime encodings left to
+// in this module — stackable-odbc-core has no numeric datetime encodings left to
 // decode (see the Backend-side decoding note on write_column_value above).
 
 fn cast_error(s: &str) -> OdbcError {
@@ -706,7 +706,7 @@ fn parse_sql_date(s: &str) -> Result<Date, OdbcError> {
 /// Parse ODBC time literal text into a [`Time`] struct plus the fractional
 /// seconds (nanoseconds) that `SQL_TIME_STRUCT` cannot carry. Callers writing
 /// to `SQL_C_TYPE_TIME` must check the returned fraction themselves and report
-/// 01S07 if it is non-zero -- this function only parses, it does not decide
+/// 01S07 if it is non-zero — this function only parses, it does not decide
 /// whether the drop is acceptable for the caller's target type.
 fn parse_sql_time(s: &str) -> Result<(Time, u32), OdbcError> {
     let (hour, minute, second, fraction) = parse_time_fields(s.trim())?;

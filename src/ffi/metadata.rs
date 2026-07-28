@@ -979,7 +979,7 @@ pub unsafe fn sql_describe_col_w<B: Backend>(
                 // Written through as-is. While the descriptor carried a
                 // `bool`, `SQL_NULLABLE_UNKNOWN` could not be reported at all
                 // and a column whose nullability the backend could not
-                // determine was announced as `SQL_NO_NULLS` -- telling the
+                // determine was announced as `SQL_NO_NULLS` — telling the
                 // application it could skip a NULL check it actually needs.
                 std::ptr::write_unaligned(nullable_ptr, desc.nullable as i16);
             }
@@ -1579,7 +1579,7 @@ mod tests {
 
     /// Every catalog result set the driver can produce, named for assertion
     /// messages. This is the list that must grow when a new catalog function
-    /// gains a result set -- the tests below iterate it, so a result set added
+    /// gains a result set — the tests below iterate it, so a result set added
     /// outside `CatalogResultColumnWidths` fails here.
     fn every_catalog_result_set(
         widths: &CatalogResultColumnWidths,
@@ -1663,7 +1663,7 @@ mod tests {
             }
             assert!(
                 seen > 0,
-                "{result_set} has no identifier column -- the name list in \
+                "{result_set} has no identifier column — the name list in \
                  is_identifier_column is probably stale"
             );
         }

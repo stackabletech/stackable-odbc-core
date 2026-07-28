@@ -1212,7 +1212,7 @@ mod tests {
 
     /// The spec lists SQL_ATTR_TXN_ISOLATION as settable "Either" side of the
     /// connection, so a level set before connecting must still be applied once
-    /// the connection exists -- the same contract as SQL_ATTR_AUTOCOMMIT.
+    /// the connection exists — the same contract as SQL_ATTR_AUTOCOMMIT.
     #[test]
     fn txn_isolation_set_before_connect_is_applied_on_connect() {
         unsafe {
@@ -1243,7 +1243,7 @@ mod tests {
 
     /// A backend declaring more than one level but not implementing
     /// `set_txn_isolation` must fail loudly rather than accept a level it
-    /// cannot apply -- the exact silent lie C3 is about.
+    /// cannot apply — the exact silent lie C3 is about.
     #[test]
     fn multi_level_backend_without_the_hook_cannot_switch_levels() {
         unsafe {

@@ -11,7 +11,7 @@ use crate::types::{ColumnDescriptor, Nullable, SqlDataType};
 /// `SQLTables`, `SQLColumns`, `SQLPrimaryKeys`, `SQLForeignKeys`,
 /// `SQLStatistics`, `SQLSpecialColumns`, `SQLProcedures`,
 /// `SQLProcedureColumns`, `SQLColumnPrivileges`, `SQLTablePrivileges` and
-/// `SQLGetTypeInfo` -- which columns exist, in what order, and whether each is
+/// `SQLGetTypeInfo` — which columns exist, in what order, and whether each is
 /// character, `SMALLINT` or `INTEGER`. That part is identical for every driver
 /// and is not configurable here.
 ///
@@ -44,7 +44,7 @@ pub struct CatalogResultColumnWidths {
     pub remarks_len: u32,
     /// SQL type reported for the character columns.
     ///
-    /// `SQL_WVARCHAR` for a Unicode driver -- which the driver crates are,
+    /// `SQL_WVARCHAR` for a Unicode driver — which the driver crates are,
     /// since only the W-suffix ODBC functions are exported and these columns
     /// are delivered as UTF-16. An ANSI driver would report
     /// `SqlDataType::VARCHAR`.
@@ -53,7 +53,7 @@ pub struct CatalogResultColumnWidths {
     ///
     /// The spec declares exactly one catalog column as `char(n)` rather than
     /// `varchar`: `SQLStatistics.ASC_OR_DESC`, which is `char(1)`. It gets its
-    /// own type for the same reason [`Self::char_sql_type`] exists -- a
+    /// own type for the same reason [`Self::char_sql_type`] exists — a
     /// Unicode driver must report `SQL_WCHAR`, not the ANSI `SQL_CHAR`.
     pub fixed_char_sql_type: SqlDataType,
 }
@@ -247,7 +247,7 @@ impl TablesResultCol {
     /// any of the five as "not NULL", and its Comments section is explicit
     /// that under the enumeration special cases (e.g. `SQL_ALL_CATALOGS`
     /// with empty schema/table patterns) "all columns except TABLE_CAT
-    /// contain NULLs" -- so TABLE_NAME and TABLE_TYPE, in particular, must
+    /// contain NULLs" — so TABLE_NAME and TABLE_TYPE, in particular, must
     /// be reported nullable even though a normal (non-enumeration) row
     /// always populates them.
     pub fn descriptor(self, widths: &CatalogResultColumnWidths) -> ColumnDescriptor {
@@ -674,7 +674,7 @@ mod tests {
     }
 
     /// Descriptors must be in spec order, because the caller feeds them to
-    /// SyntheticStatement positionally -- a reordering would silently
+    /// SyntheticStatement positionally — a reordering would silently
     /// mislabel every row.
     #[test]
     fn descriptors_are_in_spec_column_order() {
@@ -784,7 +784,7 @@ mod tests {
     /// marks none of the five "not NULL", and its Comments section states
     /// that under `SQL_ALL_CATALOGS` (and the analogous schema/table-type
     /// enumeration cases) all columns except the one being enumerated
-    /// contain NULLs -- so, unlike SQLColumns/SQLPrimaryKeys/SQLForeignKeys,
+    /// contain NULLs — so, unlike SQLColumns/SQLPrimaryKeys/SQLForeignKeys,
     /// SQLTables has no column the driver may report as non-nullable. This
     /// pins that so a future edit cannot silently reintroduce `nullable:
     /// false` on TABLE_NAME or TABLE_TYPE.

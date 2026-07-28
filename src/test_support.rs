@@ -71,8 +71,8 @@ pub unsafe fn attach_connection<B: Backend>(
         // The closure above never returns anything but `Ok(SqlReturn::SUCCESS)`,
         // so a non-`SUCCESS` result with no `error` set means `panic_safe`
         // caught a panic instead of running the closure to completion. The
-        // panic's unwind never reaches this caller -- that is the entire
-        // point of `panic_safe` -- so this return value is the only signal
+        // panic's unwind never reaches this caller — that is the entire
+        // point of `panic_safe` — so this return value is the only signal
         // left that the attach did not happen; discarding it here would
         // silently report success while `connection` (and any previously
         // attached connection this call replaced) is dropped.
@@ -114,8 +114,8 @@ pub unsafe fn detach_connection<B: Backend>(
         Some(err) => Err(err),
         // Same reasoning as `attach_connection`: a non-`SUCCESS` result with
         // no `error` set is the only remaining evidence of a caught panic,
-        // and discarding it would report `Ok(None)` -- "nothing was attached"
-        // -- when the true outcome is unknown.
+        // and discarding it would report `Ok(None)` — "nothing was attached"
+        // — when the true outcome is unknown.
         None if ret != SqlReturn::SUCCESS => Err(OdbcError::Panic {
             message: "panic while detaching a connection".into(),
         }),

@@ -406,8 +406,8 @@ pub unsafe fn sql_get_info_w<B: Backend>(
 ///
 /// The character columns split into two groups. `TYPE_NAME` and
 /// `LOCAL_TYPE_NAME` name a data-source type, which is an identifier in the
-/// data source's own namespace -- the same quantity `SQLColumns.TYPE_NAME`
-/// already reports -- so they take `identifier_len`. `LITERAL_PREFIX`,
+/// data source's own namespace — the same quantity `SQLColumns.TYPE_NAME`
+/// already reports — so they take `identifier_len`. `LITERAL_PREFIX`,
 /// `LITERAL_SUFFIX` and `CREATE_PARAMS` hold literal syntax fragments rather
 /// than names; they are not bounded by the data source's identifier limit and
 /// so take their own spec-independent widths.
@@ -535,7 +535,7 @@ pub unsafe fn sql_get_type_info<B: Backend>(
             // type". Core cannot rank closeness of mapping, so it orders by
             // TYPE_NAME within a DATA_TYPE, which is stable and total. Sorted
             // here rather than left to the backend so that every driver's
-            // result set is ordered, and ordered the same way -- an application
+            // result set is ordered, and ordered the same way — an application
             // picking "the first row for this DATA_TYPE" as the preferred type
             // otherwise gets whatever order the backend happened to declare.
             //
@@ -791,8 +791,8 @@ mod tests {
         use crate::function_id::FunctionId as F;
         let buf = all_functions_2x::<MockFunctionsBackend>();
 
-        // SQLGetConnectOption is 42. It was recorded at 30 -- an unassigned
-        // slot -- so the Windows DM, which dispatches from this array, was told
+        // SQLGetConnectOption is 42. It was recorded at 30 — an unassigned
+        // slot — so the Windows DM, which dispatches from this array, was told
         // a function the driver exports did not exist.
         for (id, label) in [
             (F::GetConnectOption, "SQLGetConnectOption"),
@@ -1392,7 +1392,7 @@ mod tests {
 
             // OuterJoins (38) is `String`-shaped ("Y"/"P"/"N" per spec), and is
             // derived from `Backend::outer_join_capabilities` rather than left
-            // to the shape default -- "" is not one of the values the spec
+            // to the shape default — "" is not one of the values the spec
             // defines for it. `MockBackend` declares LEFT | NESTED.
             let mut buf = [0xEEu16; 8];
             let mut str_len: i16 = -1;
@@ -1593,7 +1593,7 @@ mod tests {
                 assert_eq!(
                     str_len as usize,
                     expected_units * 2,
-                    "{name} reported the wrong StringLength -- a U32(0) answer \
+                    "{name} reported the wrong StringLength — a U32(0) answer \
                      reports 4 bytes for what the spec declares a character string"
                 );
                 let actual = String::from_utf16_lossy(&buf[..expected_units]);
