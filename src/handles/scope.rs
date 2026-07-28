@@ -44,8 +44,21 @@ pub struct HandleScope<'a> {
     /// The group whose lock the caller holds, or `None` for a call that
     /// arrived with `SQL_NULL_HANDLE` and so has nothing to protect.
     group: Option<Arc<GroupLock>>,
-    /// Ties `'a` to the guard borrowed in [`Self::new`].
-    _guard: PhantomData<&'a ()>,
+    /// Ties `'a` to the guard borrowed in [`Self::new`], and makes the scope
+    /// `!Send`.
+    ///
+    /// `*const ()` rather than `&'a ()` for the `!Send`: a `MutexGuard` is
+    /// itself `!Send` because releasing a lock on a thread other than the one
+    /// that took it is undefined for the underlying primitive, and a scope is
+    /// only valid while that guard is held. Leaving the scope `Send` would let a
+    /// scoped thread receive one whose guard is held elsewhere, and reach handle
+    /// contents while claiming a lock it does not hold.
+    ///
+    /// Currently unreachable — every closure that receives a scope is in-crate
+    /// and none spawns — so this closes the hole rather than fixing a live bug.
+    /// It costs nothing: the lifetime is still tied, and `PhantomData<*const ()>`
+    /// carries no variance the scope relies on.
+    _guard: PhantomData<*const &'a ()>,
 }
 
 impl<'a> HandleScope<'a> {
@@ -451,4 +464,30 @@ mod tests {
             cleanup_env_conn_stmt(env, conn, stmt);
         }
     }
+
+    /// `HandleScope` must not be `Send`.
+    ///
+    /// It is only valid while the group's `MutexGuard` is held, and a guard is
+    /// itself `!Send` because releasing a lock from a thread other than the one
+    /// that took it is undefined for the underlying primitive. A `Send` scope
+    /// could be handed to a scoped thread, which would then reach handle
+    /// contents while claiming a lock held on another thread.
+    ///
+    /// This is a compile-time assertion, not a runtime one: it fails to build if
+    /// `_guard` ever goes back to a `PhantomData` that carries `Send`.
+    const _: () = {
+        trait AmbiguousIfSend<A> {
+            fn some_item() {}
+        }
+        impl<T: ?Sized> AmbiguousIfSend<()> for T {}
+        impl<T: ?Sized + Send> AmbiguousIfSend<u8> for T {}
+
+        // The type parameter must be an inference variable: that is what makes
+        // both impls candidates. Resolution succeeds only because exactly one
+        // applies, i.e. `HandleScope` is not `Send`. If it became `Send` the
+        // second impl would apply too and this fails to compile as ambiguous.
+        // Naming `AmbiguousIfSend<()>` explicitly here would pick that impl
+        // directly and assert nothing.
+        let _ = <HandleScope<'static> as AmbiguousIfSend<_>>::some_item;
+    };
 }

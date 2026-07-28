@@ -102,6 +102,15 @@ jobs:
       - name: Run unit tests
         run: cargo test --locked
 
+      # `test-support` is gated `#[cfg(any(test, feature = "test-support"))]`, so
+      # the job above compiles that module via `cfg(test)` no matter what the
+      # feature is set to. The configuration a *driver* consumes is the other
+      # one — feature on, `cfg(test)` off — and nothing built it. `cargo check`
+      # rather than `cargo test`: the point is that the module compiles outside
+      # `cfg(test)`, and there are no tests to run in that configuration.
+      - name: Check the test-support feature as a driver consumes it
+        run: cargo check --locked --features test-support
+
       # The benchmark is its own crate (see bench/Cargo.toml), so nothing in
       # the root build touches it and bench rot could otherwise merge unnoticed.
       # harness = false means it is never run as a test either. Compile it; do

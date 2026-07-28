@@ -156,6 +156,16 @@ markers go away and this section becomes the initial-release notes.
 
 ### Changed
 
+- `HandleScope` is now `!Send`. It is only valid while the group's `MutexGuard`
+  is held, and a guard is itself `!Send` because releasing a lock from a thread
+  other than the one that took it is undefined for the underlying primitive; a
+  `Send` scope could be handed to a scoped thread that then reached handle
+  contents while claiming a lock held elsewhere. Unreachable in practice — every
+  closure receiving a scope is in-crate, `HandleScope::new` is `pub(crate)`, and
+  no driver is ever handed one — so this closes a hole rather than fixing a live
+  bug, and cannot break any downstream code, which has no way to hold a scope in
+  the first place. A compile-time assertion pins it.
+
 - **Breaking.** `EscapeDialect`, `ColumnDescriptor` and `TypeInfoRow` have
   crate-private fields and a full set of accessors. All three were
   `#[non_exhaustive]` with every field `pub` and a doc comment telling you to
