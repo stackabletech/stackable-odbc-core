@@ -868,6 +868,61 @@ mod loom_tests {
         });
     }
 
+    /// A `SQLCancel` reading a statement's token while a new execution is
+    /// replacing it must observe one whole token or the other, never a torn or
+    /// absent one.
+    ///
+    /// This interleaving only became reachable when cancel tokens started being
+    /// minted per execution rather than once per statement: `set_cancel` used
+    /// to run at most once, so nothing could race a *replacement*. Now every
+    /// statement-producing call writes, while `sql_cancel` reads with no group
+    /// lock at all — the two are serialised only by the registry's own
+    /// `RwLock`.
+    ///
+    /// *Which* of the two tokens the canceller gets is deliberately not
+    /// asserted: both are correct. Getting the outgoing one means cancelling an
+    /// execution that has already finished, which the spec defines as a no-op
+    /// ("a call to SQLCancel when no processing is being done on the statement
+    /// ... has is [sic] no effect at all"), and getting the incoming one means
+    /// cancelling the run that is actually in flight. What the model earns is
+    /// that neither thread panics, the downcast always succeeds, and the read
+    /// never yields `None` for a slot that has held a token throughout.
+    #[test]
+    fn a_cancel_token_replaced_by_a_new_execution_is_never_torn() {
+        loom::model(|| {
+            let reg = Arc::new(Registry::new());
+            let (stmt, _, _) = reg
+                .register(HandleKind::Stmt, 0x1000, GroupLock::new(), None)
+                .expect("registered");
+            // The token the first execution minted.
+            reg.set_cancel(stmt, StdArc::new(1u32) as StdArc<dyn Any + Send + Sync>);
+
+            let executor = {
+                let reg = Arc::clone(&reg);
+                thread::spawn(move || {
+                    // A second execution on the same statement mints its own.
+                    reg.set_cancel(stmt, StdArc::new(2u32) as StdArc<dyn Any + Send + Sync>);
+                })
+            };
+            let canceller = {
+                let reg = Arc::clone(&reg);
+                thread::spawn(move || {
+                    let token = reg
+                        .cancel_of(stmt)
+                        .expect("a token has been set since before either thread started");
+                    let seen = *token.downcast_ref::<u32>().expect("type");
+                    assert!(
+                        seen == 1 || seen == 2,
+                        "observed a token that was never set"
+                    );
+                })
+            };
+
+            executor.join().expect("executor panicked");
+            canceller.join().expect("canceller panicked");
+        });
+    }
+
     /// `SQLEndTran(SQL_HANDLE_ENV)` walking a connection that is freed
     /// underneath it must skip that connection, not report failure.
     ///
