@@ -461,8 +461,8 @@ pub unsafe fn sql_browse_connect_w<B: Backend>(
             let required = B::browse_connect_attrs();
             let missing: Vec<&str> = required
                 .iter()
-                .copied()
-                .filter(|&attr| merged.get(attr).is_none())
+                .map(std::borrow::Cow::as_ref)
+                .filter(|attr| merged.get(attr).is_none())
                 .collect();
 
             if !missing.is_empty() {

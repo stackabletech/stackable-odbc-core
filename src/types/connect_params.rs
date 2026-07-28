@@ -2,6 +2,7 @@
 //! (`Key=Value;Key=Value`, with `{}`-quoted values), exposing the parsed
 //! key/value pairs case-insensitively to each backend.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use crate::errors::OdbcError;
@@ -27,7 +28,7 @@ pub struct ConnectParams {
     params: HashMap<String, String>,
     /// Keyword names the backend has declared as carrying secrets. Additive to
     /// `SENSITIVE_KEYWORD_MARKERS`; see [`ConnectParams::declare_sensitive_keywords`].
-    sensitive_keywords: &'static [&'static str],
+    sensitive_keywords: Cow<'static, [Cow<'static, str>]>,
 }
 
 /// Substrings that mark a connection-string keyword as carrying a credential.
@@ -182,7 +183,7 @@ impl ConnectParams {
 
         Ok(Self {
             params,
-            sensitive_keywords: &[],
+            sensitive_keywords: Cow::Borrowed(&[]),
         })
     }
 
@@ -249,7 +250,7 @@ impl ConnectParams {
     /// The generic FFI entry points call this for every `ConnectParams` they
     /// build, using [`Backend::sensitive_connect_keywords`](crate::backend::Backend::sensitive_connect_keywords),
     /// so a driver only has to declare the list.
-    pub fn declare_sensitive_keywords(&mut self, keywords: &'static [&'static str]) {
+    pub fn declare_sensitive_keywords(&mut self, keywords: Cow<'static, [Cow<'static, str>]>) {
         self.sensitive_keywords = keywords;
     }
 
@@ -290,7 +291,7 @@ impl FromIterator<(String, String)> for ConnectParams {
         }
         Self {
             params,
-            sensitive_keywords: &[],
+            sensitive_keywords: Cow::Borrowed(&[]),
         }
     }
 }
@@ -355,7 +356,7 @@ mod tests {
         // A backend owns its own keyword vocabulary, so it can name secrets
         // core's heuristic would never guess.
         let mut params = ConnectParams::parse("Host=localhost;Wallet=abc123").unwrap();
-        params.declare_sensitive_keywords(&["wallet"]);
+        params.declare_sensitive_keywords(Cow::Borrowed(&[Cow::Borrowed("wallet")]));
         let debug_str = format!("{params:?}");
         assert!(
             !debug_str.contains("abc123"),
@@ -370,7 +371,7 @@ mod tests {
     #[test]
     fn declared_keywords_are_matched_case_insensitively() {
         let mut params = ConnectParams::parse("KeyStorePin=1234").unwrap();
-        params.declare_sensitive_keywords(&["KEYSTOREPIN"]);
+        params.declare_sensitive_keywords(Cow::Borrowed(&[Cow::Borrowed("KEYSTOREPIN")]));
         assert!(!format!("{params:?}").contains("1234"));
     }
 
@@ -378,7 +379,7 @@ mod tests {
     fn declaring_keywords_does_not_disable_the_built_in_markers() {
         // The backend's list adds to core's safeguard, it does not replace it.
         let mut params = ConnectParams::parse("Wallet=abc123;Password=s3cr3t").unwrap();
-        params.declare_sensitive_keywords(&["wallet"]);
+        params.declare_sensitive_keywords(Cow::Borrowed(&[Cow::Borrowed("wallet")]));
         let debug_str = format!("{params:?}");
         assert!(!debug_str.contains("abc123"));
         assert!(!debug_str.contains("s3cr3t"));

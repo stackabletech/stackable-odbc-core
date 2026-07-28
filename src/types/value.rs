@@ -281,8 +281,10 @@ pub enum ColumnValue {
 pub struct TypeInfoRow {
     /// `TYPE_NAME` — column 1 of the `SQLGetTypeInfo` result set.
     ///
-    /// The data-source-specific type name, as it appears in DDL.
-    pub type_name: &'static str,
+    /// The data-source-specific type name, as it appears in DDL. Owned, since
+    /// a backend that derives its type list from a runtime server-version
+    /// probe has no `'static` borrow to hand back.
+    pub type_name: std::borrow::Cow<'static, str>,
     /// `DATA_TYPE` — column 2 of the `SQLGetTypeInfo` result set.
     ///
     /// The ODBC SQL type this maps to.
@@ -294,15 +296,15 @@ pub struct TypeInfoRow {
     /// `LITERAL_PREFIX` — column 4 of the `SQLGetTypeInfo` result set.
     ///
     /// Characters that open a literal of this type, or `None` if it has no literal form.
-    pub literal_prefix: Option<&'static str>,
+    pub literal_prefix: Option<std::borrow::Cow<'static, str>>,
     /// `LITERAL_SUFFIX` — column 5 of the `SQLGetTypeInfo` result set.
     ///
     /// The closing counterpart of `literal_prefix`.
-    pub literal_suffix: Option<&'static str>,
+    pub literal_suffix: Option<std::borrow::Cow<'static, str>>,
     /// `CREATE_PARAMS` — column 6 of the `SQLGetTypeInfo` result set.
     ///
     /// Comma-separated names of the parameters a `CREATE TABLE` spelling takes, e.g. `"precision,scale"`.
-    pub create_params: Option<&'static str>,
+    pub create_params: Option<std::borrow::Cow<'static, str>>,
     /// `NULLABLE` — column 7 of the `SQLGetTypeInfo` result set.
     ///
     /// Whether the data source accepts `NULL` for this type, as a `SQL_NULLABLE_*` value.
@@ -330,7 +332,7 @@ pub struct TypeInfoRow {
     /// `LOCAL_TYPE_NAME` — column 13 of the `SQLGetTypeInfo` result set.
     ///
     /// The localised name for display, which is not usable in SQL.
-    pub local_type_name: Option<&'static str>,
+    pub local_type_name: Option<std::borrow::Cow<'static, str>>,
     /// `MINIMUM_SCALE` — column 14 of the `SQLGetTypeInfo` result set.
     ///
     /// Least scale the type accepts; `None` when scale does not apply.
@@ -366,13 +368,20 @@ impl TypeInfoRow {
     /// except the datetime and interval families — those set it with
     /// [`TypeInfoRow::with_verbose_type`].
     ///
-    /// `const` on this and every builder below, because
-    /// [`Backend::get_type_info`](crate::backend::Backend::get_type_info)
-    /// returns `&'static [TypeInfoRow]`: a driver builds its type list in a
-    /// `static`, where a non-const builder cannot be called.
-    pub const fn new(type_name: &'static str, data_type: SqlDataType) -> Self {
+    /// Takes `impl Into<Cow<'static, str>>` so a driver with a fixed type list
+    /// can still pass a `&'static str` literal, while a driver that computes
+    /// its type name at runtime (from a server-version probe, say) can pass an
+    /// owned `String`. That conversion is not `const`, so — unlike the
+    /// remaining builders below, which touch no string field and stay `const`
+    /// — this constructor cannot be used to build a `static` array; a driver
+    /// needing one now assembles its list from a function (an `OnceLock` if
+    /// it is expensive to rebuild) instead.
+    pub fn new(
+        type_name: impl Into<std::borrow::Cow<'static, str>>,
+        data_type: SqlDataType,
+    ) -> Self {
         Self {
-            type_name,
+            type_name: type_name.into(),
             data_type,
             column_size: 0,
             literal_prefix: None,
@@ -403,20 +412,23 @@ impl TypeInfoRow {
 
     /// Sets `LITERAL_PREFIX` and `LITERAL_SUFFIX`.
     #[must_use]
-    pub const fn with_literal_affixes(
+    pub fn with_literal_affixes(
         mut self,
-        prefix: Option<&'static str>,
-        suffix: Option<&'static str>,
+        prefix: Option<impl Into<std::borrow::Cow<'static, str>>>,
+        suffix: Option<impl Into<std::borrow::Cow<'static, str>>>,
     ) -> Self {
-        self.literal_prefix = prefix;
-        self.literal_suffix = suffix;
+        self.literal_prefix = prefix.map(Into::into);
+        self.literal_suffix = suffix.map(Into::into);
         self
     }
 
     /// Sets `CREATE_PARAMS`, e.g. `Some("length")` or `Some("precision,scale")`.
     #[must_use]
-    pub const fn with_create_params(mut self, create_params: Option<&'static str>) -> Self {
-        self.create_params = create_params;
+    pub fn with_create_params(
+        mut self,
+        create_params: Option<impl Into<std::borrow::Cow<'static, str>>>,
+    ) -> Self {
+        self.create_params = create_params.map(Into::into);
         self
     }
 
@@ -464,8 +476,11 @@ impl TypeInfoRow {
 
     /// Sets `LOCAL_TYPE_NAME`, the display name, which is not usable in SQL.
     #[must_use]
-    pub const fn with_local_type_name(mut self, local_type_name: Option<&'static str>) -> Self {
-        self.local_type_name = local_type_name;
+    pub fn with_local_type_name(
+        mut self,
+        local_type_name: Option<impl Into<std::borrow::Cow<'static, str>>>,
+    ) -> Self {
+        self.local_type_name = local_type_name.map(Into::into);
         self
     }
 
@@ -519,17 +534,17 @@ impl TypeInfoRow {
             // 3. COLUMN_SIZE
             ColumnValue::I32(self.column_size),
             // 4. LITERAL_PREFIX
-            match self.literal_prefix {
+            match &self.literal_prefix {
                 Some(s) => ColumnValue::String(s.to_string()),
                 None => ColumnValue::Null,
             },
             // 5. LITERAL_SUFFIX
-            match self.literal_suffix {
+            match &self.literal_suffix {
                 Some(s) => ColumnValue::String(s.to_string()),
                 None => ColumnValue::Null,
             },
             // 6. CREATE_PARAMS
-            match self.create_params {
+            match &self.create_params {
                 Some(s) => ColumnValue::String(s.to_string()),
                 None => ColumnValue::Null,
             },
@@ -552,7 +567,7 @@ impl TypeInfoRow {
                 None => ColumnValue::Null,
             },
             // 13. LOCAL_TYPE_NAME
-            match self.local_type_name {
+            match &self.local_type_name {
                 Some(s) => ColumnValue::String(s.to_string()),
                 None => ColumnValue::Null,
             },
@@ -750,5 +765,23 @@ impl ColumnDescriptor {
         self.schema_name = schema.into();
         self.table_name = table.into();
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A backend that computes its type list at runtime — from a server
+    /// version probe, say — must be able to build a row from an owned
+    /// `String`. While the fields were `&'static str` it could not, whatever
+    /// the method signature said.
+    #[test]
+    fn a_type_info_row_can_be_built_from_owned_strings() {
+        let type_name = String::from("VARCHAR");
+        let row = TypeInfoRow::new(type_name.clone(), SqlDataType::VARCHAR)
+            .with_literal_affixes(Some(String::from("'")), Some(String::from("'")));
+        assert_eq!(row.type_name, type_name);
+        assert_eq!(row.literal_prefix.as_deref(), Some("'"));
     }
 }

@@ -260,9 +260,36 @@ markers go away and this section becomes the initial-release notes.
   `886007b`, labelled `feat:`), which cost nothing only because nothing was
   released.
 
-  `TypeInfoRow`'s are `const fn`, including every builder, because
-  `Backend::get_type_info` returns `&'static [TypeInfoRow]`: a driver builds its
-  type list in a `static`, where a non-const builder cannot be called.
+  Most of `TypeInfoRow`'s builders are `const fn`; the constructor and the
+  three builders that set a string field are not — see the entry below on
+  `TypeInfoRow`'s `Cow` fields for why.
+- **Breaking:** `Backend::sensitive_connect_keywords`, `Backend::get_functions`,
+  `Backend::get_type_info`, `Backend::browse_connect_attrs`,
+  `Backend::search_pattern_escape` and `Backend::keywords` return
+  `Cow<'static, ...>` instead of `&'static ...`. `get_type_info`,
+  `search_pattern_escape` and `keywords` take a connection because their
+  answer can genuinely differ by data source, so it is computed rather than
+  a `'static` borrow — a backend deriving its answer from a server-version
+  probe, say, had no way to express that under the old signature.
+  `sensitive_connect_keywords` and `browse_connect_attrs` take no connection
+  and their answer never varies; they change to the same shape only for
+  uniformity of the trait's vocabulary. The three list-returning methods use
+  `Cow<'static, [Cow<'static, str>]>`, not `Cow<'static, [&'static str]>`, so
+  each element can be owned too — an outer `Cow` around borrowed `&'static
+  str` elements would still block a backend that computes its keyword list at
+  runtime.
+
+  `TypeInfoRow`'s own `type_name` field and its four `Option<&'static str>`
+  fields are `Cow<'static, str>` / `Option<Cow<'static, str>>` for the same
+  reason: a `Cow`-returning `get_type_info` is cosmetic if the rows it builds
+  still cannot hold an owned string. `TypeInfoRow::new`,
+  `with_literal_affixes`, `with_create_params` and `with_local_type_name` take
+  `impl Into<Cow<'static, str>>`, so a `&'static str` literal still works
+  unchanged. Converting a value through `Into` cannot run in a const context,
+  so those four are no longer `const fn`; a driver that built its type list in
+  a `static` now assembles it from a function instead (behind an `OnceLock` if
+  that is expensive to repeat). The remaining builders touch no string field
+  and stay `const`.
 - **Breaking:** the `handles`, `panic` and `diagnostics` modules are
   `pub(crate)`. Nothing outside the crate needs them — `forward_ffi!` references
   only `$crate::ffi` and `$crate::types` — and leaving them public froze

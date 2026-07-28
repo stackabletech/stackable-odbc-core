@@ -546,7 +546,7 @@ pub unsafe fn sql_get_type_info<B: Backend>(
                 a.data_type
                     .0
                     .cmp(&b.data_type.0)
-                    .then_with(|| a.type_name.cmp(b.type_name))
+                    .then_with(|| a.type_name.cmp(&b.type_name))
             });
 
             let rows: Vec<_> = selected.iter().map(|t| t.to_column_values()).collect();
@@ -649,7 +649,7 @@ pub unsafe fn sql_get_functions<B: Backend>(
                     // u16-aligned, which an application-supplied pointer does
                     // not guarantee.
                     let mut supported = [0u16; SQL_API_ODBC3_ALL_FUNCTIONS_SIZE];
-                    for &func in functions {
+                    for &func in functions.iter() {
                         let fid = func as u16;
                         let idx = (fid / 16) as usize;
                         let bit = fid % 16;
@@ -685,7 +685,7 @@ pub unsafe fn sql_get_functions<B: Backend>(
                     // Assembled locally then copied out, for the same
                     // alignment reason as the 3.x bitmap above.
                     let mut supported = [0u16; SQL_API_ALL_FUNCTIONS_SIZE];
-                    for &func in functions {
+                    for &func in functions.iter() {
                         let fid = usize::from(func as u16);
                         if fid < SQL_API_ALL_FUNCTIONS_SIZE {
                             supported[fid] = SQL_FUNC_EXISTS;
@@ -1127,19 +1127,19 @@ mod tests {
         use crate::types::{ColumnValue, TypeInfoRow};
 
         let row = TypeInfoRow {
-            type_name: "VARCHAR",
+            type_name: "VARCHAR".into(),
             data_type: crate::types::SqlDataType::VARCHAR,
             column_size: 255,
-            literal_prefix: Some("'"),
-            literal_suffix: Some("'"),
-            create_params: Some("length"),
+            literal_prefix: Some("'".into()),
+            literal_suffix: Some("'".into()),
+            create_params: Some("length".into()),
             nullable: 1,
             case_sensitive: true,
             searchable: 3,
             unsigned: None,
             fixed_prec_scale: false,
             auto_unique_value: None,
-            local_type_name: Some("VARCHAR"),
+            local_type_name: Some("VARCHAR".into()),
             minimum_scale: None,
             maximum_scale: None,
             sql_data_type: 12,

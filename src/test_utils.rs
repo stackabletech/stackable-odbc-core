@@ -3,6 +3,7 @@
 //! Provides `MockBackend` (connect succeeds) and `MockFailBackend` (connect fails)
 //! so test modules don't each need their own copy.
 
+use std::borrow::Cow;
 use std::ffi::c_void;
 
 use odbc_sys::HandleType;
@@ -169,8 +170,9 @@ macro_rules! minimal_capability_decls {
         minimal_capability_decls!(keywords = &[]);
     };
     (keywords = $keywords:expr) => {
-        fn keywords(_conn: &Self::Connection) -> &'static [&'static str] {
-            $keywords
+        fn keywords(_conn: &Self::Connection) -> Cow<'static, [Cow<'static, str>]> {
+            let list: &'static [&'static str] = $keywords;
+            Cow::Owned(list.iter().map(|s| Cow::Borrowed(*s)).collect())
         }
         fn group_by(_conn: &Self::Connection) -> u16 {
             crate::types::SQL_GB_NOT_SUPPORTED
@@ -227,8 +229,8 @@ macro_rules! minimal_capability_decls {
         fn data_source_read_only(_conn: &Self::Connection) -> bool {
             false
         }
-        fn search_pattern_escape(_conn: &Self::Connection) -> &'static str {
-            ""
+        fn search_pattern_escape(_conn: &Self::Connection) -> Cow<'static, str> {
+            Cow::Borrowed("")
         }
     };
 }
@@ -310,11 +312,11 @@ impl Backend for MockBackend {
     fn get_info(_: &MockConnection, _: crate::types::InfoType) -> Result<InfoValue, MockError> {
         Err(MockError)
     }
-    fn get_functions() -> &'static [crate::function_id::FunctionId] {
-        &[]
+    fn get_functions() -> Cow<'static, [crate::function_id::FunctionId]> {
+        Cow::Borrowed(&[])
     }
-    fn get_type_info(_conn: &Self::Connection) -> &'static [TypeInfoRow] {
-        &[]
+    fn get_type_info(_conn: &Self::Connection) -> Cow<'static, [TypeInfoRow]> {
+        Cow::Borrowed(&[])
     }
     fn tables(
         _: &MockConnection,
@@ -432,14 +434,18 @@ impl Backend for MockBackend {
     fn data_source_read_only(_conn: &Self::Connection) -> bool {
         false
     }
-    fn search_pattern_escape(_conn: &Self::Connection) -> &'static str {
-        "\\"
+    fn search_pattern_escape(_conn: &Self::Connection) -> Cow<'static, str> {
+        Cow::Borrowed("\\")
     }
     // Deliberately mixed: `SELECT` is in `ODBC_RESERVED_KEYWORDS` and must be
     // subtracted out, the other two are not and must survive. Unsorted, so the
     // ordering guarantee is exercised too.
-    fn keywords(_conn: &Self::Connection) -> &'static [&'static str] {
-        &["MOCK_PRAGMA", "SELECT", "MOCK_ATTACH"]
+    fn keywords(_conn: &Self::Connection) -> Cow<'static, [Cow<'static, str>]> {
+        Cow::Borrowed(&[
+            Cow::Borrowed("MOCK_PRAGMA"),
+            Cow::Borrowed("SELECT"),
+            Cow::Borrowed("MOCK_ATTACH"),
+        ])
     }
 }
 
@@ -501,11 +507,11 @@ impl Backend for MockNoCatalogBackend {
     fn get_info(_: &MockConnection, _: crate::types::InfoType) -> Result<InfoValue, MockError> {
         Err(MockError)
     }
-    fn get_functions() -> &'static [crate::function_id::FunctionId] {
-        &[]
+    fn get_functions() -> Cow<'static, [crate::function_id::FunctionId]> {
+        Cow::Borrowed(&[])
     }
-    fn get_type_info(_conn: &Self::Connection) -> &'static [TypeInfoRow] {
-        &[]
+    fn get_type_info(_conn: &Self::Connection) -> Cow<'static, [TypeInfoRow]> {
+        Cow::Borrowed(&[])
     }
     fn tables(
         _: &MockConnection,
@@ -613,11 +619,11 @@ macro_rules! mock_keywords_backend {
             ) -> Result<InfoValue, MockError> {
                 Err(MockError)
             }
-            fn get_functions() -> &'static [crate::function_id::FunctionId] {
-                &[]
+            fn get_functions() -> Cow<'static, [crate::function_id::FunctionId]> {
+                Cow::Borrowed(&[])
             }
-            fn get_type_info(_conn: &Self::Connection) -> &'static [TypeInfoRow] {
-                &[]
+            fn get_type_info(_conn: &Self::Connection) -> Cow<'static, [TypeInfoRow]> {
+                Cow::Borrowed(&[])
             }
             fn tables(
                 _: &MockConnection,
@@ -710,8 +716,8 @@ impl Backend for MockAltBackend {
 
     /// Names a secret that none of core's substring markers would catch, so a
     /// test can tell a backend-declared redaction from the built-in heuristic.
-    fn sensitive_connect_keywords() -> &'static [&'static str] {
-        &["wallet"]
+    fn sensitive_connect_keywords() -> Cow<'static, [Cow<'static, str>]> {
+        Cow::Borrowed(&[Cow::Borrowed("wallet")])
     }
 
     fn connect(_: &ConnectParams) -> Result<MockConnection, MockError> {
@@ -754,11 +760,11 @@ impl Backend for MockAltBackend {
     fn get_info(_: &MockConnection, _: crate::types::InfoType) -> Result<InfoValue, MockError> {
         Err(MockError)
     }
-    fn get_functions() -> &'static [crate::function_id::FunctionId] {
-        &[]
+    fn get_functions() -> Cow<'static, [crate::function_id::FunctionId]> {
+        Cow::Borrowed(&[])
     }
-    fn get_type_info(_conn: &Self::Connection) -> &'static [TypeInfoRow] {
-        &[]
+    fn get_type_info(_conn: &Self::Connection) -> Cow<'static, [TypeInfoRow]> {
+        Cow::Borrowed(&[])
     }
     fn tables(
         _: &MockConnection,
@@ -854,13 +860,13 @@ impl Backend for MockAltBackend {
     fn data_source_read_only(_conn: &Self::Connection) -> bool {
         true
     }
-    fn search_pattern_escape(_conn: &Self::Connection) -> &'static str {
-        "/"
+    fn search_pattern_escape(_conn: &Self::Connection) -> Cow<'static, str> {
+        Cow::Borrowed("/")
     }
     // Shares no entry with MockBackend's list, and spells its ODBC-reserved
     // overlap in lower case so the subtraction is proven case-insensitive.
-    fn keywords(_conn: &Self::Connection) -> &'static [&'static str] {
-        &["alter", "ALT_VACUUM"]
+    fn keywords(_conn: &Self::Connection) -> Cow<'static, [Cow<'static, str>]> {
+        Cow::Borrowed(&[Cow::Borrowed("alter"), Cow::Borrowed("ALT_VACUUM")])
     }
 
     // Differs from the default, so the SQL_MAX_*_NAME_LEN group moves with the
@@ -958,11 +964,11 @@ macro_rules! mock_isolation_backend {
             ) -> Result<InfoValue, MockError> {
                 Err(MockError)
             }
-            fn get_functions() -> &'static [crate::function_id::FunctionId] {
-                &[]
+            fn get_functions() -> Cow<'static, [crate::function_id::FunctionId]> {
+                Cow::Borrowed(&[])
             }
-            fn get_type_info(_conn: &Self::Connection) -> &'static [TypeInfoRow] {
-                &[]
+            fn get_type_info(_conn: &Self::Connection) -> Cow<'static, [TypeInfoRow]> {
+                Cow::Borrowed(&[])
             }
             fn tables(
                 _: &MockIsolationConnection,
@@ -1131,11 +1137,11 @@ macro_rules! mock_txn_backend {
                     feature: "mock txn backend".into(),
                 })
             }
-            fn get_functions() -> &'static [crate::function_id::FunctionId] {
-                &[]
+            fn get_functions() -> Cow<'static, [crate::function_id::FunctionId]> {
+                Cow::Borrowed(&[])
             }
-            fn get_type_info(_conn: &Self::Connection) -> &'static [TypeInfoRow] {
-                &[]
+            fn get_type_info(_conn: &Self::Connection) -> Cow<'static, [TypeInfoRow]> {
+                Cow::Borrowed(&[])
             }
             fn tables(
                 _: &MockTxnConnection,
@@ -1269,7 +1275,7 @@ const fn type_info_row(
     data_type: crate::types::SqlDataType,
 ) -> TypeInfoRow {
     TypeInfoRow {
-        type_name,
+        type_name: Cow::Borrowed(type_name),
         data_type,
         column_size: 0,
         literal_prefix: None,
@@ -1337,11 +1343,11 @@ impl Backend for MockTypeInfoBackend {
     fn get_info(_: &MockConnection, _: crate::types::InfoType) -> Result<InfoValue, MockError> {
         Err(MockError)
     }
-    fn get_functions() -> &'static [crate::function_id::FunctionId] {
-        &[]
+    fn get_functions() -> Cow<'static, [crate::function_id::FunctionId]> {
+        Cow::Borrowed(&[])
     }
-    fn get_type_info(_conn: &Self::Connection) -> &'static [TypeInfoRow] {
-        Self::TYPES
+    fn get_type_info(_conn: &Self::Connection) -> Cow<'static, [TypeInfoRow]> {
+        Cow::Borrowed(Self::TYPES)
     }
     fn tables(
         _: &MockConnection,
@@ -1445,9 +1451,9 @@ impl Backend for MockFunctionsBackend {
     fn get_info(_: &MockConnection, _: crate::types::InfoType) -> Result<InfoValue, MockError> {
         Err(MockError)
     }
-    fn get_functions() -> &'static [crate::function_id::FunctionId] {
+    fn get_functions() -> Cow<'static, [crate::function_id::FunctionId]> {
         use crate::function_id::FunctionId as F;
-        &[
+        Cow::Borrowed(&[
             F::AllocHandle,
             F::FreeHandle,
             F::GetConnectAttr,
@@ -1458,10 +1464,10 @@ impl Backend for MockFunctionsBackend {
             F::EndTran,
             F::ExecDirect,
             F::Fetch,
-        ]
+        ])
     }
-    fn get_type_info(_conn: &Self::Connection) -> &'static [TypeInfoRow] {
-        &[]
+    fn get_type_info(_conn: &Self::Connection) -> Cow<'static, [TypeInfoRow]> {
+        Cow::Borrowed(&[])
     }
     fn tables(
         _: &MockConnection,
@@ -1595,11 +1601,11 @@ impl Backend for MockFailingCloseBackend {
             feature: "get_info".into(),
         })
     }
-    fn get_functions() -> &'static [crate::function_id::FunctionId] {
-        &[]
+    fn get_functions() -> Cow<'static, [crate::function_id::FunctionId]> {
+        Cow::Borrowed(&[])
     }
-    fn get_type_info(_conn: &Self::Connection) -> &'static [TypeInfoRow] {
-        &[]
+    fn get_type_info(_conn: &Self::Connection) -> Cow<'static, [TypeInfoRow]> {
+        Cow::Borrowed(&[])
     }
     fn tables(
         _: &MockConnection,
@@ -1725,11 +1731,11 @@ impl Backend for MockRecordingBackend {
     fn get_info(_: &MockConnection, _: crate::types::InfoType) -> Result<InfoValue, MockError> {
         Err(MockError)
     }
-    fn get_functions() -> &'static [crate::function_id::FunctionId] {
-        &[]
+    fn get_functions() -> Cow<'static, [crate::function_id::FunctionId]> {
+        Cow::Borrowed(&[])
     }
-    fn get_type_info(_conn: &Self::Connection) -> &'static [TypeInfoRow] {
-        &[]
+    fn get_type_info(_conn: &Self::Connection) -> Cow<'static, [TypeInfoRow]> {
+        Cow::Borrowed(&[])
     }
     fn tables(
         _: &MockConnection,

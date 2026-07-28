@@ -2,6 +2,8 @@
 //! plus the shared `SQLGetInfo` helpers (`common_get_info_raw`,
 //! `default_get_info`).
 
+use std::borrow::Cow;
+
 use odbc_sys::CDataType;
 
 use crate::errors::OdbcError;
@@ -72,8 +74,14 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// common shapes, so the default understates rather than leaks. Declaring a
     /// keyword here only ever adds redaction — it can never un-redact one the
     /// heuristic already catches.
-    fn sensitive_connect_keywords() -> &'static [&'static str] {
-        &[]
+    ///
+    /// `Cow<'static, [Cow<'static, str>]>`, not `&'static [&'static str]`: this
+    /// method takes no connection, so nothing about it varies at runtime, but
+    /// every other list-returning method on this trait uses the same shape for
+    /// a data source whose answer does vary — this one matches for uniformity
+    /// of the trait's vocabulary rather than because it needs to.
+    fn sensitive_connect_keywords() -> Cow<'static, [Cow<'static, str>]> {
+        Cow::Borrowed(&[])
     }
 
     /// Closes an existing connection and releases associated resources.
@@ -204,14 +212,24 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// [`FunctionId`](crate::function_id::FunctionId) entry
     /// per exported FFI function. `stackable-odbc-core` maps 3.x IDs to their 2.x equivalents
     /// automatically for the legacy function array.
-    fn get_functions() -> &'static [crate::function_id::FunctionId];
-
-    /// Returns static type information rows describing the SQL types supported by this driver.
     ///
-    /// Called by `SQLGetTypeInfoW`. The returned slice should include both ANSI and Unicode
+    /// This method takes no connection, so nothing about it varies at
+    /// runtime; it returns `Cow<'static, [FunctionId]>` rather than
+    /// `&'static [FunctionId]` for uniformity with the trait's other
+    /// list-returning methods, not because it needs to be computed.
+    fn get_functions() -> Cow<'static, [crate::function_id::FunctionId]>;
+
+    /// Returns type information rows describing the SQL types supported by this driver.
+    ///
+    /// Called by `SQLGetTypeInfoW`. The returned rows should include both ANSI and Unicode
     /// type variants so that ODBC applications can match on `SQL_VARCHAR` as well as
     /// `SQL_WVARCHAR`.
-    fn get_type_info(conn: &Self::Connection) -> &'static [TypeInfoRow];
+    ///
+    /// Takes a connection because the type list can genuinely differ by data
+    /// source (a server-version probe gating a type's availability, say), so
+    /// the answer is computed rather than a `'static` borrow — hence
+    /// `Cow<'static, [TypeInfoRow]>` rather than `&'static [TypeInfoRow]`.
+    fn get_type_info(conn: &Self::Connection) -> Cow<'static, [TypeInfoRow]>;
 
     /// Returns a result set describing tables matching the given filter criteria.
     ///
@@ -512,8 +530,13 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// lowercase to match `ConnectParams` storage convention.
     ///
     /// The default returns an empty slice (all attributes are optional).
-    fn browse_connect_attrs() -> &'static [&'static str] {
-        &[]
+    ///
+    /// `Cow<'static, [Cow<'static, str>]>`, not `&'static [&'static str]`: this
+    /// method takes no connection, so nothing about it varies at runtime, but
+    /// it matches the shape of the trait's other list-returning methods for
+    /// uniformity of vocabulary rather than because it needs to.
+    fn browse_connect_attrs() -> Cow<'static, [Cow<'static, str>]> {
+        Cow::Borrowed(&[])
     }
 
     /// The escape-translation dialect for this backend (`{fn}` name map,
@@ -790,7 +813,11 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// (that is `SQL_LIKE_ESCAPE_CLAUSE`). Return `""` if the data source has
     /// no escape character — the spec's answer for that case, and one core
     /// cannot distinguish from a backend that simply never set it.
-    fn search_pattern_escape(conn: &Self::Connection) -> &'static str;
+    ///
+    /// Takes a connection because the escape character can genuinely differ by
+    /// data source, so the answer is computed rather than a `'static` borrow —
+    /// hence `Cow<'static, str>` rather than `&'static str`.
+    fn search_pattern_escape(conn: &Self::Connection) -> Cow<'static, str>;
 
     /// The data source's own reserved words, unfiltered.
     ///
@@ -811,7 +838,13 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// `SQLGetInfo(SQL_KEYWORDS)` is not a hot path. A backend whose list is
     /// expensive to produce — read out of a linked library, say — should cache
     /// behind its own `OnceLock` and return the cached slice from here.
-    fn keywords(conn: &Self::Connection) -> &'static [&'static str];
+    ///
+    /// Takes a connection because the keyword list can genuinely differ by
+    /// data source, so the answer is computed rather than a `'static` borrow —
+    /// hence `Cow<'static, [Cow<'static, str>]>` rather than
+    /// `&'static [&'static str]`; the inner `Cow` lets each keyword itself be
+    /// owned, not only the list.
+    fn keywords(conn: &Self::Connection) -> Cow<'static, [Cow<'static, str>]>;
 
     /// The `SQL_TIMEDATE_ADD_INTERVALS` (109) bitmask: the interval units the
     /// `TIMESTAMPADD` scalar function accepts, as an OR of the
@@ -927,7 +960,7 @@ pub trait StatementBackend: Send + Sync {
     /// Called by `SQLGetData`. The value is converted to `target_type` as requested by
     /// the application.
     ///
-    /// Returns a [`Cow`](std::borrow::Cow) so that backends which cache rows in memory can hand
+    /// Returns a [`Cow`] so that backends which cache rows in memory can hand
     /// back a borrow (`Cow::Borrowed`) without cloning, while backends that
     /// need to construct a value on the fly can still return `Cow::Owned`.
     fn get_data(
@@ -957,7 +990,7 @@ pub trait StatementBackend: Send + Sync {
     ///
     /// Called by `SQLDescribeColW`.
     ///
-    /// Returns a [`Cow`](std::borrow::Cow) for the same reason
+    /// Returns a [`Cow`] for the same reason
     /// [`StatementBackend::get_data`] does: a backend holding its column
     /// descriptors in memory — which most do, since the result set's shape is
     /// known once — can hand back a borrow instead of cloning a
@@ -1309,9 +1342,10 @@ pub fn default_get_info<B: Backend>(
 /// `SQLGetInfo` reaches at most a handful of times per connection; a backend
 /// with an expensive list caches on its own side (see [`Backend::keywords`]).
 fn data_source_specific_keywords<B: Backend>(conn: &B::Connection) -> String {
-    let mut names: Vec<&'static str> = B::keywords(conn)
+    let keywords = B::keywords(conn);
+    let mut names: Vec<&str> = keywords
         .iter()
-        .copied()
+        .map(Cow::as_ref)
         .filter(|name| {
             !crate::types::ODBC_RESERVED_KEYWORDS
                 .iter()
