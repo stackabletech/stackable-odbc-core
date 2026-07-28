@@ -1041,6 +1041,22 @@ pub const SQL_PC_NOT_PSEUDO: i16 = 1;
 /// SQLSpecialColumns PSEUDO_COLUMN: a pseudo-column such as `rowid` (SQL_PC_PSEUDO = 2).
 pub const SQL_PC_PSEUDO: i16 = 2;
 
+// --- SQLProcedures: PROCEDURE_TYPE result column (sqlext.h) ---
+//
+// `SQLProcedureColumns`' COLUMN_TYPE values are *not* here: they are exactly
+// `odbc_sys::ParamType`'s discriminants (SQL_PARAM_TYPE_UNKNOWN, SQL_PARAM_INPUT,
+// SQL_PARAM_INPUT_OUTPUT, SQL_RESULT_COL, SQL_PARAM_OUTPUT, SQL_RETURN_VALUE),
+// so a backend spells that column `ParamType::Input as i16`.
+/// SQLProcedures PROCEDURE_TYPE: cannot be determined whether the procedure
+/// returns a value (SQL_PT_UNKNOWN = 0).
+pub const SQL_PT_UNKNOWN: i16 = 0;
+/// SQLProcedures PROCEDURE_TYPE: the object does not return a value
+/// (SQL_PT_PROCEDURE = 1).
+pub const SQL_PT_PROCEDURE: i16 = 1;
+/// SQLProcedures PROCEDURE_TYPE: the object returns a value
+/// (SQL_PT_FUNCTION = 2).
+pub const SQL_PT_FUNCTION: i16 = 2;
+
 /// The ODBC reserved keywords, from Appendix C of the specification.
 ///
 /// [`SQL_KEYWORDS`] is defined as the data source's keywords *excluding*

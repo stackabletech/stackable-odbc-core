@@ -177,6 +177,130 @@ pub struct SpecialColumnRow {
     pub pseudo_column: Option<i16>,
 }
 
+/// One row of `SQLProcedures`. Spec column order; 8 columns.
+///
+/// `PROCEDURE_NAME` (3) is the only column the spec marks "not NULL".
+///
+/// Columns 4-6 are listed with data type "N/A" — "reserved for future use" —
+/// but core reports them as `SMALLINT`, the ODBC 2.0 layout that applications
+/// binding by column number expect, so they are modelled as `Option<i16>`
+/// rather than dropped.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ProcedureRow {
+    /// `PROCEDURE_CAT` (1).
+    pub catalog: Option<String>,
+    /// `PROCEDURE_SCHEM` (2).
+    pub schema: Option<String>,
+    /// `PROCEDURE_NAME` (3), not NULL.
+    pub name: String,
+    /// `NUM_INPUT_PARAMS` (4), reserved for future use.
+    pub num_input_params: Option<i16>,
+    /// `NUM_OUTPUT_PARAMS` (5), reserved for future use.
+    pub num_output_params: Option<i16>,
+    /// `NUM_RESULT_SETS` (6), reserved for future use.
+    pub num_result_sets: Option<i16>,
+    /// `REMARKS` (7).
+    pub remarks: Option<String>,
+    /// `PROCEDURE_TYPE` (8) — one of the
+    /// [`SQL_PT_*`](crate::types::SQL_PT_PROCEDURE) values.
+    pub procedure_type: Option<i16>,
+}
+
+/// One row of `SQLProcedureColumns`. Spec column order; 19 columns.
+///
+/// The non-`Option` fields are the eight the spec marks "not NULL":
+/// `PROCEDURE_NAME`, `COLUMN_NAME`, `COLUMN_TYPE`, `DATA_TYPE`, `TYPE_NAME`,
+/// `NULLABLE`, `SQL_DATA_TYPE` and `ORDINAL_POSITION`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ProcedureColumnRow {
+    /// `PROCEDURE_CAT` (1).
+    pub catalog: Option<String>,
+    /// `PROCEDURE_SCHEM` (2).
+    pub schema: Option<String>,
+    /// `PROCEDURE_NAME` (3), not NULL.
+    pub procedure_name: String,
+    /// `COLUMN_NAME` (4), not NULL.
+    pub column_name: String,
+    /// `COLUMN_TYPE` (5), not NULL — an [`odbc_sys::ParamType`] discriminant,
+    /// whose values are exactly the spec's `SQL_PARAM_*` / `SQL_RESULT_COL` /
+    /// `SQL_RETURN_VALUE` set, so spell it `ParamType::Input as i16`.
+    pub column_type: i16,
+    /// `DATA_TYPE` (6), not NULL.
+    pub data_type: i16,
+    /// `TYPE_NAME` (7), not NULL.
+    pub type_name: String,
+    /// `COLUMN_SIZE` (8).
+    pub column_size: Option<i32>,
+    /// `BUFFER_LENGTH` (9).
+    pub buffer_length: Option<i32>,
+    /// `DECIMAL_DIGITS` (10).
+    pub decimal_digits: Option<i16>,
+    /// `NUM_PREC_RADIX` (11).
+    pub num_prec_radix: Option<i16>,
+    /// `NULLABLE` (12), not NULL.
+    pub nullable: i16,
+    /// `REMARKS` (13).
+    pub remarks: Option<String>,
+    /// `COLUMN_DEF` (14).
+    pub column_def: Option<String>,
+    /// `SQL_DATA_TYPE` (15), not NULL.
+    pub sql_data_type: i16,
+    /// `SQL_DATETIME_SUB` (16).
+    pub sql_datetime_sub: Option<i16>,
+    /// `CHAR_OCTET_LENGTH` (17).
+    pub char_octet_length: Option<i32>,
+    /// `ORDINAL_POSITION` (18), not NULL.
+    pub ordinal_position: i32,
+    /// `IS_NULLABLE` (19).
+    pub is_nullable: Option<String>,
+}
+
+/// One row of `SQLColumnPrivileges`. Spec column order; 8 columns.
+///
+/// The non-`Option` fields are the four the spec marks "not NULL":
+/// `TABLE_NAME`, `COLUMN_NAME`, `GRANTEE` and `PRIVILEGE`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ColumnPrivilegeRow {
+    /// `TABLE_CAT` (1).
+    pub catalog: Option<String>,
+    /// `TABLE_SCHEM` (2).
+    pub schema: Option<String>,
+    /// `TABLE_NAME` (3), not NULL.
+    pub table_name: String,
+    /// `COLUMN_NAME` (4), not NULL.
+    pub column_name: String,
+    /// `GRANTOR` (5).
+    pub grantor: Option<String>,
+    /// `GRANTEE` (6), not NULL.
+    pub grantee: String,
+    /// `PRIVILEGE` (7), not NULL.
+    pub privilege: String,
+    /// `IS_GRANTABLE` (8).
+    pub is_grantable: Option<String>,
+}
+
+/// One row of `SQLTablePrivileges`. Spec column order; 7 columns.
+///
+/// The non-`Option` fields are the three the spec marks "not NULL":
+/// `TABLE_NAME`, `GRANTEE` and `PRIVILEGE`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TablePrivilegeRow {
+    /// `TABLE_CAT` (1).
+    pub catalog: Option<String>,
+    /// `TABLE_SCHEM` (2).
+    pub schema: Option<String>,
+    /// `TABLE_NAME` (3), not NULL.
+    pub table_name: String,
+    /// `GRANTOR` (4).
+    pub grantor: Option<String>,
+    /// `GRANTEE` (5), not NULL.
+    pub grantee: String,
+    /// `PRIVILEGE` (6), not NULL.
+    pub privilege: String,
+    /// `IS_GRANTABLE` (7).
+    pub is_grantable: Option<String>,
+}
+
 fn opt_str(v: &Option<String>) -> ColumnValue {
     match v {
         Some(s) => ColumnValue::String(s.clone()),
@@ -311,12 +435,90 @@ impl SpecialColumnRow {
     }
 }
 
+impl ProcedureRow {
+    /// Values in spec column order; 8 columns, matching the field order.
+    pub fn to_values(&self) -> Vec<ColumnValue> {
+        vec![
+            opt_str(&self.catalog),
+            opt_str(&self.schema),
+            ColumnValue::String(self.name.clone()),
+            opt_i16(self.num_input_params),
+            opt_i16(self.num_output_params),
+            opt_i16(self.num_result_sets),
+            opt_str(&self.remarks),
+            opt_i16(self.procedure_type),
+        ]
+    }
+}
+
+impl ProcedureColumnRow {
+    /// Values in spec column order; 19 columns, matching the field order.
+    pub fn to_values(&self) -> Vec<ColumnValue> {
+        vec![
+            opt_str(&self.catalog),
+            opt_str(&self.schema),
+            ColumnValue::String(self.procedure_name.clone()),
+            ColumnValue::String(self.column_name.clone()),
+            ColumnValue::I16(self.column_type),
+            ColumnValue::I16(self.data_type),
+            ColumnValue::String(self.type_name.clone()),
+            opt_i32(self.column_size),
+            opt_i32(self.buffer_length),
+            opt_i16(self.decimal_digits),
+            opt_i16(self.num_prec_radix),
+            ColumnValue::I16(self.nullable),
+            opt_str(&self.remarks),
+            opt_str(&self.column_def),
+            ColumnValue::I16(self.sql_data_type),
+            opt_i16(self.sql_datetime_sub),
+            opt_i32(self.char_octet_length),
+            ColumnValue::I32(self.ordinal_position),
+            opt_str(&self.is_nullable),
+        ]
+    }
+}
+
+impl ColumnPrivilegeRow {
+    /// Values in spec column order; 8 columns, matching the field order.
+    pub fn to_values(&self) -> Vec<ColumnValue> {
+        vec![
+            opt_str(&self.catalog),
+            opt_str(&self.schema),
+            ColumnValue::String(self.table_name.clone()),
+            ColumnValue::String(self.column_name.clone()),
+            opt_str(&self.grantor),
+            ColumnValue::String(self.grantee.clone()),
+            ColumnValue::String(self.privilege.clone()),
+            opt_str(&self.is_grantable),
+        ]
+    }
+}
+
+impl TablePrivilegeRow {
+    /// Values in spec column order; 7 columns, matching the field order.
+    pub fn to_values(&self) -> Vec<ColumnValue> {
+        vec![
+            opt_str(&self.catalog),
+            opt_str(&self.schema),
+            ColumnValue::String(self.table_name.clone()),
+            opt_str(&self.grantor),
+            ColumnValue::String(self.grantee.clone()),
+            ColumnValue::String(self.privilege.clone()),
+            opt_str(&self.is_grantable),
+        ]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ffi::metadata::{
+        column_privileges_columns, procedure_columns_columns, procedures_columns,
+        table_privileges_columns,
+    };
     use crate::types::{
         CatalogResultColumnWidths, ColumnsResultCol, ForeignKeysResultCol, PrimaryKeysResultCol,
-        TablesResultCol, special_columns_columns, statistics_columns,
+        SQL_PT_PROCEDURE, TablesResultCol, special_columns_columns, statistics_columns,
     };
 
     #[test]
@@ -372,6 +574,87 @@ mod tests {
         assert_eq!(
             SpecialColumnRow::default().to_values().len(),
             special_columns_columns(&widths).len()
+        );
+        // The last four descriptor functions live beside their FFI entry
+        // points rather than in `types`, so they are imported here rather than
+        // restated — a second statement of a column layout is a second way to
+        // state it differently.
+        assert_eq!(
+            ProcedureRow::default().to_values().len(),
+            procedures_columns(&widths).len()
+        );
+        assert_eq!(
+            ProcedureColumnRow::default().to_values().len(),
+            procedure_columns_columns(&widths).len()
+        );
+        assert_eq!(
+            ColumnPrivilegeRow::default().to_values().len(),
+            column_privileges_columns(&widths).len()
+        );
+        assert_eq!(
+            TablePrivilegeRow::default().to_values().len(),
+            table_privileges_columns(&widths).len()
+        );
+    }
+
+    #[test]
+    fn table_privilege_row_converts_in_spec_column_order() {
+        // Spec, SQLTablePrivileges result columns: 1 TABLE_CAT,
+        // 2 TABLE_SCHEM, 3 TABLE_NAME, 4 GRANTOR, 5 GRANTEE, 6 PRIVILEGE,
+        // 7 IS_GRANTABLE.
+        let row = TablePrivilegeRow {
+            catalog: Some("cat".into()),
+            schema: None,
+            table_name: "t".into(),
+            grantor: None,
+            grantee: "u".into(),
+            privilege: "SELECT".into(),
+            is_grantable: Some("YES".into()),
+        };
+        assert_eq!(
+            row.to_values(),
+            vec![
+                ColumnValue::String("cat".into()),
+                ColumnValue::Null,
+                ColumnValue::String("t".into()),
+                ColumnValue::Null,
+                ColumnValue::String("u".into()),
+                ColumnValue::String("SELECT".into()),
+                ColumnValue::String("YES".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn procedure_row_converts_in_spec_column_order() {
+        // Spec, SQLProcedures result columns: 1 PROCEDURE_CAT,
+        // 2 PROCEDURE_SCHEM, 3 PROCEDURE_NAME, 4 NUM_INPUT_PARAMS,
+        // 5 NUM_OUTPUT_PARAMS, 6 NUM_RESULT_SETS, 7 REMARKS,
+        // 8 PROCEDURE_TYPE. Columns 4-6 are "reserved for future use", so a
+        // conversion that dropped them would still produce plausible-looking
+        // values in 7 and 8 — this pins their positions.
+        let row = ProcedureRow {
+            catalog: Some("cat".into()),
+            schema: None,
+            name: "p".into(),
+            num_input_params: None,
+            num_output_params: None,
+            num_result_sets: None,
+            remarks: Some("note".into()),
+            procedure_type: Some(SQL_PT_PROCEDURE),
+        };
+        assert_eq!(
+            row.to_values(),
+            vec![
+                ColumnValue::String("cat".into()),
+                ColumnValue::Null,
+                ColumnValue::String("p".into()),
+                ColumnValue::Null,
+                ColumnValue::Null,
+                ColumnValue::Null,
+                ColumnValue::String("note".into()),
+                ColumnValue::I16(SQL_PT_PROCEDURE),
+            ]
         );
     }
 }
