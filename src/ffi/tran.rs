@@ -873,14 +873,18 @@ mod tests {
             );
             assert_eq!(ret, SqlReturn::SUCCESS);
 
+            // A real TableName: `SQLStatistics` returns `HY009` for a null one,
+            // which is the driver's to return there (no `(DM)` marker on that
+            // sentence), and would mask the cursor-state answer this pins.
+            let table: Vec<u16> = "t".encode_utf16().chain(std::iter::once(0)).collect();
             let ret = crate::ffi::metadata::sql_statistics_w::<MockTxnCloseBackend>(
                 stmt,
                 std::ptr::null(),
                 0,
                 std::ptr::null(),
                 0,
-                std::ptr::null(),
-                0,
+                table.as_ptr(),
+                SQL_NTS as i16,
                 crate::types::SQL_INDEX_ALL,
                 crate::types::SQL_QUICK,
             );

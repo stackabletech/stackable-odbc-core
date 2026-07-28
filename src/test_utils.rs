@@ -170,6 +170,12 @@ impl StatementBackend for MockStatement {
 /// minimal but states a reserved-word list, for the mocks that exist only to
 /// test the `SQL_KEYWORDS` subtraction; `table_types = <slice>` does the same
 /// for the mock that exercises `SQLTables`' `SQL_ALL_TABLE_TYPES` enumeration.
+///
+/// `minimal_capability_decls!(identifier_case = <SQL_IC_*>, search_pattern_escape
+/// = <str>)` states the two declarations `SQL_ATTR_METADATA_ID` normalisation
+/// reads. The minimal pair — `SQL_IC_SENSITIVE` and no escape character — makes
+/// normalisation a no-op, so a mock testing it has to say otherwise or every
+/// assertion passes whether core normalised or not.
 macro_rules! minimal_capability_decls {
     () => {
         minimal_capability_decls!(keywords = &[], table_types = &[]);
@@ -181,6 +187,25 @@ macro_rules! minimal_capability_decls {
         minimal_capability_decls!(keywords = &[], table_types = $table_types);
     };
     (keywords = $keywords:expr, table_types = $table_types:expr) => {
+        minimal_capability_decls!(
+            keywords = $keywords,
+            table_types = $table_types,
+            identifier_case = crate::types::SQL_IC_SENSITIVE,
+            search_pattern_escape = ""
+        );
+    };
+    (table_types = $table_types:expr, identifier_case = $identifier_case:expr,
+     search_pattern_escape = $search_pattern_escape:expr) => {
+        minimal_capability_decls!(
+            keywords = &[],
+            table_types = $table_types,
+            identifier_case = $identifier_case,
+            search_pattern_escape = $search_pattern_escape
+        );
+    };
+    (keywords = $keywords:expr, table_types = $table_types:expr,
+     identifier_case = $identifier_case:expr,
+     search_pattern_escape = $search_pattern_escape:expr) => {
         fn keywords(_conn: &Self::Connection) -> Cow<'static, [Cow<'static, str>]> {
             let list: &'static [&'static str] = $keywords;
             Cow::Owned(list.iter().map(|s| Cow::Borrowed(*s)).collect())
@@ -197,7 +222,7 @@ macro_rules! minimal_capability_decls {
         }
         // No "minimal" value exists: 0 is not a legal SQL_IDENTIFIER_CASE.
         fn identifier_case(_conn: &Self::Connection) -> u16 {
-            crate::types::SQL_IC_SENSITIVE
+            $identifier_case
         }
         fn correlation_name(_conn: &Self::Connection) -> u16 {
             crate::types::SQL_CN_NONE
@@ -245,7 +270,7 @@ macro_rules! minimal_capability_decls {
             false
         }
         fn search_pattern_escape(_conn: &Self::Connection) -> Cow<'static, str> {
-            Cow::Borrowed("")
+            Cow::Borrowed($search_pattern_escape)
         }
     };
 }
@@ -1695,6 +1720,255 @@ impl Backend for MockCatalogBackend {
     // Out of order, so the `SQL_ALL_TABLE_TYPES` test sees core's sort rather
     // than the backend's declaration order.
     minimal_capability_decls!(table_types = &["VIEW", "TABLE"]);
+}
+
+// ---------------------------------------------------------------------------
+// A backend that records the catalog arguments it was given
+// ---------------------------------------------------------------------------
+
+/// The arguments one catalog `Backend` method received, by spec argument name.
+///
+/// `catalog`/`schema`/`table` are `SQLForeignKeys`' *PK* trio; its FK trio
+/// lands in the `fk_*` fields.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RecordedCatalogArgs {
+    pub catalog: Option<String>,
+    pub schema: Option<String>,
+    pub table: Option<String>,
+    pub column: Option<String>,
+    pub table_type: Option<String>,
+    pub fk_catalog: Option<String>,
+    pub fk_schema: Option<String>,
+    pub fk_table: Option<String>,
+}
+
+thread_local! {
+    /// The arguments of the most recent catalog call on this thread. The test
+    /// harness gives each test its own thread, and every test using this mock
+    /// makes exactly one catalog call, so last-write-wins needs no reset hook.
+    static RECORDED_CATALOG_ARGS: std::cell::RefCell<Option<RecordedCatalogArgs>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Records what core actually passed down to each catalog method, so a test can
+/// assert what `SQL_ATTR_METADATA_ID` normalisation did to the application's
+/// arguments before the backend ever saw them.
+///
+/// It declares `SQL_IC_UPPER` and `"\\"` rather than the minimal
+/// `SQL_IC_SENSITIVE` and no escape character: those two are the only inputs
+/// normalisation reads, and with the minimal pair it folds nothing and escapes
+/// nothing, so every assertion would pass whether core normalised or not.
+///
+/// It also declares catalogs, schemas and table types, so the `SQL_ALL_*`
+/// enumerations can be exercised *with* `METADATA_ID` set — a normalised `"%"`
+/// would be escaped to `"\\%"` and stop being the sentinel, which is exactly
+/// the ordering bug the enumeration test pins.
+pub struct MockCatalogArgsBackend;
+
+impl MockCatalogArgsBackend {
+    fn record(args: RecordedCatalogArgs) {
+        RECORDED_CATALOG_ARGS.with(|cell| *cell.borrow_mut() = Some(args));
+    }
+
+    /// The arguments of the most recent catalog call on this thread, or `None`
+    /// if no catalog method was reached — which is itself worth asserting when
+    /// a test expects core to answer without the backend.
+    pub fn recorded() -> Option<RecordedCatalogArgs> {
+        RECORDED_CATALOG_ARGS.with(|cell| cell.borrow().clone())
+    }
+}
+
+impl Backend for MockCatalogArgsBackend {
+    type Connection = MockConnection;
+    type Statement = MockStatement;
+    type Error = MockError;
+    type CancelToken = MockCancelToken;
+
+    fn connect(_: &ConnectParams) -> Result<MockConnection, MockError> {
+        Ok(MockConnection)
+    }
+    fn disconnect(_: &mut MockConnection) -> Result<(), MockError> {
+        Ok(())
+    }
+    fn cancel_token(_conn: &Self::Connection) -> Self::CancelToken {
+        MockCancelToken::default()
+    }
+    fn cancel(token: &Self::CancelToken) -> Result<(), Self::Error> {
+        token
+            .cancelled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+    fn exec_direct(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: &str,
+    ) -> Result<MockStatement, MockError> {
+        Err(MockError)
+    }
+    fn prepare(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: &str,
+    ) -> Result<MockStatement, MockError> {
+        Err(MockError)
+    }
+    fn execute(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: &mut MockStatement,
+        _: &[crate::types::ColumnValue],
+    ) -> Result<crate::types::ExecuteOutcome, MockError> {
+        Err(MockError)
+    }
+    fn get_info(_: &MockConnection, _: crate::types::InfoType) -> Result<InfoValue, MockError> {
+        Err(MockError)
+    }
+    fn get_functions() -> Cow<'static, [crate::function_id::FunctionId]> {
+        Cow::Borrowed(&[])
+    }
+    fn get_type_info(_conn: &Self::Connection) -> Cow<'static, [TypeInfoRow]> {
+        Cow::Borrowed(&[])
+    }
+
+    fn tables(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        catalog: Option<&str>,
+        schema: Option<&str>,
+        table: Option<&str>,
+        table_type: Option<&str>,
+    ) -> Result<Vec<TableRow>, MockError> {
+        Self::record(RecordedCatalogArgs {
+            catalog: catalog.map(str::to_string),
+            schema: schema.map(str::to_string),
+            table: table.map(str::to_string),
+            table_type: table_type.map(str::to_string),
+            ..Default::default()
+        });
+        Ok(Vec::new())
+    }
+    fn columns(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        catalog: Option<&str>,
+        schema: Option<&str>,
+        table: Option<&str>,
+        column: Option<&str>,
+    ) -> Result<Vec<ColumnRow>, MockError> {
+        Self::record(RecordedCatalogArgs {
+            catalog: catalog.map(str::to_string),
+            schema: schema.map(str::to_string),
+            table: table.map(str::to_string),
+            column: column.map(str::to_string),
+            ..Default::default()
+        });
+        Ok(Vec::new())
+    }
+    fn primary_keys(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        catalog: Option<&str>,
+        schema: Option<&str>,
+        table: Option<&str>,
+    ) -> Result<Vec<PrimaryKeyRow>, MockError> {
+        Self::record(RecordedCatalogArgs {
+            catalog: catalog.map(str::to_string),
+            schema: schema.map(str::to_string),
+            table: table.map(str::to_string),
+            ..Default::default()
+        });
+        Ok(Vec::new())
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn foreign_keys(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        pk_catalog: Option<&str>,
+        pk_schema: Option<&str>,
+        pk_table: Option<&str>,
+        fk_catalog: Option<&str>,
+        fk_schema: Option<&str>,
+        fk_table: Option<&str>,
+    ) -> Result<Vec<ForeignKeyRow>, MockError> {
+        Self::record(RecordedCatalogArgs {
+            catalog: pk_catalog.map(str::to_string),
+            schema: pk_schema.map(str::to_string),
+            table: pk_table.map(str::to_string),
+            fk_catalog: fk_catalog.map(str::to_string),
+            fk_schema: fk_schema.map(str::to_string),
+            fk_table: fk_table.map(str::to_string),
+            ..Default::default()
+        });
+        Ok(Vec::new())
+    }
+    fn statistics(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        catalog: Option<&str>,
+        schema: Option<&str>,
+        table: Option<&str>,
+        _: bool,
+    ) -> Result<Vec<StatisticsRow>, MockError> {
+        Self::record(RecordedCatalogArgs {
+            catalog: catalog.map(str::to_string),
+            schema: schema.map(str::to_string),
+            table: table.map(str::to_string),
+            ..Default::default()
+        });
+        Ok(Vec::new())
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn special_columns(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: IdentifierType,
+        catalog: Option<&str>,
+        schema: Option<&str>,
+        table: Option<&str>,
+        _: Scope,
+        _: Nullable,
+    ) -> Result<Vec<SpecialColumnRow>, MockError> {
+        Self::record(RecordedCatalogArgs {
+            catalog: catalog.map(str::to_string),
+            schema: schema.map(str::to_string),
+            table: table.map(str::to_string),
+            ..Default::default()
+        });
+        Ok(Vec::new())
+    }
+
+    fn catalogs(_: &MockConnection, _: &Self::CancelToken) -> Result<Vec<String>, Self::Error> {
+        Ok(vec!["cat_a".into()])
+    }
+    fn schemas(_: &MockConnection, _: &Self::CancelToken) -> Result<Vec<String>, Self::Error> {
+        Ok(vec!["sch_a".into()])
+    }
+
+    fn supports_catalogs(_conn: &Self::Connection) -> bool {
+        true
+    }
+    fn supports_schemas(_conn: &Self::Connection) -> bool {
+        true
+    }
+    fn alter_table_support(_conn: &Self::Connection) -> u32 {
+        0
+    }
+    fn outer_join_capabilities(_conn: &Self::Connection) -> u32 {
+        0
+    }
+    fn default_txn_isolation(_conn: &Self::Connection) -> u32 {
+        0
+    }
+    fn txn_isolation_options(_conn: &Self::Connection) -> u32 {
+        0
+    }
+
+    minimal_capability_decls!(
+        table_types = &["TABLE"],
+        identifier_case = crate::types::SQL_IC_UPPER,
+        search_pattern_escape = "\\"
+    );
 }
 
 // ---------------------------------------------------------------------------

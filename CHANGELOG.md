@@ -168,6 +168,27 @@ markers go away and this section becomes the initial-release notes.
   the backend.
 - `types::SQL_ALL_CATALOGS`, `types::SQL_ALL_SCHEMAS` and
   `types::SQL_ALL_TABLE_TYPES`.
+- `SQL_ATTR_METADATA_ID` is now honoured. It was previously accepted, stored and
+  read back by `SQLGetStmtAttr` while changing nothing — so an application that
+  set it got confirmation of a behaviour the driver did not have. Core now
+  normalises the identifier-valued catalog arguments itself (strip delimiters,
+  case-fold per `SQL_IDENTIFIER_CASE`, escape `%`, `_` and the escape character
+  per `SQL_SEARCH_PATTERN_ESCAPE`) before the backend sees them, so a backend
+  needs no code for the feature at all. Applied to `SQLTables`,
+  `SQLColumns`, `SQLPrimaryKeys`, `SQLForeignKeys` (both the PK and the FK
+  trio), `SQLStatistics` and `SQLSpecialColumns`. `SQLTables`' `TableType` is
+  exempt, as the spec requires: it "is a value list argument, regardless of the
+  setting of SQL_ATTR_METADATA_ID". Detection of the three `SQL_ALL_*`
+  enumerations still runs on the raw arguments, since a normalised `"%"` would
+  be escaped and stop being the sentinel.
+- The driver-side `HY009` checks the spec assigns to the driver rather than the
+  Driver Manager. All six catalog functions reject a null catalog argument when
+  `SQL_ATTR_METADATA_ID` is `SQL_TRUE` and `Backend::supports_catalogs` reports
+  catalogs exist (`SQLForeignKeys` checks both of its catalog arguments), and
+  `SQLStatistics` and `SQLSpecialColumns` reject a null `TableName`.
+  `SQLPrimaryKeys` and `SQLForeignKeys` deliberately do **not** check their
+  table-name arguments: those sentences are `(DM)`-marked in their diagnostics
+  tables, while the identical sentence in the other two is not.
 
 ### Changed
 

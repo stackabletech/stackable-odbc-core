@@ -18,13 +18,6 @@ use crate::types::{SQL_IC_LOWER, SQL_IC_UPPER};
 /// `quotes` comes from `EscapeDialect::identifier_quotes` and `escape` from
 /// `Backend::search_pattern_escape`, so every input is a fact the backend
 /// already declares.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "called by the catalog FFI functions once METADATA_ID is wired up"
-    )
-)]
 pub(crate) fn normalise_identifier(
     value: &str,
     identifier_case: u16,
