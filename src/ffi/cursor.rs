@@ -330,13 +330,21 @@ pub unsafe fn sql_close_cursor<B: Backend>(statement_handle: *mut c_void) -> Sql
 ///   runs, and its own diagnostic is posted if that fails.
 ///
 /// The statement's cancel token is cloned out of the registry before either
-/// branch is chosen, and before the connection lock is even attempted. That
-/// ordering is load-bearing: the clone is what keeps the token alive if
-/// `SQLDisconnect` or `SQLFreeHandle` runs concurrently and tears the
-/// statement or its connection down mid-call — see `Registry::cancel_of`'s
-/// doc comment for the SQLite precedent this mirrors. Resolving the token
-/// after attempting the lock would leave a window in which the statement (and
-/// its token) could already be gone.
+/// branch is chosen, and before the connection lock is even attempted. The
+/// lifetime guarantee this needs against a concurrent `SQLDisconnect` or
+/// `SQLFreeHandle` does not come from that ordering, though: it comes from
+/// `Registry::cancel_of` itself, which takes the registry's read lock, checks
+/// the token's generation, and hands back an owned `Arc` clone — mutually
+/// exclusive with `unregister`'s write lock, so either the clone wins while
+/// the slot still holds its own reference, or the free wins first and
+/// `cancel_of` correctly returns `None`. Neither order can observe a token
+/// that "might still be there" only to find it gone underneath it; see
+/// `Registry::cancel_of`'s doc comment for the SQLite precedent this
+/// protects. What the clone-first order actually narrows is a race in
+/// *outcome*, not in soundness: resolving the token later gives a concurrent
+/// free a wider window to win that race, so cancel more often observes
+/// `None` and cancels nothing — spec-legal, and the reason to keep the
+/// clone first is to shrink that window, not to avoid a dangling reference.
 ///
 /// # Consequences of running lock-free
 ///

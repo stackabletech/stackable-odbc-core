@@ -512,6 +512,19 @@ mechanism:
   connection rather than standing alone, it must keep its target alive
   through an `Arc` — core clones the token out before doing anything else, so
   it must survive a concurrent `SQLDisconnect`.
+
+  Two consequences of running the cross-thread branch lock-free are worth
+  knowing rather than rediscovering as a bug report: a `SQLGetDiagRecW` /
+  `SQLGetDiagFieldW` immediately following such a cancel **blocks** until the
+  cancelled call has unwound through the backend, because both of those take
+  the connection's group and reading the diagnostic queue while another
+  thread pushes to it is undefined behaviour — `SQLCancel` itself still
+  returns promptly; the wait moves to whichever call reads diagnostics next.
+  And `try_lock` cannot tell "a sibling statement on this connection is busy"
+  apart from "my own statement is busy": either pushes `SQLCancel` onto the
+  cross-thread branch, so a merely-idle statement's data-at-execution state
+  is occasionally left uncleared where it strictly could have been —
+  harmless, and explicitly spec-legal.
 - **Every lock in the crate is imported from `src/sync.rs`**, never directly
   from `std::sync`, so that building with `--cfg loom` swaps every one of them
   for loom's instrumented equivalent. A lock imported around that module would

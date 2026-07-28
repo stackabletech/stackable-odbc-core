@@ -6,6 +6,14 @@
 //! discipline. A lock imported directly from `std::sync` is invisible to
 //! loom, so it would silently opt that code out of the proof. There is no
 //! second import path on purpose.
+//!
+//! Run the models with `RUSTFLAGS="--cfg loom" cargo test --lib loom_tests`.
+//! The `loom_tests` filter is required, not cosmetic: this cfg switch also
+//! applies to every other unit test in the crate, none of which are wrapped
+//! in a `loom::model`, and they call the process-wide registry outside one,
+//! which panics as soon as it resolves to loom's `RwLock` (see
+//! `handles::registry::registry`'s doc comment). The filter is what keeps
+//! those tests out of a build they were never meant to run under.
 
 #[cfg(loom)]
 pub(crate) use loom::sync::{Arc, Mutex, MutexGuard, RwLock};

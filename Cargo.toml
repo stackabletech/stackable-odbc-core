@@ -69,21 +69,32 @@ tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# Exhaustive interleaving checker for the handle lock discipline. This is a
+# regular (non-dev) dependency even though the models themselves
+# (`src/handles/registry.rs`'s `#[cfg(all(test, loom))] mod loom_tests`) only
+# need `loom` inside a test build: `src/sync.rs`'s own `#[cfg(loom)]` type
+# aliases are *not* additionally gated on `cfg(test)`, so any build at all —
+# `cargo build --lib`, `cargo check`, not only `cargo test` — resolves
+# `loom::sync::{Arc, Mutex, MutexGuard, RwLock}` the moment `--cfg loom` is
+# set. A `[dev-dependencies]` entry is invisible to exactly that non-test
+# build, which is what `cargo build --lib` under `RUSTFLAGS="--cfg loom"`
+# demonstrates directly: `error[E0432]: unresolved imports crate::sync::Arc,
+# ...`. Making `sync.rs`'s aliasing itself conditional on `cfg(test)` would
+# avoid that, but it would also mean `--cfg loom` on a non-test build silently
+# stops swapping in loom's primitives — the opposite of `sync.rs`'s own
+# documented purpose. A regular dependency costs the crate a handful of inert
+# entries in every consumer's resolved dependency graph when `loom` is not
+# active; it does not cost anything at build time, since `--cfg loom` is never
+# set outside the one job that uses it.
+[target.'cfg(loom)'.dependencies]
+loom = "0.7"
+
 [dev-dependencies]
 proptest = "1"
 # For `tests/logging.rs`, which installs a competing global subscriber before
 # calling `init_logging`. That has to run in its own process, so it cannot be a
 # unit test, and an integration test reaches only the public API plus these.
 tracing-subscriber = "0.3"
-
-# Exhaustive interleaving checker for the handle lock discipline. A regular
-# dev-dependency is enough: the models live in `src/handles/registry.rs` as
-# `#[cfg(all(test, loom))]`, so the only build that ever needs `loom` visible
-# is `cargo test --lib`, which compiles this crate's own unit-test binary and
-# sees `[dev-dependencies]` like any other test target. There is no separate
-# integration-test crate linking the library as an ordinary (non-test)
-# dependency under `--cfg loom` for `loom` to be invisible to.
-loom = "0.7"
 
 [lints.rust]
 # `loom` is a custom cfg (see `src/sync.rs`), set via `RUSTFLAGS="--cfg loom"`

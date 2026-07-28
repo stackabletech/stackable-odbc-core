@@ -124,7 +124,12 @@ pub trait HasKind {
 /// the registry, which is what keeps `SQLEndTran(SQL_HANDLE_ENV)` from ever
 /// needing to hold this handle's lock and a child connection's at once.
 ///
-/// Must be `#[repr(C)]` so that `HandleHeader` is at offset 0 for tag validation.
+/// Must be `#[repr(C)]`: validation never reads this struct's memory at all
+/// (the registry validates a token by slot index and generation, not by
+/// dereferencing it — see the module's top-level docs), so no field's offset
+/// is load-bearing for that. `#[repr(C)]` is kept anyway for a defined,
+/// non-reordered layout on a type that is heap-allocated via `Box::into_raw`
+/// and later reclaimed via `Box::from_raw` at that same raw address.
 #[repr(C)]
 pub struct EnvironmentHandle<B: Backend> {
     header: HandleHeader,
@@ -153,7 +158,12 @@ impl<B: Backend> HasKind for EnvironmentHandle<B> {
 /// Child statements are not tracked here, for the same reason
 /// `EnvironmentHandle` carries no connection list: see its doc comment.
 ///
-/// Must be `#[repr(C)]` so that `HandleHeader` is at offset 0 for tag validation.
+/// Must be `#[repr(C)]`: validation never reads this struct's memory at all
+/// (the registry validates a token by slot index and generation, not by
+/// dereferencing it — see the module's top-level docs), so no field's offset
+/// is load-bearing for that. `#[repr(C)]` is kept anyway for a defined,
+/// non-reordered layout on a type that is heap-allocated via `Box::into_raw`
+/// and later reclaimed via `Box::from_raw` at that same raw address.
 #[repr(C)]
 pub struct ConnectionHandle<B: Backend> {
     header: HandleHeader,
@@ -340,7 +350,12 @@ unsafe impl Sync for DataAtExecState {}
 /// treating it as a raw pointer anywhere would be unsound. Parentage itself
 /// lives in the registry, not in a list on the connection.
 ///
-/// Must be `#[repr(C)]` so that `HandleHeader` is at offset 0 for tag validation.
+/// Must be `#[repr(C)]`: validation never reads this struct's memory at all
+/// (the registry validates a token by slot index and generation, not by
+/// dereferencing it — see the module's top-level docs), so no field's offset
+/// is load-bearing for that. `#[repr(C)]` is kept anyway for a defined,
+/// non-reordered layout on a type that is heap-allocated via `Box::into_raw`
+/// and later reclaimed via `Box::from_raw` at that same raw address.
 ///
 /// [`StatementBackend`]: crate::backend::StatementBackend
 #[repr(C)]
@@ -1296,8 +1311,8 @@ mod tests {
 
     #[test]
     fn free_handle_rejects_wrong_handle_type() {
-        // Calling the wrong `free_*` for a handle must not free it: the tag
-        // check fails, `INVALID_HANDLE` is returned, and the handle stays valid.
+        // Calling the wrong `free_*` for a handle must not free it: the kind
+        // compare fails, `INVALID_HANDLE` is returned, and the handle stays valid.
         unsafe {
             let mut env_ptr: *mut c_void = std::ptr::null_mut();
             let _ = alloc_environment::<MockBackend>(&mut env_ptr as *mut _);

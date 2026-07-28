@@ -723,10 +723,16 @@ mod loom_tests {
         });
     }
 
-    /// `SQLCancel` must reach the backend on every interleaving, including the
-    /// one where the other thread holds the group for the whole model. A
-    /// cancel that waited for the lock would be a cancel that waits for the
-    /// query it is cancelling.
+    /// `SQLCancel` must reach the backend without ever waiting for the group,
+    /// even when another thread holds it for the model's entire duration.
+    /// This model's own (main) thread plays that other thread: it takes the
+    /// group and holds the guard until after `canceller.join()` returns,
+    /// which is what makes the hold last exactly as long as the cancel takes
+    /// — a cancel that (incorrectly) took the blocking `lock` instead of
+    /// `try_lock` would then deadlock against this thread's own guard, not
+    /// merely race it, since nothing releases the group until the join this
+    /// thread is blocked in returns. A cancel that waited for the lock would
+    /// be a cancel that waits for the query it is cancelling.
     #[test]
     fn cancel_never_waits_for_the_group() {
         loom::model(|| {
@@ -738,15 +744,22 @@ mod loom_tests {
             let flag = StdArc::new(AtomicBool::new(false));
             reg.set_cancel(stmt, StdArc::clone(&flag) as StdArc<dyn Any + Send + Sync>);
 
-            let executor = {
-                let g = Arc::clone(&group);
-                thread::spawn(move || {
-                    let _guard = g.lock();
-                })
-            };
+            // Held until this function returns, i.e. past `canceller.join()`
+            // below: Rust drops locals in reverse declaration order, so this
+            // guard outlives the join that waits on the thread it must not
+            // block.
+            let _executor_guard = group.lock();
+
             let canceller = {
                 let reg = Arc::clone(&reg);
+                let g = Arc::clone(&group);
                 thread::spawn(move || {
+                    // The behaviour under test: try_lock, never the blocking
+                    // lock. A cancel that took the latter here would block
+                    // forever on `_executor_guard` above, which is not
+                    // dropped until after this thread has already been
+                    // joined.
+                    let _guard = g.try_lock();
                     let token = reg.cancel_of(stmt).expect("token still set");
                     token
                         .downcast_ref::<AtomicBool>()
@@ -755,20 +768,29 @@ mod loom_tests {
                 })
             };
 
-            executor.join().expect("executor panicked");
             canceller.join().expect("canceller panicked");
             assert!(flag.load(Ordering::SeqCst), "cancel must always land");
         });
     }
 
-    /// The clone taken before any lock is what makes a cancel safe against a
-    /// free on another thread. This is the SQLite close-during-interrupt
-    /// hazard as a model rather than a comment: [`Registry::cancel_of`]'s
-    /// clone racing [`Registry::unregister`] is the actual interleaving
-    /// `sql_cancel` (`ffi::cursor`) exposes to a concurrent
-    /// `SQLFreeHandle`/`SQLDisconnect`, since freeing a statement never takes
-    /// the group lock (`free_statement_allocation`, `handles::mod`) any more
-    /// than `sql_cancel`'s cross-thread branch does.
+    /// The clone taken via [`Registry::cancel_of`] is what makes a cancel
+    /// safe against a free on another thread — the SQLite
+    /// close-during-interrupt hazard, as a model rather than a comment. The
+    /// model races `cancel_of` directly against [`Registry::unregister`],
+    /// with neither side holding any `GroupLock`.
+    ///
+    /// That is *not* how the real FFI path behaves, and saying so matters:
+    /// `sql_free_handle` (`ffi::handle`) wraps the whole free in `panic_safe`,
+    /// which locks the statement's group — the same group `sql_cancel`'s
+    /// `try_lock` contends for — before calling into `free_statement`, and
+    /// `SQLDisconnect` holds its connection's group the same way while
+    /// freeing every statement on it. So this model is the *more* adversarial
+    /// case: proving `cancel_of` is safe with no lock serialising it against
+    /// `unregister` at all is a stronger property than the real path needs,
+    /// not a gap in coverage. It is also the only version a loom model can
+    /// exercise, since a model can reach `Registry`/`GroupLock` directly but
+    /// not `panic_safe` or `sql_free_handle` (this module's top-level doc
+    /// comment).
     ///
     /// This is the strongest model available for the ordering `sql_cancel`
     /// uses (clone the token, *then* attempt `try_lock`): every step in that
@@ -779,10 +801,31 @@ mod loom_tests {
     /// What the ordering actually narrows is the window in which a
     /// sufficiently fast concurrent free makes `cancel_of` observe `None`
     /// instead of `Some` — a race in *outcome*, not in soundness, and both
-    /// outcomes are safe. There is consequently no assertion that holds for
-    /// this order and fails for its reverse; a swapped `sql_cancel` still
-    /// only ever reads a live token or correctly gets nothing. Reviewing the
-    /// two lines in `sql_cancel` is what continues to guard that ordering.
+    /// outcomes are safe. On the real path this window is not governed by
+    /// `sql_cancel`'s own ordering at all: while a free is in flight the
+    /// freeing thread holds the group for the free's entire duration, so
+    /// `try_lock` already fails for that whole window regardless of whether
+    /// `cancel_of` ran before or after it; reordering the two changes only
+    /// which instant inside the free's critical section `cancel_of` might
+    /// land on, not whether `sql_cancel` takes the busy branch. There is
+    /// consequently no assertion that holds for this order and fails for its
+    /// reverse; a swapped `sql_cancel` still only ever reads a live token or
+    /// correctly gets nothing. Reviewing the two lines in `sql_cancel` is what
+    /// continues to guard that ordering.
+    ///
+    /// Said honestly: this model cannot fail by construction, and that is the
+    /// point rather than a weakness. `StdArc` gives an owned clone a
+    /// type-level guarantee that its target outlives it; no interleaving loom
+    /// explores can violate that any more than it could for any other `Arc`
+    /// in safe Rust, so there is no assertion here that a bug could trip.
+    /// What the model still earns its keep on is running `cancel_of` and
+    /// `unregister` against each other on every interleaving without a panic,
+    /// a downcast failure, or a use of the token that fails once its target
+    /// is gone — i.e. exercising the concurrent registry access this crate's
+    /// design leans on, not proving a property beyond what `Arc` already
+    /// gives for free. This is the same reason Priority 1's declined ordering
+    /// test was correct to decline: the guarantee lives in the type system,
+    /// not in an interleaving a model could catch.
     #[test]
     fn a_cancel_token_survives_a_concurrent_free() {
         loom::model(|| {
@@ -802,9 +845,16 @@ mod loom_tests {
             let canceller = {
                 let reg = Arc::clone(&reg);
                 thread::spawn(move || {
+                    // Read through the clone, the way `sql_cancel` actually
+                    // uses it (`signal_cancel`, `ffi::cursor`), rather than
+                    // only checking the refcount.
                     if let Some(token) = reg.cancel_of(stmt) {
-                        // Holding the clone, the target must still be alive.
-                        assert!(StdArc::strong_count(&token) >= 1);
+                        assert!(
+                            token
+                                .downcast_ref::<AtomicBool>()
+                                .expect("type")
+                                .load(Ordering::SeqCst)
+                        );
                     }
                 })
             };
@@ -820,13 +870,24 @@ mod loom_tests {
     /// The race has two exits and they are easy to conflate: the registry may
     /// already show the slot retired when the group is resolved, or the
     /// resolve may succeed and the *lock* then block on the freeing thread, so
-    /// the staleness is only discovered on the subsequent handle lookup. Both
-    /// must reach the same skip.
+    /// the staleness is only discovered on the subsequent handle lookup.
     ///
-    /// This is the model the freed-connection fix has no unit test for: the
-    /// interleaving cannot be forced single-threaded, because any
-    /// deterministic reproduction re-exercises the first exit rather than the
-    /// second.
+    /// Said honestly: this model carries no assertion, because neither exit
+    /// can panic by construction (both are a plain `continue` on `None`) and
+    /// neither thread can deadlock — `unregister` here, like `sql_cancel`'s
+    /// cross-thread branch, takes no `GroupLock` (this module's own primitive,
+    /// not the real `free_connection` path, which does hold one; see
+    /// `a_cancel_token_survives_a_concurrent_free` above for why that's the
+    /// more adversarial case anyway), so the walker's `group.lock()` never has
+    /// anything to contend with. What reaching the end of every explored
+    /// interleaving actually shows is that `children_of`, `group_of`,
+    /// `resolve` and `unregister` compose without a panic or a hang under
+    /// concurrent access — not, by itself, that both exits are reached or
+    /// handled identically. This is the model the freed-connection fix has no
+    /// *unit* test for, because the interleaving cannot be forced
+    /// single-threaded: a deterministic reproduction re-exercises one exit
+    /// only, never both, which is what a loom model earns here even without
+    /// an assertion of its own.
     #[test]
     fn a_connection_freed_mid_end_tran_is_skipped_not_reported() {
         loom::model(|| {
