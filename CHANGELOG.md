@@ -589,6 +589,30 @@ markers go away and this section becomes the initial-release notes.
 
 ### Fixed
 
+- Five statement attributes were accepted, stored and then never acted on, so
+  `SQLGetStmtAttr` read them back and confirmed a behaviour the driver did not
+  have. They now split two ways, along the line the spec draws.
+
+  `SQL_ATTR_MAX_ROWS` and `SQL_ATTR_QUERY_TIMEOUT` are substituted with `0` (no
+  limit, no timeout) and reported as `01S02`. Both are named on the spec's own
+  01S02 substitution list, which is closed — nothing counts rows and `Backend`
+  is synchronous with no deadline, so an application that set a 30-second
+  timeout and got `SQL_SUCCESS` would wait forever on a runaway query.
+
+  `SQL_ATTR_ROWS_FETCHED_PTR`, `SQL_ATTR_ROW_STATUS_PTR` and
+  `SQL_ATTR_ROW_BIND_OFFSET_PTR` are now **honoured** rather than substituted.
+  The 01S02 list names none of them, and there is no "similar value" to
+  substitute for a pointer; with `SQL_ATTR_ROW_ARRAY_SIZE` pinned at 1 the
+  rowset has exactly one row, so `SQLFetch` writes `1` (and `0` at
+  `SQL_NO_DATA`) through the rows-fetched pointer, `SQL_ROW_SUCCESS` /
+  `SQL_ROW_SUCCESS_WITH_INFO` into the first row-status element, and adds the
+  bind offset to every bound column and indicator address. Ignoring the last of
+  those put bound data at the base address instead of the offset one.
+
+  The existing `set_and_get_query_timeout` test asserted the old behaviour —
+  that setting 30 succeeds and reads back 30 — so it pinned the defect and has
+  been rewritten.
+
 - `SQL_PARAM_OUTPUT` parameters are no longer read as input values on execute.
   An output-only parameter has no input to send: the application binds that
   buffer for the *driver* to fill and never has to initialise it. Core read it

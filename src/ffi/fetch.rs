@@ -11,6 +11,82 @@ use crate::handles::{GetDataCursor, StatementHandle};
 use crate::panic::panic_safe;
 use crate::types::{ColumnValue, FetchResult, SqlReturn, SqlState, fetch_orientation_from_raw};
 
+/// `SQL_ROW_SUCCESS` — the row-status value for a row fetched without warning.
+const SQL_ROW_SUCCESS: u16 = 0;
+/// `SQL_ROW_SUCCESS_WITH_INFO` — fetched, but a diagnostic was raised for it.
+const SQL_ROW_SUCCESS_WITH_INFO: u16 = 6;
+
+/// The current value of `SQL_ATTR_ROW_BIND_OFFSET_PTR`, in bytes, or `0`.
+///
+/// The attribute holds a *pointer to* an `SQLULEN`, not the offset itself, so
+/// the application can move the whole binding set between fetches by writing
+/// through that one pointer.
+///
+/// # Safety
+///
+/// The stored attribute must be null or a pointer to a valid `usize`, which is
+/// the application's undertaking when it sets the attribute.
+unsafe fn row_bind_offset<B: Backend>(stmt: &StatementHandle<B>) -> usize {
+    let raw = stmt
+        .attrs
+        .get(&(odbc_sys::StatementAttribute::RowBindOffsetPtr as i32))
+        .copied()
+        .unwrap_or(0);
+    if raw == 0 {
+        return 0;
+    }
+    // SAFETY: non-zero means the application set it to a pointer it promised is
+    // a valid SQLULEN. `read_unaligned` because ODBC applications place these in
+    // packed structures.
+    unsafe { std::ptr::read_unaligned(raw as *const usize) }
+}
+
+/// Write `count` through `SQL_ATTR_ROWS_FETCHED_PTR` and `status` into the first
+/// element of `SQL_ATTR_ROW_STATUS_PTR`, when the application set either.
+///
+/// Only element 0 is written because `SQL_ATTR_ROW_ARRAY_SIZE` is pinned at 1
+/// (`ffi/stmt_attr.rs` substitutes anything else back with `01S02`), so the
+/// rowset this driver produces has exactly one row and the application's array
+/// is required to be at least that long.
+///
+/// # Safety
+///
+/// Each stored attribute must be null or a pointer to a valid, writable `usize`
+/// / `u16` respectively — the application's undertaking when it set them.
+unsafe fn report_rows_fetched<B: Backend>(stmt: &StatementHandle<B>, count: usize, status: u16) {
+    unsafe { report_rows_fetched_only(stmt, count) };
+
+    let raw = stmt
+        .attrs
+        .get(&(odbc_sys::StatementAttribute::RowStatusPtr as i32))
+        .copied()
+        .unwrap_or(0);
+    if raw != 0 {
+        // SAFETY: non-zero means the application supplied a row-status array of
+        // at least SQL_ATTR_ROW_ARRAY_SIZE (= 1) elements. Unaligned because the
+        // array may sit at any offset in a packed buffer.
+        unsafe { std::ptr::write_unaligned(raw as *mut u16, status) };
+    }
+}
+
+/// The rows-fetched half of [`report_rows_fetched`], for the `SQL_NO_DATA` path
+/// where there is no row and therefore no status to report.
+///
+/// # Safety
+///
+/// See [`report_rows_fetched`].
+unsafe fn report_rows_fetched_only<B: Backend>(stmt: &StatementHandle<B>, count: usize) {
+    let raw = stmt
+        .attrs
+        .get(&(odbc_sys::StatementAttribute::RowsFetchedPtr as i32))
+        .copied()
+        .unwrap_or(0);
+    if raw != 0 {
+        // SAFETY: non-zero means the application supplied a writable SQLULEN.
+        unsafe { std::ptr::write_unaligned(raw as *mut usize, count) };
+    }
+}
+
 /// Generic implementation of SQLFetch.
 ///
 /// Spec: <https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlfetch-function>
@@ -87,6 +163,13 @@ pub unsafe fn sql_fetch<B: Backend>(statement_handle: *mut c_void) -> SqlReturn 
             // Read before the mutable borrow of `stmt.statement` below.
             let cursor_open = stmt.cursor_open;
 
+            // `SQL_ATTR_ROW_BIND_OFFSET_PTR` points at an `SQLULEN` the
+            // application may change between fetches; the spec has the driver
+            // add that value to every bound address rather than fold it into the
+            // binding once. Read once per fetch so one row uses one offset
+            // throughout, and here so it precedes the borrow above.
+            let bind_offset = row_bind_offset(stmt);
+
             // Spec HY010: the handle was never put in an executed state. Every
             // sentence of this SQLSTATE's row is (DM)-annotated; the check is
             // kept as defence in depth for a driver loaded without a Driver
@@ -139,9 +222,14 @@ pub unsafe fn sql_fetch<B: Backend>(statement_handle: *mut c_void) -> SqlReturn 
                             (
                                 col,
                                 b.target_type,
-                                b.target_value_ptr,
+                                // SAFETY: the application supplied both the base
+                                // pointer and the offset, and the spec makes the
+                                // sum its responsibility to keep in bounds — the
+                                // same contract as the unoffset pointer. Byte
+                                // arithmetic, because the offset is in bytes.
+                                b.target_value_ptr.wrapping_byte_add(bind_offset),
                                 b.buffer_length,
-                                b.str_len_or_ind_ptr,
+                                b.str_len_or_ind_ptr.wrapping_byte_add(bind_offset),
                             )
                         })
                         .collect();
@@ -181,13 +269,29 @@ pub unsafe fn sql_fetch<B: Backend>(statement_handle: *mut c_void) -> SqlReturn 
                     // Fractional truncation (01S07) arrives as an `Err` from
                     // write_column_value and is handled by panic_safe.
                     if truncated {
+                        // SAFETY: application-supplied pointers; see
+                        // `report_rows_fetched`.
+                        report_rows_fetched(stmt, 1, SQL_ROW_SUCCESS_WITH_INFO);
                         stmt.diagnostics.push(&OdbcError::StringTruncated);
                         return Ok(SqlReturn::SUCCESS_WITH_INFO);
                     }
 
+                    // SAFETY: application-supplied pointers; see
+                    // `report_rows_fetched`.
+                    report_rows_fetched(stmt, 1, SQL_ROW_SUCCESS);
                     Ok(SqlReturn::SUCCESS)
                 }
-                FetchResult::NoData => Ok(SqlReturn::NO_DATA),
+                FetchResult::NoData => {
+                    // Spec: on SQL_NO_DATA the rows-fetched buffer is set to 0.
+                    // The row-status array is left alone — with no row fetched
+                    // there is no status to report, and SQL_ROW_NOROW describes
+                    // an element of a rowset larger than the one row this
+                    // driver ever produces.
+                    // SAFETY: application-supplied pointer; see
+                    // `report_rows_fetched`.
+                    report_rows_fetched_only(stmt, 0);
+                    Ok(SqlReturn::NO_DATA)
+                }
             }
         })
     };
@@ -546,6 +650,17 @@ mod tests {
     /// Env + connection + statement for [`MockLongDataBackend`], executed and
     /// positioned on the first row, so `SQLGetData` has something to read.
     unsafe fn long_data_stmt() -> (*mut c_void, *mut c_void, *mut c_void) {
+        let (env, conn, stmt) = unsafe { long_data_stmt_no_fetch() };
+        unsafe {
+            let ret = sql_fetch::<MockLongDataBackend>(stmt);
+            assert_eq!(ret, SqlReturn::SUCCESS, "precondition: first row fetched");
+        }
+        (env, conn, stmt)
+    }
+
+    /// Env + connection + statement, executed but with the cursor still before
+    /// the first row.
+    unsafe fn long_data_stmt_no_fetch() -> (*mut c_void, *mut c_void, *mut c_void) {
         let mut env: *mut c_void = std::ptr::null_mut();
         let mut conn: *mut c_void = std::ptr::null_mut();
         let mut stmt: *mut c_void = std::ptr::null_mut();
@@ -579,8 +694,6 @@ mod tests {
                 crate::types::SQL_NTS,
             );
             assert_eq!(ret, SqlReturn::SUCCESS, "precondition: execute");
-            let ret = sql_fetch::<MockLongDataBackend>(stmt);
-            assert_eq!(ret, SqlReturn::SUCCESS, "precondition: first row fetched");
         }
         (env, conn, stmt)
     }
@@ -842,6 +955,108 @@ mod tests {
 
             assert_eq!(assembled, LONG_BYTES);
             assert!(calls > 1, "precondition: chunking must actually occur");
+
+            cleanup_long_data(env, conn, stmt);
+        }
+    }
+
+    /// `SQL_ATTR_ROWS_FETCHED_PTR` and `SQL_ATTR_ROW_STATUS_PTR` were accepted
+    /// and then ignored, so an application driving its loop off the fetched
+    /// count read whatever it had initialised the variable to — forever, if it
+    /// waited for zero.
+    #[test]
+    fn fetch_reports_rows_fetched_and_row_status_through_the_bound_pointers() {
+        unsafe {
+            let (env, conn, stmt) = long_data_stmt_no_fetch();
+
+            let mut rows_fetched: usize = 999;
+            let mut row_status: u16 = 999;
+            assert_eq!(
+                crate::ffi::stmt_attr::sql_set_stmt_attr_w::<MockLongDataBackend>(
+                    stmt,
+                    odbc_sys::StatementAttribute::RowsFetchedPtr as i32,
+                    std::ptr::from_mut(&mut rows_fetched).cast::<c_void>(),
+                    0,
+                ),
+                SqlReturn::SUCCESS
+            );
+            assert_eq!(
+                crate::ffi::stmt_attr::sql_set_stmt_attr_w::<MockLongDataBackend>(
+                    stmt,
+                    odbc_sys::StatementAttribute::RowStatusPtr as i32,
+                    std::ptr::from_mut(&mut row_status).cast::<c_void>(),
+                    0,
+                ),
+                SqlReturn::SUCCESS
+            );
+
+            assert_eq!(sql_fetch::<MockLongDataBackend>(stmt), SqlReturn::SUCCESS);
+            assert_eq!(rows_fetched, 1, "rows-fetched buffer not written");
+            assert_eq!(row_status, SQL_ROW_SUCCESS, "row-status buffer not written");
+
+            // Drain to SQL_NO_DATA; the spec sets rows-fetched to 0 there.
+            assert_eq!(sql_fetch::<MockLongDataBackend>(stmt), SqlReturn::SUCCESS);
+            assert_eq!(sql_fetch::<MockLongDataBackend>(stmt), SqlReturn::NO_DATA);
+            assert_eq!(rows_fetched, 0, "rows-fetched not zeroed at end of cursor");
+
+            cleanup_long_data(env, conn, stmt);
+        }
+    }
+
+    /// `SQL_ATTR_ROW_BIND_OFFSET_PTR` was accepted and ignored, so a bound
+    /// column landed at the base address instead of the offset one — the
+    /// application reads the wrong slot of its own buffer and never learns why.
+    #[test]
+    fn fetch_applies_the_row_bind_offset_to_bound_columns() {
+        unsafe {
+            let (env, conn, stmt) = long_data_stmt_no_fetch();
+
+            // Two i32 slots; bind column 2 (the fixed-width 4242) to slot 0 and
+            // then shift writes into slot 1 with an offset.
+            let mut slots: [i32; 2] = [0, 0];
+            let mut indicators: [isize; 2] = [0, 0];
+            let offset = std::mem::size_of::<i32>();
+            let mut bind_offset: usize = 0;
+
+            assert_eq!(
+                crate::ffi::bind::sql_bind_col::<MockLongDataBackend>(
+                    stmt,
+                    2,
+                    CDataType::SLong as i16,
+                    slots.as_mut_ptr().cast::<c_void>(),
+                    4,
+                    indicators.as_mut_ptr(),
+                ),
+                SqlReturn::SUCCESS
+            );
+            assert_eq!(
+                crate::ffi::stmt_attr::sql_set_stmt_attr_w::<MockLongDataBackend>(
+                    stmt,
+                    odbc_sys::StatementAttribute::RowBindOffsetPtr as i32,
+                    std::ptr::from_mut(&mut bind_offset).cast::<c_void>(),
+                    0,
+                ),
+                SqlReturn::SUCCESS
+            );
+
+            // Offset 0: the value lands in slot 0.
+            assert_eq!(sql_fetch::<MockLongDataBackend>(stmt), SqlReturn::SUCCESS);
+            assert_eq!(slots, [4242, 0]);
+
+            // The application moves the offset between fetches, which is the
+            // whole reason the attribute is a *pointer* to the offset.
+            slots = [0, 0];
+            bind_offset = offset;
+            assert_eq!(sql_fetch::<MockLongDataBackend>(stmt), SqlReturn::SUCCESS);
+            assert_eq!(
+                slots,
+                [0, 4242],
+                "the bind offset was ignored; the value landed at the base address"
+            );
+            // `sql_fetch` reads `bind_offset` through the raw pointer it was
+            // given, which `unused_assignments` cannot see; assert on it so the
+            // store is observable to the compiler as well as to the driver.
+            assert_eq!(bind_offset, offset);
 
             cleanup_long_data(env, conn, stmt);
         }

@@ -37,6 +37,10 @@ const SQL_BIND_BY_COLUMN: usize = 0;
 const SQL_ROW_ARRAY_SIZE_DEFAULT: usize = 1;
 // SQL_ATTR_PARAMSET_SIZE default
 const SQL_PARAMSET_SIZE_DEFAULT: usize = 1;
+// SQL_ATTR_MAX_ROWS default: 0, "return all rows".
+const SQL_MAX_ROWS_DEFAULT: usize = 0;
+// SQL_ATTR_QUERY_TIMEOUT default: 0, "no timeout".
+const SQL_QUERY_TIMEOUT_DEFAULT: usize = 0;
 
 /// Generic implementation of SQLSetStmtAttrW.
 ///
@@ -279,7 +283,58 @@ pub unsafe fn sql_set_stmt_attr_w<B: Backend>(
                     Ok(SqlReturn::SUCCESS_WITH_INFO)
                 }
 
+                // No row limit is applied anywhere: `SQLFetch` asks the backend
+                // for the next row until the backend says there are none, and
+                // nothing counts. Storing a non-zero limit verbatim would have
+                // `SQLGetStmtAttr` report a cap the driver then does not honour,
+                // so an application asking for 10 rows quietly receives all of
+                // them. SQL_ATTR_MAX_ROWS is on the spec's own 01S02
+                // substitution list, so say so instead.
+                Some(StatementAttribute::MaxRows) if int_val != SQL_MAX_ROWS_DEFAULT => {
+                    tracing::warn!(
+                        "SQLSetStmtAttrW: SQL_ATTR_MAX_ROWS={} not supported, substituting {} (01S02)",
+                        int_val,
+                        SQL_MAX_ROWS_DEFAULT
+                    );
+                    stmt.attrs.insert(attribute, SQL_MAX_ROWS_DEFAULT);
+                    stmt.diagnostics.push(&OdbcError::general(
+                        format!(
+                            "SQL_ATTR_MAX_ROWS {int_val} is not supported; substituted {SQL_MAX_ROWS_DEFAULT} (no limit)"
+                        ),
+                        SqlState::option_value_changed(),
+                    ));
+                    Ok(SqlReturn::SUCCESS_WITH_INFO)
+                }
+
+                // `Backend` is synchronous and has no cancellation deadline, so
+                // no timeout is ever applied. Same reasoning as MAX_ROWS above,
+                // and SQL_ATTR_QUERY_TIMEOUT is likewise on the 01S02 list — an
+                // application that sets a 30-second timeout and gets SUCCESS is
+                // entitled to believe a runaway query will be cut off.
+                Some(StatementAttribute::QueryTimeout) if int_val != SQL_QUERY_TIMEOUT_DEFAULT => {
+                    tracing::warn!(
+                        "SQLSetStmtAttrW: SQL_ATTR_QUERY_TIMEOUT={} not supported, substituting {} (01S02)",
+                        int_val,
+                        SQL_QUERY_TIMEOUT_DEFAULT
+                    );
+                    stmt.attrs.insert(attribute, SQL_QUERY_TIMEOUT_DEFAULT);
+                    stmt.diagnostics.push(&OdbcError::general(
+                        format!(
+                            "SQL_ATTR_QUERY_TIMEOUT {int_val} is not supported; substituted {SQL_QUERY_TIMEOUT_DEFAULT} (no timeout)"
+                        ),
+                        SqlState::option_value_changed(),
+                    ));
+                    Ok(SqlReturn::SUCCESS_WITH_INFO)
+                }
+
                 // All other recognised attributes: store value.
+                //
+                // SQL_ATTR_ROWS_FETCHED_PTR, SQL_ATTR_ROW_STATUS_PTR and
+                // SQL_ATTR_ROW_BIND_OFFSET_PTR reach here and are stored
+                // verbatim, which is correct because `SQLFetch` now reads and
+                // honours all three. They are deliberately *not* substituted:
+                // the spec's 01S02 list is closed and names none of them, and
+                // there is no "similar value" to substitute for a pointer.
                 Some(_) => {
                     stmt.attrs.insert(attribute, int_val);
                     Ok(SqlReturn::SUCCESS)
@@ -922,6 +977,12 @@ mod tests {
 
     #[test]
     fn set_and_get_query_timeout() {
+        // This test previously asserted SUCCESS and a read-back of 30 — that is,
+        // it pinned the driver claiming to honour a timeout it never applies.
+        // No timeout is applied anywhere: `Backend` is synchronous and has no
+        // deadline, so an application told SUCCESS would wait forever on a
+        // runaway query. SQL_ATTR_QUERY_TIMEOUT is named on the spec's own 01S02
+        // substitution list for exactly this case.
         unsafe {
             let (env, conn, stmt) = alloc_env_conn_stmt();
             let ret = sql_set_stmt_attr_w::<MockBackend>(
@@ -930,9 +991,21 @@ mod tests {
                 30usize as *mut c_void,
                 0,
             );
-            assert_eq!(ret, SqlReturn::SUCCESS);
+            assert_eq!(ret, SqlReturn::SUCCESS_WITH_INFO);
 
-            let mut val: u32 = 0;
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+                assert_eq!(
+                    handle
+                        .diagnostics
+                        .get(0)
+                        .expect("a 01S02 record")
+                        .sqlstate
+                        .as_str(),
+                    "01S02"
+                );
+            });
+
+            let mut val: u32 = 99;
             let ret = sql_get_stmt_attr_w::<MockBackend>(
                 stmt,
                 StatementAttribute::QueryTimeout as i32,
@@ -941,7 +1014,51 @@ mod tests {
                 std::ptr::null_mut(),
             );
             assert_eq!(ret, SqlReturn::SUCCESS);
-            assert_eq!(val, 30);
+            assert_eq!(
+                val, 0,
+                "SQLGetStmtAttr must report the substituted no-timeout value"
+            );
+            cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
+    #[test]
+    /// The same reasoning as SQL_ATTR_QUERY_TIMEOUT: nothing counts rows, so a
+    /// stored limit would be a cap `SQLGetStmtAttr` reports and `SQLFetch` never
+    /// applies. Also on the spec's 01S02 list.
+    fn set_max_rows_substitutes_no_limit_with_01s02() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            let ret = sql_set_stmt_attr_w::<MockBackend>(
+                stmt,
+                StatementAttribute::MaxRows as i32,
+                10usize as *mut c_void,
+                0,
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS_WITH_INFO);
+
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+                assert_eq!(
+                    handle
+                        .diagnostics
+                        .get(0)
+                        .expect("a 01S02 record")
+                        .sqlstate
+                        .as_str(),
+                    "01S02"
+                );
+            });
+
+            let mut val: u32 = 99;
+            let ret = sql_get_stmt_attr_w::<MockBackend>(
+                stmt,
+                StatementAttribute::MaxRows as i32,
+                &mut val as *mut u32 as *mut c_void,
+                0,
+                std::ptr::null_mut(),
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+            assert_eq!(val, 0, "SQLGetStmtAttr must report the substituted value");
             cleanup_env_conn_stmt(env, conn, stmt);
         }
     }
