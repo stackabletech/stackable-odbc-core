@@ -13,9 +13,9 @@ use crate::errors::OdbcError;
 use crate::ffi::handle::{sql_alloc_handle, sql_free_handle};
 use crate::types::{
     ColumnRow, ConnectParams, ForeignKeyRow, IdentifierType, InfoValue, Nullable, PrimaryKeyRow,
-    SQL_FALSE, SQL_INDEX_OTHER, SQL_PC_NOT_PSEUDO, SQL_SCOPE_CURROW, SQL_SCOPE_SESSION,
-    SQL_SCOPE_TRANSACTION, SQL_TRUE, Scope, SpecialColumnRow, SqlDataType, SqlReturn,
-    StatisticsRow, TableRow, TypeInfoRow,
+    ProcedureRow, SQL_FALSE, SQL_INDEX_OTHER, SQL_PC_NOT_PSEUDO, SQL_PT_PROCEDURE,
+    SQL_SCOPE_CURROW, SQL_SCOPE_SESSION, SQL_SCOPE_TRANSACTION, SQL_TRUE, Scope, SpecialColumnRow,
+    SqlDataType, SqlReturn, StatisticsRow, TableRow, TypeInfoRow,
 };
 
 // ---------------------------------------------------------------------------
@@ -1685,6 +1685,25 @@ impl Backend for MockCatalogBackend {
             special(SCOPE_CURROW, "a"),
             special(SCOPE_TRANSACTION, "b"),
         ])
+    }
+
+    /// Out of spec order on `PROCEDURE_NAME`; the catalog and schema are
+    /// shared, so that column is the discriminating key.
+    fn procedures(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+    ) -> Result<Vec<ProcedureRow>, MockError> {
+        let proc = |name: &str| ProcedureRow {
+            catalog: Some("cat".into()),
+            schema: Some("sch".into()),
+            name: name.into(),
+            procedure_type: Some(SQL_PT_PROCEDURE),
+            ..Default::default()
+        };
+        Ok(vec![proc("z_proc"), proc("a_proc"), proc("m_proc")])
     }
 
     /// Deliberately out of order, and distinct from the table names above, so

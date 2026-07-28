@@ -10,7 +10,7 @@ use crate::errors::OdbcError;
 use crate::types::{
     CatalogResultColumnWidths, ColumnDescriptor, ColumnRow, ColumnValue, ConnectParams,
     ExecuteOutcome, FetchResult, ForeignKeyRow, IdentifierType, InfoValue, Nullable, PrimaryKeyRow,
-    Scope, SpecialColumnRow, StatisticsRow, TableRow, TypeInfoRow,
+    ProcedureRow, Scope, SpecialColumnRow, StatisticsRow, TableRow, TypeInfoRow,
 };
 
 /// Core abstraction for database-specific logic.
@@ -447,6 +447,35 @@ pub trait Backend: Sized + Send + Sync + 'static {
             feature: "special_columns".into(),
         }
         .into())
+    }
+
+    /// Return the stored procedures matching the given filter criteria.
+    ///
+    /// Called by `SQLProceduresW`. All filter parameters are optional; `None`
+    /// means no filter on that dimension. `cancel` is this statement's token;
+    /// record whatever `Backend::cancel` will need to identify this work.
+    ///
+    /// The default returns no rows rather than `NotImplemented`, unlike
+    /// [`Backend::primary_keys`] and its neighbours: a data source with no
+    /// stored procedures has none to report, which is a legitimate answer, and
+    /// this function returned an empty result set for every driver before the
+    /// hook existed. Erroring instead would regress a working call.
+    ///
+    /// **Return the rows in any order.** Core sorts them into the spec's order
+    /// (PROCEDURE_CAT, PROCEDURE_SCHEM, PROCEDURE_NAME) and builds the result
+    /// set, so a backend does not need an ORDER BY for correctness.
+    ///
+    /// `SQL_ATTR_METADATA_ID` has already been applied: when it is `SQL_TRUE`
+    /// core has stripped delimiters, case-folded and escaped each argument, so
+    /// these are always ordinary pattern values here.
+    fn procedures(
+        _conn: &Self::Connection,
+        _cancel: &Self::CancelToken,
+        _catalog: Option<&str>,
+        _schema: Option<&str>,
+        _proc_name: Option<&str>,
+    ) -> Result<Vec<ProcedureRow>, Self::Error> {
+        Ok(Vec::new())
     }
 
     /// Everything needed to cancel work on a statement from a thread holding

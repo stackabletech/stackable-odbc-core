@@ -17,10 +17,10 @@ use crate::types::col_attr::{ColAttrValue, get_column_attribute};
 use crate::types::{
     CatalogResultColumnWidths, ColumnDescriptor, ColumnRow, ColumnValue, ColumnsResultCol, Desc,
     ForeignKeyRow, ForeignKeysResultCol, Nullable, PRIVILEGE_LEN, PrimaryKeyRow,
-    PrimaryKeysResultCol, SQL_ALL_CATALOGS, SQL_ALL_SCHEMAS, SQL_ALL_TABLE_TYPES, SQL_FALSE,
-    SQL_INDEX_UNIQUE, SQL_TRUE, SpecialColumnRow, SqlReturn, SqlState, StatementAttribute,
-    StatisticsRow, TableRow, TablesResultCol, ULen, YES_NO_LEN, character, identifier,
-    identifier_type_from_raw, integer, nullable_from_raw, scope_from_raw, smallint,
+    PrimaryKeysResultCol, ProcedureRow, SQL_ALL_CATALOGS, SQL_ALL_SCHEMAS, SQL_ALL_TABLE_TYPES,
+    SQL_FALSE, SQL_INDEX_UNIQUE, SQL_TRUE, SpecialColumnRow, SqlReturn, SqlState,
+    StatementAttribute, StatisticsRow, TableRow, TablesResultCol, ULen, YES_NO_LEN, character,
+    identifier, identifier_type_from_raw, integer, nullable_from_raw, scope_from_raw, smallint,
     special_columns_columns, statistics_columns,
 };
 use crate::utf16::{utf16_to_string, write_utf16};
@@ -1650,6 +1650,15 @@ pub unsafe fn sql_col_attribute_w<B: Backend>(
 /// 4-6 are listed with data type "N/A" ("reserved for future use"); they are
 /// reported as `SMALLINT`, which is what the ODBC 2.0 layout used and what
 /// applications binding by column number expect.
+/// `SQLProcedures`' spec sort order, as zero-based column indices.
+///
+/// The page reads "ordered by PROCEDURE_CAT, PROCEDURE_SCHEMA, and
+/// PROCEDURE_NAME", but no `PROCEDURE_SCHEMA` column exists — the same page's
+/// result-column table names column 2 `PROCEDURE_SCHEM`. The sentence has a
+/// typo; column 2 is the key. Do not "correct" this into a lookup for a column
+/// that does not exist.
+const PROCEDURES_SORT_KEYS: [usize; 3] = [0, 1, 2];
+
 pub(crate) fn procedures_columns(widths: &CatalogResultColumnWidths) -> Vec<ColumnDescriptor> {
     vec![
         identifier("PROCEDURE_CAT", widths, Nullable::SqlNullable),
@@ -1667,37 +1676,45 @@ pub(crate) fn procedures_columns(widths: &CatalogResultColumnWidths) -> Vec<Colu
 ///
 /// Spec: <https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlprocedures-function>
 ///
-/// Returns an empty result set with the standard 8-column schema. The shared framework
-/// surfaces no stored-procedure metadata, so this satisfies the protocol contract (valid
-/// column descriptors, zero rows) while allowing BI tools to proceed without error.
+/// Queries the backend for stored-procedure metadata and stores the result set
+/// in the statement handle. A backend that leaves [`Backend::procedures`]
+/// defaulted returns no rows, which is the spec's response for a data source
+/// with no stored procedures.
 ///
 /// # Parameters
 ///
 /// - `statement_handle`: Statement handle.
-/// - `_catalog_name` / `_name_length1`: Catalog name (ignored — returns empty result set).
-/// - `_schema_name` / `_name_length2`: Schema name (ignored — returns empty result set).
-/// - `_proc_name` / `_name_length3`: Procedure name (ignored — returns empty result set).
+/// - `catalog_name` / `name_length1`: Catalog name (NULL = no filter; no search patterns).
+/// - `schema_name` / `name_length2`: Schema name search pattern (NULL = no filter).
+/// - `proc_name` / `name_length3`: Procedure name search pattern (NULL = no filter).
 ///
 /// # Spec compliance
 ///
 /// - 01000: General warning (driver-specific informational message); not returned here.
-/// - 08S01: Communication link failure; not applicable (no backend query).
+/// - 08S01: Communication link failure; propagated from the backend when its
+///   client library reports the link to the data source failed.
 /// - 24000: Invalid cursor state — returned if a cursor is already open on this statement.
-/// - 40001: Serialization failure; not applicable (no backend query).
-/// - 40003: Statement completion unknown; not applicable (no backend query).
-/// - HY000: General error; returned for any unexpected internal error.
+/// - 40001: Serialization failure; propagated from backend as `HY000`.
+/// - 40003: Statement completion unknown; propagated from backend as `HY000`.
+/// - HY000: General error; returned for any unexpected backend error.
 /// - HY001: Memory allocation error; returned if allocation fails.
 /// - HY008: Operation canceled (DM) (driver-manager-handled; not returned here).
-/// - HY009: Invalid use of null pointer (DM) (driver-manager-handled; not returned by this
-///   driver).
+/// - HY009: Invalid use of null pointer. **Returned by this driver** for the one clause the
+///   spec's diagnostics table states *without* a `(DM)` marker: `SQL_ATTR_METADATA_ID` was
+///   `SQL_TRUE`, `CatalogName` was a null pointer, and `SQL_CATALOG_NAME` reports that
+///   catalog names are supported. The `SchemaName`/`ProcName` clause beside it *is*
+///   `(DM)`-marked and is deliberately not checked here, and this page states no
+///   unconditional null-argument clause at all — unlike `SQLColumnPrivileges`, whose
+///   `TableName` sentence carries no marker and *is* checked.
 /// - HY010: Function sequence error — returned if connection is not open. DM cases (async, etc.)
 ///   are driver-manager-handled; not returned here.
 /// - HY013: Memory management error; returned if underlying allocation fails.
 /// - HY090: Invalid string or buffer length (DM) (driver-manager-handled; not returned here).
 /// - HY117: Connection suspended (DM) (driver-manager-handled; not returned here).
-/// - HYC00: Optional feature not implemented; not applicable (empty result set always returned).
-/// - HYT00: Timeout expired; not applicable (no backend query).
-/// - HYT01: Connection timeout expired; not applicable (no backend query).
+/// - HYC00: Optional feature not implemented; propagated from backend if catalogs/schemas or
+///   search patterns are unsupported.
+/// - HYT00: Timeout expired; propagated from backend as `HY000`.
+/// - HYT01: Connection timeout expired; propagated from backend as `HY000`.
 /// - IM001: Driver does not support this function (DM) (driver-manager-handled; not returned here).
 /// - IM017: Polling disabled (DM) (driver-manager-handled; not returned here).
 /// - IM018: SQLCompleteAsync not called (DM) (driver-manager-handled; not returned here).
@@ -1707,23 +1724,67 @@ pub(crate) fn procedures_columns(widths: &CatalogResultColumnWidths) -> Vec<Colu
 /// `statement_handle` must point to a valid `StatementHandle<B>`.
 pub unsafe fn sql_procedures_w<B: Backend>(
     statement_handle: *mut c_void,
-    _catalog_name: *const u16,
-    _name_length1: i16,
-    _schema_name: *const u16,
-    _name_length2: i16,
-    _proc_name: *const u16,
-    _name_length3: i16,
+    catalog_name: *const u16,
+    name_length1: i16,
+    schema_name: *const u16,
+    name_length2: i16,
+    proc_name: *const u16,
+    name_length3: i16,
 ) -> SqlReturn {
     tracing::debug!("SQLProceduresW(stmt={:?})", statement_handle);
     // SAFETY: statement_handle is null or a valid StatementHandle<B>; kind and group
-    // validated by scope.stmt_with_parent inside set_empty_result.
+    // validated by scope.stmt_with_parent inside the closure.
     let ret = unsafe {
         panic_safe::<B, _>(statement_handle, |scope| {
-            set_empty_result::<B>(
-                scope,
-                statement_handle,
-                procedures_columns(&B::catalog_result_column_widths()),
+            let (stmt, conn) = scope.stmt_with_parent::<B>(statement_handle)?;
+            stmt.diagnostics.clear();
+
+            if stmt.cursor_open {
+                return Err(OdbcError::general(
+                    "A cursor is already open on this statement",
+                    SqlState::invalid_cursor_state(),
+                ));
+            }
+
+            let Some(ref connection) = conn.connection else {
+                return Err(OdbcError::general(
+                    "Connection is not open",
+                    SqlState::function_sequence_error(),
+                ));
+            };
+
+            let catalog = parse_filter_param(catalog_name, name_length1)?;
+            let schema = parse_filter_param(schema_name, name_length2)?;
+            let proc = parse_filter_param(proc_name, name_length3)?;
+
+            // The token exists once this statement makes its first
+            // backend call; created here on demand, then reused for every
+            // later call on the same statement (see `resolve_cancel_token`).
+            let cancel_token =
+                crate::handles::resolve_cancel_token::<B>(statement_handle, connection);
+            let cancel = crate::handles::cancel_as::<B>(&cancel_token)?;
+
+            let rows = B::procedures(
+                connection,
+                cancel,
+                catalog.as_deref(),
+                schema.as_deref(),
+                proc.as_deref(),
             )
+            .into_odbc()?;
+
+            let mut values: Vec<Vec<ColumnValue>> =
+                rows.iter().map(ProcedureRow::to_values).collect();
+            crate::catalog_sort::sort_rows(
+                &mut values,
+                &PROCEDURES_SORT_KEYS,
+                B::null_collation(connection),
+            );
+            stmt.set_result_set(StatementData::Synthetic(SyntheticStatement::new(
+                procedures_columns(&B::catalog_result_column_widths()),
+                values,
+            )));
+            Ok(SqlReturn::SUCCESS)
         })
     };
     tracing::debug!("SQLProceduresW -> {:?}", ret);
@@ -2277,6 +2338,9 @@ mod tests {
     const TABLE_NAME_COLUMN: u16 = 3;
     const TABLE_TYPE_COLUMN: u16 = 4;
     const REMARKS_COLUMN: u16 = 5;
+    /// `SQLProcedures`' discriminating result column.
+    const PROCEDURE_NAME_COLUMN: u16 = 3;
+
     const ALL_TABLES_COLUMNS: [u16; 5] = [
         TABLE_CAT_COLUMN,
         TABLE_SCHEM_COLUMN,
@@ -2758,6 +2822,32 @@ mod tests {
                 vec!["a", "b", "c"],
                 "SCOPE must order the result set"
             );
+
+            cleanup_for::<MockCatalogBackend>(env, conn, stmt);
+        }
+    }
+
+    /// Spec: "SQLProcedures returns the results as a standard result set,
+    /// ordered by PROCEDURE_CAT, PROCEDURE_SCHEMA, and PROCEDURE_NAME." The
+    /// page writes `PROCEDURE_SCHEMA`, but its own result-column table names
+    /// column 2 `PROCEDURE_SCHEM`; the sort is by column 2 either way.
+    #[test]
+    fn procedures_result_is_sorted_by_spec_keys() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCatalogBackend>();
+            let ret = sql_procedures_w::<MockCatalogBackend>(
+                stmt,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+
+            let names = fetch_column_as_strings::<MockCatalogBackend>(stmt, PROCEDURE_NAME_COLUMN);
+            assert_eq!(names, vec!["a_proc", "m_proc", "z_proc"]);
 
             cleanup_for::<MockCatalogBackend>(env, conn, stmt);
         }

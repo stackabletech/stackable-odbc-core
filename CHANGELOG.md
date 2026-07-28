@@ -44,6 +44,20 @@ Everything a driver has to change for the catalog rework, in one place.
 
 ### Added
 
+- `SQLProcedures` now returns real rows when a backend implements the new
+  defaulted `Backend::procedures`, instead of always returning an empty result
+  set. Core converts the returned `ProcedureRow`s to the spec's 8-column layout
+  and sorts them into the spec's order (PROCEDURE_CAT, PROCEDURE_SCHEM,
+  PROCEDURE_NAME). Defaulted to `Ok(Vec::new())` rather than `NotImplemented`,
+  so a driver that does not override it behaves exactly as before: a data source
+  with no stored procedures has none to report, and erroring instead would turn
+  a working call into a failure.
+
+- `SQL_PT_UNKNOWN`, `SQL_PT_PROCEDURE` and `SQL_PT_FUNCTION`, the
+  `PROCEDURE_TYPE` result-column values `odbc-sys` does not define.
+  `SQLProcedureColumns`' `COLUMN_TYPE` needs no counterpart —
+  `odbc_sys::ParamType`'s discriminants are exactly that column's value set.
+
 - `Backend::describe_param` and the `ParamDescriptor` it returns, so a backend
   can answer `SQLDescribeParam` for real. Core previously reported a hard-wired
   `VARCHAR(SQL_DEFAULT_PARAM_SIZE)` for every parameter of every statement,
