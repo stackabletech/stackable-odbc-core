@@ -334,8 +334,11 @@ unsafe impl Sync for DataAtExecState {}
 /// cursor while deliberately keeping the statement. [`Self::cursor_open`] is the
 /// answer to the second question and is what every `24000` guard tests.
 ///
-/// `conn` is a raw pointer back to the parent connection, used to remove this
-/// statement from the parent's list on free.
+/// `conn` is the token of the parent connection, not an address: it is
+/// resolved through the registry like any other handle, via
+/// [`HandleScope::get`](crate::handles::scope::HandleScope::get), which is why
+/// treating it as a raw pointer anywhere would be unsound. Parentage itself
+/// lives in the registry, not in a list on the connection.
 ///
 /// Must be `#[repr(C)]` so that `HandleHeader` is at offset 0 for tag validation.
 ///

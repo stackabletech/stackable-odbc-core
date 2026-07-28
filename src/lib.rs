@@ -23,9 +23,32 @@
 //!
 //! # Thread safety
 //!
-//! All handle types require `B: Send + Sync`. Individual handles are **not**
-//! internally synchronized — the ODBC Driver Manager serializes concurrent
-//! calls to the same handle.
+//! Handles are internally synchronised, per connection. A connection and all of
+//! its statements share one lock, so calls on different connections proceed in
+//! parallel while calls on the same connection are serialised.
+//!
+//! [`SQLAllocHandle`'s Comments
+//! section](https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlallochandle-function)
+//! is why this crate does not leave that to the Driver Manager: "on operating
+//! systems that support multiple threads, applications can use the same
+//! environment, connection, statement, or descriptor handle on different
+//! threads. Drivers must therefore support safe, multithread access to this
+//! information."
+//!
+//! `SQLCancel` is the exception, deliberately: it may be called from another
+//! thread while a function is executing on the statement, and it never takes
+//! that lock. Taking it would make cancel wait for the query it was asked to
+//! cancel. It signals the backend's [`backend::Backend::CancelToken`] instead
+//! and, per the spec, posts no diagnostic records in that case.
+//!
+//! A driver's own state is its own responsibility, with one bounded exception:
+//! whatever a backend puts in its `CancelToken` is the only thing core will
+//! touch concurrently with a connection. That type — and only that type — needs
+//! to be safe for concurrent use.
+//!
+//! On unixODBC, a driver built on this crate can declare `Threading = 2` in
+//! `odbcinst.ini`. The default of `3` makes the Driver Manager serialise every
+//! call in the process, which this crate no longer needs.
 //!
 //! # Unicode
 //!

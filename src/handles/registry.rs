@@ -172,9 +172,9 @@ struct Slot {
 /// `handles::mod`, which resolve the process-wide singleton via `registry()`
 /// below rather than taking a `Registry` as an argument — see that function's
 /// doc comment for why a model must not call through to it. loom's
-/// primitives are also not const-constructible, so a global static could not
-/// have been declared the way the pre-Task-2 `REGISTRY` was; a type gives
-/// loom code a `Registry` it builds for itself instead.
+/// primitives are also not const-constructible, so a bare `static` cannot
+/// hold one directly; a type gives loom code a `Registry` it builds for
+/// itself instead.
 pub(crate) struct Registry {
     slots: RwLock<Vec<Slot>>,
 }

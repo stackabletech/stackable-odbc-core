@@ -621,11 +621,13 @@ mod tests {
     ///
     /// The type parameter is load-bearing, not decoration. A handle is a
     /// `ConnectionHandle<B>`, whose `connection: Option<B::Connection>` field
-    /// has a different layout for every backend, while the tag that handle
-    /// resolution validates is the same for all of them. Allocating as
-    /// one backend and calling as another therefore passes the tag check and
-    /// then reads uninitialised memory -- undefined behaviour that Miri
-    /// catches and a plain `cargo test` does not.
+    /// has a different layout for every backend, while validation is a
+    /// registry slot, generation and kind compare that never dereferences the
+    /// caller's value and so has no way to know which backend allocated the
+    /// handle. Allocating as one backend and calling as another therefore
+    /// passes that compare and then reads memory laid out for a different
+    /// type — undefined behaviour that Miri catches and a plain `cargo test`
+    /// does not.
     unsafe fn alloc_env_conn_for<B: Backend>() -> (*mut c_void, *mut c_void) {
         let mut env: *mut c_void = std::ptr::null_mut();
         let _ = unsafe {

@@ -367,14 +367,25 @@ markers go away and this section becomes the initial-release notes.
   generational handle registry (see `Fixed`). `HasTag` becomes `HasKind`, with
   `const KIND: HandleKind` in place of `const TAG: u32` and a `header()`
   accessor in place of `invalidate_tag()`; `HandleHeader` now records a slot and
-  generation rather than a tag. `ConnectionHandle::env`, `StatementHandle::conn`,
-  `EnvironmentHandle::connections` and `ConnectionHandle::statements` hold
-  tokens rather than addresses.
+  generation rather than a tag. `ConnectionHandle::env` and
+  `StatementHandle::conn` hold tokens rather than addresses.
   No application or Driver Manager sees any difference — `SQLHANDLE` is opaque
   to both — and `forward_ffi!`'s exported signatures are unchanged, so a driver
   crate needs no edit unless it reached into these internals, which nothing in
-  the FFI surface requires. The module is slated to become `pub(crate)`, which
-  would make this representation private for good.
+  the FFI surface requires.
+- **Breaking:** `EnvironmentHandle::connections` and
+  `ConnectionHandle::statements` are removed. Parentage is derived from the
+  handle registry (`Registry::children_of`) rather than stored as a list on the
+  parent, which is what lets a walk over a connection's statements — or an
+  environment's connections — take an owned snapshot instead of a borrow of a
+  field another thread could be freeing an entry out from under. `handles` is
+  now `pub(crate)`, so nothing outside this crate reached these fields anyway.
+- **Breaking:** `as_handle_ref` and `try_get_diagnostic_queue`, the two
+  functions that reached a handle's contents by resolving its token directly,
+  are removed. A `HandleScope` is now the only way to reach handle contents,
+  and `panic_safe` — which locks the target's lock group before constructing
+  one — is the only way most code gets one; see the per-connection lock
+  entries below.
 - `SQL_CURSOR_COMMIT_BEHAVIOR` and `SQL_CURSOR_ROLLBACK_BEHAVIOR` now report
   `SQL_CB_PRESERVE` instead of `SQL_CB_DELETE`, and are derived from
   `Backend::cursor_commit_behavior` / `Backend::cursor_rollback_behavior`
@@ -708,8 +719,14 @@ markers go away and this section becomes the initial-release notes.
   not measure this, since it drives `SyntheticStatement` directly and never
   crosses the FFI boundary.
   The one case no scheme can defend is an application freeing a handle on one
-  thread while another is mid-call on it; ODBC forbids that and the Driver
-  Manager serialises calls per handle.
+  thread while another is mid-call on it; ODBC forbids that outright, and no
+  amount of internal synchronisation changes it. Ordinary concurrent calls on
+  the same handle are a different matter: this crate no longer depends on the
+  Driver Manager to serialise those either, since it does not on every
+  platform — the Windows Driver Manager does not serialise calls to a handle
+  at all, and `SQLAllocHandle`'s own Comments section says drivers "must
+  therefore support safe, multithread access to this information." See the
+  per-connection lock entries below.
 - **Security.** Writes and reads through application-supplied pointers are now
   unaligned throughout. ODBC applications using row-wise binding pass pointers
   at arbitrary offsets into a packed buffer, so alignment is never guaranteed —
@@ -946,6 +963,19 @@ markers go away and this section becomes the initial-release notes.
   for that variant). It now records a general error, so a genuinely failing
   connection's own SQLSTATE is no longer suppressed by a corrupt entry
   encountered before it.
+- Handle contents are now synchronised per connection, through a `GroupLock`
+  a connection shares with all of its statements and a `HandleScope` that is
+  the only way to reach a handle's fields. Previously nothing in this crate
+  serialised concurrent calls on the same handle at all; a `SQLCancel` running
+  on a second thread could race the executing thread's own mutation of the
+  same diagnostic queue and binding maps, which could double-free.
+- `SQLEndTran` walks an owned snapshot of a connection's statements (an
+  environment's connections, for `SQL_HANDLE_ENV`), taken from the registry via
+  `Registry::children_of` rather than borrowed from a field on the parent
+  handle. Freeing a statement mid-walk on another thread can therefore no
+  longer shift the sequence the walk is iterating, which is what made
+  `SQLEndTran(SQL_HANDLE_ENV)` racing a concurrent `SQLFreeHandle` on one of its
+  connections unsound when the list was a field of the environment.
 - **Breaking.** `SQLCancel` no longer takes its statement's connection lock
   unconditionally. It clones the statement's cancel token out of the registry,
   then attempts the connection group with `try_lock` instead of a blocking

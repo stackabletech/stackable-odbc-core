@@ -17,6 +17,7 @@ framework itself and, where relevant, how a downstream driver crate consumes it.
 | [Converting raw values](#converting-raw-values-to-strongly-typed-enums) | Handling raw integers from the C ABI |
 | [Adding a new driver](#adding-a-new-driver) | Creating a new backend crate on top of core |
 | [Testing](#testing) | Writing tests, or running Miri / fuzz |
+| [Concurrency: the lock discipline](#concurrency-the-lock-discipline) | Understanding the per-connection lock, `HandleScope`, `SQLCancel`'s exemption, or loom |
 | [Architecture](#architecture) | Understanding call flow or crate layout |
 
 ## Conventions
@@ -466,6 +467,75 @@ allocation of the *target* type, not into a byte buffer:
 let mut arena = vec![0u16; 16];
 let ptr = unsafe { arena.as_mut_ptr().cast::<u8>().add(1) }.cast::<u16>();
 ```
+
+### Concurrency: the lock discipline
+
+Handle contents are internally synchronised, per connection, not left to the
+Driver Manager. `SQLAllocHandle`'s Comments section requires this: "Drivers
+must therefore support safe, multithread access to this information." The
+mechanism:
+
+- **A lock group is per connection, shared with every statement (and
+  descriptor) allocated on it.** One acquisition therefore covers a call that
+  touches a statement and its parent connection, which is what removes any
+  ordering to get wrong between the two. Groups are `GroupLock`
+  (`src/handles/registry.rs`); which group a token belongs to is derived from
+  the registry, not stored on the handle.
+- **`HandleScope` is the only way to reach a handle's contents, and
+  `panic_safe` (`src/panic.rs`) is the only way most code gets a
+  `HandleScope`.** `panic_safe` locks the target's group before constructing
+  the scope and ties the scope's lifetime to that lock, so "the group lock is
+  held" is a fact the borrow checker enforces rather than a rule a comment
+  states. The two other callers of `HandleScope::new` are
+  `HandleScope::with_child_group` (the nested-lock case below) and
+  `sql_cancel`, which builds one only on the branch where its own `try_lock`
+  succeeded.
+- **The one lock-ordering rule is environment before connection**, and
+  `SQLEndTran(SQL_HANDLE_ENV)` is its only site: it holds the environment's
+  group while walking that environment's connections via
+  `HandleScope::with_child_group`. Do not acquire a connection's group first
+  and then reach for its environment's; nothing else in the crate nests two
+  groups at all.
+- **`SQLCancel` is deliberately exempt.** It may run on a thread other than
+  the one executing on the target statement, and taking that statement's
+  group lock unconditionally would make cancelling a query wait for the query
+  it was asked to cancel. Instead it clones the statement's cancel token out
+  of the registry, then attempts the group with `try_lock`: on the branch
+  where another thread holds it, cancel signals the backend's `CancelToken`
+  and returns, touching no handle state and posting no diagnostic, per the
+  spec's own carve-out for a function running on another thread. A
+  `CancelToken` therefore carries the crate's one bounded exception to "core
+  never touches a backend's state concurrently": it must be built eagerly,
+  with the connection's real parameters in hand, at first use rather than
+  lazily inside `cancel` (see `Backend::cancel_token`'s doc comment for the
+  MariaDB ODBC-401 failure this rule exists to prevent), and if it aliases the
+  connection rather than standing alone, it must keep its target alive
+  through an `Arc` — core clones the token out before doing anything else, so
+  it must survive a concurrent `SQLDisconnect`.
+- **Every lock in the crate is imported from `src/sync.rs`**, never directly
+  from `std::sync`, so that building with `--cfg loom` swaps every one of them
+  for loom's instrumented equivalent. A lock imported around that module would
+  be invisible to loom and silently opt its code out of the interleaving
+  proof.
+
+**Loom models** the primitives this discipline is built from —
+`Registry` and `GroupLock` (`src/handles/registry.rs`'s
+`#[cfg(all(test, loom))] mod loom_tests`) — not the FFI entry points above
+them, since `registry()` panics outside an active `loom::model` and cannot be
+called from inside one either (loom replays the same closure many times to
+explore interleavings, while a `static` only runs its initializer once). Run
+them with:
+
+```bash
+RUSTFLAGS="--cfg loom" cargo test --lib loom_tests
+```
+
+The `loom_tests` filter is required: every other unit test in the crate also
+compiles under `--cfg loom` once it is set, and calls the process-wide
+registry outside a model, which panics as soon as `Registry::new` resolves to
+loom's `RwLock`. If a model runs long, lower `LOOM_MAX_PREEMPTIONS` (set to
+`3` in CI) before simplifying the model itself — a smaller bound still proves
+more than no model.
 
 ### Fuzzing
 
