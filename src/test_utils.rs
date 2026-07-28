@@ -2970,6 +2970,25 @@ impl Backend for MockCancelAwareBackend {
         }
         Ok(Vec::new())
     }
+    /// Always answers `NotImplemented` (which is what `MockError` collapses
+    /// to), while still honouring [`Self::cancel_before_returning`].
+    ///
+    /// That combination is deliberate and is not reachable through the other
+    /// methods: `SQLStatistics` converts the backend's error before matching so
+    /// it can turn `NotImplemented` into the spec's empty result set, and this
+    /// mock lets a test prove that arm survives a signalled token instead of
+    /// being relabelled `HY008`.
+    fn statistics(
+        _: &MockConnection,
+        cancel: &Self::CancelToken,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: bool,
+    ) -> Result<Vec<StatisticsRow>, MockError> {
+        let _ = Self::take_call_outcome(cancel);
+        Err(MockError)
+    }
 
     fn supports_catalogs(_conn: &Self::Connection) -> bool {
         false

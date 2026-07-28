@@ -56,6 +56,13 @@ Everything a driver has to change for the catalog rework, in one place.
 
 ### Added
 
+- The ten catalog functions now return `HY008` when a `SQLCancel` from another
+  thread interrupted them and the backend implements `Backend::is_cancelled`,
+  on the same terms as the execution functions. `SQLStatistics` and
+  `SQLSpecialColumns` reclassify only their genuine-error arm: a backend
+  answering `NotImplemented` still gets the spec's empty result set, because
+  that is an answer rather than a failure.
+
 - `SqlState::operation_canceled()` (`HY008`) and the defaulted
   `Backend::is_cancelled` hook it pairs with, so a driver no longer needs
   `SqlState::new("HY008")`. `cancel` signals and `is_cancelled` observes;

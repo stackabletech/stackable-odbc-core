@@ -8,6 +8,7 @@ use std::borrow::Cow;
 use std::ffi::c_void;
 
 use crate::backend::{Backend, StatementBackend};
+use crate::cancel::reclassify_cancelled;
 use crate::errors::{IntoOdbc, OdbcError};
 use crate::handles::{StatementData, StatementHandle};
 use crate::panic::panic_safe;
@@ -394,8 +395,8 @@ pub unsafe fn sql_tables_w<B: Backend>(
                 schema.as_deref(),
                 table.as_deref(),
                 &table_types,
-            )
-            .into_odbc()?;
+            );
+            let rows = reclassify_cancelled::<B, _, _>(rows, cancel)?;
 
             let mut values: Vec<Vec<ColumnValue>> = rows.iter().map(TableRow::to_values).collect();
             crate::catalog_sort::sort_rows(
@@ -542,8 +543,8 @@ pub unsafe fn sql_columns_w<B: Backend>(
                 schema.as_deref(),
                 table.as_deref(),
                 column.as_deref(),
-            )
-            .into_odbc()?;
+            );
+            let rows = reclassify_cancelled::<B, _, _>(rows, cancel)?;
 
             let mut values: Vec<Vec<ColumnValue>> = rows.iter().map(ColumnRow::to_values).collect();
             // Spec: ordered by TABLE_CAT, TABLE_SCHEM, TABLE_NAME,
@@ -688,8 +689,8 @@ pub unsafe fn sql_primary_keys_w<B: Backend>(
                 catalog.as_deref(),
                 schema.as_deref(),
                 table.as_deref(),
-            )
-            .into_odbc()?;
+            );
+            let rows = reclassify_cancelled::<B, _, _>(rows, cancel)?;
 
             let mut values: Vec<Vec<ColumnValue>> =
                 rows.iter().map(PrimaryKeyRow::to_values).collect();
@@ -873,8 +874,8 @@ pub unsafe fn sql_foreign_keys_w<B: Backend>(
                 fk_catalog.as_deref(),
                 fk_schema.as_deref(),
                 fk_table.as_deref(),
-            )
-            .into_odbc()?;
+            );
+            let rows = reclassify_cancelled::<B, _, _>(rows, cancel)?;
 
             let mut values: Vec<Vec<ColumnValue>> =
                 rows.iter().map(ForeignKeyRow::to_values).collect();
@@ -1072,7 +1073,11 @@ pub unsafe fn sql_statistics_w<B: Backend>(
                     )));
                     Ok(SqlReturn::SUCCESS)
                 }
-                Err(e) => Err(e),
+                // Only this arm is reclassified. The `NotImplemented` arm above is
+                // not a failure at all — it is how a backend says it exposes no such
+                // metadata, and the spec's answer to that is an empty result set,
+                // not `HY008`.
+                Err(e) => reclassify_cancelled::<B, _, _>(Err(e), cancel),
             }
         })
     };
@@ -1282,7 +1287,11 @@ pub unsafe fn sql_special_columns_w<B: Backend>(
                     Ok(SqlReturn::SUCCESS)
                 }
                 Err(OdbcError::NotImplemented { .. }) => empty(stmt),
-                Err(e) => Err(e),
+                // Only this arm is reclassified. The `NotImplemented` arm above is
+                // not a failure at all — it is how a backend says it exposes no such
+                // metadata, and the spec's answer to that is an empty result set,
+                // not `HY008`.
+                Err(e) => reclassify_cancelled::<B, _, _>(Err(e), cancel),
             }
         })
     };
@@ -1789,8 +1798,8 @@ pub unsafe fn sql_procedures_w<B: Backend>(
                 catalog.as_deref(),
                 schema.as_deref(),
                 proc.as_deref(),
-            )
-            .into_odbc()?;
+            );
+            let rows = reclassify_cancelled::<B, _, _>(rows, cancel)?;
 
             let mut values: Vec<Vec<ColumnValue>> =
                 rows.iter().map(ProcedureRow::to_values).collect();
@@ -1983,8 +1992,8 @@ pub unsafe fn sql_procedure_columns_w<B: Backend>(
                 schema.as_deref(),
                 proc.as_deref(),
                 column.as_deref(),
-            )
-            .into_odbc()?;
+            );
+            let rows = reclassify_cancelled::<B, _, _>(rows, cancel)?;
 
             let mut values: Vec<Vec<ColumnValue>> =
                 rows.iter().map(ProcedureColumnRow::to_values).collect();
@@ -2169,8 +2178,8 @@ pub unsafe fn sql_column_privileges_w<B: Backend>(
                 schema.as_deref(),
                 table.as_deref(),
                 column.as_deref(),
-            )
-            .into_odbc()?;
+            );
+            let rows = reclassify_cancelled::<B, _, _>(rows, cancel)?;
 
             let mut values: Vec<Vec<ColumnValue>> =
                 rows.iter().map(ColumnPrivilegeRow::to_values).collect();
@@ -2342,8 +2351,8 @@ pub unsafe fn sql_table_privileges_w<B: Backend>(
                 catalog.as_deref(),
                 schema.as_deref(),
                 table.as_deref(),
-            )
-            .into_odbc()?;
+            );
+            let rows = reclassify_cancelled::<B, _, _>(rows, cancel)?;
 
             let mut values: Vec<Vec<ColumnValue>> =
                 rows.iter().map(TablePrivilegeRow::to_values).collect();
@@ -2370,8 +2379,8 @@ mod tests {
     use crate::ffi::info::type_info_columns;
     use crate::handles::ConnectionHandle;
     use crate::test_utils::{
-        MockBackend, MockCatalogArgsBackend, MockCatalogBackend, MockConnection,
-        MockNoCatalogBackend, alloc_env_conn_stmt, with_handle,
+        MockBackend, MockCancelAwareBackend, MockCatalogArgsBackend, MockCatalogBackend,
+        MockConnection, MockNoCatalogBackend, alloc_env_conn_stmt, with_handle,
     };
     use crate::types::{
         CDataType, ColumnsResultCol, Desc, ForeignKeysResultCol, Nullable, PrimaryKeysResultCol,
@@ -3513,6 +3522,80 @@ mod tests {
             assert_eq!(args.schema.as_deref(), Some("MY\\_SCH"));
             assert_eq!(args.table.as_deref(), Some("MY\\_NAME"));
             cleanup_for::<MockCatalogArgsBackend>(env, conn, stmt);
+        }
+    }
+
+    /// Spec, `SQLTables` `HY008`, second clause: the function "was called, and
+    /// before it completed execution, `SQLCancel` … was called on the
+    /// `StatementHandle` from a different thread in a multithread
+    /// application." No `(DM)` marker, so this driver returns it. A catalog
+    /// function is an ordinary backend call and is cancellable like any other.
+    #[test]
+    fn a_cancelled_catalog_call_reports_hy008() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCancelAwareBackend>();
+            MockCancelAwareBackend::fail_next_execution();
+            MockCancelAwareBackend::cancel_before_returning();
+
+            let ret = sql_tables_w::<MockCancelAwareBackend>(
+                stmt,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+            );
+            assert_eq!(ret, SqlReturn::ERROR);
+            with_handle::<MockCancelAwareBackend, StatementHandle<MockCancelAwareBackend>, _>(
+                stmt,
+                |h| {
+                    let rec = h.diagnostics.get(0).expect("record 1 exists");
+                    assert_eq!(rec.sqlstate.as_str(), "HY008");
+                },
+            );
+            cleanup_for::<MockCancelAwareBackend>(env, conn, stmt);
+        }
+    }
+
+    /// The counterpart, and the subtlety of the two `match`-shaped catalog
+    /// sites: `SQLStatistics` and `SQLSpecialColumns` convert the backend's
+    /// error *before* matching, so a `NotImplemented` can be recognised and
+    /// turned into the spec's empty result set.
+    ///
+    /// `NotImplemented` there means "this backend exposes no index metadata" —
+    /// a legitimate empty answer, not a failure — so it must survive even when
+    /// the token happens to be signalled. Reclassifying the whole `Result`
+    /// rather than only its genuine-error arm would turn a spec-mandated empty
+    /// result set into `HY008`.
+    #[test]
+    fn an_unimplemented_catalog_method_is_not_reclassified_as_cancelled() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCancelAwareBackend>();
+            // The mock's `statistics` signals its own token and then answers
+            // `NotImplemented`, which is the exact collision this pins.
+            MockCancelAwareBackend::cancel_before_returning();
+
+            let table = utf16_of("t");
+            let ret = sql_statistics_w::<MockCancelAwareBackend>(
+                stmt,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                table.as_ptr(),
+                SQL_NTS_I16,
+                SQL_INDEX_ALL,
+                SQL_QUICK,
+            );
+            assert_eq!(
+                ret,
+                SqlReturn::SUCCESS,
+                "an unimplemented catalog method still yields the spec's empty result set"
+            );
+            cleanup_for::<MockCancelAwareBackend>(env, conn, stmt);
         }
     }
 
