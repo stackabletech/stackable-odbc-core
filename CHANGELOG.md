@@ -62,6 +62,15 @@ Everything a driver has to change for the catalog rework, in one place.
   implement the second whenever you implement the first, or a cancelled call
   still reports whatever SQLSTATE your error mapping produced.
 
+- `SQLExecDirect`, `SQLPrepare`, `SQLExecute` and `SQLParamData` now return
+  `HY008` when a `SQLCancel` from another thread interrupted them and the
+  backend implements `Backend::is_cancelled`. They previously reported whatever
+  the backend's error mapping produced for the resulting failure, usually
+  `HY000` — which told the application nothing about why. Only the error path
+  is reclassified: the spec allows a cancelled execution to succeed anyway
+  ("it is possible for the execution to succeed and return SQL_SUCCESS while
+  the cancel is also successful"), so a successful call stays successful.
+
 - `SQLProcedures` now returns real rows when a backend implements the new
   defaulted `Backend::procedures`, instead of always returning an empty result
   set. Core converts the returned `ProcedureRow`s to the spec's 8-column layout

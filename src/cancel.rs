@@ -25,13 +25,6 @@ use crate::types::SqlState;
 /// the *symptom* of a cancellation (a closed socket, an aborted query) and not
 /// the cause. Its SQLSTATE is what the application would otherwise see, and it
 /// is exactly what the spec says must not be reported here.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "called by the ffi/ backend call sites once they are wired up"
-    )
-)]
 pub(crate) fn reclassify_cancelled<B: Backend, T, E: Into<OdbcError>>(
     result: Result<T, E>,
     cancel: &B::CancelToken,

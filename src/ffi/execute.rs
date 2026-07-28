@@ -3,7 +3,8 @@
 use std::ffi::c_void;
 
 use crate::backend::{Backend, StatementBackend};
-use crate::errors::{IntoOdbc, OdbcError};
+use crate::cancel::reclassify_cancelled;
+use crate::errors::OdbcError;
 use crate::panic::panic_safe;
 use crate::types::{SQL_NTS, SqlReturn, SqlState};
 use crate::utf16::utf16_to_string;
@@ -180,9 +181,11 @@ pub unsafe fn sql_exec_direct_w<B: Backend>(
                 }
             }
 
-            // The token exists once this statement makes its first
-            // backend call; created here on demand, then reused for every
-            // later call on the same statement (see `mint_cancel_token`).
+            // This execution's own token, replacing whatever the previous one
+            // left behind (see `mint_cancel_token`). `SQLCancel` signals it
+            // from another thread; the error paths below ask it, so that a
+            // cancellation is reported as HY008 rather than as whatever
+            // symptom the backend's client library happened to see.
             let cancel_token = crate::handles::mint_cancel_token::<B>(statement_handle, connection);
             let cancel = crate::handles::cancel_as::<B>(&cancel_token)?;
 
@@ -193,8 +196,12 @@ pub unsafe fn sql_exec_direct_w<B: Backend>(
             let result = if param_count > 0 {
                 // SAFETY: caller guarantees all bound buffer pointers remain valid.
                 let params = crate::ffi::params::collect_params(&stmt.param_bindings, param_count)?;
-                let mut prepared = B::prepare(connection, cancel, &sql).into_odbc()?;
-                let outcome = B::execute(connection, cancel, &mut prepared, &params).into_odbc()?;
+                let mut prepared =
+                    reclassify_cancelled::<B, _, _>(B::prepare(connection, cancel, &sql), cancel)?;
+                let outcome = reclassify_cancelled::<B, _, _>(
+                    B::execute(connection, cancel, &mut prepared, &params),
+                    cancel,
+                )?;
                 // SAFETY: the application's bound output buffer pointers remain
                 // valid per the caller contract (same guarantee collect_params relies on).
                 // Already inside the enclosing `unsafe` context, like collect_params above.
@@ -204,7 +211,7 @@ pub unsafe fn sql_exec_direct_w<B: Backend>(
                 )?;
                 prepared
             } else {
-                B::exec_direct(connection, cancel, &sql).into_odbc()?
+                reclassify_cancelled::<B, _, _>(B::exec_direct(connection, cancel, &sql), cancel)?
             };
             // Opens a cursor only if the statement actually returned columns.
             stmt.set_result_set(crate::handles::StatementData::Backend(result));
@@ -340,14 +347,17 @@ pub unsafe fn sql_prepare_w<B: Backend>(
             };
             let param_count = crate::ffi::params::count_params(&sql);
 
-            // The token exists once this statement makes its first
-            // backend call; created here on demand, then reused for every
-            // later call on the same statement (see `mint_cancel_token`).
+            // This execution's own token, replacing whatever the previous one
+            // left behind (see `mint_cancel_token`). `SQLCancel` signals it
+            // from another thread; the error paths below ask it, so that a
+            // cancellation is reported as HY008 rather than as whatever
+            // symptom the backend's client library happened to see.
             let cancel_token = crate::handles::mint_cancel_token::<B>(statement_handle, connection);
             let cancel = crate::handles::cancel_as::<B>(&cancel_token)?;
 
             // Ask backend to validate and prepare the statement.
-            let prepared = B::prepare(connection, cancel, &sql).into_odbc()?;
+            let prepared =
+                reclassify_cancelled::<B, _, _>(B::prepare(connection, cancel, &sql), cancel)?;
 
             // Prepared, not executed (S2/S3): no cursor is open, and a
             // re-prepare closes any cursor the previous execution left open.
@@ -499,9 +509,11 @@ pub unsafe fn sql_execute<B: Backend>(statement_handle: *mut c_void) -> SqlRetur
                 ));
             };
 
-            // The token exists once this statement makes its first
-            // backend call; created here on demand, then reused for every
-            // later call on the same statement (see `mint_cancel_token`).
+            // This execution's own token, replacing whatever the previous one
+            // left behind (see `mint_cancel_token`). `SQLCancel` signals it
+            // from another thread; the error paths below ask it, so that a
+            // cancellation is reported as HY008 rather than as whatever
+            // symptom the backend's client library happened to see.
             let cancel_token = crate::handles::mint_cancel_token::<B>(statement_handle, connection);
             let cancel = crate::handles::cancel_as::<B>(&cancel_token)?;
 
@@ -515,7 +527,8 @@ pub unsafe fn sql_execute<B: Backend>(statement_handle: *mut c_void) -> SqlRetur
                         SqlState::function_sequence_error(),
                     )
                 })?;
-                let prepared = B::prepare(connection, cancel, sql).into_odbc()?;
+                let prepared =
+                    reclassify_cancelled::<B, _, _>(B::prepare(connection, cancel, sql), cancel)?;
                 stmt.set_prepared_statement(crate::handles::StatementData::Backend(prepared));
             }
 
@@ -528,7 +541,10 @@ pub unsafe fn sql_execute<B: Backend>(statement_handle: *mut c_void) -> SqlRetur
 
             let outcome = match stmt_data {
                 crate::handles::StatementData::Backend(backend_stmt) => {
-                    B::execute(connection, cancel, backend_stmt, &params).into_odbc()?
+                    reclassify_cancelled::<B, _, _>(
+                        B::execute(connection, cancel, backend_stmt, &params),
+                        cancel,
+                    )?
                 }
                 crate::handles::StatementData::Synthetic(_) => {
                     return Err(OdbcError::general(
@@ -564,8 +580,10 @@ mod tests {
     use super::*;
     use crate::ffi::handle::sql_free_handle;
     use crate::handles::ConnectionHandle;
+    use crate::handles::StatementHandle;
     use crate::test_utils::{
-        MockBackend, MockConnection, MockRecordingBackend, alloc_env_conn_stmt, with_handle,
+        MockBackend, MockCancelAwareBackend, MockConnection, MockRecordingBackend,
+        alloc_env_conn_stmt, with_handle,
     };
     use odbc_sys::HandleType;
 
@@ -1095,6 +1113,175 @@ mod tests {
             );
 
             cleanup_env_conn_stmt_for::<MockRecordingBackend>(env, conn, stmt);
+        }
+    }
+
+    /// Env + connection + statement for [`MockCancelAwareBackend`], with the
+    /// connection populated directly. `MockCancelAwareBackend::connect`
+    /// succeeds, but going through `SQLDriverConnectW` would leave the DSN
+    /// machinery in the picture for tests that are about cancellation.
+    unsafe fn alloc_cancel_aware_stmt() -> (*mut c_void, *mut c_void, *mut c_void) {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCancelAwareBackend>();
+            with_handle::<MockCancelAwareBackend, ConnectionHandle<MockCancelAwareBackend>, _>(
+                conn,
+                |c| {
+                    c.connection = Some(MockConnection);
+                },
+            );
+            (env, conn, stmt)
+        }
+    }
+
+    /// The SQLSTATE of the statement handle's first diagnostic record.
+    fn first_sqlstate(stmt: *mut c_void) -> String {
+        let mut state = String::new();
+        with_handle::<MockCancelAwareBackend, StatementHandle<MockCancelAwareBackend>, _>(
+            stmt,
+            |h| {
+                state = h
+                    .diagnostics
+                    .get(0)
+                    .expect("record 1 exists")
+                    .sqlstate
+                    .as_str()
+                    .to_owned();
+            },
+        );
+        state
+    }
+
+    /// Spec, `SQLExecDirect` `HY008`, second clause: the function "was called,
+    /// and before it completed execution, **SQLCancel** or **SQLCancelHandle**
+    /// was called on the *StatementHandle* from a different thread in a
+    /// multithread application." The row carries no `(DM)` marker, so this is
+    /// the driver's to return.
+    #[test]
+    fn a_cancelled_execution_reports_hy008_not_the_backends_own_state() {
+        unsafe {
+            let (env, conn, stmt) = alloc_cancel_aware_stmt();
+            MockCancelAwareBackend::fail_next_execution();
+            MockCancelAwareBackend::cancel_before_returning();
+
+            let wide: Vec<u16> = "SELECT 1".encode_utf16().collect();
+            let ret =
+                sql_exec_direct_w::<MockCancelAwareBackend>(stmt, wide.as_ptr(), wide.len() as i32);
+            assert_eq!(ret, SqlReturn::ERROR);
+            assert_eq!(first_sqlstate(stmt), "HY008");
+
+            cleanup_env_conn_stmt_for::<MockCancelAwareBackend>(env, conn, stmt);
+        }
+    }
+
+    /// The other half: a failure that was *not* a cancellation keeps the
+    /// backend's own SQLSTATE. Reclassifying unconditionally would relabel
+    /// every backend error in the crate as `HY008`.
+    #[test]
+    fn an_uncancelled_failure_keeps_its_own_state() {
+        unsafe {
+            let (env, conn, stmt) = alloc_cancel_aware_stmt();
+            MockCancelAwareBackend::fail_next_execution();
+
+            let wide: Vec<u16> = "SELECT 1".encode_utf16().collect();
+            let ret =
+                sql_exec_direct_w::<MockCancelAwareBackend>(stmt, wide.as_ptr(), wide.len() as i32);
+            assert_eq!(ret, SqlReturn::ERROR);
+            assert_ne!(first_sqlstate(stmt), "HY008");
+
+            cleanup_env_conn_stmt_for::<MockCancelAwareBackend>(env, conn, stmt);
+        }
+    }
+
+    /// `SQLPrepare` reaches `Backend::prepare`, which is cancellable on the
+    /// same terms as an execution. Its `HY008` row carries no `(DM)` marker
+    /// either.
+    #[test]
+    fn a_cancelled_prepare_reports_hy008() {
+        unsafe {
+            let (env, conn, stmt) = alloc_cancel_aware_stmt();
+            MockCancelAwareBackend::fail_next_execution();
+            MockCancelAwareBackend::cancel_before_returning();
+
+            let wide: Vec<u16> = "SELECT 1".encode_utf16().collect();
+            let ret =
+                sql_prepare_w::<MockCancelAwareBackend>(stmt, wide.as_ptr(), wide.len() as i32);
+            assert_eq!(ret, SqlReturn::ERROR);
+            assert_eq!(first_sqlstate(stmt), "HY008");
+
+            cleanup_env_conn_stmt_for::<MockCancelAwareBackend>(env, conn, stmt);
+        }
+    }
+
+    /// `SQLExecute`'s own `Backend::execute` call site, reached after a
+    /// successful `SQLPrepare` so that the one-shot failure switch lands on
+    /// the execution rather than on the prepare that precedes it.
+    #[test]
+    fn a_cancelled_execute_reports_hy008() {
+        unsafe {
+            let (env, conn, stmt) = alloc_cancel_aware_stmt();
+
+            let wide: Vec<u16> = "SELECT 1".encode_utf16().collect();
+            assert_eq!(
+                sql_prepare_w::<MockCancelAwareBackend>(stmt, wide.as_ptr(), wide.len() as i32),
+                SqlReturn::SUCCESS,
+                "precondition: prepare succeeds",
+            );
+
+            MockCancelAwareBackend::fail_next_execution();
+            MockCancelAwareBackend::cancel_before_returning();
+
+            assert_eq!(
+                sql_execute::<MockCancelAwareBackend>(stmt),
+                SqlReturn::ERROR
+            );
+            assert_eq!(first_sqlstate(stmt), "HY008");
+
+            cleanup_env_conn_stmt_for::<MockCancelAwareBackend>(env, conn, stmt);
+        }
+    }
+
+    /// Spec, `SQLCancel`: "After the statement has been canceled, the
+    /// application can call **SQLExecute** or **SQLExecDirect** again."
+    ///
+    /// With one token per statement, `Backend::cancel` marked a token the next
+    /// execution reused, so every later call on that statement reported
+    /// `HY008` forever. A token minted per execution cannot leak across that
+    /// boundary. This is the end-to-end guard on `mint_cancel_token`, and it
+    /// only bites once a call site reclassifies — before Task 4 the second
+    /// execution succeeded whatever the token said.
+    #[test]
+    fn a_statement_is_reusable_after_being_cancelled() {
+        unsafe {
+            let (env, conn, stmt) = alloc_cancel_aware_stmt();
+            let wide: Vec<u16> = "SELECT 1".encode_utf16().collect();
+
+            assert_eq!(
+                sql_exec_direct_w::<MockCancelAwareBackend>(stmt, wide.as_ptr(), wide.len() as i32),
+                SqlReturn::SUCCESS,
+            );
+
+            // Signals the token the execution above minted.
+            assert_eq!(
+                crate::ffi::cursor::sql_cancel::<MockCancelAwareBackend>(stmt),
+                SqlReturn::SUCCESS,
+            );
+            let _ = crate::ffi::cursor::sql_close_cursor::<MockCancelAwareBackend>(stmt);
+
+            // A fresh execution mints a fresh token, so the stale signal cannot
+            // reach it — even though this one is also told to fail, which is
+            // what makes the assertion about the token and not about luck.
+            MockCancelAwareBackend::fail_next_execution();
+            assert_eq!(
+                sql_exec_direct_w::<MockCancelAwareBackend>(stmt, wide.as_ptr(), wide.len() as i32),
+                SqlReturn::ERROR,
+            );
+            assert_ne!(
+                first_sqlstate(stmt),
+                "HY008",
+                "a cancel aimed at a finished execution must not reach the one that replaced it",
+            );
+
+            cleanup_env_conn_stmt_for::<MockCancelAwareBackend>(env, conn, stmt);
         }
     }
 }

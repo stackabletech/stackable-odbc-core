@@ -8,7 +8,8 @@ use odbc_sys::SqlDataType;
 
 use crate::{
     backend::{Backend, StatementBackend},
-    errors::{IntoOdbc, OdbcError},
+    cancel::reclassify_cancelled,
+    errors::OdbcError,
     handles::{ParameterBinding, StatementHandle},
     panic::panic_safe,
     types::{
@@ -1157,15 +1158,18 @@ pub unsafe fn sql_param_data<B: Backend>(
                 ));
             };
 
-            // The token exists once this statement makes its first
-            // backend call; created here on demand, then reused for every
-            // later call on the same statement (see `mint_cancel_token`).
+            // This execution's own token, replacing whatever the previous one
+            // left behind (see `mint_cancel_token`). `SQLCancel` signals it
+            // from another thread; the error paths below ask it, so that a
+            // cancellation is reported as HY008 rather than as whatever
+            // symptom the backend's client library happened to see.
             let cancel_token = crate::handles::mint_cancel_token::<B>(statement_handle, connection);
             let cancel = crate::handles::cancel_as::<B>(&cancel_token)?;
 
             // If statement was closed (e.g. SQLFreeStmt(SQL_CLOSE)), re-prepare.
             if stmt.statement.is_none() {
-                let prepared = B::prepare(connection, cancel, &sql).into_odbc()?;
+                let prepared =
+                    reclassify_cancelled::<B, _, _>(B::prepare(connection, cancel, &sql), cancel)?;
                 stmt.set_prepared_statement(crate::handles::StatementData::Backend(prepared));
             }
 
@@ -1175,7 +1179,10 @@ pub unsafe fn sql_param_data<B: Backend>(
 
             match stmt_data {
                 crate::handles::StatementData::Backend(backend_stmt) => {
-                    B::execute(connection, cancel, backend_stmt, &params).into_odbc()?;
+                    reclassify_cancelled::<B, _, _>(
+                        B::execute(connection, cancel, backend_stmt, &params),
+                        cancel,
+                    )?;
                 }
                 crate::handles::StatementData::Synthetic(_) => {
                     return Err(OdbcError::general(
@@ -1205,7 +1212,11 @@ mod tests {
     use super::*;
     use crate::{
         ffi::{execute::sql_prepare_w, handle::sql_free_handle},
-        test_utils::{MockBackend, MockLongDataBackend, alloc_env_conn_stmt, with_handle},
+        handles::ConnectionHandle,
+        test_utils::{
+            MockBackend, MockCancelAwareBackend, MockConnection, MockLongDataBackend,
+            alloc_env_conn_stmt, with_handle,
+        },
         types::{CDataType, ParamType},
     };
 
@@ -1238,6 +1249,127 @@ mod tests {
     unsafe fn prepare_sql(stmt: *mut c_void, sql: &str) -> SqlReturn {
         let wide: Vec<u16> = sql.encode_utf16().collect();
         unsafe { sql_prepare_w::<MockBackend>(stmt, wide.as_ptr(), wide.len() as i32) }
+    }
+
+    /// Spec, `SQLParamData` `HY008`, second clause: `SQLCancel` "was called on
+    /// the *StatementHandle* from a different thread in a multithread
+    /// application". No `(DM)` marker, so the driver returns it.
+    ///
+    /// `SQLParamData` is the one entry point that reaches the backend only at
+    /// the *end* of the data-at-execution loop, so the whole loop has to run
+    /// before the reclassified call site is reachable at all.
+    #[test]
+    fn a_cancelled_param_data_reports_hy008() {
+        unsafe {
+            let (env, conn, stmt) = alloc_cancel_aware_stmt();
+
+            // Bind parameter 1 as data-at-execution, so SQLExecDirectW defers
+            // to the SQLPutData / SQLParamData loop instead of executing.
+            let mut ind: isize = SQL_DATA_AT_EXEC;
+            let mut val: i32 = 0;
+            assert_eq!(
+                sql_bind_parameter::<MockCancelAwareBackend>(
+                    stmt,
+                    1,
+                    ParamType::Input as i16,
+                    CDataType::Char as i16,
+                    SqlDataType::VARCHAR.0,
+                    10,
+                    0,
+                    std::ptr::from_mut(&mut val).cast::<c_void>(),
+                    0,
+                    &raw mut ind,
+                ),
+                SqlReturn::SUCCESS,
+            );
+
+            let wide: Vec<u16> = "SELECT ?".encode_utf16().collect();
+            assert_eq!(
+                crate::ffi::execute::sql_exec_direct_w::<MockCancelAwareBackend>(
+                    stmt,
+                    wide.as_ptr(),
+                    wide.len() as i32,
+                ),
+                SqlReturn::NEED_DATA,
+                "precondition: the data-at-execution loop starts",
+            );
+
+            let mut value_ptr: *mut c_void = std::ptr::null_mut();
+            assert_eq!(
+                sql_param_data::<MockCancelAwareBackend>(stmt, &raw mut value_ptr),
+                SqlReturn::NEED_DATA,
+                "precondition: parameter 1 is requested",
+            );
+
+            let data = b"x";
+            assert_eq!(
+                sql_put_data::<MockCancelAwareBackend>(
+                    stmt,
+                    data.as_ptr().cast::<c_void>().cast_mut(),
+                    1,
+                ),
+                SqlReturn::SUCCESS,
+                "precondition: the parameter's data is supplied",
+            );
+
+            // The next SQLParamData has every parameter and calls the backend.
+            MockCancelAwareBackend::fail_next_execution();
+            MockCancelAwareBackend::cancel_before_returning();
+            assert_eq!(
+                sql_param_data::<MockCancelAwareBackend>(stmt, &raw mut value_ptr),
+                SqlReturn::ERROR,
+            );
+            with_handle::<MockCancelAwareBackend, StatementHandle<MockCancelAwareBackend>, _>(
+                stmt,
+                |h| {
+                    let rec = h.diagnostics.get(0).expect("record 1 exists");
+                    assert_eq!(rec.sqlstate.as_str(), "HY008");
+                },
+            );
+
+            cleanup_cancel_aware(env, conn, stmt);
+        }
+    }
+
+    /// Env + connection + statement for [`MockCancelAwareBackend`], connected
+    /// directly rather than through `SQLDriverConnectW`.
+    unsafe fn alloc_cancel_aware_stmt() -> (*mut c_void, *mut c_void, *mut c_void) {
+        unsafe {
+            let mut env: *mut c_void = std::ptr::null_mut();
+            let _ = crate::ffi::handle::sql_alloc_handle::<MockCancelAwareBackend>(
+                HandleType::Env as i16,
+                std::ptr::null_mut(),
+                &mut env,
+            );
+            let mut conn: *mut c_void = std::ptr::null_mut();
+            let _ = crate::ffi::handle::sql_alloc_handle::<MockCancelAwareBackend>(
+                HandleType::Dbc as i16,
+                env,
+                &mut conn,
+            );
+            with_handle::<MockCancelAwareBackend, ConnectionHandle<MockCancelAwareBackend>, _>(
+                conn,
+                |c| {
+                    c.connection = Some(MockConnection);
+                },
+            );
+            let mut stmt: *mut c_void = std::ptr::null_mut();
+            let _ = crate::ffi::handle::sql_alloc_handle::<MockCancelAwareBackend>(
+                HandleType::Stmt as i16,
+                conn,
+                &mut stmt,
+            );
+            (env, conn, stmt)
+        }
+    }
+
+    unsafe fn cleanup_cancel_aware(env: *mut c_void, conn: *mut c_void, stmt: *mut c_void) {
+        unsafe {
+            let _ = sql_free_handle::<MockCancelAwareBackend>(HandleType::Stmt as i16, stmt);
+            let _ = crate::ffi::connect::sql_disconnect::<MockCancelAwareBackend>(conn);
+            let _ = sql_free_handle::<MockCancelAwareBackend>(HandleType::Dbc as i16, conn);
+            let _ = sql_free_handle::<MockCancelAwareBackend>(HandleType::Env as i16, env);
+        }
     }
 
     #[test]
