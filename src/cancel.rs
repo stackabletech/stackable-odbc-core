@@ -79,6 +79,73 @@ mod tests {
         );
     }
 
+    /// The shape every FFI entry point will use, exercised once here against a
+    /// real `Backend` rather than a hand-set flag: the backend signals its own
+    /// token mid-call and then fails, which is what core sees when another
+    /// thread cancelled it. Pins `MockCancelAwareBackend`'s switches too, so a
+    /// broken mock fails here rather than in twenty entry-point tests.
+    #[test]
+    fn a_backend_that_cancels_itself_mid_call_produces_hy008() {
+        use crate::backend::Backend;
+        use crate::test_utils::{MockCancelAwareBackend, MockConnection};
+
+        MockCancelAwareBackend::fail_next_execution();
+        MockCancelAwareBackend::cancel_before_returning();
+
+        let token = MockCancelAwareBackend::cancel_token(&MockConnection);
+        let result = MockCancelAwareBackend::exec_direct(&MockConnection, &token, "SELECT 1");
+        assert!(result.is_err(), "the mock was told to fail");
+        assert!(
+            MockCancelAwareBackend::is_cancelled(&token),
+            "the mock was told to cancel itself before returning"
+        );
+
+        let err = reclassify_cancelled::<MockCancelAwareBackend, _, _>(result, &token)
+            .expect_err("the input was an error");
+        assert_eq!(err.sqlstate().as_str(), "HY008");
+    }
+
+    /// The same mock without the cancel switch: a plain failure keeps its own
+    /// state. Guards against the switches leaking between calls, which would
+    /// make every entry-point test pass for the wrong reason.
+    #[test]
+    fn the_same_backend_failing_without_a_cancel_keeps_its_own_state() {
+        use crate::backend::Backend;
+        use crate::test_utils::{MockCancelAwareBackend, MockConnection};
+
+        MockCancelAwareBackend::fail_next_execution();
+
+        let token = MockCancelAwareBackend::cancel_token(&MockConnection);
+        let result = MockCancelAwareBackend::exec_direct(&MockConnection, &token, "SELECT 1");
+        assert!(result.is_err());
+        assert!(!MockCancelAwareBackend::is_cancelled(&token));
+
+        let err = reclassify_cancelled::<MockCancelAwareBackend, _, _>(result, &token)
+            .expect_err("the input was an error");
+        assert_ne!(err.sqlstate().as_str(), "HY008");
+    }
+
+    /// The cursor half of the same shape, for the entry points that consume a
+    /// cursor rather than produce one. `fetch`'s failure is reclassified
+    /// against the token the *producing* execution minted, which is what
+    /// `handles::current_cancel_token` hands them.
+    #[test]
+    fn a_cancelled_fetch_produces_hy008() {
+        use crate::backend::{Backend, StatementBackend};
+        use crate::test_utils::{MockCancelAwareBackend, MockConnection};
+
+        let token = MockCancelAwareBackend::cancel_token(&MockConnection);
+        let mut stmt = MockCancelAwareBackend::exec_direct(&MockConnection, &token, "SELECT 1")
+            .expect("the mock was not told to fail");
+
+        MockCancelAwareBackend::fail_next_fetch();
+        MockCancelAwareBackend::cancel(&token).expect("mock cancel succeeds");
+
+        let err = reclassify_cancelled::<MockCancelAwareBackend, _, _>(stmt.fetch(), &token)
+            .expect_err("the fetch was told to fail");
+        assert_eq!(err.sqlstate().as_str(), "HY008");
+    }
+
     #[test]
     fn success_stays_successful_even_when_the_token_is_signalled() {
         // Spec, SQLCancel: "it is possible for the execution to succeed and

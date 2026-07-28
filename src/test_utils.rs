@@ -2784,3 +2784,211 @@ impl Backend for MockRecordingBackend {
 
     minimal_capability_decls!();
 }
+
+// ---------------------------------------------------------------------------
+// A backend that can be made to fail, and to cancel itself while failing
+// ---------------------------------------------------------------------------
+
+thread_local! {
+    /// The next backend call on this thread returns `Err`.
+    static FAIL_NEXT_CALL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The next backend call signals its own token just before returning.
+    static CANCEL_WHILE_RUNNING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The next `StatementBackend::fetch` returns `Err`.
+    static FAIL_NEXT_FETCH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Models "another thread cancelled this call while it was in flight" without
+/// needing a second thread.
+///
+/// The interleaving that produces `HY008` is: a backend call is running, a
+/// `SQLCancel` on another thread signals its token, and the call then fails.
+/// [`Self::cancel_before_returning`] makes the mock signal its own token from
+/// *inside* the call, immediately before returning `Err`, which leaves core
+/// facing exactly the same state — a failed call whose token reads cancelled —
+/// with none of a real thread's timing nondeterminism.
+///
+/// The genuinely concurrent path is proved separately by the cross-thread test;
+/// this mock is for the per-entry-point coverage, where spinning up a thread per
+/// assertion would buy nothing and cost determinism.
+///
+/// Each switch is one-shot and thread-local: the harness gives every test its
+/// own thread, and a switch consumed by the call under test cannot leak into
+/// the next one.
+pub struct MockCancelAwareBackend;
+
+impl MockCancelAwareBackend {
+    /// The next backend call fails.
+    pub fn fail_next_execution() {
+        FAIL_NEXT_CALL.with(|c| c.set(true));
+    }
+    /// The next `StatementBackend::fetch` fails.
+    pub fn fail_next_fetch() {
+        FAIL_NEXT_FETCH.with(|c| c.set(true));
+    }
+    /// The next backend call signals its own token before returning.
+    pub fn cancel_before_returning() {
+        CANCEL_WHILE_RUNNING.with(|c| c.set(true));
+    }
+
+    /// Consume both call switches, applying the cancel to `token`. Returns
+    /// whether the call should fail.
+    fn take_call_outcome(token: &MockCancelToken) -> bool {
+        if CANCEL_WHILE_RUNNING.with(std::cell::Cell::take) {
+            token
+                .cancelled
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        FAIL_NEXT_CALL.with(std::cell::Cell::take)
+    }
+}
+
+/// The statement [`MockCancelAwareBackend`] produces: one row, so a test can
+/// reach `SQLFetch` at all, and a one-shot failure switch for it.
+#[derive(Debug, Default)]
+pub struct MockCancelAwareStatement {
+    rows_left: u8,
+}
+
+impl StatementBackend for MockCancelAwareStatement {
+    type Error = MockError;
+
+    fn column_count(&self) -> i16 {
+        1
+    }
+
+    fn fetch(&mut self) -> Result<crate::types::FetchResult, Self::Error> {
+        if FAIL_NEXT_FETCH.with(std::cell::Cell::take) {
+            return Err(MockError);
+        }
+        if self.rows_left == 0 {
+            return Ok(crate::types::FetchResult::NoData);
+        }
+        self.rows_left -= 1;
+        Ok(crate::types::FetchResult::Row)
+    }
+
+    fn get_data(
+        &mut self,
+        _col: u16,
+        _target_type: crate::types::CDataType,
+    ) -> Result<Cow<'_, crate::types::ColumnValue>, Self::Error> {
+        if FAIL_NEXT_FETCH.with(std::cell::Cell::take) {
+            return Err(MockError);
+        }
+        Ok(Cow::Owned(crate::types::ColumnValue::I32(1)))
+    }
+}
+
+impl Backend for MockCancelAwareBackend {
+    type Connection = MockConnection;
+    type Statement = MockCancelAwareStatement;
+    type Error = MockError;
+    type CancelToken = MockCancelToken;
+
+    fn connect(_: &ConnectParams) -> Result<MockConnection, MockError> {
+        Ok(MockConnection)
+    }
+    fn disconnect(_: &mut MockConnection) -> Result<(), MockError> {
+        Ok(())
+    }
+    fn cancel_token(_conn: &Self::Connection) -> Self::CancelToken {
+        MockCancelToken::default()
+    }
+    fn cancel(token: &Self::CancelToken) -> Result<(), Self::Error> {
+        token
+            .cancelled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+    fn is_cancelled(token: &Self::CancelToken) -> bool {
+        token.cancelled.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    fn exec_direct(
+        _: &MockConnection,
+        cancel: &Self::CancelToken,
+        _: &str,
+    ) -> Result<MockCancelAwareStatement, MockError> {
+        if Self::take_call_outcome(cancel) {
+            return Err(MockError);
+        }
+        Ok(MockCancelAwareStatement { rows_left: 1 })
+    }
+    fn prepare(
+        _: &MockConnection,
+        cancel: &Self::CancelToken,
+        _: &str,
+    ) -> Result<MockCancelAwareStatement, MockError> {
+        if Self::take_call_outcome(cancel) {
+            return Err(MockError);
+        }
+        Ok(MockCancelAwareStatement { rows_left: 1 })
+    }
+    fn execute(
+        _: &MockConnection,
+        cancel: &Self::CancelToken,
+        _: &mut MockCancelAwareStatement,
+        _: &[crate::types::ColumnValue],
+    ) -> Result<crate::types::ExecuteOutcome, MockError> {
+        if Self::take_call_outcome(cancel) {
+            return Err(MockError);
+        }
+        Ok(crate::types::ExecuteOutcome::default())
+    }
+    fn get_info(_: &MockConnection, _: crate::types::InfoType) -> Result<InfoValue, MockError> {
+        Err(MockError)
+    }
+    fn get_functions() -> Cow<'static, [crate::function_id::FunctionId]> {
+        Cow::Borrowed(&[])
+    }
+    fn get_type_info(_conn: &Self::Connection) -> Cow<'static, [TypeInfoRow]> {
+        Cow::Borrowed(&[])
+    }
+    fn tables(
+        _: &MockConnection,
+        cancel: &Self::CancelToken,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: &[String],
+    ) -> Result<Vec<TableRow>, MockError> {
+        if Self::take_call_outcome(cancel) {
+            return Err(MockError);
+        }
+        Ok(Vec::new())
+    }
+    fn columns(
+        _: &MockConnection,
+        cancel: &Self::CancelToken,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+    ) -> Result<Vec<ColumnRow>, MockError> {
+        if Self::take_call_outcome(cancel) {
+            return Err(MockError);
+        }
+        Ok(Vec::new())
+    }
+
+    fn supports_catalogs(_conn: &Self::Connection) -> bool {
+        false
+    }
+    fn supports_schemas(_conn: &Self::Connection) -> bool {
+        false
+    }
+    fn alter_table_support(_conn: &Self::Connection) -> u32 {
+        0
+    }
+    fn outer_join_capabilities(_conn: &Self::Connection) -> u32 {
+        0
+    }
+    fn default_txn_isolation(_conn: &Self::Connection) -> u32 {
+        0
+    }
+    fn txn_isolation_options(_conn: &Self::Connection) -> u32 {
+        0
+    }
+
+    minimal_capability_decls!();
+}
