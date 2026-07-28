@@ -45,6 +45,23 @@ pub(crate) fn reclassify_cancelled<B: Backend, T, E: Into<OdbcError>>(
     }
 }
 
+/// [`reclassify_cancelled`] for a caller that may not have a token.
+///
+/// The cursor-consuming entry points — `SQLFetch`, `SQLGetData` and their
+/// neighbours — read their token from the registry rather than minting one, and
+/// `None` there means no backend call has run on this statement yet. Nothing
+/// could have been cancelled in that case, so the error passes through with its
+/// own SQLSTATE.
+pub(crate) fn reclassify_cancelled_opt<B: Backend, T, E: Into<OdbcError>>(
+    result: Result<T, E>,
+    cancel: Option<&B::CancelToken>,
+) -> Result<T, OdbcError> {
+    match cancel {
+        Some(cancel) => reclassify_cancelled::<B, _, _>(result, cancel),
+        None => result.map_err(Into::into),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

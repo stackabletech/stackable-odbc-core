@@ -56,6 +56,13 @@ Everything a driver has to change for the catalog rework, in one place.
 
 ### Added
 
+- `SQLFetch`, `SQLFetchScroll` and `SQLGetData` now return `HY008` on a
+  cross-thread cancel. These consume a cursor an earlier execution opened, so
+  they read the token *that* execution minted rather than minting one.
+  `StatementBackend` is unchanged and stays independent of
+  `Backend::CancelToken`: core resolves the token from the handle registry, the
+  same way `SQLCancel` does.
+
 - The ten catalog functions now return `HY008` when a `SQLCancel` from another
   thread interrupted them and the backend implements `Backend::is_cancelled`,
   on the same terms as the execution functions. `SQLStatistics` and

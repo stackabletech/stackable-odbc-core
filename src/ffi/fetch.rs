@@ -5,6 +5,7 @@ use std::ffi::c_void;
 use odbc_sys::FetchOrientation;
 
 use crate::backend::{Backend, StatementBackend};
+use crate::cancel::reclassify_cancelled_opt;
 use crate::column_value::{write_column_value, write_column_value_at};
 use crate::errors::OdbcError;
 use crate::handles::{GetDataCursor, StatementHandle};
@@ -163,6 +164,18 @@ pub unsafe fn sql_fetch<B: Backend>(statement_handle: *mut c_void) -> SqlReturn 
             // Read before the mutable borrow of `stmt.statement` below.
             let cursor_open = stmt.cursor_open;
 
+            // `SQLFetch` consumes the cursor a previous execution opened, so it
+            // observes *that* execution's token rather than minting one — the
+            // token the backend was handed when it produced this statement.
+            // `None` means no backend call has run here, so nothing could have
+            // been cancelled. Resolved off the registry, which needs no borrow
+            // of `stmt`.
+            let cancel_token = crate::handles::current_cancel_token(statement_handle);
+            let cancel = cancel_token
+                .as_ref()
+                .map(crate::handles::cancel_as::<B>)
+                .transpose()?;
+
             // `SQL_ATTR_ROW_BIND_OFFSET_PTR` points at an `SQLULEN` the
             // application may change between fetches; the spec has the driver
             // add that value to every bound address rather than fold it into the
@@ -204,7 +217,7 @@ pub unsafe fn sql_fetch<B: Backend>(statement_handle: *mut c_void) -> SqlReturn 
             // through cannot leave a stale position behind.
             stmt.get_data_cursor = None;
 
-            match statement.fetch()? {
+            match reclassify_cancelled_opt::<B, _, _>(statement.fetch(), cancel)? {
                 FetchResult::Row => {
                     // Populate bound columns.
                     // Collect binding info first to avoid borrowing stmt mutably
@@ -237,7 +250,10 @@ pub unsafe fn sql_fetch<B: Backend>(statement_handle: *mut c_void) -> SqlReturn 
                     let mut truncated = false;
                     if let Some(ref mut statement) = stmt.statement {
                         for (col, c_type, target_ptr, buf_len, ind_ptr) in &binding_info {
-                            let value = statement.get_data(*col, *c_type)?;
+                            let value = reclassify_cancelled_opt::<B, _, _>(
+                                statement.get_data(*col, *c_type),
+                                cancel,
+                            )?;
                             // Spec 22002: if data is NULL and no indicator variable was supplied, return error.
                             if matches!(*value, ColumnValue::Null) && ind_ptr.is_null() {
                                 return Err(OdbcError::general(
@@ -546,6 +562,15 @@ pub unsafe fn sql_get_data<B: Backend>(
                     SqlState::invalid_cursor_state(),
                 ));
             }
+            // As in `SQLFetch`: this consumes a cursor an earlier execution
+            // opened, so it observes that execution's token rather than minting
+            // one. Resolved before the mutable borrow below, off the registry.
+            let cancel_token = crate::handles::current_cancel_token(statement_handle);
+            let cancel = cancel_token
+                .as_ref()
+                .map(crate::handles::cancel_as::<B>)
+                .transpose()?;
+
             // `cursor_open` implies `statement.is_some()`; this arm keeps the
             // invariant honest rather than unwrapping.
             let Some(ref mut statement) = stmt.statement else {
@@ -599,7 +624,10 @@ pub unsafe fn sql_get_data<B: Backend>(
                 return Ok(SqlReturn::NO_DATA);
             }
 
-            let value = statement.get_data(col_or_param_num, c_type)?;
+            let value = reclassify_cancelled_opt::<B, _, _>(
+                statement.get_data(col_or_param_num, c_type),
+                cancel,
+            )?;
             // Spec 22002: data is NULL but no indicator variable was supplied.
             if matches!(*value, ColumnValue::Null) && str_len_or_ind_ptr.is_null() {
                 return Err(OdbcError::general(
@@ -641,11 +669,119 @@ mod tests {
     use super::*;
     use crate::ffi::handle::{sql_alloc_handle, sql_free_handle};
     use crate::test_utils::{
-        LONG_BYTES, LONG_TEXT, MockBackend, MockLongDataBackend, alloc_env_conn_stmt,
-        cleanup_env_conn_stmt, with_handle,
+        LONG_BYTES, LONG_TEXT, MockBackend, MockCancelAwareBackend, MockLongDataBackend,
+        alloc_env_conn_stmt, cleanup_env_conn_stmt, with_handle,
     };
     use crate::types::CDataType;
     use odbc_sys::HandleType;
+
+    /// Env + connection + statement for an arbitrary backend, connected and
+    /// executed so a cursor is open and the execution's cancel token exists.
+    ///
+    /// `fetch.rs`'s other helpers are `MockBackend`- or
+    /// `MockLongDataBackend`-specific, and neither can be made to fail a fetch
+    /// on demand.
+    unsafe fn executed_stmt_for<B: Backend>() -> (*mut c_void, *mut c_void, *mut c_void) {
+        unsafe {
+            let mut env: *mut c_void = std::ptr::null_mut();
+            let _ = sql_alloc_handle::<B>(HandleType::Env as i16, std::ptr::null_mut(), &mut env);
+            let mut conn: *mut c_void = std::ptr::null_mut();
+            let _ = sql_alloc_handle::<B>(HandleType::Dbc as i16, env, &mut conn);
+            let wide: Vec<u16> = "Host=localhost;Database=test".encode_utf16().collect();
+            assert_eq!(
+                crate::ffi::connect::sql_driver_connect_w::<B>(
+                    conn,
+                    std::ptr::null_mut(),
+                    wide.as_ptr(),
+                    i16::try_from(wide.len()).expect("connection string fits in i16"),
+                    std::ptr::null_mut(),
+                    0,
+                    std::ptr::null_mut(),
+                    0,
+                ),
+                SqlReturn::SUCCESS,
+            );
+            let mut stmt: *mut c_void = std::ptr::null_mut();
+            let _ = sql_alloc_handle::<B>(HandleType::Stmt as i16, conn, &mut stmt);
+
+            let sql: Vec<u16> = "SELECT 1".encode_utf16().collect();
+            assert_eq!(
+                crate::ffi::execute::sql_exec_direct_w::<B>(
+                    stmt,
+                    sql.as_ptr(),
+                    i32::try_from(sql.len()).expect("SQL fits in i32"),
+                ),
+                SqlReturn::SUCCESS,
+                "precondition: a cursor is open and a cancel token exists",
+            );
+            (env, conn, stmt)
+        }
+    }
+
+    unsafe fn cleanup_stmt_for<B: Backend>(env: *mut c_void, conn: *mut c_void, stmt: *mut c_void) {
+        unsafe {
+            let _ = sql_free_handle::<B>(HandleType::Stmt as i16, stmt);
+            let _ = crate::ffi::connect::sql_disconnect::<B>(conn);
+            let _ = sql_free_handle::<B>(HandleType::Dbc as i16, conn);
+            let _ = sql_free_handle::<B>(HandleType::Env as i16, env);
+        }
+    }
+
+    /// Spec, `SQLFetch` `HY008` — the row carries no `(DM)` marker, and its
+    /// second clause is exactly this crate's cross-thread cancel: "the
+    /// `SQLFetch` function was called, and before it completed execution,
+    /// `SQLCancel` … was called on the `StatementHandle` from a different
+    /// thread in a multithread application."
+    ///
+    /// `SQLFetch` has no token of its own — `StatementBackend::fetch` takes
+    /// none — so this also pins that core reads the token the *producing*
+    /// execution minted.
+    #[test]
+    fn a_cancelled_fetch_reports_hy008() {
+        unsafe {
+            let (env, conn, stmt) = executed_stmt_for::<MockCancelAwareBackend>();
+
+            MockCancelAwareBackend::fail_next_fetch();
+            assert_eq!(
+                crate::ffi::cursor::sql_cancel::<MockCancelAwareBackend>(stmt),
+                SqlReturn::SUCCESS,
+            );
+
+            let ret = sql_fetch::<MockCancelAwareBackend>(stmt);
+            assert_eq!(ret, SqlReturn::ERROR);
+            with_handle::<MockCancelAwareBackend, StatementHandle<MockCancelAwareBackend>, _>(
+                stmt,
+                |h| {
+                    let rec = h.diagnostics.get(0).expect("record 1 exists");
+                    assert_eq!(rec.sqlstate.as_str(), "HY008");
+                },
+            );
+            cleanup_stmt_for::<MockCancelAwareBackend>(env, conn, stmt);
+        }
+    }
+
+    /// The other half: a fetch that fails without a cancel keeps the backend's
+    /// own SQLSTATE. Reclassifying unconditionally would relabel every fetch
+    /// error in the crate as `HY008`.
+    #[test]
+    fn an_uncancelled_fetch_failure_keeps_its_own_state() {
+        unsafe {
+            let (env, conn, stmt) = executed_stmt_for::<MockCancelAwareBackend>();
+
+            MockCancelAwareBackend::fail_next_fetch();
+
+            let ret = sql_fetch::<MockCancelAwareBackend>(stmt);
+            assert_eq!(ret, SqlReturn::ERROR);
+            with_handle::<MockCancelAwareBackend, StatementHandle<MockCancelAwareBackend>, _>(
+                stmt,
+                |h| {
+                    let rec = h.diagnostics.get(0).expect("record 1 exists");
+                    assert_ne!(rec.sqlstate.as_str(), "HY008");
+                },
+            );
+            cleanup_stmt_for::<MockCancelAwareBackend>(env, conn, stmt);
+        }
+    }
 
     /// Env + connection + statement for [`MockLongDataBackend`], executed and
     /// positioned on the first row, so `SQLGetData` has something to read.

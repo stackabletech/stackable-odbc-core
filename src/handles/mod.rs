@@ -724,13 +724,6 @@ pub(crate) fn mint_cancel_token<B: Backend>(
 ///
 /// `None` means no backend call has run on this statement yet, which is
 /// indistinguishable from "nothing to cancel" and is handled as such.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "called by the cursor-consuming ffi/ entry points once they are wired up"
-    )
-)]
 pub(crate) fn current_cancel_token(
     stmt_token: *mut c_void,
 ) -> Option<StdArc<dyn Any + Send + Sync>> {
