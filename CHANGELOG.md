@@ -153,8 +153,30 @@ markers go away and this section becomes the initial-release notes.
   the ODBC specification. `SQL_KEYWORDS` is defined as the data source's own
   keywords *excluding* these, so the list and the subtraction now live in core
   once instead of being transcribed into each driver.
+- `SQLTables` now serves the `SQL_ALL_CATALOGS`, `SQL_ALL_SCHEMAS` and
+  `SQL_ALL_TABLE_TYPES` enumerations, which were previously unimplemented and
+  are what a BI tool's navigator uses to browse a data source. Core builds these
+  result sets itself, with all columns except the enumerated one set to NULL as
+  the spec requires, and `Backend::tables` is not called for them. All three
+  sentinels are the string `"%"`, so an enumeration is recognised by which
+  argument carries it while the others are empty strings —
+  `SQLTables("%", "%", "%")` remains an ordinary match-everything query.
+- `Backend::catalogs` and `Backend::schemas` (both defaulted to
+  `NotImplemented`), supplying the names for the first two enumerations. Core
+  calls them only when `supports_catalogs` / `supports_schemas` already returned
+  `true`; when either is `false` it returns an empty result set without asking
+  the backend.
+- `types::SQL_ALL_CATALOGS`, `types::SQL_ALL_SCHEMAS` and
+  `types::SQL_ALL_TABLE_TYPES`.
 
 ### Changed
+
+- **Breaking:** `Backend::table_types` is a new **required** method, returning
+  the table types the data source has (e.g. `["TABLE", "VIEW"]`) for
+  `SQLTables`' `SQL_ALL_TABLE_TYPES` enumeration. It has no safe default: an
+  empty list is a claim that the data source has no table types, and unlike
+  catalogs and schemas there is no capability method to derive it from.
+  Migration: add it to your `impl Backend`, in upper case.
 
 - **Breaking:** `Backend::tables` now returns `Vec<TableRow>` instead of
   `Self::Statement`. Core converts the rows to the spec's column layout, sorts

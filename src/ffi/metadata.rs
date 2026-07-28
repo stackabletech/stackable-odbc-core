@@ -4,6 +4,7 @@
 //! SQLProceduresW, SQLProcedureColumnsW, SQLColumnPrivilegesW,
 //! SQLTablePrivilegesW.
 
+use std::borrow::Cow;
 use std::ffi::c_void;
 
 use crate::backend::{Backend, StatementBackend};
@@ -16,10 +17,10 @@ use crate::types::col_attr::{ColAttrValue, get_column_attribute};
 use crate::types::{
     CatalogResultColumnWidths, ColumnDescriptor, ColumnRow, ColumnValue, ColumnsResultCol, Desc,
     ForeignKeyRow, ForeignKeysResultCol, Nullable, PRIVILEGE_LEN, PrimaryKeyRow,
-    PrimaryKeysResultCol, SQL_INDEX_UNIQUE, SpecialColumnRow, SqlReturn, SqlState, StatisticsRow,
-    TableRow, TablesResultCol, ULen, YES_NO_LEN, character, identifier, identifier_type_from_raw,
-    integer, nullable_from_raw, scope_from_raw, smallint, special_columns_columns,
-    statistics_columns,
+    PrimaryKeysResultCol, SQL_ALL_CATALOGS, SQL_ALL_SCHEMAS, SQL_ALL_TABLE_TYPES, SQL_INDEX_UNIQUE,
+    SpecialColumnRow, SqlReturn, SqlState, StatisticsRow, TableRow, TablesResultCol, ULen,
+    YES_NO_LEN, character, identifier, identifier_type_from_raw, integer, nullable_from_raw,
+    scope_from_raw, smallint, special_columns_columns, statistics_columns,
 };
 use crate::utf16::{utf16_to_string, write_utf16};
 
@@ -40,12 +41,67 @@ unsafe fn parse_filter_param(ptr: *const u16, len: i16) -> Result<Option<String>
     Ok(Some(s))
 }
 
+/// `SQLTables`' spec sort order — "ordered by TABLE_TYPE, TABLE_CAT,
+/// TABLE_SCHEM, and TABLE_NAME", as zero-based column indices.
+const TABLES_SORT_KEYS: [usize; 4] = [3, 0, 1, 2];
+
+/// Which `SQLTables` enumeration an argument combination selects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TableEnumeration {
+    /// `SQL_ALL_CATALOGS` — the list of catalogs.
+    Catalogs,
+    /// `SQL_ALL_SCHEMAS` — the list of schemas.
+    Schemas,
+    /// `SQL_ALL_TABLE_TYPES` — the list of table types.
+    TableTypes,
+}
+
+/// Classify `SQLTables`' four arguments as one of the three enumerations, or
+/// as an ordinary query.
+///
+/// All three `SQL_ALL_*` sentinels are the same string, `"%"`, so an
+/// enumeration is identified by which argument carries it **while the others
+/// are empty strings** — never by the `"%"` on its own. `SQLTables("%", "%",
+/// "%")` is an ordinary match-everything query, and a detector keyed on `"%"`
+/// alone would answer it with a catalog list.
+///
+/// A null argument (`None`) is not an empty string and does not satisfy the
+/// trigger: the spec spells the other arguments out as empty strings.
+fn table_enumeration(
+    catalog: &Option<String>,
+    schema: &Option<String>,
+    table: &Option<String>,
+    table_type: &Option<String>,
+) -> Option<TableEnumeration> {
+    let is_empty = |arg: &Option<String>| arg.as_deref() == Some("");
+    if catalog.as_deref() == Some(SQL_ALL_CATALOGS) && is_empty(schema) && is_empty(table) {
+        Some(TableEnumeration::Catalogs)
+    } else if schema.as_deref() == Some(SQL_ALL_SCHEMAS) && is_empty(catalog) && is_empty(table) {
+        Some(TableEnumeration::Schemas)
+    } else if table_type.as_deref() == Some(SQL_ALL_TABLE_TYPES)
+        && is_empty(catalog)
+        && is_empty(schema)
+        && is_empty(table)
+    {
+        Some(TableEnumeration::TableTypes)
+    } else {
+        None
+    }
+}
+
 /// Generic implementation of SQLTablesW.
 ///
 /// Spec: <https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqltables-function>
 ///
 /// Queries the backend for table metadata and stores the result set in the
 /// statement handle.
+///
+/// Three argument combinations are *enumerations* rather than queries — a
+/// `"%"` in `catalog_name`, `schema_name` or `table_type` while every other
+/// name argument is the empty string. Core serves those itself from
+/// [`Backend::catalogs`], [`Backend::schemas`] and [`Backend::table_types`],
+/// with every column but the enumerated one NULL. `Backend::tables` is not
+/// called for them.
 ///
 /// # Parameters
 ///
@@ -142,6 +198,69 @@ pub unsafe fn sql_tables_w<B: Backend>(
                 crate::handles::resolve_cancel_token::<B>(statement_handle, connection);
             let cancel = crate::handles::cancel_as::<B>(&cancel_token)?;
 
+            // Enumeration detection runs on the *raw* arguments, before any
+            // normalisation: a normalised `"%"` would no longer be the
+            // sentinel, and the enumeration would silently become an ordinary
+            // query. Anything that rewrites these arguments must stay behind
+            // this block.
+            if let Some(kind) = table_enumeration(&catalog, &schema, &table, &tt) {
+                tracing::debug!("SQLTablesW: serving the {:?} enumeration", kind);
+                let names: Vec<String> = match kind {
+                    TableEnumeration::Catalogs => {
+                        if B::supports_catalogs(connection) {
+                            B::catalogs(connection, cancel).into_odbc()?
+                        } else {
+                            // Spec-correct without asking the backend: a data
+                            // source with no catalogs has no catalogs to list.
+                            Vec::new()
+                        }
+                    }
+                    TableEnumeration::Schemas => {
+                        if B::supports_schemas(connection) {
+                            B::schemas(connection, cancel).into_odbc()?
+                        } else {
+                            Vec::new()
+                        }
+                    }
+                    TableEnumeration::TableTypes => B::table_types(connection)
+                        .into_iter()
+                        .map(Cow::into_owned)
+                        .collect(),
+                };
+
+                // Spec: "All columns except the <enumerated> column contain
+                // NULLs."
+                let rows: Vec<TableRow> = names
+                    .into_iter()
+                    .map(|name| match kind {
+                        TableEnumeration::Catalogs => TableRow {
+                            catalog: Some(name),
+                            ..TableRow::default()
+                        },
+                        TableEnumeration::Schemas => TableRow {
+                            schema: Some(name),
+                            ..TableRow::default()
+                        },
+                        TableEnumeration::TableTypes => TableRow {
+                            table_type: Some(name),
+                            ..TableRow::default()
+                        },
+                    })
+                    .collect();
+                let mut values: Vec<Vec<ColumnValue>> =
+                    rows.iter().map(TableRow::to_values).collect();
+                crate::catalog_sort::sort_rows(
+                    &mut values,
+                    &TABLES_SORT_KEYS,
+                    B::null_collation(connection),
+                );
+                stmt.set_result_set(StatementData::Synthetic(SyntheticStatement::new(
+                    TablesResultCol::all_descriptors(&B::catalog_result_column_widths()),
+                    values,
+                )));
+                return Ok(SqlReturn::SUCCESS);
+            }
+
             let rows = B::tables(
                 connection,
                 cancel,
@@ -153,11 +272,9 @@ pub unsafe fn sql_tables_w<B: Backend>(
             .into_odbc()?;
 
             let mut values: Vec<Vec<ColumnValue>> = rows.iter().map(TableRow::to_values).collect();
-            // Spec: ordered by TABLE_TYPE, TABLE_CAT, TABLE_SCHEM, TABLE_NAME
-            // — zero-based column indices 3, 0, 1, 2.
             crate::catalog_sort::sort_rows(
                 &mut values,
-                &[3, 0, 1, 2],
+                &TABLES_SORT_KEYS,
                 B::null_collation(connection),
             );
             stmt.set_result_set(StatementData::Synthetic(SyntheticStatement::new(
@@ -1654,11 +1771,12 @@ mod tests {
     use crate::ffi::info::type_info_columns;
     use crate::handles::ConnectionHandle;
     use crate::test_utils::{
-        MockBackend, MockCatalogBackend, MockConnection, alloc_env_conn_stmt, with_handle,
+        MockBackend, MockCatalogBackend, MockConnection, MockNoCatalogBackend, alloc_env_conn_stmt,
+        with_handle,
     };
     use crate::types::{
         CDataType, ColumnsResultCol, Desc, ForeignKeysResultCol, Nullable, PrimaryKeysResultCol,
-        SQL_BEST_ROWID, SQL_INDEX_ALL, SQL_SCOPE_CURROW, SqlDataType,
+        SQL_BEST_ROWID, SQL_INDEX_ALL, SQL_NTS, SQL_NULL_DATA, SQL_SCOPE_CURROW, SqlDataType,
     };
     use odbc_sys::HandleType;
 
@@ -1885,6 +2003,274 @@ mod tests {
         out
     }
 
+    /// A UTF-16 argument for a `*W` catalog function, null-terminated so it
+    /// can be passed with [`SQL_NTS_I16`]. The terminator is not optional: an
+    /// empty `Vec<u16>`'s `as_ptr()` is dangling, and scanning it for a
+    /// terminator would be undefined behaviour.
+    fn utf16_of(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    /// [`SQL_NTS`] at the width of these functions' length parameters.
+    /// `i16::try_from` is not usable in a `const` initialiser and `-3` cannot
+    /// truncate.
+    const SQL_NTS_I16: i16 = SQL_NTS as i16;
+
+    /// The `SQLTables` result columns, in spec order.
+    const TABLE_CAT_COLUMN: u16 = 1;
+    const TABLE_SCHEM_COLUMN: u16 = 2;
+    const TABLE_NAME_COLUMN: u16 = 3;
+    const TABLE_TYPE_COLUMN: u16 = 4;
+    const REMARKS_COLUMN: u16 = 5;
+    const ALL_TABLES_COLUMNS: [u16; 5] = [
+        TABLE_CAT_COLUMN,
+        TABLE_SCHEM_COLUMN,
+        TABLE_NAME_COLUMN,
+        TABLE_TYPE_COLUMN,
+        REMARKS_COLUMN,
+    ];
+
+    /// Fetch every row of the statement's open cursor, collecting
+    /// `(value, indicator)` for each of `columns`.
+    ///
+    /// One pass over the cursor, unlike `fetch_column_as_strings`: the cursor
+    /// is forward-only, so a test needing two columns cannot simply call that
+    /// helper twice — the second call would see `SQL_NO_DATA` immediately and
+    /// assert over an empty vector.
+    unsafe fn fetch_columns_with_indicators<B: Backend>(
+        stmt: *mut c_void,
+        columns: &[u16],
+    ) -> Vec<Vec<(String, isize)>> {
+        let mut out: Vec<Vec<(String, isize)>> = Vec::new();
+        unsafe {
+            loop {
+                let fetched = crate::ffi::fetch::sql_fetch::<B>(stmt);
+                if fetched == SqlReturn::NO_DATA {
+                    break;
+                }
+                assert_eq!(fetched, SqlReturn::SUCCESS, "SQLFetch failed");
+                let mut row = Vec::with_capacity(columns.len());
+                for &column in columns {
+                    let mut buf = [0u8; 128];
+                    let mut ind: isize = 0;
+                    let ret = crate::ffi::fetch::sql_get_data::<B>(
+                        stmt,
+                        column,
+                        CDataType::Char as i16,
+                        buf.as_mut_ptr().cast::<c_void>(),
+                        buf.len() as isize,
+                        &mut ind,
+                    );
+                    assert_eq!(ret, SqlReturn::SUCCESS, "SQLGetData failed");
+                    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+                    row.push((String::from_utf8_lossy(&buf[..end]).into_owned(), ind));
+                }
+                out.push(row);
+                assert!(out.len() <= 100, "fetch loop does not terminate");
+            }
+        }
+        out
+    }
+
+    /// Drain a `SQLTables` enumeration result set: assert that every column
+    /// except `populated` is genuinely NULL — the spec says those columns
+    /// "contain NULLs", and an empty string would pass a string comparison
+    /// while being wrong — and return the populated column's values in row
+    /// order.
+    unsafe fn enumeration_values<B: Backend>(stmt: *mut c_void, populated: u16) -> Vec<String> {
+        let rows = unsafe { fetch_columns_with_indicators::<B>(stmt, &ALL_TABLES_COLUMNS) };
+        for row in &rows {
+            for (column, (value, indicator)) in ALL_TABLES_COLUMNS.iter().zip(row) {
+                if *column == populated {
+                    continue;
+                }
+                assert_eq!(
+                    *indicator, SQL_NULL_DATA,
+                    "column {column} must be NULL, got {value:?}"
+                );
+            }
+        }
+        let index = usize::from(populated - 1);
+        rows.into_iter().map(|row| row[index].0.clone()).collect()
+    }
+
+    /// Spec: "If CatalogName is SQL_ALL_CATALOGS and SchemaName and TableName
+    /// are empty strings, the result set contains a list of valid catalogs for
+    /// the data source. (All columns except the TABLE_CAT column contain
+    /// NULLs.)"
+    #[test]
+    fn all_catalogs_enumeration_returns_catalog_names_only() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCatalogBackend>();
+            let catalog = utf16_of(SQL_ALL_CATALOGS);
+            let empty = utf16_of("");
+            let ret = sql_tables_w::<MockCatalogBackend>(
+                stmt,
+                catalog.as_ptr(),
+                SQL_NTS_I16,
+                empty.as_ptr(),
+                SQL_NTS_I16,
+                empty.as_ptr(),
+                SQL_NTS_I16,
+                std::ptr::null(),
+                0,
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+            assert_eq!(
+                enumeration_values::<MockCatalogBackend>(stmt, TABLE_CAT_COLUMN),
+                vec!["cat_a", "cat_b"],
+            );
+            cleanup_for::<MockCatalogBackend>(env, conn, stmt);
+        }
+    }
+
+    /// Spec: "If SchemaName is SQL_ALL_SCHEMAS and CatalogName and TableName
+    /// are empty strings, the result set contains a list of valid schemas for
+    /// the data source. (All columns except the TABLE_SCHEM column contain
+    /// NULLs.)"
+    #[test]
+    fn all_schemas_enumeration_returns_schema_names_only() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCatalogBackend>();
+            let schema = utf16_of(SQL_ALL_SCHEMAS);
+            let empty = utf16_of("");
+            let ret = sql_tables_w::<MockCatalogBackend>(
+                stmt,
+                empty.as_ptr(),
+                SQL_NTS_I16,
+                schema.as_ptr(),
+                SQL_NTS_I16,
+                empty.as_ptr(),
+                SQL_NTS_I16,
+                std::ptr::null(),
+                0,
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+            assert_eq!(
+                enumeration_values::<MockCatalogBackend>(stmt, TABLE_SCHEM_COLUMN),
+                vec!["sch_a", "sch_b"],
+            );
+            cleanup_for::<MockCatalogBackend>(env, conn, stmt);
+        }
+    }
+
+    /// Spec: "If TableType is SQL_ALL_TABLE_TYPES and CatalogName, SchemaName,
+    /// and TableName are empty strings, the result set contains a list of
+    /// valid table types for the data source. (All columns except the
+    /// TABLE_TYPE column contain NULLs.)"
+    #[test]
+    fn all_table_types_enumeration_returns_table_types_only() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCatalogBackend>();
+            let table_type = utf16_of(SQL_ALL_TABLE_TYPES);
+            let empty = utf16_of("");
+            let ret = sql_tables_w::<MockCatalogBackend>(
+                stmt,
+                empty.as_ptr(),
+                SQL_NTS_I16,
+                empty.as_ptr(),
+                SQL_NTS_I16,
+                empty.as_ptr(),
+                SQL_NTS_I16,
+                table_type.as_ptr(),
+                SQL_NTS_I16,
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+            assert_eq!(
+                enumeration_values::<MockCatalogBackend>(stmt, TABLE_TYPE_COLUMN),
+                vec!["TABLE", "VIEW"],
+            );
+            cleanup_for::<MockCatalogBackend>(env, conn, stmt);
+        }
+    }
+
+    /// The regression this pins: all three `SQL_ALL_*` sentinels are the
+    /// literal string `"%"`, so a detector keyed on `"%"` alone would replace
+    /// an ordinary match-everything query with a catalog list.
+    #[test]
+    fn a_pattern_in_every_argument_is_not_an_enumeration() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCatalogBackend>();
+            let pattern = utf16_of("%");
+            let ret = sql_tables_w::<MockCatalogBackend>(
+                stmt,
+                pattern.as_ptr(),
+                SQL_NTS_I16,
+                pattern.as_ptr(),
+                SQL_NTS_I16,
+                pattern.as_ptr(),
+                SQL_NTS_I16,
+                std::ptr::null(),
+                0,
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+            assert_eq!(
+                fetch_column_as_strings::<MockCatalogBackend>(stmt, TABLE_NAME_COLUMN),
+                vec!["b_table", "z_table", "a_view"],
+                "must be the ordinary table list, not a catalog enumeration"
+            );
+            cleanup_for::<MockCatalogBackend>(env, conn, stmt);
+        }
+    }
+
+    /// `supports_catalogs` is a required capability method, so core answers an
+    /// `SQL_ALL_CATALOGS` enumeration with an empty result set for a backend
+    /// that has no catalogs, without calling the backend at all —
+    /// `MockNoCatalogBackend::tables` returns an error, so reaching the
+    /// ordinary path would surface as `SQL_ERROR`.
+    #[test]
+    fn all_catalogs_is_empty_when_the_backend_has_no_catalogs() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockNoCatalogBackend>();
+            let catalog = utf16_of(SQL_ALL_CATALOGS);
+            let empty = utf16_of("");
+            let ret = sql_tables_w::<MockNoCatalogBackend>(
+                stmt,
+                catalog.as_ptr(),
+                SQL_NTS_I16,
+                empty.as_ptr(),
+                SQL_NTS_I16,
+                empty.as_ptr(),
+                SQL_NTS_I16,
+                std::ptr::null(),
+                0,
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+            assert!(
+                fetch_column_as_strings::<MockNoCatalogBackend>(stmt, TABLE_CAT_COLUMN).is_empty()
+            );
+            cleanup_for::<MockNoCatalogBackend>(env, conn, stmt);
+        }
+    }
+
+    /// The schema half of the check above: `supports_schemas` is likewise
+    /// required, so a schema enumeration is empty without a backend call.
+    #[test]
+    fn all_schemas_is_empty_when_the_backend_has_no_schemas() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockNoCatalogBackend>();
+            let schema = utf16_of(SQL_ALL_SCHEMAS);
+            let empty = utf16_of("");
+            let ret = sql_tables_w::<MockNoCatalogBackend>(
+                stmt,
+                empty.as_ptr(),
+                SQL_NTS_I16,
+                schema.as_ptr(),
+                SQL_NTS_I16,
+                empty.as_ptr(),
+                SQL_NTS_I16,
+                std::ptr::null(),
+                0,
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+            assert!(
+                fetch_column_as_strings::<MockNoCatalogBackend>(stmt, TABLE_SCHEM_COLUMN)
+                    .is_empty()
+            );
+            cleanup_for::<MockNoCatalogBackend>(env, conn, stmt);
+        }
+    }
+
     /// Spec: "SQLTables returns the results as a standard result set, ordered
     /// by TABLE_TYPE, TABLE_CAT, TABLE_SCHEM, and TABLE_NAME." TABLE_TYPE
     /// dominates, so a VIEW sorts after every TABLE regardless of name.
@@ -1905,7 +2291,6 @@ mod tests {
             );
             assert_eq!(ret, SqlReturn::SUCCESS);
 
-            const TABLE_NAME_COLUMN: u16 = 3;
             let names = fetch_column_as_strings::<MockCatalogBackend>(stmt, TABLE_NAME_COLUMN);
             assert_eq!(
                 names,

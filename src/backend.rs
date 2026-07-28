@@ -265,6 +265,59 @@ pub trait Backend: Sized + Send + Sync + 'static {
         table_type: Option<&str>,
     ) -> Result<Vec<TableRow>, Self::Error>;
 
+    /// The table types this data source has, for `SQLTables`'
+    /// `SQL_ALL_TABLE_TYPES` enumeration — e.g. `["TABLE", "VIEW"]`.
+    ///
+    /// Required, not defaulted, for the reason in AGENTS.md: an empty list is
+    /// an *answer* ("this data source has no table types"), not "unknown", and
+    /// there is no `supports_*` method to derive it from the way
+    /// `SQL_ALL_CATALOGS` derives from [`Backend::supports_catalogs`]. Any
+    /// value core invented here would be a claim about a data source it knows
+    /// nothing about.
+    ///
+    /// Values should be upper case: the spec has applications specify table
+    /// types in upper case and the driver map them to whatever the data source
+    /// needs.
+    ///
+    /// Takes no `cancel` token because it is a static declaration rather than
+    /// a query — unlike [`Backend::catalogs`] and [`Backend::schemas`].
+    fn table_types(conn: &Self::Connection) -> Vec<Cow<'static, str>>;
+
+    /// The catalog names on this data source, for `SQLTables`'
+    /// `SQL_ALL_CATALOGS` enumeration.
+    ///
+    /// Runtime data rather than a static capability, so this takes `cancel`
+    /// like every other backend call. Core only calls it when
+    /// [`Backend::supports_catalogs`] already returned `true` — a backend that
+    /// says it has no catalogs gets an empty result set without being asked —
+    /// so a backend that claims catalogs and leaves this defaulted is a driver
+    /// bug, which core reports as `HYC00` rather than silently returning
+    /// nothing.
+    ///
+    /// **Return the names in any order.** Core sorts the result set.
+    fn catalogs(
+        _conn: &Self::Connection,
+        _cancel: &Self::CancelToken,
+    ) -> Result<Vec<String>, Self::Error> {
+        Err(OdbcError::NotImplemented {
+            feature: "catalogs".into(),
+        }
+        .into())
+    }
+
+    /// The schema names on this data source, for `SQLTables`'
+    /// `SQL_ALL_SCHEMAS` enumeration. See [`Backend::catalogs`]; this is gated
+    /// on [`Backend::supports_schemas`] the same way.
+    fn schemas(
+        _conn: &Self::Connection,
+        _cancel: &Self::CancelToken,
+    ) -> Result<Vec<String>, Self::Error> {
+        Err(OdbcError::NotImplemented {
+            feature: "schemas".into(),
+        }
+        .into())
+    }
+
     /// Returns the rows describing columns matching the given filter criteria.
     ///
     /// Called by `SQLColumnsW`. All filter parameters are optional; `None` means no filter

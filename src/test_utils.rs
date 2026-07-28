@@ -157,8 +157,8 @@ impl StatementBackend for MockStatement {
     type Error = MockError;
 }
 
-/// The eight required capability declarations, for a mock that stands for a
-/// minimal data source and whose test does not care about them.
+/// The required capability declarations, for a mock that stands for a minimal
+/// data source and whose test does not care about them.
 ///
 /// Every value is the *least* capable one the spec defines, which for four of
 /// them happens to be `0`. That is deliberate: `0` is a real claim for these
@@ -168,15 +168,26 @@ impl StatementBackend for MockStatement {
 ///
 /// `minimal_capability_decls!(keywords = <slice>)` keeps every other value
 /// minimal but states a reserved-word list, for the mocks that exist only to
-/// test the `SQL_KEYWORDS` subtraction.
+/// test the `SQL_KEYWORDS` subtraction; `table_types = <slice>` does the same
+/// for the mock that exercises `SQLTables`' `SQL_ALL_TABLE_TYPES` enumeration.
 macro_rules! minimal_capability_decls {
     () => {
-        minimal_capability_decls!(keywords = &[]);
+        minimal_capability_decls!(keywords = &[], table_types = &[]);
     };
     (keywords = $keywords:expr) => {
+        minimal_capability_decls!(keywords = $keywords, table_types = &[]);
+    };
+    (table_types = $table_types:expr) => {
+        minimal_capability_decls!(keywords = &[], table_types = $table_types);
+    };
+    (keywords = $keywords:expr, table_types = $table_types:expr) => {
         fn keywords(_conn: &Self::Connection) -> Cow<'static, [Cow<'static, str>]> {
             let list: &'static [&'static str] = $keywords;
             Cow::Owned(list.iter().map(|s| Cow::Borrowed(*s)).collect())
+        }
+        fn table_types(_conn: &Self::Connection) -> Vec<Cow<'static, str>> {
+            let list: &'static [&'static str] = $table_types;
+            list.iter().map(|s| Cow::Borrowed(*s)).collect()
         }
         fn group_by(_conn: &Self::Connection) -> u16 {
             crate::types::SQL_GB_NOT_SUPPORTED
@@ -450,6 +461,9 @@ impl Backend for MockBackend {
             Cow::Borrowed("SELECT"),
             Cow::Borrowed("MOCK_ATTACH"),
         ])
+    }
+    fn table_types(_conn: &Self::Connection) -> Vec<Cow<'static, str>> {
+        vec![Cow::Borrowed("TABLE")]
     }
 }
 
@@ -871,6 +885,9 @@ impl Backend for MockAltBackend {
     // overlap in lower case so the subtraction is proven case-insensitive.
     fn keywords(_conn: &Self::Connection) -> Cow<'static, [Cow<'static, str>]> {
         Cow::Borrowed(&[Cow::Borrowed("alter"), Cow::Borrowed("ALT_VACUUM")])
+    }
+    fn table_types(_conn: &Self::Connection) -> Vec<Cow<'static, str>> {
+        vec![Cow::Borrowed("ALT_TABLE"), Cow::Borrowed("ALT_VIEW")]
     }
 
     // Differs from the default, so the SQL_MAX_*_NAME_LEN group moves with the
@@ -1645,6 +1662,17 @@ impl Backend for MockCatalogBackend {
         ])
     }
 
+    /// Deliberately out of order, and distinct from the table names above, so
+    /// an `SQL_ALL_CATALOGS` enumeration that fell through to `tables` would
+    /// be visible rather than coincidentally right.
+    fn catalogs(_: &MockConnection, _: &Self::CancelToken) -> Result<Vec<String>, Self::Error> {
+        Ok(vec!["cat_b".into(), "cat_a".into()])
+    }
+    /// Out of order, for the same reason as [`MockCatalogBackend::catalogs`].
+    fn schemas(_: &MockConnection, _: &Self::CancelToken) -> Result<Vec<String>, Self::Error> {
+        Ok(vec!["sch_b".into(), "sch_a".into()])
+    }
+
     fn supports_catalogs(_conn: &Self::Connection) -> bool {
         true
     }
@@ -1664,7 +1692,9 @@ impl Backend for MockCatalogBackend {
         0
     }
 
-    minimal_capability_decls!();
+    // Out of order, so the `SQL_ALL_TABLE_TYPES` test sees core's sort rather
+    // than the backend's declaration order.
+    minimal_capability_decls!(table_types = &["VIEW", "TABLE"]);
 }
 
 // ---------------------------------------------------------------------------

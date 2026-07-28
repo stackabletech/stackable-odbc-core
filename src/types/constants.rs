@@ -962,6 +962,24 @@ pub const SQL_FN_TD_CURRENT_TIMESTAMP: u32 = 0x0008_0000;
 /// `SQL_FN_TD_EXTRACT` — the `EXTRACT` scalar function.
 pub const SQL_FN_TD_EXTRACT: u32 = 0x0010_0000;
 
+// --- SQLTables: the SQL_ALL_* enumeration sentinels (sqlext.h) ---
+/// `SQL_ALL_CATALOGS` — `SQLTables`' catalog-enumeration sentinel.
+///
+/// All three `SQL_ALL_*` sentinels are the same string, `"%"`. Which
+/// enumeration is meant depends on **which argument carries it while the
+/// others are empty strings**, never on the `"%"` alone:
+/// `SQLTables("%", "%", "%")` is an ordinary match-everything query, not an
+/// enumeration.
+pub const SQL_ALL_CATALOGS: &str = "%";
+/// `SQL_ALL_SCHEMAS` — `SQLTables`' schema-enumeration sentinel. See
+/// [`SQL_ALL_CATALOGS`] for the disambiguation rule; the two constants are the
+/// same string.
+pub const SQL_ALL_SCHEMAS: &str = "%";
+/// `SQL_ALL_TABLE_TYPES` — `SQLTables`' table-type-enumeration sentinel. See
+/// [`SQL_ALL_CATALOGS`] for the disambiguation rule; the two constants are the
+/// same string.
+pub const SQL_ALL_TABLE_TYPES: &str = "%";
+
 // --- SQLStatistics: Unique argument (sqlext.h) ---
 /// SQLStatistics `Unique`: return only unique indexes (SQL_INDEX_UNIQUE = 0).
 pub const SQL_INDEX_UNIQUE: u16 = 0;
