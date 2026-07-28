@@ -419,6 +419,17 @@ markers go away and this section becomes the initial-release notes.
   their spec-observable behaviour: both still read without clearing the queue
   or posting a diagnostic for themselves, per the spec's own exception to the
   clear-at-entry rule for these two functions.
+- **Breaking.** `Backend::cancel` no longer takes `&mut Self::Statement`.
+  `SQLCancel` must be able to signal a statement from a thread holding no lock
+  on its connection, concurrently with another thread executing on it — a
+  `&mut Self::Statement` cannot be produced under that constraint at all.
+  `Backend` gains an associated `CancelToken: Send + Sync + 'static` and
+  `cancel_token(conn: &Self::Connection) -> Self::CancelToken`; `cancel` now
+  takes `&Self::CancelToken`. Core builds the token once, the first time a
+  statement makes a backend call, and never replaces it — see
+  `Backend::CancelToken`'s doc comment for the two legitimate token shapes
+  (standalone vs. aliasing the connection) and the failure modes each guards
+  against.
 
 ### Fixed
 

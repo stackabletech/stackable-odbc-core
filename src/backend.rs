@@ -301,16 +301,79 @@ pub trait Backend: Sized + Send + Sync + 'static {
         .into())
     }
 
-    /// Cancels an in-progress statement.
+    /// Everything needed to cancel work on a statement from a thread holding
+    /// no lock on the connection, while another thread may be executing on it
+    /// concurrently.
     ///
-    /// Called by `SQLCancel`. Takes `&mut` because implementations must clear
-    /// streaming state (e.g. `next_uri`) after a server-side cancel to prevent
-    /// `close_cursor`/`Drop` from trying to drain a cancelled query, which
-    /// would fail and leave the connection pool's TCP socket dirty.
+    /// Two shapes are legitimate, and the choice is the backend's:
     ///
-    /// Returns `OdbcError` directly (not `Self::Error`) to allow a default
-    /// implementation. The default returns `NotImplemented`.
-    fn cancel(_stmt: &mut Self::Statement) -> Result<(), Self::Error> {
+    /// - **Standalone** — the token carries its own channel and shares
+    ///   nothing with the connection. libpq's `PGcancel` (a snapshot of the
+    ///   backend PID and secret key, used over a fresh socket) and MySQL's
+    ///   second connection issuing `KILL QUERY` are both this shape. Prefer
+    ///   it.
+    /// - **Aliasing** — the token holds the connection itself, sound only
+    ///   where the backend's own client library documents concurrent use.
+    ///   `sqlite3_interrupt` is the example: SQLite guarantees it is safe to
+    ///   call from a thread other than the one running the query.
+    ///
+    /// An aliasing token **must** keep its target alive through an `Arc`,
+    /// never a raw handle: core clones the token out before doing anything
+    /// else, so it has to survive a concurrent `SQLDisconnect`. SQLite's own
+    /// documentation states the requirement directly — "it is not safe to
+    /// call this routine with a database connection that is closed or might
+    /// close before `sqlite3_interrupt()` returns" — and the same reasoning
+    /// applies to any aliasing token, not only SQLite's.
+    ///
+    /// A backend that cannot cancel anything uses `()`.
+    ///
+    /// `'static` is required, not incidental: core stores the token as
+    /// `Arc<dyn Any + Send + Sync>` in the registry so the registry itself
+    /// can stay non-generic over `Backend`, and `Any` is implemented only for
+    /// `'static` types.
+    type CancelToken: Send + Sync + 'static;
+
+    /// Build the cancel token for a connection.
+    ///
+    /// Core calls this once per statement — the first time the statement
+    /// makes a backend call (`exec_direct`, `prepare`, a catalog function,
+    /// ...), not at `SQLAllocHandle(SQL_HANDLE_STMT)`. A statement can be
+    /// allocated on a connection that is not yet open (`SQLAllocHandle`'s
+    /// 08003 for that case is Driver-Manager-owned, so core never checks it),
+    /// which leaves no `&Self::Connection` to build a token from until a
+    /// statement-producing call actually supplies one.
+    ///
+    /// Once built, the token is never replaced for the life of the
+    /// statement, including across a later `SQLExecute` on the same handle: a
+    /// fresh token per execution would let a `SQLCancel` that had already
+    /// cloned the previous one signal an execution that already finished,
+    /// while the one actually running goes uncancelled.
+    ///
+    /// Build the token with the connection's parameters in hand here —
+    /// do not defer the real assembly to `cancel`. MariaDB's ODBC-401 is the
+    /// failure this rule exists to prevent: its cancel channel was assembled
+    /// lazily, after the original connection's TLS settings were no longer
+    /// available, so cancelling an encrypted connection failed silently.
+    ///
+    /// A backend whose cancellation needs a value not known until execution
+    /// (e.g. a query id) returns an empty shared slot here —
+    /// `Arc<Mutex<Option<QueryId>>>` — and fills it from `exec_direct` /
+    /// `prepare` / `execute`, each of which receives the same token.
+    fn cancel_token(conn: &Self::Connection) -> Self::CancelToken;
+
+    /// Cancel whatever the token refers to.
+    ///
+    /// Called by `SQLCancel`, possibly while another thread is executing on
+    /// the same statement. It receives neither a connection nor a statement —
+    /// deliberately: that signature is what keeps this call off the guarded
+    /// state entirely, so core never takes the connection's lock to invoke
+    /// it. Any state a backend needs to clear after a cancellation (e.g.
+    /// streaming/pagination state) has to live in the token itself, or behind
+    /// synchronisation the backend owns.
+    ///
+    /// The default returns `NotImplemented`, which `SQLCancel` treats as
+    /// success: there was nothing to cancel.
+    fn cancel(_token: &Self::CancelToken) -> Result<(), Self::Error> {
         Err(OdbcError::NotImplemented {
             feature: "cancel".into(),
         }

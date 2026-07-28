@@ -374,7 +374,7 @@ impl Registry {
     /// Attach a cancel token to a live handle. Replaces any previous one.
     #[allow(
         dead_code,
-        reason = "no caller until Backend::CancelToken (task 13) gives statements something to store here"
+        reason = "no production caller until task 14 wires handles::resolve_cancel_token into the nine statement-producing call sites; exercised today only by resolve_cancel_token's own unit test"
     )]
     pub(crate) fn set_cancel(&self, token: *mut c_void, cancel: StdArc<dyn Any + Send + Sync>) {
         if token.is_null() {
@@ -396,10 +396,6 @@ impl Registry {
     /// concurrent `SQLFreeHandle` or `SQLDisconnect` — the case SQLite's
     /// documentation calls out as unsafe ("a database connection that is
     /// closed or might close before `sqlite3_interrupt()` returns").
-    #[allow(
-        dead_code,
-        reason = "no caller until SQLCancel (task 15) reads the token stored by set_cancel"
-    )]
     pub(crate) fn cancel_of(&self, token: *mut c_void) -> Option<StdArc<dyn Any + Send + Sync>> {
         if token.is_null() {
             return None;

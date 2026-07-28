@@ -302,9 +302,12 @@ pub unsafe fn sql_close_cursor<B: Backend>(statement_handle: *mut c_void) -> Sql
 ///
 /// Spec: <https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlcancel-function>
 ///
-/// Cancels an asynchronous operation on a statement. The `Backend` trait is synchronous
-/// (there is nothing to cancel), so this is a no-op that returns SUCCESS as long
-/// as the handle is valid.
+/// Cancels an in-progress statement. If the statement has a cancel token
+/// (created by the first backend call it made; see `Backend::cancel_token`),
+/// this calls `Backend::cancel` with it. A statement that has never made a
+/// backend call has no token yet, and cancelling it is a no-op that still
+/// returns SUCCESS — the spec's own answer for "no processing in progress"
+/// (ODBC 3.5: cancelling then "has no effect at all").
 ///
 /// # Parameters
 ///
@@ -320,8 +323,9 @@ pub unsafe fn sql_close_cursor<B: Backend>(statement_handle: *mut c_void) -> Sql
 ///   `panic_safe`.
 /// - HY010 (function sequence error): (driver-manager-handled; not returned here)
 /// - HY013 (memory management error): not applicable; Rust memory access cannot fail silently.
-/// - HY018 (server declined cancel request): not applicable; the `Backend` trait is synchronous
-///   and the cancel is always a no-op.
+/// - HY018 (server declined cancel request): propagated from `Backend::cancel` — mapping a
+///   declined cancellation to this SQLSTATE is the backend's error-mapping function's job, not
+///   core's.
 /// - HY117 (connection suspended): (driver-manager-handled; not returned here)
 /// - HYT01 (connection timeout): not applicable; the framework is in-process.
 /// - IM001 (driver does not support function): (driver-manager-handled; not returned here)
@@ -341,15 +345,17 @@ pub unsafe fn sql_cancel<B: Backend>(statement_handle: *mut c_void) -> SqlReturn
             let stmt = scope.get::<StatementHandle<B>>(statement_handle)?;
             stmt.diagnostics.clear();
 
-            // `ref mut`: cancel must clear the statement's streaming state
-            // (see `Backend::cancel`).
-            if let Some(crate::handles::StatementData::Backend(ref mut backend_stmt)) =
-                stmt.statement
+            // Stopgap: still resolves the token through the group lock this
+            // scope already holds. Task 15 removes the lock from this path
+            // and reads the token without going through the scope at all.
+            //
+            // A statement with no token yet (never made a backend call, or
+            // the connection was never open) has nothing to cancel -- the
+            // spec's own answer for "cancel with no processing in progress".
+            if let Some(token) = crate::handles::registry::registry().cancel_of(statement_handle)
+                && let Some(token) = token.downcast_ref::<B::CancelToken>()
             {
-                // Converted before matching: `B::cancel` reports `B::Error`,
-                // and the arm below has to recognise core's own
-                // `NotImplemented` inside it.
-                match B::cancel(backend_stmt).into_odbc() {
+                match B::cancel(token).into_odbc() {
                     Ok(()) => {}
                     // NotImplemented is fine; no pending operation to cancel.
                     Err(crate::errors::OdbcError::NotImplemented { .. }) => {}

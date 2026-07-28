@@ -24,7 +24,13 @@
 //! thread while another is mid-call on it. ODBC forbids that and the Driver
 //! Manager serialises calls per handle.
 
+use std::any::Any;
 use std::ffi::c_void;
+// Deliberately `std::sync::Arc`, not `crate::sync::Arc`: this feeds the same
+// `Arc<dyn Any + Send + Sync>` erasure `Slot::cancel` stores, and that
+// coercion does not exist for loom's `Arc`. See `registry.rs`'s note on
+// `Slot::cancel` for the full reason.
+use std::sync::Arc as StdArc;
 
 use odbc_sys::AttrOdbcVersion;
 
@@ -588,6 +594,48 @@ pub unsafe fn alloc_statement<B: Backend>(
     SqlReturn::SUCCESS
 }
 
+/// Resolve the cancel token for `stmt_token`, creating it on first use.
+///
+/// `Backend::cancel_token` cannot run at `SQLAllocHandle(SQL_HANDLE_STMT)`
+/// (see that method's doc comment): a statement can be allocated on a
+/// connection that is not yet open, and there is no `&B::Connection` to hand
+/// it until one exists. Instead, core calls this from the first
+/// statement-producing call that has a connection in hand — `exec_direct`,
+/// `prepare`, `tables`, and the rest of the nine all check
+/// `conn.connection.is_some()` and return 08003 before reaching here, so
+/// `connection` is always real by the time this runs.
+///
+/// Create once, never replace: if the registry already holds a token for
+/// `stmt_token`, that `Arc` is returned as-is rather than building a second
+/// one. Minting a fresh token on a later call would let a `SQLCancel` that
+/// had already cloned the previous token signal an execution that is no
+/// longer the one running — silently cancelling nothing, which is the exact
+/// bug class this design exists to close.
+///
+/// # Locking
+///
+/// The caller must already hold `stmt_token`'s connection group lock — every
+/// statement-producing FFI entry point does, via `panic_safe`/`HandleScope`,
+/// for the whole duration of the backend call this feeds. That is what makes
+/// the check-then-set below race-free with no synchronisation of its own: two
+/// threads can never be inside this function for the same statement at the
+/// same time.
+#[allow(
+    dead_code,
+    reason = "no production caller until task 14 wires this into the nine statement-producing call sites; exercised today by its own unit test"
+)]
+pub(crate) fn resolve_cancel_token<B: Backend>(
+    stmt_token: *mut c_void,
+    connection: &B::Connection,
+) -> StdArc<dyn Any + Send + Sync> {
+    if let Some(existing) = registry().cancel_of(stmt_token) {
+        return existing;
+    }
+    let created: StdArc<dyn Any + Send + Sync> = StdArc::new(B::cancel_token(connection));
+    registry().set_cancel(stmt_token, StdArc::clone(&created));
+    created
+}
+
 /// Free an environment handle. Fails with `SqlReturn::ERROR` if there are
 /// still active connections.
 ///
@@ -1006,6 +1054,53 @@ mod tests {
             );
 
             let _ = free_env(env_ptr);
+        }
+    }
+
+    /// Allocation alone must not create a cancel token (the corrected design:
+    /// see `resolve_cancel_token`'s doc comment for why it cannot run at
+    /// `SQLAllocHandle` time), and two calls standing in for two different
+    /// statement-producing FFI entry points on the same statement must
+    /// observe the identical `Arc` -- never a second, freshly minted one.
+    #[test]
+    fn resolve_cancel_token_creates_once_and_never_replaces() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            with_handle::<MockBackend, ConnectionHandle<MockBackend>, _>(conn, |c| {
+                c.connection = Some(MockConnection);
+            });
+
+            assert!(
+                registry::registry().cancel_of(stmt).is_none(),
+                "allocation alone must not create a cancel token"
+            );
+
+            let first = with_handle::<MockBackend, ConnectionHandle<MockBackend>, _>(conn, |c| {
+                let connection = c.connection.as_ref().expect("connected above");
+                resolve_cancel_token::<MockBackend>(stmt, connection)
+            });
+            let second = with_handle::<MockBackend, ConnectionHandle<MockBackend>, _>(conn, |c| {
+                let connection = c.connection.as_ref().expect("connected above");
+                resolve_cancel_token::<MockBackend>(stmt, connection)
+            });
+
+            assert!(
+                StdArc::ptr_eq(&first, &second),
+                "two statement-producing calls on the same statement must observe the same token"
+            );
+            assert!(
+                first
+                    .downcast_ref::<crate::test_utils::MockCancelToken>()
+                    .is_some(),
+                "the stored token must be the backend's own type"
+            );
+
+            let _ = free_statement::<MockBackend>(stmt);
+            with_handle::<MockBackend, ConnectionHandle<MockBackend>, _>(conn, |c| {
+                c.connection = None;
+            });
+            let _ = free_conn(conn);
+            let _ = free_env(env);
         }
     }
 

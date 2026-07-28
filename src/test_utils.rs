@@ -89,6 +89,13 @@ pub(crate) fn with_handle<B: Backend, T: crate::handles::HasKind, R>(
 pub struct MockConnection;
 pub struct MockStatement;
 
+/// Records that `SQLCancel` reached the backend, so a test can assert the
+/// signal arrived rather than merely that the call returned success.
+#[derive(Debug, Default)]
+pub struct MockCancelToken {
+    pub cancelled: std::sync::atomic::AtomicBool,
+}
+
 #[derive(Debug)]
 pub struct MockError;
 
@@ -246,11 +253,21 @@ impl Backend for MockBackend {
     type Connection = MockConnection;
     type Statement = MockStatement;
     type Error = MockError;
+    type CancelToken = MockCancelToken;
 
     fn connect(_: &ConnectParams) -> Result<MockConnection, MockError> {
         Ok(MockConnection)
     }
     fn disconnect(_: &mut MockConnection) -> Result<(), MockError> {
+        Ok(())
+    }
+    fn cancel_token(_conn: &Self::Connection) -> Self::CancelToken {
+        MockCancelToken::default()
+    }
+    fn cancel(token: &Self::CancelToken) -> Result<(), Self::Error> {
+        token
+            .cancelled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
     fn exec_direct(_: &MockConnection, _: &str) -> Result<MockStatement, MockError> {
@@ -416,11 +433,21 @@ impl Backend for MockNoCatalogBackend {
     type Connection = MockConnection;
     type Statement = MockStatement;
     type Error = MockError;
+    type CancelToken = MockCancelToken;
 
     fn connect(_: &ConnectParams) -> Result<MockConnection, MockError> {
         Ok(MockConnection)
     }
     fn disconnect(_: &mut MockConnection) -> Result<(), MockError> {
+        Ok(())
+    }
+    fn cancel_token(_conn: &Self::Connection) -> Self::CancelToken {
+        MockCancelToken::default()
+    }
+    fn cancel(token: &Self::CancelToken) -> Result<(), Self::Error> {
+        token
+            .cancelled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
     fn exec_direct(_: &MockConnection, _: &str) -> Result<MockStatement, MockError> {
@@ -506,11 +533,19 @@ macro_rules! mock_keywords_backend {
             type Connection = MockConnection;
             type Statement = MockStatement;
             type Error = MockError;
+            type CancelToken = MockCancelToken;
 
             fn connect(_: &ConnectParams) -> Result<MockConnection, MockError> {
                 Ok(MockConnection)
             }
             fn disconnect(_: &mut MockConnection) -> Result<(), MockError> {
+                Ok(())
+            }
+            fn cancel_token(_conn: &Self::Connection) -> Self::CancelToken {
+                MockCancelToken::default()
+            }
+            fn cancel(token: &Self::CancelToken) -> Result<(), Self::Error> {
+                token.cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
                 Ok(())
             }
             fn exec_direct(_: &MockConnection, _: &str) -> Result<MockStatement, MockError> {
@@ -623,6 +658,7 @@ impl Backend for MockAltBackend {
     type Connection = MockConnection;
     type Statement = MockStatement;
     type Error = MockError;
+    type CancelToken = MockCancelToken;
 
     /// Names a secret that none of core's substring markers would catch, so a
     /// test can tell a backend-declared redaction from the built-in heuristic.
@@ -634,6 +670,15 @@ impl Backend for MockAltBackend {
         Ok(MockConnection)
     }
     fn disconnect(_: &mut MockConnection) -> Result<(), MockError> {
+        Ok(())
+    }
+    fn cancel_token(_conn: &Self::Connection) -> Self::CancelToken {
+        MockCancelToken::default()
+    }
+    fn cancel(token: &Self::CancelToken) -> Result<(), Self::Error> {
+        token
+            .cancelled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
     fn exec_direct(_: &MockConnection, _: &str) -> Result<MockStatement, MockError> {
@@ -809,6 +854,7 @@ macro_rules! mock_isolation_backend {
             type Connection = MockIsolationConnection;
             type Statement = MockStatement;
             type Error = MockError;
+            type CancelToken = MockCancelToken;
 
             fn connect(_: &ConnectParams) -> Result<MockIsolationConnection, MockError> {
                 Ok(MockIsolationConnection {
@@ -816,6 +862,13 @@ macro_rules! mock_isolation_backend {
                 })
             }
             fn disconnect(_: &mut MockIsolationConnection) -> Result<(), MockError> {
+                Ok(())
+            }
+            fn cancel_token(_conn: &Self::Connection) -> Self::CancelToken {
+                MockCancelToken::default()
+            }
+            fn cancel(token: &Self::CancelToken) -> Result<(), Self::Error> {
+                token.cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
                 Ok(())
             }
             fn exec_direct(
@@ -958,6 +1011,7 @@ macro_rules! mock_txn_backend {
             /// error type simply *is* core's -- which the bounds allow, since
             /// `OdbcError` converts to and from itself.
             type Error = OdbcError;
+            type CancelToken = MockCancelToken;
 
             fn connect(params: &ConnectParams) -> Result<MockTxnConnection, OdbcError> {
                 Ok(MockTxnConnection {
@@ -965,6 +1019,15 @@ macro_rules! mock_txn_backend {
                 })
             }
             fn disconnect(_: &mut MockTxnConnection) -> Result<(), OdbcError> {
+                Ok(())
+            }
+            fn cancel_token(_conn: &Self::Connection) -> Self::CancelToken {
+                MockCancelToken::default()
+            }
+            fn cancel(token: &Self::CancelToken) -> Result<(), Self::Error> {
+                token
+                    .cancelled
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
                 Ok(())
             }
             // Succeeds, unlike `MockBackend::exec_direct`, so a test can tell
@@ -1154,11 +1217,21 @@ impl Backend for MockTypeInfoBackend {
     type Connection = MockConnection;
     type Statement = MockStatement;
     type Error = MockError;
+    type CancelToken = MockCancelToken;
 
     fn connect(_: &ConnectParams) -> Result<MockConnection, MockError> {
         Ok(MockConnection)
     }
     fn disconnect(_: &mut MockConnection) -> Result<(), MockError> {
+        Ok(())
+    }
+    fn cancel_token(_conn: &Self::Connection) -> Self::CancelToken {
+        MockCancelToken::default()
+    }
+    fn cancel(token: &Self::CancelToken) -> Result<(), Self::Error> {
+        token
+            .cancelled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
     fn exec_direct(_: &MockConnection, _: &str) -> Result<MockStatement, MockError> {
@@ -1241,11 +1314,21 @@ impl Backend for MockFunctionsBackend {
     type Connection = MockConnection;
     type Statement = MockStatement;
     type Error = MockError;
+    type CancelToken = MockCancelToken;
 
     fn connect(_: &ConnectParams) -> Result<MockConnection, MockError> {
         Ok(MockConnection)
     }
     fn disconnect(_: &mut MockConnection) -> Result<(), MockError> {
+        Ok(())
+    }
+    fn cancel_token(_conn: &Self::Connection) -> Self::CancelToken {
+        MockCancelToken::default()
+    }
+    fn cancel(token: &Self::CancelToken) -> Result<(), Self::Error> {
+        token
+            .cancelled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
     fn exec_direct(_: &MockConnection, _: &str) -> Result<MockStatement, MockError> {
@@ -1359,11 +1442,21 @@ impl Backend for MockFailingCloseBackend {
     type Connection = MockConnection;
     type Statement = MockFailingCloseStatement;
     type Error = OdbcError;
+    type CancelToken = MockCancelToken;
 
     fn connect(_: &ConnectParams) -> Result<MockConnection, OdbcError> {
         Ok(MockConnection)
     }
     fn disconnect(_: &mut MockConnection) -> Result<(), OdbcError> {
+        Ok(())
+    }
+    fn cancel_token(_conn: &Self::Connection) -> Self::CancelToken {
+        MockCancelToken::default()
+    }
+    fn cancel(token: &Self::CancelToken) -> Result<(), Self::Error> {
+        token
+            .cancelled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
     fn exec_direct(_: &MockConnection, _: &str) -> Result<MockFailingCloseStatement, OdbcError> {
