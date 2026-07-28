@@ -70,8 +70,12 @@ use crate::{
 /// - `HY090` Invalid string or buffer length — (driver-manager-handled; not returned here)
 /// - `HY104` Invalid precision or scale value — a driver-returned code (the spec does not mark it
 ///   (DM)): `column_size` and `decimal_digits` are stored verbatim without range validation.
-///   Data-source-specific range checking would require backend metadata not available at bind
-///   time, so validation is intentionally deferred to execute time.
+///   This row is about a precision or scale "outside the range of values supported by the data
+///   source", which needs backend metadata not available at bind time, so it is not returned.
+///   The values are not merely stored, though: at execute time a character parameter bound as
+///   `SQL_DECIMAL` or `SQL_NUMERIC` is checked against them and reports `22001` if the
+///   conversion would truncate (`crate::param_convert`). That is a different question — whether
+///   *this value* fits *this declaration* — and a different SQLSTATE.
 /// - `HY105` Invalid parameter type — (DM) the spec marks HY105 as DM-only. When the driver
 ///   receives an unrecognised `input_output_type`, it returns `HY024` (invalid attribute value)
 ///   instead, since the DM should have rejected it first.
@@ -574,6 +578,8 @@ pub(crate) unsafe fn read_param_value(
             return crate::param_convert::text_to_sql_type(
                 &String::from_utf8_lossy(bytes),
                 binding.sql_type,
+                binding.col_size,
+                binding.decimal_digits,
             );
         }
         CDataType::WChar => {
@@ -587,6 +593,8 @@ pub(crate) unsafe fn read_param_value(
                 return crate::param_convert::text_to_sql_type(
                     &unsafe { utf16_to_string(ptr, SQL_NTS) }.unwrap_or_default(),
                     binding.sql_type,
+                    binding.col_size,
+                    binding.decimal_digits,
                 );
             } else {
                 // SAFETY: str_len_or_ind_ptr is non-null and the caller guarantees it points
@@ -600,6 +608,8 @@ pub(crate) unsafe fn read_param_value(
                     return crate::param_convert::text_to_sql_type(
                         &unsafe { utf16_to_string(ptr, SQL_NTS) }.unwrap_or_default(),
                         binding.sql_type,
+                        binding.col_size,
+                        binding.decimal_digits,
                     );
                 } else {
                     // Explicit byte length: ODBC reports lengths in bytes for WChar.
@@ -619,6 +629,8 @@ pub(crate) unsafe fn read_param_value(
             return crate::param_convert::text_to_sql_type(
                 &String::from_utf16_lossy(&units),
                 binding.sql_type,
+                binding.col_size,
+                binding.decimal_digits,
             );
         }
         CDataType::Binary => {
@@ -904,6 +916,8 @@ pub(crate) fn is_data_at_exec(indicator: isize) -> bool {
 fn dae_buffer_to_value(
     c_type: Option<odbc_sys::CDataType>,
     sql_type: SqlDataType,
+    col_size: ULen,
+    decimal_digits: i16,
     buffer: &[u8],
 ) -> Result<ColumnValue, OdbcError> {
     use odbc_sys::CDataType;
@@ -918,7 +932,7 @@ fn dae_buffer_to_value(
         }
         _ => String::from_utf8_lossy(buffer).into_owned(),
     };
-    crate::param_convert::text_to_sql_type(&text, sql_type)
+    crate::param_convert::text_to_sql_type(&text, sql_type, col_size, decimal_digits)
 }
 
 /// Scan bound parameters for data-at-execution indicators.
@@ -1224,7 +1238,9 @@ pub unsafe fn sql_param_data<B: Backend>(
                     // offers a parameter that `find_data_at_exec_params` found
                     // a data-at-execution indicator on, which requires one.
                     let sql_type = binding.map_or(SqlDataType::UNKNOWN_TYPE, |b| b.sql_type);
-                    dae_buffer_to_value(c_type, sql_type, &dae.buffer)?
+                    let col_size = binding.map_or(0, |b| b.col_size);
+                    let decimal_digits = binding.map_or(0, |b| b.decimal_digits);
+                    dae_buffer_to_value(c_type, sql_type, col_size, decimal_digits, &dae.buffer)?
                 };
                 dae.collected_values.insert(param_num, value);
                 dae.buffer.clear();
@@ -2044,13 +2060,17 @@ mod tests {
         assert_eq!(params, vec![ColumnValue::I32(1234)]);
     }
 
-    /// Build an `SQL_C_CHAR` input binding over `text` with an explicit length.
+    /// Build an `SQL_C_CHAR` input binding over `text`.
+    ///
+    /// `col_size` is 0 — no declared size — because these tests are about the
+    /// declared *type*. `crate::param_convert`'s own tests cover the declared
+    /// size, and a `col_size` invented here would silently size-check them.
     fn char_binding(text: &'static [u8], sql_type: SqlDataType) -> ParameterBinding {
         ParameterBinding {
             input_output_type: ParamType::Input,
             c_type: CDataType::Char,
             sql_type,
-            col_size: text.len() as ULen,
+            col_size: 0,
             decimal_digits: 0,
             value_ptr: text.as_ptr().cast_mut().cast::<c_void>(),
             buffer_length: text.len() as isize,
@@ -2150,7 +2170,8 @@ mod tests {
     #[test]
     fn dae_buffer_to_value_converts_char_to_the_declared_decimal_type() {
         assert_eq!(
-            dae_buffer_to_value(Some(CDataType::Char), SqlDataType::DECIMAL, b"12.34").unwrap(),
+            dae_buffer_to_value(Some(CDataType::Char), SqlDataType::DECIMAL, 0, 0, b"12.34")
+                .unwrap(),
             ColumnValue::Decimal("12.34".to_string())
         );
     }
@@ -2160,8 +2181,14 @@ mod tests {
     #[test]
     fn dae_buffer_to_value_leaves_binary_alone() {
         assert_eq!(
-            dae_buffer_to_value(Some(CDataType::Binary), SqlDataType::EXT_BINARY, &[1, 2, 3])
-                .unwrap(),
+            dae_buffer_to_value(
+                Some(CDataType::Binary),
+                SqlDataType::EXT_BINARY,
+                0,
+                0,
+                &[1, 2, 3]
+            )
+            .unwrap(),
             ColumnValue::Bytes(vec![1, 2, 3])
         );
     }
@@ -2861,6 +2888,8 @@ mod tests {
             dae_buffer_to_value(
                 Some(odbc_sys::CDataType::Binary),
                 SqlDataType::EXT_BINARY,
+                0,
+                0,
                 &buf
             )
             .unwrap(),
@@ -2876,8 +2905,14 @@ mod tests {
             buf.extend_from_slice(&u.to_ne_bytes());
         }
         assert_eq!(
-            dae_buffer_to_value(Some(odbc_sys::CDataType::WChar), SqlDataType::VARCHAR, &buf)
-                .unwrap(),
+            dae_buffer_to_value(
+                Some(odbc_sys::CDataType::WChar),
+                SqlDataType::VARCHAR,
+                0,
+                0,
+                &buf
+            )
+            .unwrap(),
             ColumnValue::String("hi".to_string())
         );
     }
@@ -2888,6 +2923,8 @@ mod tests {
             dae_buffer_to_value(
                 Some(odbc_sys::CDataType::Char),
                 SqlDataType::VARCHAR,
+                0,
+                0,
                 b"abc"
             )
             .unwrap(),

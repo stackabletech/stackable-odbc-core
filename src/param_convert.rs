@@ -30,7 +30,7 @@ use odbc_sys::SqlDataType;
 use crate::{
     column_value::{current_utc_date, parse_sql_time, parse_sql_timestamp},
     errors::OdbcError,
-    types::{ColumnValue, SqlState},
+    types::{ColumnValue, SqlState, ULen},
 };
 
 // -- the four SQLSTATEs the table's third column names ----------------------
@@ -89,10 +89,40 @@ fn datetime_overflow(text: &str, what: &str) -> OdbcError {
 /// where text *is* the answer, and driver-specific type identifiers, which only
 /// the backend can interpret.
 ///
+/// # Declared size
+///
+/// `col_size` and `decimal_digits` are `SQLBindParameter`'s `ColumnSize` and
+/// `DecimalDigits`. They are enforced for `SQL_DECIMAL` and `SQL_NUMERIC` only
+/// — see [`check_declared_decimal_size`], which also records why the numeric
+/// and integer types need no such check.
+///
+/// Two rows of the table still ask for a size check that is not made here, and
+/// both are deliberate rather than forgotten:
+///
+/// - **Character targets.** "Byte length of data > Column length" is 22001 for
+///   `SQL_CHAR`/`SQL_VARCHAR`/`SQL_LONGVARCHAR`, and the `SQL_W*` row states
+///   the same test in *characters*. The wide row is implementable — UTF-16 code
+///   units are well defined — but the narrow one is not: "byte length" is in
+///   the data source's own encoding, which core does not know and which differs
+///   between a UTF-8 backend and a Shift-JIS one. Answering it needs a
+///   `Backend` hook, so it waits for a driver that needs one.
+/// - **Binary targets.** "(Byte length of data) / 2 > column byte length" is
+///   22001, and unlike the character case it has no encoding question. It is
+///   simply not done yet.
+///
+/// Until then the declared size for those targets is unenforced, and the effect
+/// is a missing diagnostic rather than wrong data: the value reaches the
+/// backend as the application wrote it, and the data source applies its own
+/// column constraints. An application relying on the driver to police its
+/// declared parameter size is not told; one relying on the data source is
+/// unaffected.
+///
 /// [C to SQL: Character]: https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/c-to-sql-character
 pub(crate) fn text_to_sql_type(
     text: &str,
     sql_type: SqlDataType,
+    col_size: ULen,
+    decimal_digits: i16,
 ) -> Result<ColumnValue, OdbcError> {
     // The declared type, not the value: a parameter's contents can be anything
     // the application is querying on. Which SQL type it was bound as is the
@@ -108,9 +138,9 @@ pub(crate) fn text_to_sql_type(
     // in one row: the test is the same ("is this a numeric-literal"), and only
     // what survives the conversion differs.
     if sql_type == SqlDataType::DECIMAL || sql_type == SqlDataType::NUMERIC {
-        return Ok(ColumnValue::Decimal(
-            decimal_literal(text, "decimal")?.to_decimal_string(),
-        ));
+        let literal = decimal_literal(text, "decimal")?;
+        check_declared_decimal_size(&literal, text, col_size, decimal_digits)?;
+        return Ok(ColumnValue::Decimal(literal.to_decimal_string()));
     }
     if sql_type == SqlDataType::EXT_TINY_INT {
         return Ok(ColumnValue::I8(to_integer(text, "TINYINT")?));
@@ -273,6 +303,36 @@ impl DecimalLiteral {
         }
     }
 
+    /// The smallest scale that represents this value exactly.
+    ///
+    /// A declared scale is compared against this rather than against however
+    /// many fractional digits were typed, so `12.3400` fits `DECIMAL(10,2)`:
+    /// dropping those two trailing zeros loses nothing, and the spec's
+    /// truncation test is about what the conversion would *lose*.
+    fn required_scale(&self) -> usize {
+        if self.is_zero() || self.scale <= 0 {
+            return 0;
+        }
+        let trailing_zeros = self.digits.len() - self.digits.trim_end_matches('0').len();
+        usize::try_from(self.scale)
+            .unwrap_or(0)
+            .saturating_sub(trailing_zeros)
+    }
+
+    /// The number of digits to the left of the decimal point. Zero has none, so
+    /// it fits a `DECIMAL(2,2)` that has room for no whole digits at all.
+    fn whole_digits(&self) -> usize {
+        if self.is_zero() {
+            return 0;
+        }
+        let significant = self.significant().len();
+        if self.scale <= 0 {
+            // A negative scale is trailing zeros the literal did not spell out.
+            return significant.saturating_add(usize::try_from(-self.scale).unwrap_or(0));
+        }
+        significant.saturating_sub(usize::try_from(self.scale).unwrap_or(0))
+    }
+
     /// Whether every digit to the right of the decimal point is a zero, i.e.
     /// whether an integer target would lose anything.
     fn fraction_is_zero(&self) -> bool {
@@ -312,6 +372,60 @@ impl DecimalLiteral {
 
 fn decimal_literal(text: &str, sql_type: &str) -> Result<DecimalLiteral, OdbcError> {
     parse_numeric_literal(text).ok_or_else(|| not_a_literal(text, sql_type))
+}
+
+/// Apply the declared `DECIMAL(col_size, decimal_digits)` to a parsed literal.
+///
+/// These are `SQLBindParameter`'s `ColumnSize` and `DecimalDigits`, which for
+/// `SQL_DECIMAL` and `SQL_NUMERIC` set the IPD's `SQL_DESC_PRECISION` and
+/// `SQL_DESC_SCALE`. Both of the row's truncation outcomes are 22001 —
+/// "data converted with truncation of fractional digits" and "conversion of
+/// data would result in loss of whole (as opposed to fractional) digits".
+/// (`SQLExecute`'s own 22003 row is a different check: it is about assignment
+/// to the *table column*, which is the data source's to make, not the
+/// driver's.)
+///
+/// Only these two SQL types are checked. `ColumnSize` sets `SQL_DESC_PRECISION`
+/// for `SQL_FLOAT`, `SQL_REAL` and `SQL_DOUBLE` too, but there it is a count of
+/// mantissa bits and the row's own test is range, which [`to_double`] already
+/// applies. For every other type — the integers included — the spec says
+/// plainly: "For other data types, the *ColumnSize* argument is ignored."
+///
+/// The two declared-size checks the spec's table still asks for and this does
+/// not are noted on [`text_to_sql_type`].
+fn check_declared_decimal_size(
+    literal: &DecimalLiteral,
+    text: &str,
+    col_size: ULen,
+    decimal_digits: i16,
+) -> Result<(), OdbcError> {
+    // No decimal has zero digits of precision, so a `ColumnSize` of 0 states
+    // that the application declared no size rather than a zero-digit column.
+    // The spec defines no sentinel for "size unknown", and reading 0 literally
+    // would reject every value an application that omits it ever binds.
+    if col_size == 0 {
+        return Ok(());
+    }
+
+    // A negative scale is legal on some data sources and rounds the value to
+    // tens or hundreds. Core has no rounding to apply and will not guess at
+    // one, so a negative scale disables the check rather than being read as 0.
+    let Ok(scale) = usize::try_from(decimal_digits) else {
+        return Ok(());
+    };
+
+    if literal.required_scale() > scale {
+        return Err(truncation(text, "truncate its fractional digits"));
+    }
+
+    // A scale exceeding the precision is a contradictory declaration; it leaves
+    // room for no whole digits rather than underflowing.
+    let whole_allowed = col_size.saturating_sub(scale);
+    if literal.whole_digits() > whole_allowed {
+        return Err(truncation(text, "lose whole digits"));
+    }
+
+    Ok(())
 }
 
 /// Convert to an exact integer target, applying the row's two truncation tests.
@@ -472,12 +586,34 @@ fn retype_datetime_error(e: OdbcError, text: &str, sql_type: &str) -> OdbcError 
 mod tests {
     use super::*;
 
+    /// Convert with no declared size, which is how most of these tests want it:
+    /// a precision of 0 is not a legal decimal precision, so it reads as "the
+    /// application did not state one" and no size check runs.
     fn convert(text: &str, sql_type: SqlDataType) -> ColumnValue {
-        text_to_sql_type(text, sql_type).expect("conversion should succeed")
+        text_to_sql_type(text, sql_type, 0, 0).expect("conversion should succeed")
     }
 
     fn sqlstate(text: &str, sql_type: SqlDataType) -> String {
-        text_to_sql_type(text, sql_type)
+        state_of(text_to_sql_type(text, sql_type, 0, 0))
+    }
+
+    /// Convert as `DECIMAL(col_size, decimal_digits)`.
+    fn convert_decimal(text: &str, col_size: ULen, decimal_digits: i16) -> ColumnValue {
+        text_to_sql_type(text, SqlDataType::DECIMAL, col_size, decimal_digits)
+            .expect("conversion should succeed")
+    }
+
+    fn decimal_sqlstate(text: &str, col_size: ULen, decimal_digits: i16) -> String {
+        state_of(text_to_sql_type(
+            text,
+            SqlDataType::DECIMAL,
+            col_size,
+            decimal_digits,
+        ))
+    }
+
+    fn state_of(result: Result<ColumnValue, OdbcError>) -> String {
+        result
             .expect_err("conversion should have failed")
             .sqlstate()
             .as_str()
@@ -570,6 +706,133 @@ mod tests {
     #[test]
     fn an_empty_decimal_parameter_is_22018() {
         assert_eq!(sqlstate("", SqlDataType::DECIMAL), "22018");
+    }
+
+    // -- DECIMAL / NUMERIC: the declared precision and scale -----------------
+
+    #[test]
+    fn a_decimal_within_its_declared_precision_and_scale_is_accepted() {
+        assert_eq!(
+            convert_decimal("12.34", 10, 2),
+            ColumnValue::Decimal("12.34".into())
+        );
+    }
+
+    /// Spec: "Data converted with truncation of fractional digits" → 22001.
+    /// `DECIMAL(10,2)` has no room for the third fractional digit.
+    #[test]
+    fn a_decimal_with_more_fractional_digits_than_its_declared_scale_is_22001() {
+        assert_eq!(decimal_sqlstate("12.345", 10, 2), "22001");
+    }
+
+    /// Trailing zeros beyond the declared scale lose nothing, so they are not
+    /// truncation. The check ignores them; the value is still passed on as the
+    /// application wrote it, because `12.3400` and `12.34` are the same
+    /// `DECIMAL(10,2)` and reshaping digits is not this check's job.
+    #[test]
+    fn a_decimal_whose_extra_fractional_digits_are_zeros_is_accepted() {
+        assert_eq!(
+            convert_decimal("12.3400", 10, 2),
+            ColumnValue::Decimal("12.3400".into())
+        );
+    }
+
+    /// Spec: "Conversion of data would result in loss of whole (as opposed to
+    /// fractional) digits" → 22001. `DECIMAL(10,2)` leaves eight whole digits.
+    #[test]
+    fn a_decimal_with_more_whole_digits_than_its_declared_precision_allows_is_22001() {
+        assert_eq!(
+            decimal_sqlstate("123456789012345678901234567890", 10, 2),
+            "22001"
+        );
+    }
+
+    #[test]
+    fn a_decimal_filling_its_declared_precision_exactly_is_accepted() {
+        assert_eq!(
+            convert_decimal("12345678.90", 10, 2),
+            ColumnValue::Decimal("12345678.90".into())
+        );
+    }
+
+    #[test]
+    fn a_decimal_one_whole_digit_over_its_declared_precision_is_22001() {
+        assert_eq!(decimal_sqlstate("123456789.01", 10, 2), "22001");
+    }
+
+    /// A precision of 0 is not a legal decimal precision, so it states that the
+    /// application declared no size rather than a zero-digit column. Checking
+    /// it literally would reject every value.
+    #[test]
+    fn a_decimal_with_an_unstated_precision_is_not_size_checked() {
+        assert_eq!(
+            convert_decimal("123456789012345678901234567890.99", 0, 0),
+            ColumnValue::Decimal("123456789012345678901234567890.99".into())
+        );
+    }
+
+    /// `DECIMAL(2,2)` holds only a fraction. A value below one has no whole
+    /// digits to lose.
+    #[test]
+    fn a_decimal_smaller_than_one_has_no_whole_digits() {
+        assert_eq!(
+            convert_decimal("0.05", 2, 2),
+            ColumnValue::Decimal("0.05".into())
+        );
+    }
+
+    #[test]
+    fn zero_fits_a_declared_decimal_with_no_whole_digits() {
+        assert_eq!(convert_decimal("0", 2, 2), ColumnValue::Decimal("0".into()));
+    }
+
+    /// An exponent is expanded before the size check, so the declared size is
+    /// measured against the value rather than against how it was spelled.
+    #[test]
+    fn a_decimal_exponent_is_expanded_before_the_size_check() {
+        assert_eq!(decimal_sqlstate("1e9", 10, 2), "22001");
+    }
+
+    /// A negative scale is legal on some data sources and means the value is
+    /// rounded to tens or hundreds. Core has no rounding to apply, so it
+    /// declines to enforce rather than guessing.
+    #[test]
+    fn a_negative_declared_scale_is_not_enforced() {
+        assert_eq!(
+            convert_decimal("12.34", 10, -1),
+            ColumnValue::Decimal("12.34".into())
+        );
+    }
+
+    /// A scale larger than the precision is a contradictory declaration. It
+    /// leaves no whole digits rather than underflowing the subtraction.
+    #[test]
+    fn a_declared_scale_larger_than_the_precision_leaves_no_whole_digits() {
+        assert_eq!(decimal_sqlstate("1.5", 2, 4), "22001");
+    }
+
+    /// Spec, `SQLBindParameter`'s *ColumnSize* section: `ColumnSize` sets
+    /// `SQL_DESC_PRECISION` only for `SQL_DECIMAL`, `SQL_NUMERIC`, `SQL_FLOAT`,
+    /// `SQL_REAL` and `SQL_DOUBLE`; "for other data types, the *ColumnSize*
+    /// argument is ignored". The integer types are other data types, so their
+    /// range check stays the C type's own.
+    #[test]
+    fn an_integer_target_ignores_the_declared_column_size() {
+        assert_eq!(
+            text_to_sql_type("123456", SqlDataType::INTEGER, 2, 0).unwrap(),
+            ColumnValue::I32(123_456)
+        );
+    }
+
+    /// The same for a character target: this change enforces the declared size
+    /// for `SQL_DECIMAL` and `SQL_NUMERIC` only. See `text_to_sql_type`'s
+    /// "Declared size" note for the two targets still unchecked.
+    #[test]
+    fn a_character_target_ignores_the_declared_column_size() {
+        assert_eq!(
+            text_to_sql_type("abcdefghij", SqlDataType::VARCHAR, 5, 0).unwrap(),
+            ColumnValue::String("abcdefghij".into())
+        );
     }
 
     // -- exact integer targets ----------------------------------------------

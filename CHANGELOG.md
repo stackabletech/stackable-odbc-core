@@ -824,6 +824,27 @@ Everything a driver has to change for the catalog rework, in one place.
   `SQLPutData` data-at-execution text goes through the same conversion, so the
   two routes to a parameter agree.
 
+- **A `DECIMAL` parameter's declared precision and scale were not enforced.**
+  `text_to_sql_type` checked that character parameter data denoted the declared
+  type but never measured it against `SQLBindParameter`'s `ColumnSize` and
+  `DecimalDigits`, so `12.345` bound as `DECIMAL(10,2)` reached the backend
+  whole and a thirty-digit value bound the same way did too. Both are `22001`
+  on the spec's "C to SQL: Character" table — "data converted with truncation
+  of fractional digits" and "conversion of data would result in loss of whole
+  (as opposed to fractional) digits" — and both are now returned. A
+  `ColumnSize` of `0` reads as "no size declared" rather than a zero-digit
+  column, since no decimal has zero digits of precision and the spec defines no
+  sentinel; a negative `DecimalDigits` disables the check, because it asks for a
+  rounding core has none to apply. Trailing zeros beyond the declared scale are
+  not truncation, and the value is passed on as the application wrote it — this
+  check validates, it does not reshape digits. Only `SQL_DECIMAL` and
+  `SQL_NUMERIC` are checked: `ColumnSize` is mantissa bits for the approximate
+  numerics, whose test is range and already applied, and the spec states that
+  "for other data types, the *ColumnSize* argument is ignored". The declared
+  size for character and binary targets remains unenforced; `text_to_sql_type`'s
+  "Declared size" note records what is missing and why the character case needs
+  a `Backend` hook to answer at all.
+
 - **`?` was counted as a parameter marker inside quoted identifiers and
   comments.** `count_params` tracked single-quoted string literals and nothing
   else, so `SELECT "a?b" FROM t` reported one parameter and `SELECT 1 -- huh?`
