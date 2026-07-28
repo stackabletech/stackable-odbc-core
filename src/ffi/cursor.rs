@@ -350,7 +350,7 @@ pub unsafe fn sql_cancel<B: Backend>(statement_handle: *mut c_void) -> SqlReturn
             // and reads the token without going through the scope at all.
             //
             // A statement with no token yet (never made a backend call, or
-            // the connection was never open) has nothing to cancel -- the
+            // the connection was never open) has nothing to cancel, per the
             // spec's own answer for "cancel with no processing in progress".
             if let Some(token) = crate::handles::registry::registry().cancel_of(statement_handle)
                 && let Some(token) = token.downcast_ref::<B::CancelToken>()
@@ -1069,7 +1069,11 @@ mod tests {
                 ));
             });
 
-            // Cancel should succeed even when a cursor is open (it's a no-op).
+            // This statement has no cancel token (nothing has stored one), so
+            // `sql_cancel` takes the no-token early return regardless of
+            // cursor state, it is not a general claim that cancelling an
+            // open cursor is always a no-op. `cancel_calls_backend_cancel_...`
+            // below is what exercises `Backend::cancel` actually running.
             let ret = sql_cancel::<MockBackend>(stmt);
             assert_eq!(ret, SqlReturn::SUCCESS);
             // Cursor must still be open; cancel does not close it.
@@ -1079,6 +1083,109 @@ mod tests {
             });
 
             cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
+    /// As [`alloc_env_conn_stmt`], but generic over `B`. Needed for a backend
+    /// other than `MockBackend`, specifically one whose `Error` is
+    /// `OdbcError` directly, so `Backend::cancel` can return something other
+    /// than the `NotImplemented` every `MockError` collapses to.
+    unsafe fn alloc_env_conn_stmt_for<B: Backend>() -> (*mut c_void, *mut c_void, *mut c_void) {
+        unsafe {
+            let mut env: *mut c_void = std::ptr::null_mut();
+            let _ = crate::ffi::handle::sql_alloc_handle::<B>(
+                odbc_sys::HandleType::Env as i16,
+                std::ptr::null_mut(),
+                &mut env,
+            );
+            let mut conn: *mut c_void = std::ptr::null_mut();
+            let _ = crate::ffi::handle::sql_alloc_handle::<B>(
+                odbc_sys::HandleType::Dbc as i16,
+                env,
+                &mut conn,
+            );
+            let mut stmt: *mut c_void = std::ptr::null_mut();
+            let _ = crate::ffi::handle::sql_alloc_handle::<B>(
+                odbc_sys::HandleType::Stmt as i16,
+                conn,
+                &mut stmt,
+            );
+            (env, conn, stmt)
+        }
+    }
+
+    /// As [`cleanup_env_conn_stmt`], but generic over `B`, for
+    /// [`alloc_env_conn_stmt_for`].
+    unsafe fn cleanup_env_conn_stmt_for<B: Backend>(
+        env: *mut c_void,
+        conn: *mut c_void,
+        stmt: *mut c_void,
+    ) {
+        unsafe {
+            let _ =
+                crate::ffi::handle::sql_free_handle::<B>(odbc_sys::HandleType::Stmt as i16, stmt);
+            let _ =
+                crate::ffi::handle::sql_free_handle::<B>(odbc_sys::HandleType::Dbc as i16, conn);
+            let _ = crate::ffi::handle::sql_free_handle::<B>(odbc_sys::HandleType::Env as i16, env);
+        }
+    }
+
+    /// The path this task actually adds: `sql_cancel` resolving a stored
+    /// token through the registry and handing it to `Backend::cancel`. No
+    /// production code creates this token yet (task 14 wires that in), so the
+    /// test seeds the registry directly, exactly what task 14's call sites
+    /// will do via `resolve_cancel_token`.
+    #[test]
+    fn cancel_calls_backend_cancel_when_a_token_exists() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+
+            let token = std::sync::Arc::new(crate::test_utils::MockCancelToken::default());
+            crate::handles::registry::registry().set_cancel(
+                stmt,
+                std::sync::Arc::clone(&token) as std::sync::Arc<dyn std::any::Any + Send + Sync>,
+            );
+
+            let ret = sql_cancel::<MockBackend>(stmt);
+            assert_eq!(ret, SqlReturn::SUCCESS);
+            assert!(
+                token.cancelled.load(Ordering::SeqCst),
+                "Backend::cancel must have run against the stored token"
+            );
+
+            cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
+    /// The error-propagation arm of `sql_cancel`'s stopgap: `Backend::cancel`
+    /// returning `Err` must reach the caller as `SQL_ERROR` rather than being
+    /// swallowed like `NotImplemented` is. `MockBackend` cannot produce this,
+    /// since its `Error` is `MockError`, which converts to `OdbcError` as
+    /// `NotImplemented` and would be silently treated as "nothing to
+    /// cancel". `MockFailingCloseBackend` is the one mock whose `Error` is
+    /// `OdbcError` directly, so its `cancel` can return a real error via
+    /// `MockCancelToken::should_fail`.
+    #[test]
+    fn cancel_propagates_a_backend_cancel_error() {
+        unsafe {
+            let (env, conn, stmt) =
+                alloc_env_conn_stmt_for::<crate::test_utils::MockFailingCloseBackend>();
+
+            let token = crate::test_utils::MockCancelToken {
+                should_fail: std::sync::atomic::AtomicBool::new(true),
+                ..Default::default()
+            };
+            crate::handles::registry::registry().set_cancel(
+                stmt,
+                std::sync::Arc::new(token) as std::sync::Arc<dyn std::any::Any + Send + Sync>,
+            );
+
+            let ret = sql_cancel::<crate::test_utils::MockFailingCloseBackend>(stmt);
+            assert_eq!(ret, SqlReturn::ERROR);
+
+            cleanup_env_conn_stmt_for::<crate::test_utils::MockFailingCloseBackend>(
+                env, conn, stmt,
+            );
         }
     }
 

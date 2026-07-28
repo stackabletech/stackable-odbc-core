@@ -431,6 +431,11 @@ markers go away and this section becomes the initial-release notes.
   (standalone vs. aliasing the connection) and the failure modes each guards
   against.
 
+  `cancel_token` has no default, so every existing driver needs one to keep
+  compiling; a backend that cannot cancel anything can add the minimal stub
+  `type CancelToken = ();` and `fn cancel_token(_: &Self::Connection) {}` and
+  move on (`cancel` itself already defaults to `NotImplemented`).
+
 ### Fixed
 
 - `SQLGetData` and `SQLFetch` perform the temporal struct conversions the

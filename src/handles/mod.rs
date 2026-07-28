@@ -1061,7 +1061,7 @@ mod tests {
     /// see `resolve_cancel_token`'s doc comment for why it cannot run at
     /// `SQLAllocHandle` time), and two calls standing in for two different
     /// statement-producing FFI entry points on the same statement must
-    /// observe the identical `Arc` -- never a second, freshly minted one.
+    /// observe the identical `Arc`, never a second, freshly minted one.
     #[test]
     fn resolve_cancel_token_creates_once_and_never_replaces() {
         unsafe {

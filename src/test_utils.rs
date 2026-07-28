@@ -91,9 +91,17 @@ pub struct MockStatement;
 
 /// Records that `SQLCancel` reached the backend, so a test can assert the
 /// signal arrived rather than merely that the call returned success.
+///
+/// `should_fail` is read only by [`MockFailingCloseBackend`]'s `cancel`,
+/// which is the one mock whose `Error` is `OdbcError` directly rather than
+/// `MockError` (`MockError` collapses to `NotImplemented` on the way back to
+/// `OdbcError`, which `sql_cancel` treats as "nothing to cancel" rather than
+/// a failure, so it cannot stand in for a backend's cancel actually erroring
+/// out).
 #[derive(Debug, Default)]
 pub struct MockCancelToken {
     pub cancelled: std::sync::atomic::AtomicBool,
+    pub should_fail: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Debug)]
@@ -1453,7 +1461,16 @@ impl Backend for MockFailingCloseBackend {
     fn cancel_token(_conn: &Self::Connection) -> Self::CancelToken {
         MockCancelToken::default()
     }
+    /// The one mock `cancel` that can actually fail: `should_fail` lets a
+    /// test exercise `sql_cancel`'s error-propagation arm, which needs a real
+    /// `OdbcError` rather than `MockError`'s collapse to `NotImplemented`.
     fn cancel(token: &Self::CancelToken) -> Result<(), Self::Error> {
+        if token.should_fail.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(OdbcError::general(
+                "mock backend declined the cancel request",
+                crate::types::SqlState::general_error(),
+            ));
+        }
         token
             .cancelled
             .store(true, std::sync::atomic::Ordering::SeqCst);
