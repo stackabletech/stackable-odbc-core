@@ -64,6 +64,21 @@ Everything a driver has to change for the catalog rework, in one place.
   GRANTEE. All three default to `Ok(Vec::new())`, so a driver that does not
   override them behaves exactly as before.
 
+- `SQL_ATTR_METADATA_ID` support in `SQLProcedures`, `SQLProcedureColumns`,
+  `SQLColumnPrivileges` and `SQLTablePrivileges`, completing the catalog family.
+  Every string argument of all four is an identifier under `SQL_TRUE` — this
+  family has no `SQLTables`-`TableType`-style exemption — so core strips
+  delimiters, case-folds per `SQL_IDENTIFIER_CASE` and escapes `%`/`_` per
+  `SQL_SEARCH_PATTERN_ESCAPE` before the backend is called. A driver needs no
+  code for the feature.
+
+  All four now also return `HY009` when `METADATA_ID` is `SQL_TRUE`,
+  `CatalogName` is a null pointer and the data source has catalogs — the one
+  clause all four pages state without a `(DM)` marker. `SQLColumnPrivileges`
+  additionally rejects a null `TableName` unconditionally, because it is the
+  only one of the four whose page states that sentence unmarked; the other
+  three deliberately do not, and tests pin the difference in both directions.
+
 - `SQL_PT_UNKNOWN`, `SQL_PT_PROCEDURE` and `SQL_PT_FUNCTION`, the
   `PROCEDURE_TYPE` result-column values `odbc-sys` does not define.
   `SQLProcedureColumns`' `COLUMN_TYPE` needs no counterpart —

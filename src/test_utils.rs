@@ -1848,6 +1848,9 @@ pub struct RecordedCatalogArgs {
     pub catalog: Option<String>,
     pub schema: Option<String>,
     pub table: Option<String>,
+    /// `SQLProcedures`' and `SQLProcedureColumns`' `ProcName`. Kept apart from
+    /// `table` so a test cannot pass by reading the wrong argument.
+    pub proc: Option<String>,
     pub column: Option<String>,
     /// `SQLTables`' `TableType`, as the parsed value list core passes down —
     /// not the raw string the application supplied. Empty means no filter.
@@ -2044,6 +2047,71 @@ impl Backend for MockCatalogArgsBackend {
         _: Scope,
         _: Nullable,
     ) -> Result<Vec<SpecialColumnRow>, MockError> {
+        Self::record(RecordedCatalogArgs {
+            catalog: catalog.map(str::to_string),
+            schema: schema.map(str::to_string),
+            table: table.map(str::to_string),
+            ..Default::default()
+        });
+        Ok(Vec::new())
+    }
+
+    fn procedures(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        catalog: Option<&str>,
+        schema: Option<&str>,
+        proc_name: Option<&str>,
+    ) -> Result<Vec<ProcedureRow>, MockError> {
+        Self::record(RecordedCatalogArgs {
+            catalog: catalog.map(str::to_string),
+            schema: schema.map(str::to_string),
+            proc: proc_name.map(str::to_string),
+            ..Default::default()
+        });
+        Ok(Vec::new())
+    }
+    fn procedure_columns(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        catalog: Option<&str>,
+        schema: Option<&str>,
+        proc_name: Option<&str>,
+        column: Option<&str>,
+    ) -> Result<Vec<ProcedureColumnRow>, MockError> {
+        Self::record(RecordedCatalogArgs {
+            catalog: catalog.map(str::to_string),
+            schema: schema.map(str::to_string),
+            proc: proc_name.map(str::to_string),
+            column: column.map(str::to_string),
+            ..Default::default()
+        });
+        Ok(Vec::new())
+    }
+    fn column_privileges(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        catalog: Option<&str>,
+        schema: Option<&str>,
+        table: Option<&str>,
+        column: Option<&str>,
+    ) -> Result<Vec<ColumnPrivilegeRow>, MockError> {
+        Self::record(RecordedCatalogArgs {
+            catalog: catalog.map(str::to_string),
+            schema: schema.map(str::to_string),
+            table: table.map(str::to_string),
+            column: column.map(str::to_string),
+            ..Default::default()
+        });
+        Ok(Vec::new())
+    }
+    fn table_privileges(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        catalog: Option<&str>,
+        schema: Option<&str>,
+        table: Option<&str>,
+    ) -> Result<Vec<TablePrivilegeRow>, MockError> {
         Self::record(RecordedCatalogArgs {
             catalog: catalog.map(str::to_string),
             schema: schema.map(str::to_string),

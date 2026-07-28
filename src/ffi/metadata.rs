@@ -86,12 +86,14 @@ fn check_metadata_id_null_catalog<B: Backend>(
 }
 
 /// Spec `HY009`, "The TableName argument was a null pointer" — for
-/// `SQLStatistics` and `SQLSpecialColumns` **only**.
+/// `SQLStatistics`, `SQLSpecialColumns` and `SQLColumnPrivileges` **only**.
 ///
-/// Those two are the only catalog functions whose diagnostics table states that
-/// sentence without a `(DM)` marker. `SQLPrimaryKeys` and `SQLForeignKeys`
-/// carry the same sentence *with* the marker, so the Driver Manager returns it
-/// and the driver must not — do not extend this to them.
+/// Those three are the only catalog functions whose diagnostics table states
+/// that sentence without a `(DM)` marker. `SQLPrimaryKeys`, `SQLForeignKeys`
+/// and `SQLTablePrivileges` carry the same sentence *with* the marker, so the
+/// Driver Manager returns it and the driver must not — do not extend this to
+/// them. `SQLProcedures` and `SQLProcedureColumns` state no such sentence about
+/// their `ProcName` at all.
 fn check_null_table_name(table_name: *const u16, function: &str) -> Result<(), OdbcError> {
     if table_name.is_null() {
         return Err(OdbcError::general(
@@ -1661,8 +1663,16 @@ pub(crate) fn procedures_columns(widths: &CatalogResultColumnWidths) -> Vec<Colu
 /// - HY000: General error; returned for any unexpected backend error.
 /// - HY001: Memory allocation error; returned if allocation fails.
 /// - HY008: Operation canceled (DM) (driver-manager-handled; not returned here).
-/// - HY009: Invalid use of null pointer (DM) (driver-manager-handled; not returned by this
-///   driver).
+/// - HY009: Invalid use of null pointer. **Returned by this driver** for the one clause the
+///   spec's diagnostics table states *without* a `(DM)` marker: `SQL_ATTR_METADATA_ID` was
+///   `SQL_TRUE`, `CatalogName` was a null pointer, and `SQL_CATALOG_NAME` reports that
+///   catalog names are supported. The `SchemaName`/`ProcName` clause beside it *is*
+///   `(DM)`-marked and is deliberately not checked here.
+///
+///   This page states **no** unconditional null-argument clause, so a null `ProcName` is
+///   accepted — unlike `SQLColumnPrivileges`, whose `TableName` sentence carries no marker
+///   and no `METADATA_ID` condition and *is* checked. See
+///   `the_procedure_functions_do_not_check_null_name_arguments`.
 /// - HY010: Function sequence error — returned if connection is not open. DM cases (async, etc.)
 ///   are driver-manager-handled; not returned here.
 /// - HY013: Memory management error; returned if underlying allocation fails.
@@ -1721,12 +1731,30 @@ pub unsafe fn sql_procedures_w<B: Backend>(
                 proc,
             );
 
+            // Spec HY009 (not (DM)): METADATA_ID plus a null CatalogName on a
+            // data source that has catalogs. The neighbouring
+            // SchemaName/ProcName clause *is* (DM)-marked, and this page states
+            // no unconditional null-argument clause — see the doc comment.
+            let metadata_id = metadata_id_enabled(stmt);
+            check_metadata_id_null_catalog::<B>(
+                connection,
+                catalog_name,
+                metadata_id,
+                "SQLProceduresW",
+            )?;
+
             // The token exists once this statement makes its first
             // backend call; created here on demand, then reused for every
             // later call on the same statement (see `resolve_cancel_token`).
             let cancel_token =
                 crate::handles::resolve_cancel_token::<B>(statement_handle, connection);
             let cancel = crate::handles::cancel_as::<B>(&cancel_token)?;
+
+            // All three arguments are identifiers under METADATA_ID; this
+            // family has no `TableType`-style exemption.
+            let catalog = normalise_catalog_arg::<B>(connection, catalog, metadata_id);
+            let schema = normalise_catalog_arg::<B>(connection, schema, metadata_id);
+            let proc = normalise_catalog_arg::<B>(connection, proc, metadata_id);
 
             let rows = B::procedures(
                 connection,
@@ -1825,8 +1853,16 @@ pub(crate) fn procedure_columns_columns(
 /// - HY000: General error; returned for any unexpected backend error.
 /// - HY001: Memory allocation error; returned if allocation fails.
 /// - HY008: Operation canceled (DM) (driver-manager-handled; not returned here).
-/// - HY009: Invalid use of null pointer (DM) (driver-manager-handled; not returned by this
-///   driver).
+/// - HY009: Invalid use of null pointer. **Returned by this driver** for the one clause the
+///   spec's diagnostics table states *without* a `(DM)` marker: `SQL_ATTR_METADATA_ID` was
+///   `SQL_TRUE`, `CatalogName` was a null pointer, and `SQL_CATALOG_NAME` reports that
+///   catalog names are supported. The `SchemaName`/`ProcName`/`ColumnName` clause beside it
+///   *is* `(DM)`-marked and is deliberately not checked here.
+///
+///   This page states **no** unconditional null-argument clause, so a null `ProcName` or
+///   `ColumnName` is accepted — unlike `SQLColumnPrivileges`, whose `TableName` sentence
+///   carries no marker and no `METADATA_ID` condition and *is* checked. See
+///   `the_procedure_functions_do_not_check_null_name_arguments`.
 /// - HY010: Function sequence error — returned if connection is not open. DM cases (async, etc.)
 ///   are driver-manager-handled; not returned here.
 /// - HY013: Memory management error; returned if underlying allocation fails.
@@ -1891,9 +1927,28 @@ pub unsafe fn sql_procedure_columns_w<B: Backend>(
                 column,
             );
 
+            // Spec HY009 (not (DM)): METADATA_ID plus a null CatalogName on a
+            // data source that has catalogs. The neighbouring
+            // SchemaName/ProcName/ColumnName clause *is* (DM)-marked, and this
+            // page states no unconditional null-argument clause — see the doc
+            // comment.
+            let metadata_id = metadata_id_enabled(stmt);
+            check_metadata_id_null_catalog::<B>(
+                connection,
+                catalog_name,
+                metadata_id,
+                "SQLProcedureColumnsW",
+            )?;
+
             let cancel_token =
                 crate::handles::resolve_cancel_token::<B>(statement_handle, connection);
             let cancel = crate::handles::cancel_as::<B>(&cancel_token)?;
+
+            // All four arguments are identifiers under METADATA_ID.
+            let catalog = normalise_catalog_arg::<B>(connection, catalog, metadata_id);
+            let schema = normalise_catalog_arg::<B>(connection, schema, metadata_id);
+            let proc = normalise_catalog_arg::<B>(connection, proc, metadata_id);
+            let column = normalise_catalog_arg::<B>(connection, column, metadata_id);
 
             let rows = B::procedure_columns(
                 connection,
@@ -1976,8 +2031,21 @@ pub(crate) fn column_privileges_columns(
 /// - HY000: General error; returned for any unexpected backend error.
 /// - HY001: Memory allocation error; returned if allocation fails.
 /// - HY008: Operation canceled (DM) (driver-manager-handled; not returned here).
-/// - HY009: Invalid use of null pointer (DM) (driver-manager-handled; not returned by this
-///   driver).
+/// - HY009: Invalid use of null pointer. **Returned by this driver** for *both* clauses the
+///   spec's diagnostics table states without a `(DM)` marker — this is the only one of the
+///   four functions in this family with two:
+///
+///   1. "The `TableName` argument was a null pointer", **unconditionally**. The sentence
+///      carries no marker and no `METADATA_ID` condition, and the page's argument
+///      description agrees that `TableName` "cannot be a null pointer".
+///      `SQLTablePrivileges`, `SQLProcedures` and `SQLProcedureColumns` state no such
+///      unmarked sentence and deliberately do not check it — see
+///      `table_privileges_does_not_check_null_table_name` and
+///      `the_procedure_functions_do_not_check_null_name_arguments`.
+///   2. `SQL_ATTR_METADATA_ID` was `SQL_TRUE`, `CatalogName` was a null pointer, and
+///      `SQL_CATALOG_NAME` reports that catalog names are supported.
+///
+///   The `SchemaName`/`ColumnName` clause beside them *is* `(DM)`-marked and is not checked.
 /// - HY010: Function sequence error — returned if connection is not open. DM cases (async, etc.)
 ///   are driver-manager-handled; not returned here.
 /// - HY013: Memory management error; returned if underlying allocation fails.
@@ -2028,6 +2096,12 @@ pub unsafe fn sql_column_privileges_w<B: Backend>(
                 ));
             };
 
+            // Spec HY009 (not (DM), and not conditional on METADATA_ID) — the
+            // clause only this one of the four states. Checked before the
+            // arguments are parsed, because a null pointer is exactly what
+            // parsing would turn into a `None` and lose. See the doc comment.
+            check_null_table_name(table_name, "SQLColumnPrivilegesW")?;
+
             let catalog = parse_filter_param(catalog_name, name_length1)?;
             let schema = parse_filter_param(schema_name, name_length2)?;
             let table = parse_filter_param(table_name, name_length3)?;
@@ -2042,9 +2116,26 @@ pub unsafe fn sql_column_privileges_w<B: Backend>(
                 column,
             );
 
+            // Spec HY009 (not (DM)): METADATA_ID plus a null CatalogName on a
+            // data source that has catalogs. The neighbouring
+            // SchemaName/ColumnName clause *is* (DM)-marked.
+            let metadata_id = metadata_id_enabled(stmt);
+            check_metadata_id_null_catalog::<B>(
+                connection,
+                catalog_name,
+                metadata_id,
+                "SQLColumnPrivilegesW",
+            )?;
+
             let cancel_token =
                 crate::handles::resolve_cancel_token::<B>(statement_handle, connection);
             let cancel = crate::handles::cancel_as::<B>(&cancel_token)?;
+
+            // All four arguments are identifiers under METADATA_ID.
+            let catalog = normalise_catalog_arg::<B>(connection, catalog, metadata_id);
+            let schema = normalise_catalog_arg::<B>(connection, schema, metadata_id);
+            let table = normalise_catalog_arg::<B>(connection, table, metadata_id);
+            let column = normalise_catalog_arg::<B>(connection, column, metadata_id);
 
             let rows = B::column_privileges(
                 connection,
@@ -2130,8 +2221,17 @@ pub(crate) fn table_privileges_columns(
 /// - HY000: General error; returned for any unexpected backend error.
 /// - HY001: Memory allocation error; returned if allocation fails.
 /// - HY008: Operation canceled (DM) (driver-manager-handled; not returned here).
-/// - HY009: Invalid use of null pointer (DM) (driver-manager-handled; not returned by this
-///   driver).
+/// - HY009: Invalid use of null pointer. **Returned by this driver** for the one clause the
+///   spec's diagnostics table states *without* a `(DM)` marker: `SQL_ATTR_METADATA_ID` was
+///   `SQL_TRUE`, `CatalogName` was a null pointer, and `SQL_CATALOG_NAME` reports that
+///   catalog names are supported.
+///
+///   The `SchemaName`/`TableName` clause beside it *is* `(DM)`-marked, so the Driver Manager
+///   returns it and this driver deliberately does **not** — including for a null `TableName`,
+///   which this page states only under that marked, `METADATA_ID`-conditional sentence.
+///   `SQLColumnPrivileges` carries an *unmarked and unconditional* null-`TableName` sentence
+///   and does check it; the difference between the two is intentional, not an omission here.
+///   See `table_privileges_does_not_check_null_table_name`.
 /// - HY010: Function sequence error — returned if connection is not open. DM cases (async, etc.)
 ///   are driver-manager-handled; not returned here.
 /// - HY013: Memory management error; returned if underlying allocation fails.
@@ -2190,9 +2290,27 @@ pub unsafe fn sql_table_privileges_w<B: Backend>(
                 table,
             );
 
+            // Spec HY009 (not (DM)): METADATA_ID plus a null CatalogName on a
+            // data source that has catalogs. This page's null-`TableName`
+            // clause *is* (DM)-marked, unlike `SQLColumnPrivileges`', so there
+            // is deliberately no unconditional check here — see the doc comment
+            // and `table_privileges_does_not_check_null_table_name`.
+            let metadata_id = metadata_id_enabled(stmt);
+            check_metadata_id_null_catalog::<B>(
+                connection,
+                catalog_name,
+                metadata_id,
+                "SQLTablePrivilegesW",
+            )?;
+
             let cancel_token =
                 crate::handles::resolve_cancel_token::<B>(statement_handle, connection);
             let cancel = crate::handles::cancel_as::<B>(&cancel_token)?;
+
+            // All three arguments are identifiers under METADATA_ID.
+            let catalog = normalise_catalog_arg::<B>(connection, catalog, metadata_id);
+            let schema = normalise_catalog_arg::<B>(connection, schema, metadata_id);
+            let table = normalise_catalog_arg::<B>(connection, table, metadata_id);
 
             let rows = B::table_privileges(
                 connection,
@@ -3034,14 +3152,16 @@ mod tests {
     fn column_privileges_result_is_sorted_by_spec_keys() {
         unsafe {
             let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCatalogBackend>();
+            // `TableName` must not be null: the spec makes that HY009 here.
+            let table = utf16_of("t");
             let ret = sql_column_privileges_w::<MockCatalogBackend>(
                 stmt,
                 std::ptr::null(),
                 0,
                 std::ptr::null(),
                 0,
-                std::ptr::null(),
-                0,
+                table.as_ptr(),
+                SQL_NTS_I16,
                 std::ptr::null(),
                 0,
             );
@@ -3087,6 +3207,288 @@ mod tests {
             );
 
             cleanup_for::<MockCatalogBackend>(env, conn, stmt);
+        }
+    }
+
+    /// Spec, `SQLColumnPrivileges` `HY009`: "The TableName argument was a null
+    /// pointer." No `(DM)` marker, and not conditional on `METADATA_ID` —
+    /// unlike the `SchemaName`/`ColumnName` sentence beside it, which is
+    /// `(DM)`. The page's argument description agrees: `TableName` "cannot be a
+    /// null pointer". This is the only one of the four functions in this family
+    /// carrying such a clause.
+    #[test]
+    fn column_privileges_checks_null_table_name_unconditionally() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCatalogBackend>();
+            let ret = sql_column_privileges_w::<MockCatalogBackend>(
+                stmt,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(), // null TableName, METADATA_ID not set
+                0,
+                std::ptr::null(),
+                0,
+            );
+            assert_eq!(ret, SqlReturn::ERROR);
+            with_handle::<MockCatalogBackend, StatementHandle<MockCatalogBackend>, _>(stmt, |h| {
+                let rec = h.diagnostics.get(0).expect("record 1 exists");
+                assert_eq!(rec.sqlstate.as_str(), "HY009");
+            });
+            cleanup_for::<MockCatalogBackend>(env, conn, stmt);
+        }
+    }
+
+    /// Spec, `SQLTablePrivileges` `HY009`: its null-`TableName` clause appears
+    /// only under "(DM) ... SQL_ATTR_METADATA_ID was set to SQL_TRUE". There is
+    /// no unconditional driver-side check here, unlike `SQLColumnPrivileges`.
+    /// Do not "fix" this into consistency.
+    #[test]
+    fn table_privileges_does_not_check_null_table_name() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCatalogBackend>();
+            let ret = sql_table_privileges_w::<MockCatalogBackend>(
+                stmt,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+            cleanup_for::<MockCatalogBackend>(env, conn, stmt);
+        }
+    }
+
+    /// The same for `SQLProcedures` and `SQLProcedureColumns`: neither page
+    /// states an unmarked null-argument clause, so a null `ProcName` is
+    /// accepted. Both are exercised because the two pages were transcribed
+    /// separately, and only one of them being right is the realistic slip.
+    #[test]
+    fn the_procedure_functions_do_not_check_null_name_arguments() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCatalogBackend>();
+            assert_eq!(
+                sql_procedures_w::<MockCatalogBackend>(
+                    stmt,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                    0,
+                ),
+                SqlReturn::SUCCESS,
+            );
+            // The first call left a cursor open; a second on the same
+            // statement would fail 24000 for that reason rather than HY009.
+            let _ = crate::ffi::cursor::sql_close_cursor::<MockCatalogBackend>(stmt);
+            assert_eq!(
+                sql_procedure_columns_w::<MockCatalogBackend>(
+                    stmt,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                    0,
+                ),
+                SqlReturn::SUCCESS,
+            );
+            cleanup_for::<MockCatalogBackend>(env, conn, stmt);
+        }
+    }
+
+    /// Spec `HY009`: "The SQL_ATTR_METADATA_ID statement attribute was set to
+    /// SQL_TRUE, the CatalogName argument was a null pointer, and the
+    /// SQL_CATALOG_NAME InfoType returns that catalog names are supported."
+    /// That sentence carries no `(DM)` marker on any of these four pages, so
+    /// all four check it — the half that *is* uniform across the family.
+    #[test]
+    fn all_four_check_metadata_id_with_a_null_catalog() {
+        unsafe {
+            let expect_hy009 = |stmt: *mut c_void, ret: SqlReturn, function: &str| {
+                assert_eq!(ret, SqlReturn::ERROR, "{function} accepted a null catalog");
+                with_handle::<MockCatalogBackend, StatementHandle<MockCatalogBackend>, _>(
+                    stmt,
+                    |h| {
+                        let rec = h.diagnostics.get(0).expect("record 1 exists");
+                        assert_eq!(rec.sqlstate.as_str(), "HY009", "{function}");
+                    },
+                );
+            };
+            let empty = utf16_of("");
+
+            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCatalogBackend>();
+            set_metadata_id_true::<MockCatalogBackend>(stmt);
+            expect_hy009(
+                stmt,
+                sql_procedures_w::<MockCatalogBackend>(
+                    stmt,
+                    std::ptr::null(),
+                    0,
+                    empty.as_ptr(),
+                    SQL_NTS_I16,
+                    empty.as_ptr(),
+                    SQL_NTS_I16,
+                ),
+                "SQLProceduresW",
+            );
+            expect_hy009(
+                stmt,
+                sql_procedure_columns_w::<MockCatalogBackend>(
+                    stmt,
+                    std::ptr::null(),
+                    0,
+                    empty.as_ptr(),
+                    SQL_NTS_I16,
+                    empty.as_ptr(),
+                    SQL_NTS_I16,
+                    empty.as_ptr(),
+                    SQL_NTS_I16,
+                ),
+                "SQLProcedureColumnsW",
+            );
+            expect_hy009(
+                stmt,
+                sql_column_privileges_w::<MockCatalogBackend>(
+                    stmt,
+                    std::ptr::null(),
+                    0,
+                    empty.as_ptr(),
+                    SQL_NTS_I16,
+                    // Non-null, so the unconditional TableName check cannot be
+                    // what produces the HY009 this asserts.
+                    empty.as_ptr(),
+                    SQL_NTS_I16,
+                    empty.as_ptr(),
+                    SQL_NTS_I16,
+                ),
+                "SQLColumnPrivilegesW",
+            );
+            expect_hy009(
+                stmt,
+                sql_table_privileges_w::<MockCatalogBackend>(
+                    stmt,
+                    std::ptr::null(),
+                    0,
+                    empty.as_ptr(),
+                    SQL_NTS_I16,
+                    empty.as_ptr(),
+                    SQL_NTS_I16,
+                ),
+                "SQLTablePrivilegesW",
+            );
+            cleanup_for::<MockCatalogBackend>(env, conn, stmt);
+        }
+    }
+
+    /// Spec, "Arguments in Catalog Functions": under `METADATA_ID = SQL_TRUE`
+    /// **every** string argument of all four becomes an identifier — there is
+    /// no `TableType`-style exemption anywhere in this family. Core folds and
+    /// escapes each one before the backend sees it.
+    #[test]
+    fn metadata_id_normalises_every_argument_of_the_four() {
+        unsafe {
+            let catalog = utf16_of("my_cat");
+            let schema = utf16_of("my_sch");
+            let name = utf16_of("my_name");
+            let column = utf16_of("my_col");
+
+            // Each function gets its own statement: a call leaves a cursor
+            // open, and a second on the same statement would fail 24000.
+            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCatalogArgsBackend>();
+            set_metadata_id_true::<MockCatalogArgsBackend>(stmt);
+            assert_eq!(
+                sql_procedures_w::<MockCatalogArgsBackend>(
+                    stmt,
+                    catalog.as_ptr(),
+                    SQL_NTS_I16,
+                    schema.as_ptr(),
+                    SQL_NTS_I16,
+                    name.as_ptr(),
+                    SQL_NTS_I16,
+                ),
+                SqlReturn::SUCCESS,
+            );
+            let args = MockCatalogArgsBackend::recorded().expect("Backend::procedures was called");
+            assert_eq!(args.catalog.as_deref(), Some("MY\\_CAT"));
+            assert_eq!(args.schema.as_deref(), Some("MY\\_SCH"));
+            assert_eq!(args.proc.as_deref(), Some("MY\\_NAME"));
+            cleanup_for::<MockCatalogArgsBackend>(env, conn, stmt);
+
+            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCatalogArgsBackend>();
+            set_metadata_id_true::<MockCatalogArgsBackend>(stmt);
+            assert_eq!(
+                sql_procedure_columns_w::<MockCatalogArgsBackend>(
+                    stmt,
+                    catalog.as_ptr(),
+                    SQL_NTS_I16,
+                    schema.as_ptr(),
+                    SQL_NTS_I16,
+                    name.as_ptr(),
+                    SQL_NTS_I16,
+                    column.as_ptr(),
+                    SQL_NTS_I16,
+                ),
+                SqlReturn::SUCCESS,
+            );
+            let args =
+                MockCatalogArgsBackend::recorded().expect("Backend::procedure_columns was called");
+            assert_eq!(args.catalog.as_deref(), Some("MY\\_CAT"));
+            assert_eq!(args.schema.as_deref(), Some("MY\\_SCH"));
+            assert_eq!(args.proc.as_deref(), Some("MY\\_NAME"));
+            assert_eq!(args.column.as_deref(), Some("MY\\_COL"));
+            cleanup_for::<MockCatalogArgsBackend>(env, conn, stmt);
+
+            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCatalogArgsBackend>();
+            set_metadata_id_true::<MockCatalogArgsBackend>(stmt);
+            assert_eq!(
+                sql_column_privileges_w::<MockCatalogArgsBackend>(
+                    stmt,
+                    catalog.as_ptr(),
+                    SQL_NTS_I16,
+                    schema.as_ptr(),
+                    SQL_NTS_I16,
+                    name.as_ptr(),
+                    SQL_NTS_I16,
+                    column.as_ptr(),
+                    SQL_NTS_I16,
+                ),
+                SqlReturn::SUCCESS,
+            );
+            let args =
+                MockCatalogArgsBackend::recorded().expect("Backend::column_privileges was called");
+            assert_eq!(args.catalog.as_deref(), Some("MY\\_CAT"));
+            assert_eq!(args.schema.as_deref(), Some("MY\\_SCH"));
+            assert_eq!(args.table.as_deref(), Some("MY\\_NAME"));
+            assert_eq!(args.column.as_deref(), Some("MY\\_COL"));
+            cleanup_for::<MockCatalogArgsBackend>(env, conn, stmt);
+
+            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCatalogArgsBackend>();
+            set_metadata_id_true::<MockCatalogArgsBackend>(stmt);
+            assert_eq!(
+                sql_table_privileges_w::<MockCatalogArgsBackend>(
+                    stmt,
+                    catalog.as_ptr(),
+                    SQL_NTS_I16,
+                    schema.as_ptr(),
+                    SQL_NTS_I16,
+                    name.as_ptr(),
+                    SQL_NTS_I16,
+                ),
+                SqlReturn::SUCCESS,
+            );
+            let args =
+                MockCatalogArgsBackend::recorded().expect("Backend::table_privileges was called");
+            assert_eq!(args.catalog.as_deref(), Some("MY\\_CAT"));
+            assert_eq!(args.schema.as_deref(), Some("MY\\_SCH"));
+            assert_eq!(args.table.as_deref(), Some("MY\\_NAME"));
+            cleanup_for::<MockCatalogArgsBackend>(env, conn, stmt);
         }
     }
 
@@ -4183,14 +4585,17 @@ mod tests {
             let cr = connect_handle(conn);
             assert_eq!(cr, SqlReturn::SUCCESS);
 
+            // `TableName` must not be null here: the spec states that clause
+            // without a `(DM)` marker, so the driver rejects it with HY009.
+            let table = utf16_of("t");
             let ret = sql_column_privileges_w::<MockBackend>(
                 stmt,
                 std::ptr::null(),
                 0,
                 std::ptr::null(),
                 0,
-                std::ptr::null(),
-                0,
+                table.as_ptr(),
+                SQL_NTS_I16,
                 std::ptr::null(),
                 0,
             );
