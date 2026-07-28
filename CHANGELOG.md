@@ -48,6 +48,11 @@ Everything a driver has to change for the catalog rework, in one place.
    `SQLProcedureColumns`, `SQLColumnPrivileges` or `SQLTablePrivileges` to
    return rows: each defaults to an empty result set, which is what those four
    functions returned before. Points 4 and 5 apply to them too.
+8. **`SQLColumnPrivileges` now rejects a null `TableName` with `HY009`**, which
+   the spec states for it without a `(DM)` marker. This is the one behaviour
+   change in point 7's group that an existing test suite can notice — a test
+   passing a null there was relying on a spec violation. The other three
+   functions must *not* check it, and do not.
 
 ### Added
 
