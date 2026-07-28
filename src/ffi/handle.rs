@@ -18,6 +18,8 @@ use std::ffi::c_void;
 /// - `SQL_HANDLE_ENV` (1) — allocate an environment handle (`input_handle` must be null)
 /// - `SQL_HANDLE_DBC` (2) — allocate a connection handle (`input_handle` must be a valid env)
 /// - `SQL_HANDLE_STMT` (3) — allocate a statement handle (`input_handle` must be a valid conn)
+/// - `SQL_HANDLE_DESC` (4) — not implemented; returns `SQL_ERROR` with HYC00
+/// - `SQL_HANDLE_DBC_INFO_TOKEN` — not implemented; returns `SQL_ERROR` with HYC00
 ///
 /// # Spec compliance
 ///
@@ -41,9 +43,13 @@ use std::ffi::c_void;
 ///   null). The spec annotates this (DM); it is guarded defensively here.
 /// - HY117: Connection suspended due to unknown transaction state
 ///   (driver-manager-handled; not returned here).
-/// - HYC00: Optional feature not implemented. `SQL_HANDLE_DESC` and
-///   `SQL_HANDLE_DBC_INFO_TOKEN` allocation return `SQL_ERROR` (not implemented);
-///   no specific SQLSTATE is attached.
+/// - HYC00: Optional feature not implemented. Returned, with this SQLSTATE
+///   posted, for `SQL_HANDLE_DESC` and `SQL_HANDLE_DBC_INFO_TOKEN` allocation.
+///   This is the only un-annotated code in this function's table covering an
+///   unimplemented handle type, and the spec names `SQL_HANDLE_DESC` in its
+///   description; `IM001`, the alternative, is (DM). Note `SQLFreeHandle`
+///   answers `HY000` for the same condition, because its table has no `HYC00`
+///   row at all — the asymmetry is what the two tables say.
 /// - HYT01: Connection timeout expired (not returned here; allocation performs
 ///   no network I/O).
 /// - IM001: Driver does not support this function (driver-manager-handled; not
@@ -159,14 +165,26 @@ pub unsafe fn sql_alloc_handle<B: Backend>(
                     // Explicit descriptor handle allocation (SQL_HANDLE_DESC) is not yet implemented.
                     // The Windows DM auto-allocates implicit descriptors; applications rarely call this directly.
                     // Full implementation requires a descriptor handle registry. Deferred.
-                    tracing::error!("SQLAllocHandle: SQL_HANDLE_DESC not implemented");
-                    SqlReturn::ERROR
+                    //
+                    // HYC00 is the only un-annotated code this function's table
+                    // offers for an unimplemented handle type, and it names this
+                    // case directly; IM001, the alternative, is (DM). Note
+                    // SQLFreeHandle answers HY000 for the same condition, because
+                    // its table lists no HYC00 at all. The `*output_handle_ptr =
+                    // SQL_NULL_HANDLE` write above already ran, so the spec's
+                    // "set to SQL_NULL_HANDLE on error" still holds on this path.
+                    return Err(OdbcError::general(
+                        "SQLAllocHandle: SQL_HANDLE_DESC is not implemented",
+                        crate::types::SqlState::optional_feature_not_implemented(),
+                    ));
                 }
                 HandleType::DbcInfoToken => {
                     // Only used between Driver Manager and drivers for connection pooling.
                     // Applications should not use this handle type.
-                    tracing::error!("SQLAllocHandle: SQL_HANDLE_DBC_INFO_TOKEN not implemented");
-                    SqlReturn::ERROR
+                    return Err(OdbcError::general(
+                        "SQLAllocHandle: SQL_HANDLE_DBC_INFO_TOKEN is not implemented",
+                        crate::types::SqlState::optional_feature_not_implemented(),
+                    ));
                 }
             };
             Ok(ret)
@@ -757,6 +775,47 @@ mod tests {
             );
 
             crate::test_utils::cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
+    #[test]
+    fn alloc_handle_unimplemented_type_posts_hyc00() {
+        // HYC00, not the HY000 its SQLFreeHandle counterpart uses: unlike that
+        // function's table, SQLAllocHandle's *does* list HYC00, un-annotated,
+        // for exactly this case ("The HandleType argument was SQL_HANDLE_DESC").
+        // IM001, the other candidate, is (DM).
+        unsafe {
+            let mut env: *mut c_void = std::ptr::null_mut();
+            let _ = sql_alloc_handle::<MockBackend>(
+                HandleType::Env as i16,
+                std::ptr::null_mut(),
+                &mut env,
+            );
+            let mut conn: *mut c_void = std::ptr::null_mut();
+            let _ = sql_alloc_handle::<MockBackend>(HandleType::Dbc as i16, env, &mut conn);
+
+            let mut desc: *mut c_void = std::ptr::null_mut();
+            let ret = sql_alloc_handle::<MockBackend>(HandleType::Desc as i16, conn, &mut desc);
+            assert_eq!(ret, SqlReturn::ERROR);
+            assert!(
+                desc.is_null(),
+                "spec: OutputHandlePtr is SQL_NULL_HANDLE on error"
+            );
+
+            with_handle::<MockBackend, crate::handles::ConnectionHandle<MockBackend>, _>(
+                conn,
+                |handle| {
+                    assert_eq!(
+                        handle.diagnostics.len(),
+                        1,
+                        "SQL_ERROR with no diagnostic is unreportable"
+                    );
+                    let rec = handle.diagnostics.get(0).expect("record 1 exists");
+                    assert_eq!(rec.sqlstate.as_str(), "HYC00");
+                },
+            );
+
+            crate::test_utils::cleanup_env_conn_stmt(env, conn, std::ptr::null_mut());
         }
     }
 

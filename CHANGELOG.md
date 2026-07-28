@@ -599,6 +599,10 @@ markers go away and this section becomes the initial-release notes.
 
 ### Fixed
 
+- `SQLAllocHandle` returned a bare `SQL_ERROR` with no diagnostic for
+  `SQL_HANDLE_DESC` and `SQL_HANDLE_DBC_INFO_TOKEN`. It now posts `HYC00`, which
+  this function's diagnostics table lists un-annotated for exactly that case.
+
 - `SQLFreeStmt` returned `SQL_ERROR` for an unrecognised `Option` *before*
   entering `panic_safe`, so there was no handle to post onto and `SQLGetDiagRec`
   answered `SQL_NO_DATA`. The parse now happens inside `panic_safe` and posts
