@@ -11,7 +11,7 @@ use odbc_sys::HandleType;
 use crate::backend::{Backend, StatementBackend};
 use crate::errors::OdbcError;
 use crate::ffi::handle::{sql_alloc_handle, sql_free_handle};
-use crate::types::{ConnectParams, InfoValue, Nullable, SqlReturn, TypeInfoRow};
+use crate::types::{ConnectParams, InfoValue, Nullable, SqlReturn, TableRow, TypeInfoRow};
 
 // ---------------------------------------------------------------------------
 // Handle allocation helpers
@@ -324,7 +324,7 @@ impl Backend for MockBackend {
         _: Option<&str>,
         _: Option<&str>,
         _: Option<&str>,
-    ) -> Result<MockStatement, MockError> {
+    ) -> Result<Vec<TableRow>, MockError> {
         Err(MockError)
     }
     fn columns(
@@ -519,7 +519,7 @@ impl Backend for MockNoCatalogBackend {
         _: Option<&str>,
         _: Option<&str>,
         _: Option<&str>,
-    ) -> Result<MockStatement, MockError> {
+    ) -> Result<Vec<TableRow>, MockError> {
         Err(MockError)
     }
     fn columns(
@@ -631,7 +631,7 @@ macro_rules! mock_keywords_backend {
                 _: Option<&str>,
                 _: Option<&str>,
                 _: Option<&str>,
-            ) -> Result<MockStatement, MockError> {
+            ) -> Result<Vec<TableRow>, MockError> {
                 Err(MockError)
             }
             fn columns(
@@ -772,7 +772,7 @@ impl Backend for MockAltBackend {
         _: Option<&str>,
         _: Option<&str>,
         _: Option<&str>,
-    ) -> Result<MockStatement, MockError> {
+    ) -> Result<Vec<TableRow>, MockError> {
         Err(MockError)
     }
     fn columns(
@@ -976,7 +976,7 @@ macro_rules! mock_isolation_backend {
                 _: Option<&str>,
                 _: Option<&str>,
                 _: Option<&str>,
-            ) -> Result<MockStatement, MockError> {
+            ) -> Result<Vec<TableRow>, MockError> {
                 Err(MockError)
             }
             fn columns(
@@ -1149,7 +1149,7 @@ macro_rules! mock_txn_backend {
                 _: Option<&str>,
                 _: Option<&str>,
                 _: Option<&str>,
-            ) -> Result<MockStatement, OdbcError> {
+            ) -> Result<Vec<TableRow>, OdbcError> {
                 Err(OdbcError::NotImplemented {
                     feature: "mock txn backend".into(),
                 })
@@ -1355,7 +1355,7 @@ impl Backend for MockTypeInfoBackend {
         _: Option<&str>,
         _: Option<&str>,
         _: Option<&str>,
-    ) -> Result<MockStatement, MockError> {
+    ) -> Result<Vec<TableRow>, MockError> {
         Err(MockError)
     }
     fn columns(
@@ -1374,6 +1374,139 @@ impl Backend for MockTypeInfoBackend {
     }
     fn supports_schemas(_conn: &Self::Connection) -> bool {
         false
+    }
+    fn alter_table_support(_conn: &Self::Connection) -> u32 {
+        0
+    }
+    fn outer_join_capabilities(_conn: &Self::Connection) -> u32 {
+        0
+    }
+    fn default_txn_isolation(_conn: &Self::Connection) -> u32 {
+        0
+    }
+    fn txn_isolation_options(_conn: &Self::Connection) -> u32 {
+        0
+    }
+
+    minimal_capability_decls!();
+}
+
+// ---------------------------------------------------------------------------
+// A backend that declares catalog rows
+// ---------------------------------------------------------------------------
+
+/// Declares real catalog rows, in deliberately wrong order, so a test can tell
+/// that the catalog FFI functions sort rather than passing the backend's rows
+/// through.
+///
+/// These rows are not on [`MockBackend`]: a backend that returns rows changes
+/// what `SQLTables` does on every test that touches it, and the existing ones
+/// assume it returns nothing.
+pub struct MockCatalogBackend;
+
+impl Backend for MockCatalogBackend {
+    type Connection = MockConnection;
+    type Statement = MockStatement;
+    type Error = MockError;
+    type CancelToken = MockCancelToken;
+
+    fn connect(_: &ConnectParams) -> Result<MockConnection, MockError> {
+        Ok(MockConnection)
+    }
+    fn disconnect(_: &mut MockConnection) -> Result<(), MockError> {
+        Ok(())
+    }
+    fn cancel_token(_conn: &Self::Connection) -> Self::CancelToken {
+        MockCancelToken::default()
+    }
+    fn cancel(token: &Self::CancelToken) -> Result<(), Self::Error> {
+        token
+            .cancelled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+    fn exec_direct(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: &str,
+    ) -> Result<MockStatement, MockError> {
+        Err(MockError)
+    }
+    fn prepare(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: &str,
+    ) -> Result<MockStatement, MockError> {
+        Err(MockError)
+    }
+    fn execute(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: &mut MockStatement,
+        _: &[crate::types::ColumnValue],
+    ) -> Result<crate::types::ExecuteOutcome, MockError> {
+        Err(MockError)
+    }
+    fn get_info(_: &MockConnection, _: crate::types::InfoType) -> Result<InfoValue, MockError> {
+        Err(MockError)
+    }
+    fn get_functions() -> Cow<'static, [crate::function_id::FunctionId]> {
+        Cow::Borrowed(&[])
+    }
+    fn get_type_info(_conn: &Self::Connection) -> Cow<'static, [TypeInfoRow]> {
+        Cow::Borrowed(&[])
+    }
+    /// Out of spec order on the dominant key: the `VIEW` comes first, and the
+    /// two `TABLE` rows are reverse-alphabetical. Passing these through
+    /// unsorted therefore fails the ordering test rather than passing by luck.
+    fn tables(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+    ) -> Result<Vec<TableRow>, MockError> {
+        Ok(vec![
+            TableRow {
+                catalog: Some("cat".into()),
+                schema: Some("sch".into()),
+                name: Some("a_view".into()),
+                table_type: Some("VIEW".into()),
+                remarks: None,
+            },
+            TableRow {
+                catalog: Some("cat".into()),
+                schema: Some("sch".into()),
+                name: Some("z_table".into()),
+                table_type: Some("TABLE".into()),
+                remarks: None,
+            },
+            TableRow {
+                catalog: Some("cat".into()),
+                schema: Some("sch".into()),
+                name: Some("b_table".into()),
+                table_type: Some("TABLE".into()),
+                remarks: None,
+            },
+        ])
+    }
+    fn columns(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+    ) -> Result<MockStatement, MockError> {
+        Err(MockError)
+    }
+
+    fn supports_catalogs(_conn: &Self::Connection) -> bool {
+        true
+    }
+    fn supports_schemas(_conn: &Self::Connection) -> bool {
+        true
     }
     fn alter_table_support(_conn: &Self::Connection) -> u32 {
         0
@@ -1475,7 +1608,7 @@ impl Backend for MockFunctionsBackend {
         _: Option<&str>,
         _: Option<&str>,
         _: Option<&str>,
-    ) -> Result<MockStatement, MockError> {
+    ) -> Result<Vec<TableRow>, MockError> {
         Err(MockError)
     }
     fn columns(
@@ -1613,7 +1746,7 @@ impl Backend for MockFailingCloseBackend {
         _: Option<&str>,
         _: Option<&str>,
         _: Option<&str>,
-    ) -> Result<MockFailingCloseStatement, OdbcError> {
+    ) -> Result<Vec<TableRow>, OdbcError> {
         Err(OdbcError::NotImplemented {
             feature: "tables".into(),
         })
@@ -1823,7 +1956,7 @@ impl Backend for MockLongDataBackend {
         _: Option<&str>,
         _: Option<&str>,
         _: Option<&str>,
-    ) -> Result<MockLongDataStatement, OdbcError> {
+    ) -> Result<Vec<TableRow>, OdbcError> {
         Err(OdbcError::NotImplemented {
             feature: "tables".into(),
         })
@@ -1947,7 +2080,7 @@ impl Backend for MockRecordingBackend {
         _: Option<&str>,
         _: Option<&str>,
         _: Option<&str>,
-    ) -> Result<MockStatement, MockError> {
+    ) -> Result<Vec<TableRow>, MockError> {
         Err(MockError)
     }
     fn columns(

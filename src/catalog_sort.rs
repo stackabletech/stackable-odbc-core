@@ -53,21 +53,6 @@ fn compare_values(a: &ColumnValue, b: &ColumnValue, null_collation: u16) -> Orde
 ///
 /// `sort_by` is stable, which matters: rows equal on every spec key keep the
 /// order the backend returned them in.
-// Dead in the library build until the catalog FFI functions are migrated to
-// typed rows; the tests below already exercise it, which is why the attribute
-// is scoped to `not(test)` — under `--all-targets` the expectation would
-// otherwise be unfulfilled.
-//
-// `expect` rather than `allow` so this deletes itself: an unfulfilled
-// expectation is an error, so the first caller in the library turns this
-// attribute into a build failure that says "remove me".
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "called by the catalog FFI functions once they return typed rows"
-    )
-)]
 pub(crate) fn sort_rows(rows: &mut [Vec<ColumnValue>], keys: &[usize], null_collation: u16) {
     rows.sort_by(|a, b| {
         for &k in keys {

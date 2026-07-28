@@ -9,7 +9,7 @@ use odbc_sys::CDataType;
 use crate::errors::OdbcError;
 use crate::types::{
     CatalogResultColumnWidths, ColumnDescriptor, ColumnValue, ConnectParams, ExecuteOutcome,
-    FetchResult, IdentifierType, InfoValue, Nullable, Scope, TypeInfoRow,
+    FetchResult, IdentifierType, InfoValue, Nullable, Scope, TableRow, TypeInfoRow,
 };
 
 /// Core abstraction for database-specific logic.
@@ -246,11 +246,15 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// `Cow<'static, [TypeInfoRow]>` rather than `&'static [TypeInfoRow]`.
     fn get_type_info(conn: &Self::Connection) -> Cow<'static, [TypeInfoRow]>;
 
-    /// Returns a result set describing tables matching the given filter criteria.
+    /// Returns the rows describing tables matching the given filter criteria.
     ///
-    /// Called by `SQLTablesW`. All filter parameters are optional; `None` means no filter
-    /// on that dimension. `cancel` is this statement's token; record whatever
-    /// `Backend::cancel` will need to identify this work.
+    /// Called by `SQLTablesW`. All filter parameters are optional; `None` means
+    /// no filter on that dimension. `cancel` is this statement's token; record
+    /// whatever `Backend::cancel` will need to identify this work.
+    ///
+    /// **Return the rows in any order.** Core sorts them into the spec's order
+    /// (TABLE_TYPE, TABLE_CAT, TABLE_SCHEM, TABLE_NAME) and builds the result
+    /// set, so a backend does not need an ORDER BY for correctness.
     fn tables(
         conn: &Self::Connection,
         cancel: &Self::CancelToken,
@@ -258,7 +262,7 @@ pub trait Backend: Sized + Send + Sync + 'static {
         schema: Option<&str>,
         table: Option<&str>,
         table_type: Option<&str>,
-    ) -> Result<Self::Statement, Self::Error>;
+    ) -> Result<Vec<TableRow>, Self::Error>;
 
     /// Returns a result set describing columns matching the given filter criteria.
     ///

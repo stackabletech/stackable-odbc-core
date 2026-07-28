@@ -14,10 +14,10 @@ use crate::panic::panic_safe;
 use crate::synthetic::SyntheticStatement;
 use crate::types::col_attr::{ColAttrValue, get_column_attribute};
 use crate::types::{
-    CatalogResultColumnWidths, ColumnDescriptor, Desc, Nullable, PRIVILEGE_LEN, SQL_INDEX_UNIQUE,
-    SqlReturn, SqlState, ULen, YES_NO_LEN, character, identifier, identifier_type_from_raw,
-    integer, nullable_from_raw, scope_from_raw, smallint, special_columns_columns,
-    statistics_columns,
+    CatalogResultColumnWidths, ColumnDescriptor, ColumnValue, Desc, Nullable, PRIVILEGE_LEN,
+    SQL_INDEX_UNIQUE, SqlReturn, SqlState, TableRow, TablesResultCol, ULen, YES_NO_LEN, character,
+    identifier, identifier_type_from_raw, integer, nullable_from_raw, scope_from_raw, smallint,
+    special_columns_columns, statistics_columns,
 };
 use crate::utf16::{utf16_to_string, write_utf16};
 
@@ -140,7 +140,7 @@ pub unsafe fn sql_tables_w<B: Backend>(
                 crate::handles::resolve_cancel_token::<B>(statement_handle, connection);
             let cancel = crate::handles::cancel_as::<B>(&cancel_token)?;
 
-            let result = B::tables(
+            let rows = B::tables(
                 connection,
                 cancel,
                 catalog.as_deref(),
@@ -150,7 +150,18 @@ pub unsafe fn sql_tables_w<B: Backend>(
             )
             .into_odbc()?;
 
-            stmt.set_result_set(StatementData::Backend(result));
+            let mut values: Vec<Vec<ColumnValue>> = rows.iter().map(TableRow::to_values).collect();
+            // Spec: ordered by TABLE_TYPE, TABLE_CAT, TABLE_SCHEM, TABLE_NAME
+            // — zero-based column indices 3, 0, 1, 2.
+            crate::catalog_sort::sort_rows(
+                &mut values,
+                &[3, 0, 1, 2],
+                B::null_collation(connection),
+            );
+            stmt.set_result_set(StatementData::Synthetic(SyntheticStatement::new(
+                TablesResultCol::all_descriptors(&B::catalog_result_column_widths()),
+                values,
+            )));
             Ok(SqlReturn::SUCCESS)
         })
     };
@@ -1568,13 +1579,15 @@ pub unsafe fn sql_table_privileges_w<B: Backend>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ffi::handle::sql_free_handle;
+    use crate::ffi::handle::{sql_alloc_handle, sql_free_handle};
     use crate::ffi::info::type_info_columns;
     use crate::handles::ConnectionHandle;
-    use crate::test_utils::{MockBackend, MockConnection, alloc_env_conn_stmt, with_handle};
+    use crate::test_utils::{
+        MockBackend, MockCatalogBackend, MockConnection, alloc_env_conn_stmt, with_handle,
+    };
     use crate::types::{
-        ColumnsResultCol, Desc, ForeignKeysResultCol, Nullable, PrimaryKeysResultCol,
-        SQL_BEST_ROWID, SQL_INDEX_ALL, SQL_SCOPE_CURROW, SqlDataType, TablesResultCol,
+        CDataType, ColumnsResultCol, Desc, ForeignKeysResultCol, Nullable, PrimaryKeysResultCol,
+        SQL_BEST_ROWID, SQL_INDEX_ALL, SQL_SCOPE_CURROW, SqlDataType,
     };
     use odbc_sys::HandleType;
 
@@ -1728,6 +1741,108 @@ mod tests {
             let _ = crate::ffi::connect::sql_disconnect::<MockBackend>(conn);
             let _ = sql_free_handle::<MockBackend>(HandleType::Dbc as i16, conn);
             let _ = sql_free_handle::<MockBackend>(HandleType::Env as i16, env);
+        }
+    }
+
+    /// Generic counterpart of `alloc_env_conn_stmt` + `cleanup` above, for a
+    /// test that needs a backend other than `MockBackend`. The catalog
+    /// functions all require an open connection, so this connects too.
+    unsafe fn alloc_env_conn_stmt_for<B: Backend>() -> (*mut c_void, *mut c_void, *mut c_void) {
+        unsafe {
+            let mut env: *mut c_void = std::ptr::null_mut();
+            let _ = sql_alloc_handle::<B>(HandleType::Env as i16, std::ptr::null_mut(), &mut env);
+            let mut conn: *mut c_void = std::ptr::null_mut();
+            let _ = sql_alloc_handle::<B>(HandleType::Dbc as i16, env, &mut conn);
+            let wide: Vec<u16> = "Host=localhost;Database=test".encode_utf16().collect();
+            assert_eq!(
+                crate::ffi::connect::sql_driver_connect_w::<B>(
+                    conn,
+                    std::ptr::null_mut(),
+                    wide.as_ptr(),
+                    i16::try_from(wide.len()).expect("connection string fits in i16"),
+                    std::ptr::null_mut(),
+                    0,
+                    std::ptr::null_mut(),
+                    0,
+                ),
+                SqlReturn::SUCCESS,
+            );
+            let mut stmt: *mut c_void = std::ptr::null_mut();
+            let _ = sql_alloc_handle::<B>(HandleType::Stmt as i16, conn, &mut stmt);
+            (env, conn, stmt)
+        }
+    }
+
+    unsafe fn cleanup_for<B: Backend>(env: *mut c_void, conn: *mut c_void, stmt: *mut c_void) {
+        unsafe {
+            let _ = sql_free_handle::<B>(HandleType::Stmt as i16, stmt);
+            // A connected handle cannot be freed.
+            let _ = crate::ffi::connect::sql_disconnect::<B>(conn);
+            let _ = sql_free_handle::<B>(HandleType::Dbc as i16, conn);
+            let _ = sql_free_handle::<B>(HandleType::Env as i16, env);
+        }
+    }
+
+    /// Fetch every row of the statement's open cursor, collecting one column
+    /// as a string. A NULL value is collected as the empty string; no test
+    /// here distinguishes the two.
+    unsafe fn fetch_column_as_strings<B: Backend>(stmt: *mut c_void, column: u16) -> Vec<String> {
+        let mut out = Vec::new();
+        unsafe {
+            loop {
+                let fetched = crate::ffi::fetch::sql_fetch::<B>(stmt);
+                if fetched == SqlReturn::NO_DATA {
+                    break;
+                }
+                assert_eq!(fetched, SqlReturn::SUCCESS, "SQLFetch failed");
+                let mut buf = [0u8; 128];
+                let mut ind: isize = 0;
+                let ret = crate::ffi::fetch::sql_get_data::<B>(
+                    stmt,
+                    column,
+                    CDataType::Char as i16,
+                    buf.as_mut_ptr().cast::<c_void>(),
+                    buf.len() as isize,
+                    &mut ind,
+                );
+                assert_eq!(ret, SqlReturn::SUCCESS, "SQLGetData failed");
+                let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+                out.push(String::from_utf8_lossy(&buf[..end]).into_owned());
+                assert!(out.len() <= 100, "fetch loop does not terminate");
+            }
+        }
+        out
+    }
+
+    /// Spec: "SQLTables returns the results as a standard result set, ordered
+    /// by TABLE_TYPE, TABLE_CAT, TABLE_SCHEM, and TABLE_NAME." TABLE_TYPE
+    /// dominates, so a VIEW sorts after every TABLE regardless of name.
+    #[test]
+    fn tables_result_is_sorted_by_spec_keys() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCatalogBackend>();
+            let ret = sql_tables_w::<MockCatalogBackend>(
+                stmt,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+
+            const TABLE_NAME_COLUMN: u16 = 3;
+            let names = fetch_column_as_strings::<MockCatalogBackend>(stmt, TABLE_NAME_COLUMN);
+            assert_eq!(
+                names,
+                vec!["b_table", "z_table", "a_view"],
+                "TABLE_TYPE must dominate TABLE_NAME"
+            );
+
+            cleanup_for::<MockCatalogBackend>(env, conn, stmt);
         }
     }
 

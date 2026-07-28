@@ -156,6 +156,14 @@ markers go away and this section becomes the initial-release notes.
 
 ### Changed
 
+- **Breaking:** `Backend::tables` now returns `Vec<TableRow>` instead of
+  `Self::Statement`. Core converts the rows to the spec's column layout, sorts
+  them into the spec's order (TABLE_TYPE, TABLE_CAT, TABLE_SCHEM, TABLE_NAME)
+  and builds the result set itself, so a driver no longer needs an ORDER BY for
+  correctness and can no longer get the column order wrong. Migration: return
+  the rows your query produced as `TableRow`s and delete the statement
+  construction.
+
 - An infinite `f32`/`f64` read as `SQL_C_CHAR` or `SQL_C_WCHAR` now renders as
   `Infinity`/`-Infinity` rather than Rust's `inf`/`-inf`. The ODBC spec defines
   no textual form for a non-finite float, so this is decided by ecosystem fit:
