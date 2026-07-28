@@ -84,6 +84,7 @@
 pub use odbc_sys;
 
 pub mod backend;
+pub(crate) mod cancel;
 pub(crate) mod catalog_ident;
 pub(crate) mod catalog_sort;
 pub mod column_value;

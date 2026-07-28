@@ -77,6 +77,9 @@ pub const INVALID_AUTH_SPEC: &str = "28000";
 /// Invalid application buffer type — HY003
 pub const INVALID_APPLICATION_BUFFER_TYPE: &str = "HY003";
 
+/// Operation canceled — HY008
+pub const OPERATION_CANCELED: &str = "HY008";
+
 /// Invalid use of null pointer — HY009
 pub const INVALID_USE_OF_NULL_POINTER: &str = "HY009";
 
@@ -245,6 +248,21 @@ impl SqlState {
         Self::new(FUNCTION_SEQUENCE_ERROR)
     }
 
+    /// Operation canceled — HY008
+    ///
+    /// Returned by a statement-level call that a `SQLCancel` on another thread
+    /// interrupted, which is the second of the two clauses the spec's `HY008`
+    /// row states: the function "was called, and before it completed execution,
+    /// `SQLCancel` … was called on the `StatementHandle` from a different
+    /// thread in a multithread application".
+    ///
+    /// The row's first clause — asynchronous processing, then the function
+    /// called again — cannot arise here: core implements no asynchronous
+    /// execution and never returns `SQL_STILL_EXECUTING`.
+    pub fn operation_canceled() -> Self {
+        Self::new(OPERATION_CANCELED)
+    }
+
     /// Connection name in use — 08002
     pub fn connection_in_use() -> Self {
         Self::new(CONNECTION_IN_USE)
@@ -405,6 +423,13 @@ mod tests {
     fn sqlstate_roundtrip() {
         let state = SqlState::new(GENERAL_ERROR);
         assert_eq!(state.as_str(), GENERAL_ERROR);
+    }
+
+    #[test]
+    fn operation_canceled_is_hy008() {
+        // Spec, SQLCancel: "If the original function is canceled, it returns
+        // SQL_ERROR and SQLSTATE HY008 (Operation canceled)."
+        assert_eq!(SqlState::operation_canceled().as_str(), "HY008");
     }
 
     #[test]

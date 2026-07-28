@@ -328,6 +328,9 @@ impl Backend for MockBackend {
             .store(true, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
+    fn is_cancelled(token: &Self::CancelToken) -> bool {
+        token.cancelled.load(std::sync::atomic::Ordering::SeqCst)
+    }
     fn exec_direct(
         _: &MockConnection,
         _: &Self::CancelToken,
@@ -526,6 +529,9 @@ impl Backend for MockNoCatalogBackend {
             .store(true, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
+    fn is_cancelled(token: &Self::CancelToken) -> bool {
+        token.cancelled.load(std::sync::atomic::Ordering::SeqCst)
+    }
     fn exec_direct(
         _: &MockConnection,
         _: &Self::CancelToken,
@@ -634,6 +640,9 @@ macro_rules! mock_keywords_backend {
             fn cancel(token: &Self::CancelToken) -> Result<(), Self::Error> {
                 token.cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
                 Ok(())
+            }
+            fn is_cancelled(token: &Self::CancelToken) -> bool {
+                token.cancelled.load(std::sync::atomic::Ordering::SeqCst)
             }
             fn exec_direct(
                 _: &MockConnection,
@@ -778,6 +787,9 @@ impl Backend for MockAltBackend {
             .cancelled
             .store(true, std::sync::atomic::Ordering::SeqCst);
         Ok(())
+    }
+    fn is_cancelled(token: &Self::CancelToken) -> bool {
+        token.cancelled.load(std::sync::atomic::Ordering::SeqCst)
     }
     fn exec_direct(
         _: &MockConnection,
@@ -983,6 +995,9 @@ macro_rules! mock_isolation_backend {
                 token.cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
                 Ok(())
             }
+            fn is_cancelled(token: &Self::CancelToken) -> bool {
+                token.cancelled.load(std::sync::atomic::Ordering::SeqCst)
+            }
             fn exec_direct(
                 _: &MockIsolationConnection,
                 _: &Self::CancelToken,
@@ -1149,6 +1164,9 @@ macro_rules! mock_txn_backend {
                     .cancelled
                     .store(true, std::sync::atomic::Ordering::SeqCst);
                 Ok(())
+            }
+            fn is_cancelled(token: &Self::CancelToken) -> bool {
+                token.cancelled.load(std::sync::atomic::Ordering::SeqCst)
             }
             // Succeeds, unlike `MockBackend::exec_direct`, so a test can tell
             // "SQLExecDirect was allowed" from "SQLExecDirect was rejected".
@@ -1365,6 +1383,9 @@ impl Backend for MockTypeInfoBackend {
             .store(true, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
+    fn is_cancelled(token: &Self::CancelToken) -> bool {
+        token.cancelled.load(std::sync::atomic::Ordering::SeqCst)
+    }
     fn exec_direct(
         _: &MockConnection,
         _: &Self::CancelToken,
@@ -1484,6 +1505,9 @@ impl Backend for MockCatalogBackend {
             .cancelled
             .store(true, std::sync::atomic::Ordering::SeqCst);
         Ok(())
+    }
+    fn is_cancelled(token: &Self::CancelToken) -> bool {
+        token.cancelled.load(std::sync::atomic::Ordering::SeqCst)
     }
     fn exec_direct(
         _: &MockConnection,
@@ -1917,6 +1941,9 @@ impl Backend for MockCatalogArgsBackend {
             .store(true, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
+    fn is_cancelled(token: &Self::CancelToken) -> bool {
+        token.cancelled.load(std::sync::atomic::Ordering::SeqCst)
+    }
     fn exec_direct(
         _: &MockConnection,
         _: &Self::CancelToken,
@@ -2188,6 +2215,9 @@ impl Backend for MockFunctionsBackend {
             .store(true, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
+    fn is_cancelled(token: &Self::CancelToken) -> bool {
+        token.cancelled.load(std::sync::atomic::Ordering::SeqCst)
+    }
     fn exec_direct(
         _: &MockConnection,
         _: &Self::CancelToken,
@@ -2335,6 +2365,12 @@ impl Backend for MockFailingCloseBackend {
             .cancelled
             .store(true, std::sync::atomic::Ordering::SeqCst);
         Ok(())
+    }
+    /// Paired with the `cancel` above: a declined cancel leaves `cancelled`
+    /// unset, so this reports `false` and the in-flight call keeps its own
+    /// SQLSTATE rather than being relabelled `HY008`.
+    fn is_cancelled(token: &Self::CancelToken) -> bool {
+        token.cancelled.load(std::sync::atomic::Ordering::SeqCst)
     }
     fn exec_direct(
         _: &MockConnection,
@@ -2668,6 +2704,9 @@ impl Backend for MockRecordingBackend {
             .cancelled
             .store(true, std::sync::atomic::Ordering::SeqCst);
         Ok(())
+    }
+    fn is_cancelled(token: &Self::CancelToken) -> bool {
+        token.cancelled.load(std::sync::atomic::Ordering::SeqCst)
     }
     fn exec_direct(
         _: &MockConnection,

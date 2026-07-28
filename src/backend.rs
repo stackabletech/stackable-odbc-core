@@ -649,6 +649,37 @@ pub trait Backend: Sized + Send + Sync + 'static {
         .into())
     }
 
+    /// Whether this token has been signalled by [`Backend::cancel`].
+    ///
+    /// Core calls this **only after a backend call returned an error**, to
+    /// decide whether that error was a cancellation. When it answers `true`,
+    /// core discards the backend's SQLSTATE and reports `HY008` instead —
+    /// the spec's "If the original function is canceled, it returns SQL_ERROR
+    /// and SQLSTATE HY008 (Operation canceled)."
+    ///
+    /// Core never asks on the success path, and a backend must not expect it
+    /// to. The spec explicitly allows a cancelled execution to finish anyway:
+    /// "it is possible for the execution to succeed and return SQL_SUCCESS
+    /// while the cancel is also successful." A successful call therefore stays
+    /// successful whatever this would have answered.
+    ///
+    /// **Implement this whenever you implement [`Backend::cancel`].** The two
+    /// are a pair: `cancel` signals, this observes. A backend that signals but
+    /// cannot observe still cancels the work — it just reports the resulting
+    /// failure with whatever SQLSTATE its own error mapping produced, usually
+    /// `HY000`, which tells the application nothing about why it failed.
+    ///
+    /// The default is `false`, which is the correct answer for a backend that
+    /// leaves `cancel` defaulted and therefore has no cancellation at all.
+    ///
+    /// Called with no lock held on the cross-thread path and with the
+    /// connection's group lock held on the idle path, exactly as
+    /// [`Backend::cancel`] is, so the same "never block on anything that waits
+    /// for this connection's lock" rule applies.
+    fn is_cancelled(_token: &Self::CancelToken) -> bool {
+        false
+    }
+
     /// Commit or roll back the current transaction on a connection.
     ///
     /// Called by `SQLEndTran`. If `commit` is `true`, commit; otherwise roll back.

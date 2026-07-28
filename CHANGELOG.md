@@ -56,6 +56,12 @@ Everything a driver has to change for the catalog rework, in one place.
 
 ### Added
 
+- `SqlState::operation_canceled()` (`HY008`) and the defaulted
+  `Backend::is_cancelled` hook it pairs with, so a driver no longer needs
+  `SqlState::new("HY008")`. `cancel` signals and `is_cancelled` observes;
+  implement the second whenever you implement the first, or a cancelled call
+  still reports whatever SQLSTATE your error mapping produced.
+
 - `SQLProcedures` now returns real rows when a backend implements the new
   defaulted `Backend::procedures`, instead of always returning an empty result
   set. Core converts the returned `ProcedureRow`s to the spec's 8-column layout
