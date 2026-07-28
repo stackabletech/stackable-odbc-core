@@ -110,6 +110,15 @@ pub const NUMERIC_VALUE_OUT_OF_RANGE: &str = "22003";
 /// Invalid character value for cast specification — 22018
 pub const INVALID_CHARACTER_VALUE_FOR_CAST: &str = "22018";
 
+/// COUNT field incorrect — 07002
+pub const COUNT_FIELD_INCORRECT: &str = "07002";
+
+/// String data, right truncation — 22001
+pub const STRING_DATA_RIGHT_TRUNCATION: &str = "22001";
+
+/// Datetime field overflow — 22008
+pub const DATETIME_FIELD_OVERFLOW: &str = "22008";
+
 /// Invalid datetime format — 22007
 pub const INVALID_DATETIME_FORMAT: &str = "22007";
 
@@ -329,6 +338,35 @@ impl SqlState {
     /// Numeric value out of range — 22003
     pub fn numeric_value_out_of_range() -> Self {
         Self::new(NUMERIC_VALUE_OUT_OF_RANGE)
+    }
+
+    /// COUNT field incorrect — 07002
+    ///
+    /// Returned when the statement contains more parameter markers than the
+    /// application bound values for, which is the first clause of the `07002`
+    /// row on the `SQLExecute` and `SQLExecDirect` diagnostics tables: "The
+    /// number of parameters specified in `SQLBindParameter` was less than the
+    /// number of parameters in the SQL statement". Neither row carries a
+    /// `(DM)` marker, so this is the driver's to report.
+    pub fn count_field_incorrect() -> Self {
+        Self::new(COUNT_FIELD_INCORRECT)
+    }
+
+    /// String data, right truncation — 22001
+    ///
+    /// The error-severity truncation code, as distinct from the
+    /// warning-severity `01004` that [`SqlState::string_data_right_truncated`]
+    /// carries. The C-to-SQL conversion tables use this one: converting
+    /// character parameter data to a numeric SQL type that cannot hold all of
+    /// its digits loses data the application meant to send, so the value is
+    /// not sent at all.
+    pub fn string_data_right_truncation() -> Self {
+        Self::new(STRING_DATA_RIGHT_TRUNCATION)
+    }
+
+    /// Datetime field overflow — 22008
+    pub fn datetime_field_overflow() -> Self {
+        Self::new(DATETIME_FIELD_OVERFLOW)
     }
 
     /// Invalid character value for cast specification — 22018

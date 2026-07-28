@@ -33,21 +33,38 @@ use crate::utf16::utf16_to_string;
 /// - 01007: Privilege not granted — propagated from backend.
 /// - 01S02: Option value changed — propagated from backend.
 /// - 01S07: Fractional truncation — propagated from backend.
-/// - 07002: COUNT field incorrect — propagated from backend.
+/// - 07002: COUNT field incorrect — the row's first clause, "the number of parameters
+///   specified in `SQLBindParameter` was less than the number of parameters in the SQL
+///   statement", is **returned here**: a `?` marker with no binding is rejected rather than
+///   padded with NULL (`ffi::params::collect_params`). The second clause, a binding whose
+///   `ParameterValuePtr` is null with a non-`SQL_NULL_DATA`/`SQL_DATA_AT_EXEC` indicator, is
+///   rejected by `SQLBindParameter` itself. Also propagated from backend.
 /// - 07006: Restricted data type attribute violation — propagated from backend.
 /// - 07007: Restricted parameter value violation — propagated from backend.
 /// - 07S01: Invalid use of default parameter — propagated from backend.
 /// - 08S01: Communication link failure — propagated from backend.
 /// - 21S01: Insert value list does not match column list — propagated from backend.
 /// - 21S02: Degree of derived table does not match column list — propagated from backend.
-/// - 22001: String data, right truncation — propagated from backend.
+/// - 22001: String data, right truncation — returned here when converting character
+///   parameter data to the declared SQL type would truncate it: fractional digits dropped
+///   for an exact-numeric target, or whole digits lost (`crate::param_convert`, the
+///   "C to SQL: Character" table). Also propagated from backend.
 /// - 22002: Indicator variable required but not supplied — propagated from backend.
-/// - 22003: Numeric value out of range — propagated from backend.
-/// - 22007: Invalid datetime format — propagated from backend.
-/// - 22008: Datetime field overflow — propagated from backend.
+/// - 22003: Numeric value out of range — returned here when character parameter data falls
+///   outside the range of the declared approximate-numeric or `SQL_BIT` type
+///   (`crate::param_convert`). Also propagated from backend.
+/// - 22007: Invalid datetime format — returned here for character parameter data that is a
+///   datetime literal with an out-of-range field (`crate::param_convert`). Also propagated
+///   from backend.
+/// - 22008: Datetime field overflow — returned here when character parameter data carries a
+///   datetime component the declared type cannot hold: a non-zero time for `SQL_TYPE_DATE`,
+///   or non-zero fractional seconds for `SQL_TYPE_TIME` (`crate::param_convert`). Also
+///   propagated from backend.
 /// - 22012: Division by zero — propagated from backend.
 /// - 22015: Interval field overflow — propagated from backend.
-/// - 22018: Invalid character value for cast specification — propagated from backend.
+/// - 22018: Invalid character value for cast specification — returned here when character
+///   parameter data is not a valid literal of the SQL type declared for it at
+///   `SQLBindParameter` (`crate::param_convert`). Also propagated from backend.
 /// - 22019: Invalid escape character — propagated from backend.
 /// - 22025: Invalid escape sequence — propagated from backend.
 /// - 23000: Integrity constraint violation — propagated from backend.
@@ -157,6 +174,10 @@ pub unsafe fn sql_exec_direct_w<B: Backend>(
             };
 
             let sql = utf16_to_string(statement_text, text_length)?;
+            // Needed whether or not escapes are translated: `count_params` uses
+            // the dialect's identifier delimiters to tell a `?` inside a
+            // quoted identifier from a parameter marker.
+            let dialect = B::escape_dialect(connection);
             // Spec: SQL_ATTR_NOSCAN=SQL_NOSCAN_ON disables escape-sequence
             // scanning; otherwise translate `{fn}`/`{d}`/`{t}`/`{ts}`/`{oj}`/
             // `{escape}` (and reject `{call}` with HYC00) before it reaches
@@ -164,15 +185,17 @@ pub unsafe fn sql_exec_direct_w<B: Backend>(
             let sql = if noscan {
                 sql
             } else {
-                crate::escape::translate_escapes(&sql, &B::escape_dialect(connection))?
+                crate::escape::translate_escapes(&sql, &dialect)?
             };
 
             // Check for data-at-execution parameters.
-            let param_count = crate::ffi::params::count_params(&sql);
+            let param_count = crate::ffi::params::count_params(&sql, &dialect);
             if param_count > 0 {
                 // SAFETY: caller guarantees all bound buffer pointers remain valid.
-                let (non_dae_values, dae_params) =
-                    crate::ffi::params::find_data_at_exec_params(&stmt.param_bindings, param_count);
+                let (non_dae_values, dae_params) = crate::ffi::params::find_data_at_exec_params(
+                    &stmt.param_bindings,
+                    param_count,
+                )?;
 
                 if !dae_params.is_empty() {
                     stmt.data_at_exec = Some(crate::handles::DataAtExecState {
@@ -257,6 +280,8 @@ pub unsafe fn sql_exec_direct_w<B: Backend>(
 /// - 21S01: Insert value list does not match column list — propagated from backend.
 /// - 21S02: Degree of derived table does not match column list — propagated from backend.
 /// - 22018: Invalid character value for cast specification — propagated from backend.
+///   `SQLPrepareW` reads no parameter values, so the character-to-SQL-type conversion that
+///   raises this in `SQLExecute` and `SQLExecDirectW` does not run here.
 /// - 22019: Invalid escape character — propagated from backend.
 /// - 22025: Invalid escape sequence — propagated from backend.
 /// - 24000: Invalid cursor state — (DM case for open cursor with fetched rows:
@@ -348,6 +373,10 @@ pub unsafe fn sql_prepare_w<B: Backend>(
                 ));
             };
 
+            // Needed whether or not escapes are translated: `count_params` uses
+            // the dialect's identifier delimiters to tell a `?` inside a
+            // quoted identifier from a parameter marker.
+            let dialect = B::escape_dialect(connection);
             // Spec: SQL_ATTR_NOSCAN=SQL_NOSCAN_ON disables escape-sequence
             // scanning; otherwise translate before counting `?` markers:
             // escapes never contain them, so translation cannot move a
@@ -355,9 +384,9 @@ pub unsafe fn sql_prepare_w<B: Backend>(
             let sql = if noscan {
                 sql
             } else {
-                crate::escape::translate_escapes(&sql, &B::escape_dialect(connection))?
+                crate::escape::translate_escapes(&sql, &dialect)?
             };
-            let param_count = crate::ffi::params::count_params(&sql);
+            let param_count = crate::ffi::params::count_params(&sql, &dialect);
 
             // This execution's own token, replacing whatever the previous one
             // left behind (see `mint_cancel_token`). `SQLCancel` signals it
@@ -420,20 +449,37 @@ pub unsafe fn sql_prepare_w<B: Backend>(
 /// - 01007: Privilege not granted — propagated from backend.
 /// - 01S02: Option value changed — propagated from backend.
 /// - 01S07: Fractional truncation — propagated from backend.
-/// - 07002: COUNT field incorrect — propagated from backend.
+/// - 07002: COUNT field incorrect — the row's first clause, "the number of parameters
+///   specified in `SQLBindParameter` was less than the number of parameters in the SQL
+///   statement", is **returned here**: a `?` marker with no binding is rejected rather than
+///   padded with NULL (`ffi::params::collect_params`). The second clause, a binding whose
+///   `ParameterValuePtr` is null with a non-`SQL_NULL_DATA`/`SQL_DATA_AT_EXEC` indicator, is
+///   rejected by `SQLBindParameter` itself. Also propagated from backend.
 /// - 07006: Restricted data type attribute violation — propagated from backend.
 /// - 07007: Restricted parameter value violation — propagated from backend.
 /// - 07S01: Invalid use of default parameter — propagated from backend.
 /// - 08S01: Communication link failure — propagated from backend.
 /// - 21S02: Degree of derived table does not match column list — propagated from backend.
-/// - 22001: String data, right truncation — propagated from backend.
+/// - 22001: String data, right truncation — returned here when converting character
+///   parameter data to the declared SQL type would truncate it: fractional digits dropped
+///   for an exact-numeric target, or whole digits lost (`crate::param_convert`, the
+///   "C to SQL: Character" table). Also propagated from backend.
 /// - 22002: Indicator variable required but not supplied — propagated from backend.
-/// - 22003: Numeric value out of range — propagated from backend.
-/// - 22007: Invalid datetime format — propagated from backend.
-/// - 22008: Datetime field overflow — propagated from backend.
+/// - 22003: Numeric value out of range — returned here when character parameter data falls
+///   outside the range of the declared approximate-numeric or `SQL_BIT` type
+///   (`crate::param_convert`). Also propagated from backend.
+/// - 22007: Invalid datetime format — returned here for character parameter data that is a
+///   datetime literal with an out-of-range field (`crate::param_convert`). Also propagated
+///   from backend.
+/// - 22008: Datetime field overflow — returned here when character parameter data carries a
+///   datetime component the declared type cannot hold: a non-zero time for `SQL_TYPE_DATE`,
+///   or non-zero fractional seconds for `SQL_TYPE_TIME` (`crate::param_convert`). Also
+///   propagated from backend.
 /// - 22012: Division by zero — propagated from backend.
 /// - 22015: Interval field overflow — propagated from backend.
-/// - 22018: Invalid character value for cast specification — propagated from backend.
+/// - 22018: Invalid character value for cast specification — returned here when character
+///   parameter data is not a valid literal of the SQL type declared for it at
+///   `SQLBindParameter` (`crate::param_convert`). Also propagated from backend.
 /// - 22019: Invalid escape character — propagated from backend.
 /// - 22025: Invalid escape sequence — propagated from backend.
 /// - 23000: Integrity constraint violation — propagated from backend.
@@ -496,7 +542,7 @@ pub unsafe fn sql_execute<B: Backend>(statement_handle: *mut c_void) -> SqlRetur
             // Check for data-at-execution parameters.
             // SAFETY: caller guarantees all bound buffer pointers remain valid.
             let (non_dae_values, dae_params) =
-                crate::ffi::params::find_data_at_exec_params(&stmt.param_bindings, param_count);
+                crate::ffi::params::find_data_at_exec_params(&stmt.param_bindings, param_count)?;
 
             if !dae_params.is_empty() {
                 // Store DAE state and return SQL_NEED_DATA.

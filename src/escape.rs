@@ -148,7 +148,7 @@ impl EscapeDialect {
         }
     }
 
-    fn ident_close(&self, open: char) -> Option<char> {
+    pub(crate) fn ident_close(&self, open: char) -> Option<char> {
         self.identifier_quotes
             .iter()
             .find(|(o, _)| *o == open)
@@ -230,18 +230,22 @@ fn translate_slice(
     Ok(out)
 }
 
-/// Copy a single-quoted string literal verbatim, including a `''` doubled quote.
-fn copy_string(chars: &[char], i: &mut usize, out: &mut String) {
-    out.push(chars[*i]); // opening '
-    *i += 1;
+// The `skip_*` helpers below advance `*i` past one lexical region without
+// interpreting it; the `copy_*` wrappers do the same and copy what was skipped.
+// Splitting them this way is what lets `ffi::params::count_params` scan for `?`
+// parameter markers with exactly the region boundaries this module translates
+// escapes with. Two independent scanners is how a `?` inside a quoted
+// identifier came to be counted as a marker.
+
+/// Advance past a single-quoted string literal, including any `''` doubled quote.
+pub(crate) fn skip_string(chars: &[char], i: &mut usize) {
+    *i += 1; // opening '
     while *i < chars.len() {
         let c = chars[*i];
-        out.push(c);
         *i += 1;
         if c == '\'' {
             if chars.get(*i) == Some(&'\'') {
-                out.push('\''); // doubled quote — stays inside the string
-                *i += 1;
+                *i += 1; // doubled quote — stays inside the string
             } else {
                 break; // closing quote
             }
@@ -249,19 +253,17 @@ fn copy_string(chars: &[char], i: &mut usize, out: &mut String) {
     }
 }
 
-fn copy_quoted_ident(chars: &[char], i: &mut usize, out: &mut String, open: char, close: char) {
-    out.push(chars[*i]); // opening quote
-    *i += 1;
+/// Advance past a delimited identifier opened by `open` and closed by `close`.
+pub(crate) fn skip_quoted_ident(chars: &[char], i: &mut usize, open: char, close: char) {
+    *i += 1; // opening quote
     while *i < chars.len() {
         let c = chars[*i];
-        out.push(c);
         *i += 1;
         if c == close {
             // A doubled close-quote escapes it, but only for symmetric quote
             // styles (`"..."`, `` `...` ``). Bracket identifiers (`[...]`) have
             // no doubling — a `]` always closes them.
             if open == close && chars.get(*i) == Some(&close) {
-                out.push(close);
                 *i += 1;
             } else {
                 break;
@@ -270,10 +272,11 @@ fn copy_quoted_ident(chars: &[char], i: &mut usize, out: &mut String, open: char
     }
 }
 
-fn copy_line_comment(chars: &[char], i: &mut usize, out: &mut String) {
+/// Advance past a `--` line comment, up to and including its newline. An
+/// unterminated comment runs to the end of the statement.
+pub(crate) fn skip_line_comment(chars: &[char], i: &mut usize) {
     while *i < chars.len() {
         let c = chars[*i];
-        out.push(c);
         *i += 1;
         if c == '\n' {
             break;
@@ -281,20 +284,48 @@ fn copy_line_comment(chars: &[char], i: &mut usize, out: &mut String) {
     }
 }
 
-fn copy_block_comment(chars: &[char], i: &mut usize, out: &mut String) {
-    out.push(chars[*i]); // '/'
-    out.push(chars[*i + 1]); // '*'
-    *i += 2;
+/// Advance past a `/* … */` block comment. An unterminated comment runs to the
+/// end of the statement.
+pub(crate) fn skip_block_comment(chars: &[char], i: &mut usize) {
+    *i += 2; // '/' '*'
     while *i < chars.len() {
         if chars[*i] == '*' && chars.get(*i + 1) == Some(&'/') {
-            out.push('*');
-            out.push('/');
             *i += 2;
             break;
         }
-        out.push(chars[*i]);
         *i += 1;
     }
+}
+
+/// Copy a single-quoted string literal verbatim, including a `''` doubled quote.
+fn copy_string(chars: &[char], i: &mut usize, out: &mut String) {
+    copy_skipped(chars, i, out, skip_string);
+}
+
+fn copy_quoted_ident(chars: &[char], i: &mut usize, out: &mut String, open: char, close: char) {
+    copy_skipped(chars, i, out, |chars, i| {
+        skip_quoted_ident(chars, i, open, close);
+    });
+}
+
+fn copy_line_comment(chars: &[char], i: &mut usize, out: &mut String) {
+    copy_skipped(chars, i, out, skip_line_comment);
+}
+
+/// Run `skip` and append every character it advanced over to `out`.
+fn copy_skipped(
+    chars: &[char],
+    i: &mut usize,
+    out: &mut String,
+    skip: impl FnOnce(&[char], &mut usize),
+) {
+    let start = *i;
+    skip(chars, i);
+    out.extend(&chars[start..*i]);
+}
+
+fn copy_block_comment(chars: &[char], i: &mut usize, out: &mut String) {
+    copy_skipped(chars, i, out, skip_block_comment);
 }
 
 /// Find the index of the `}` matching the `{` at `open`, skipping strings,

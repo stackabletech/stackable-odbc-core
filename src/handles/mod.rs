@@ -273,14 +273,21 @@ unsafe impl Sync for ColumnBinding {}
 
 /// Parameter binding information stored by `SQLBindParameter`.
 ///
-/// `sql_type`, `col_size` and `decimal_digits` are recorded but not yet read.
-/// They are exactly what `SQLDescribeParam` has to report back, and dropping
-/// them would mean `SQLBindParameter` discarding the only copy of what the
-/// application declared. Kept deliberately, not by oversight.
+/// `col_size` and `decimal_digits` are recorded but not yet read. They are
+/// exactly what `SQLDescribeParam` has to report back, and dropping them would
+/// mean `SQLBindParameter` discarding the only copy of what the application
+/// declared. Kept deliberately, not by oversight.
+///
+/// `sql_type` **is** read: it is `SQLBindParameter`'s `ParameterType`, the SQL
+/// type the value is converted to before it reaches the backend. For every C
+/// type but the two character ones the conversion is a no-op, because
+/// `c_type` already fixes the value's shape — but for `SQL_C_CHAR` and
+/// `SQL_C_WCHAR` this field is the only statement of what the text *is*. See
+/// [`crate::param_convert`].
 #[derive(Debug)]
 #[allow(
     dead_code,
-    reason = "recorded for SQLDescribeParam, which does not read them yet"
+    reason = "col_size and decimal_digits are recorded for SQLDescribeParam, which does not read them yet"
 )]
 pub struct ParameterBinding {
     /// Whether this is an input, output, or input/output parameter.

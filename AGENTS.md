@@ -790,6 +790,7 @@ Generic framework. Zero database-specific code.
 | `types/version.rs` | Parsed data-source version numbers, for a backend gating capabilities on server version |
 | `types/redacted.rs` | `Redacted<T>` — `Debug` wrapper that prints `*****` for sensitive fields (e.g. passwords) |
 | `column_value.rs` | `write_column_value()` — core data marshalling for `SQLGetData` (NULL, truncation, type coercion) |
+| `param_convert.rs` | `text_to_sql_type()` — the reverse direction: converts `SQL_C_CHAR`/`SQL_C_WCHAR` parameter text to the SQL type `SQLBindParameter` declared. The spec's "C to SQL: Character" table, transcribed |
 | `synthetic.rs` | `SyntheticStatement` — in-memory result set for `SQLGetTypeInfo` and catalog functions |
 | `catalog_sort.rs` | Sorts a catalog result set into its spec-mandated order; NULL placement from `Backend::null_collation` |
 | `catalog_ident.rs` | `SQL_ATTR_METADATA_ID` identifier normalisation and the `SQLTables` `TableType` value-list parser |

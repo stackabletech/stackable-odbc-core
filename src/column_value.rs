@@ -616,7 +616,7 @@ fn civil_from_days(days: i64) -> (i64, u16, u16) {
     clippy::disallowed_methods,
     reason = "SQL_TYPE_TIME -> SQL_C_TYPE_TIMESTAMP is specified as using the current date"
 )]
-fn current_utc_date() -> (i16, u16, u16) {
+pub(crate) fn current_utc_date() -> (i16, u16, u16) {
     // `try_from` rather than `as`: a clock far enough out to exceed i64 seconds
     // is nonsense either way, but wrapping it into a negative would turn a date
     // in the far future into one in the distant past.
@@ -783,7 +783,7 @@ fn parse_time_fields(s: &str) -> Result<(u16, u16, u16, u32), OdbcError> {
     Ok((hour, minute, second, fraction))
 }
 
-fn parse_sql_date(s: &str) -> Result<Date, OdbcError> {
+pub(crate) fn parse_sql_date(s: &str) -> Result<Date, OdbcError> {
     let (year, month, day) = parse_date_fields(s.trim())?;
     Ok(Date { year, month, day })
 }
@@ -793,7 +793,7 @@ fn parse_sql_date(s: &str) -> Result<Date, OdbcError> {
 /// to `SQL_C_TYPE_TIME` must check the returned fraction themselves and report
 /// 01S07 if it is non-zero — this function only parses, it does not decide
 /// whether the drop is acceptable for the caller's target type.
-fn parse_sql_time(s: &str) -> Result<(Time, u32), OdbcError> {
+pub(crate) fn parse_sql_time(s: &str) -> Result<(Time, u32), OdbcError> {
     let (hour, minute, second, fraction) = parse_time_fields(s.trim())?;
     Ok((
         Time {
@@ -805,7 +805,7 @@ fn parse_sql_time(s: &str) -> Result<(Time, u32), OdbcError> {
     ))
 }
 
-fn parse_sql_timestamp(s: &str) -> Result<Timestamp, OdbcError> {
+pub(crate) fn parse_sql_timestamp(s: &str) -> Result<Timestamp, OdbcError> {
     let t = s.trim();
     // Accept either the ODBC space separator or the ISO 8601 'T'.
     let (date_part, time_part) = match t.split_once([' ', 'T']) {

@@ -102,6 +102,7 @@ pub mod function_id;
 pub(crate) mod handles;
 pub mod logging;
 pub(crate) mod panic;
+pub(crate) mod param_convert;
 mod sync;
 pub mod synthetic;
 /// Hooks a driver's test suite needs and its production build must not have.

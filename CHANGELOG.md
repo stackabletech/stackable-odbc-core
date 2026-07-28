@@ -797,6 +797,57 @@ Everything a driver has to change for the catalog rework, in one place.
 
 ### Fixed
 
+- **Character parameter data ignored the SQL type it was bound as.**
+  `SQLBindParameter` takes two types — `ValueType`, the C type the value
+  arrives in, and `ParameterType`, the SQL type the data source is to receive —
+  and ODBC makes the driver convert between them. `read_param_value` matched on
+  the C type alone, so `ParameterBinding::sql_type` was recorded and never
+  read. For every C type but the two character ones that lost nothing, because
+  the C type already fixes the value's shape; for `SQL_C_CHAR` and
+  `SQL_C_WCHAR` it discarded the only statement of what the text *was*.
+  `SQL_C_CHAR` + `SQL_NUMERIC` — what pyodbc emits for a `Decimal`, and what
+  any client emits for a value it delivers as text — reached the backend as
+  `ColumnValue::String`, so a driver that renders its parameters emitted
+  `WHERE amount = '12.34'` against a decimal column and the data source
+  rejected the comparison. The new `param_convert` module is the spec's
+  "C to SQL: Character" table transcribed: decimal, exact-integer,
+  approximate-numeric, `SQL_BIT`, binary (hexadecimal pairs) and the three
+  datetime targets, each with the SQLSTATE that table's third column gives —
+  `22018` for text that is not a literal of the declared type, `22001` for a
+  conversion that would truncate, `22003` for out of range, `22008` for a
+  datetime component the target cannot hold. **Driver-visible:** a backend now
+  receives `ColumnValue::Decimal`, `I32`, `Timestamp` and so on where it
+  previously received `String` for these bindings; one that parsed the string
+  itself can drop that code, and one that matched only `String` must handle the
+  typed variants. Character SQL types, the interval types, `SQL_GUID` and
+  driver-specific type identifiers are unchanged and still arrive as `String`.
+  `SQLPutData` data-at-execution text goes through the same conversion, so the
+  two routes to a parameter agree.
+
+- **`?` was counted as a parameter marker inside quoted identifiers and
+  comments.** `count_params` tracked single-quoted string literals and nothing
+  else, so `SELECT "a?b" FROM t` reported one parameter and `SELECT 1 -- huh?`
+  reported one too. `SQLNumParams` over-reported, `collect_params` padded the
+  phantom marker with a value, and a driver whose own substitution scan
+  mirrored core's rewrote the identifier along with it. The scan now skips
+  string literals, delimited identifiers, `--` line comments and `/* … */`
+  block comments, taking the identifier delimiters from the backend's
+  `EscapeDialect` rather than assuming `"`. The region helpers are `escape`'s
+  own, shared with `translate_escapes` so the two scans cannot drift apart
+  again.
+
+- **A parameter marker with no bound value was padded with NULL.**
+  `collect_params` emitted `ColumnValue::Null` for a marker the application
+  never called `SQLBindParameter` for, so `WHERE x = ?` with nothing bound ran
+  as `WHERE x = NULL`, matched no row and reported success — the application
+  saw an empty result set rather than its own mistake. Both `SQLExecute` and
+  `SQLExecDirectW` now report `07002` (COUNT field incorrect), which is the
+  first clause of that row on both diagnostics tables and carries no `(DM)`
+  marker. The data-at-execution scan rejects the same gap, so it is not a
+  second route to the old behaviour. A `SQL_PARAM_OUTPUT` binding still yields
+  `Null` and is unaffected: it has no input value by definition, and reading
+  its uninitialised buffer would be unsound.
+
 - The 32 `HY008` doc comments across `src/ffi/` claimed the state could not
   arise, on one of two false grounds: that "the `Backend` trait is synchronous"
   — which says nothing about another thread cancelling — or that it was

@@ -177,6 +177,10 @@ pub unsafe fn sql_bind_parameter<B: Backend>(
 /// Returns the number of `?` parameter markers in the prepared SQL statement.
 /// Fails with HY010 (function sequence error) if no SQL has been prepared.
 ///
+/// A `?` counts only where the grammar admits a parameter marker: one inside a
+/// string literal, a delimited identifier or a comment is part of that token,
+/// not a marker.
+///
 /// # Parameters
 ///
 /// - `statement_handle`: Statement handle.
@@ -393,27 +397,48 @@ pub unsafe fn sql_describe_param<B: Backend>(
     ret
 }
 
-/// Count `?` parameter markers in an SQL string, ignoring occurrences inside
-/// single-quoted string literals.
+/// Count `?` parameter markers in an SQL string.
 ///
-/// Escaped single quotes (`''`) inside a string literal are handled correctly.
-pub(crate) fn count_params(sql: &str) -> u16 {
+/// A `?` counts only where the SQL grammar admits a parameter marker, so the
+/// scan skips the four regions where one cannot appear: single-quoted string
+/// literals (`''` doubling included), delimited identifiers, `--` line comments
+/// and `/* … */` block comments. The identifier delimiters come from the
+/// backend's [`EscapeDialect`](crate::escape::EscapeDialect) rather than being
+/// assumed to be `"`, because that is where a backend already states them.
+///
+/// Miscounting is not a cosmetic problem. The count is what `SQLNumParams`
+/// reports, what bounds [`collect_params`]'s `1..=param_count` walk, and what
+/// the value list handed to `Backend::execute` is sized by — so a `?` inside
+/// `"a?b"` counted as a marker makes the driver ask for a value that the
+/// statement has no place for.
+///
+/// The region helpers are `escape`'s own, shared with
+/// [`crate::escape::translate_escapes`] so the two scans cannot drift apart.
+pub(crate) fn count_params(sql: &str, dialect: &crate::escape::EscapeDialect) -> u16 {
+    use crate::escape::{skip_block_comment, skip_line_comment, skip_quoted_ident, skip_string};
+
+    let chars: Vec<char> = sql.chars().collect();
     let mut count = 0u16;
-    let mut in_string = false;
-    let mut chars = sql.chars().peekable();
-    while let Some(c) = chars.next() {
-        match (c, in_string) {
-            ('\'', false) => in_string = true,
-            ('\'', true) => {
-                // Escaped quote '' stays inside the string; otherwise end of string.
-                if chars.peek() == Some(&'\'') {
-                    chars.next();
-                } else {
-                    in_string = false;
-                }
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '\'' {
+            skip_string(&chars, &mut i);
+        } else if let Some(close) = dialect.ident_close(c) {
+            skip_quoted_ident(&chars, &mut i, c, close);
+        } else if c == '-' && chars.get(i + 1) == Some(&'-') {
+            skip_line_comment(&chars, &mut i);
+        } else if c == '/' && chars.get(i + 1) == Some(&'*') {
+            skip_block_comment(&chars, &mut i);
+        } else {
+            if c == '?' {
+                // `SQLNumParams` reports a `u16`, so a statement with more than
+                // 65 535 markers has no representable answer. Saturating keeps
+                // the count at the maximum rather than wrapping to a small
+                // number that would silently drop every parameter past it.
+                count = count.saturating_add(1);
             }
-            ('?', false) => count += 1,
-            _ => {}
+            i += 1;
         }
     }
     count
@@ -457,7 +482,9 @@ fn clamp_to_bound_buffer(byte_len: usize, buffer_length: isize) -> usize {
 ///
 /// `binding.value_ptr` and `binding.str_len_or_ind_ptr` must point to valid
 /// memory of the appropriate type and size.
-pub(crate) unsafe fn read_param_value(binding: &ParameterBinding) -> ColumnValue {
+pub(crate) unsafe fn read_param_value(
+    binding: &ParameterBinding,
+) -> Result<ColumnValue, OdbcError> {
     use odbc_sys::CDataType;
 
     // Check indicator for NULL.
@@ -465,15 +492,15 @@ pub(crate) unsafe fn read_param_value(binding: &ParameterBinding) -> ColumnValue
         // SAFETY: str_len_or_ind_ptr is non-null and the caller guarantees it points to a valid isize.
         let indicator = unsafe { std::ptr::read_unaligned(binding.str_len_or_ind_ptr) };
         if indicator == SQL_NULL_DATA {
-            return ColumnValue::Null;
+            return Ok(ColumnValue::Null);
         }
     }
 
     if binding.value_ptr.is_null() {
-        return ColumnValue::Null;
+        return Ok(ColumnValue::Null);
     }
 
-    match binding.c_type {
+    Ok(match binding.c_type {
         // SAFETY for all integer/float reads below: value_ptr is non-null (guarded above) and the
         // caller guarantees it points to a valid value of the appropriate C type provided by the
         // ODBC caller via SQLBindParameter. `read_unaligned` tolerates the arbitrary offsets
@@ -544,7 +571,10 @@ pub(crate) unsafe fn read_param_value(binding: &ParameterBinding) -> ColumnValue
                 // SQL_C_CHAR buffers are always null-terminated when SQL_NTS is used).
                 unsafe { std::ffi::CStr::from_ptr(ptr as *const std::ffi::c_char) }.to_bytes()
             };
-            ColumnValue::String(String::from_utf8_lossy(bytes).into_owned())
+            return crate::param_convert::text_to_sql_type(
+                &String::from_utf8_lossy(bytes),
+                binding.sql_type,
+            );
         }
         CDataType::WChar => {
             let ptr = binding.value_ptr as *const u16;
@@ -554,8 +584,9 @@ pub(crate) unsafe fn read_param_value(binding: &ParameterBinding) -> ColumnValue
                 // SAFETY: caller guarantees ptr is a valid, null-terminated UTF-16 string.
                 // value_ptr null case is excluded by the guard above; unwrap_or_default is unreachable.
                 debug_assert!(!ptr.is_null(), "value_ptr null case excluded above");
-                return ColumnValue::String(
-                    unsafe { utf16_to_string(ptr, SQL_NTS) }.unwrap_or_default(),
+                return crate::param_convert::text_to_sql_type(
+                    &unsafe { utf16_to_string(ptr, SQL_NTS) }.unwrap_or_default(),
+                    binding.sql_type,
                 );
             } else {
                 // SAFETY: str_len_or_ind_ptr is non-null and the caller guarantees it points
@@ -566,8 +597,9 @@ pub(crate) unsafe fn read_param_value(binding: &ParameterBinding) -> ColumnValue
                     // SAFETY: caller guarantees ptr is a valid, null-terminated UTF-16 string.
                     // value_ptr null case is excluded by the guard above; unwrap_or_default is unreachable.
                     debug_assert!(!ptr.is_null(), "value_ptr null case excluded above");
-                    return ColumnValue::String(
-                        unsafe { utf16_to_string(ptr, SQL_NTS) }.unwrap_or_default(),
+                    return crate::param_convert::text_to_sql_type(
+                        &unsafe { utf16_to_string(ptr, SQL_NTS) }.unwrap_or_default(),
+                        binding.sql_type,
                     );
                 } else {
                     // Explicit byte length: ODBC reports lengths in bytes for WChar.
@@ -584,7 +616,10 @@ pub(crate) unsafe fn read_param_value(binding: &ParameterBinding) -> ColumnValue
             let units: Vec<u16> = (0..code_units)
                 .map(|i| unsafe { std::ptr::read_unaligned(ptr.add(i)) })
                 .collect();
-            ColumnValue::String(String::from_utf16_lossy(&units))
+            return crate::param_convert::text_to_sql_type(
+                &String::from_utf16_lossy(&units),
+                binding.sql_type,
+            );
         }
         CDataType::Binary => {
             let ptr = binding.value_ptr as *const u8;
@@ -671,7 +706,7 @@ pub(crate) unsafe fn read_param_value(binding: &ParameterBinding) -> ColumnValue
             );
             ColumnValue::Null
         }
-    }
+    })
 }
 
 /// Render a `SQL_NUMERIC_STRUCT` as its exact decimal string.
@@ -721,10 +756,29 @@ fn guid_struct_to_bytes(g: &odbc_sys::Guid) -> [u8; 16] {
     bytes
 }
 
+/// The 07002 an unbound parameter marker earns.
+///
+/// Spec, the first clause of the `07002` row shared by the `SQLExecute` and
+/// `SQLExecDirect` diagnostics tables, neither of them `(DM)`-marked: "The
+/// number of parameters specified in **SQLBindParameter** was less than the
+/// number of parameters in the SQL statement".
+pub(crate) fn unbound_parameter(number: u16) -> OdbcError {
+    OdbcError::general(
+        format!("No value was bound for parameter {number}"),
+        SqlState::count_field_incorrect(),
+    )
+}
+
 /// Collect bound parameter values in order 1..=param_count.
 ///
-/// Unbound parameters are emitted as `ColumnValue::Null`, and so are
-/// `SQL_PARAM_OUTPUT` ones: an output-only parameter has no input value, and its
+/// A marker with no binding is 07002 (see [`unbound_parameter`]). Padding the
+/// gap with NULL, as an earlier revision did, runs a statement the application
+/// never wrote: `WHERE x = ?` with nothing bound becomes `WHERE x = NULL`,
+/// which matches no row and reports success, so the application sees an empty
+/// result set rather than its own mistake.
+///
+/// A `SQL_PARAM_OUTPUT` binding *is* emitted as `ColumnValue::Null`, and that
+/// is not the same case: an output-only parameter has no input value, and its
 /// buffer is where the *driver* is expected to put something. Reading it is not
 /// merely meaningless, it is unsound — the application never had to initialise
 /// it, so for `SQL_C_CHAR` with an absent or `SQL_NTS` indicator
@@ -752,10 +806,10 @@ pub(crate) unsafe fn collect_params(
             Some(binding) if binding.input_output_type != ParamType::Output => {
                 // SAFETY: the caller guarantees all ParameterBinding value and indicator
                 // pointers in `bindings` point to valid memory of the appropriate type.
-                params.push(unsafe { read_param_value(binding) });
+                params.push(unsafe { read_param_value(binding) }?);
             }
             Some(_) => params.push(ColumnValue::Null),
-            None => params.push(ColumnValue::Null),
+            None => return Err(unbound_parameter(i)),
         }
     }
     Ok(params)
@@ -842,19 +896,29 @@ pub(crate) fn is_data_at_exec(indicator: isize) -> bool {
 /// (which corrupts non-UTF-8 bytes); `SQL_C_WCHAR` data is UTF-16; everything else
 /// is treated as text. The buffer is assumed non-empty (the caller maps an empty
 /// buffer to `ColumnValue::Null`).
-fn dae_buffer_to_value(c_type: Option<odbc_sys::CDataType>, buffer: &[u8]) -> ColumnValue {
+///
+/// Text is then converted to `sql_type` by [`crate::param_convert::text_to_sql_type`],
+/// the same way [`read_param_value`] converts a value delivered in one piece.
+/// `SQLPutData` is only a different way to hand over the same parameter, so it
+/// must not be a way to reach the backend with the declared type discarded.
+fn dae_buffer_to_value(
+    c_type: Option<odbc_sys::CDataType>,
+    sql_type: SqlDataType,
+    buffer: &[u8],
+) -> Result<ColumnValue, OdbcError> {
     use odbc_sys::CDataType;
-    match c_type {
-        Some(CDataType::Binary) => ColumnValue::Bytes(buffer.to_vec()),
+    let text = match c_type {
+        Some(CDataType::Binary) => return Ok(ColumnValue::Bytes(buffer.to_vec())),
         Some(CDataType::WChar) => {
             let units: Vec<u16> = buffer
                 .chunks_exact(2)
                 .map(|b| u16::from_ne_bytes([b[0], b[1]]))
                 .collect();
-            ColumnValue::String(String::from_utf16_lossy(&units))
+            String::from_utf16_lossy(&units)
         }
-        _ => ColumnValue::String(String::from_utf8_lossy(buffer).into_owned()),
-    }
+        _ => String::from_utf8_lossy(buffer).into_owned(),
+    };
+    crate::param_convert::text_to_sql_type(&text, sql_type)
 }
 
 /// Scan bound parameters for data-at-execution indicators.
@@ -871,10 +935,13 @@ fn dae_buffer_to_value(c_type: Option<odbc_sys::CDataType>, buffer: &[u8]) -> Co
 pub(crate) unsafe fn find_data_at_exec_params(
     bindings: &std::collections::HashMap<u16, crate::handles::ParameterBinding>,
     param_count: u16,
-) -> (
-    std::collections::HashMap<u16, crate::types::ColumnValue>,
-    Vec<u16>,
-) {
+) -> Result<
+    (
+        std::collections::HashMap<u16, crate::types::ColumnValue>,
+        Vec<u16>,
+    ),
+    OdbcError,
+> {
     let mut non_dae = std::collections::HashMap::new();
     let mut dae_params = Vec::new();
 
@@ -892,14 +959,17 @@ pub(crate) unsafe fn find_data_at_exec_params(
                 dae_params.push(i);
             } else {
                 // SAFETY: caller guarantees all binding pointers are valid.
-                non_dae.insert(i, unsafe { read_param_value(binding) });
+                non_dae.insert(i, unsafe { read_param_value(binding) }?);
             }
         } else {
-            non_dae.insert(i, crate::types::ColumnValue::Null);
+            // The same 07002 `collect_params` reports. This is the other route
+            // to the identical gap, and letting it pad with NULL would make
+            // data-at-execution a way around the check.
+            return Err(unbound_parameter(i));
         }
     }
 
-    (non_dae, dae_params)
+    Ok((non_dae, dae_params))
 }
 
 /// Generic implementation of SQLPutData.
@@ -1062,13 +1132,24 @@ pub unsafe fn sql_put_data<B: Backend>(
 /// - 01004: String data, right truncated — propagated from backend.
 /// - 07006: Restricted data type attribute violation — propagated from backend.
 /// - 08S01: Communication link failure — propagated from backend.
-/// - 22001: String data, right truncation — propagated from backend.
-/// - 22003: Numeric value out of range — propagated from backend.
-/// - 22007: Invalid datetime format — propagated from backend.
-/// - 22008: Datetime field overflow — propagated from backend.
+/// - 22001: String data, right truncation — returned here when the accumulated
+///   data-at-execution text would be truncated by conversion to the declared SQL type, the
+///   same check `SQLExecute` applies to a value delivered in one piece
+///   (`crate::param_convert`). Also propagated from backend.
+/// - 22003: Numeric value out of range — returned here when that text falls outside the
+///   range of the declared numeric type (`crate::param_convert`). Also propagated from
+///   backend.
+/// - 22007: Invalid datetime format — returned here for a datetime literal with an
+///   out-of-range field (`crate::param_convert`). Also propagated from backend.
+/// - 22008: Datetime field overflow — returned here when that text carries a datetime
+///   component the declared type cannot hold (`crate::param_convert`). Also propagated from
+///   backend.
 /// - 22012: Division by zero — propagated from backend.
 /// - 22015: Interval field overflow — propagated from backend.
-/// - 22018: Invalid character value for cast specification — propagated from backend.
+/// - 22018: Invalid character value for cast specification — returned here when the
+///   accumulated data-at-execution text is not a valid literal of the SQL type declared for
+///   the parameter at `SQLBindParameter` (`crate::param_convert`). Also propagated from
+///   backend.
 /// - 23000: Integrity constraint violation — propagated from backend.
 /// - 24000: Invalid cursor state — propagated from backend.
 /// - 40001: Serialization failure — propagated from backend.
@@ -1137,8 +1218,13 @@ pub unsafe fn sql_param_data<B: Backend>(
                 let value = if dae.buffer.is_empty() {
                     ColumnValue::Null
                 } else {
-                    let c_type = stmt.param_bindings.get(&param_num).map(|b| b.c_type);
-                    dae_buffer_to_value(c_type, &dae.buffer)
+                    let binding = stmt.param_bindings.get(&param_num);
+                    let c_type = binding.map(|b| b.c_type);
+                    // An absent binding cannot reach here — `SQLParamData` only
+                    // offers a parameter that `find_data_at_exec_params` found
+                    // a data-at-execution indicator on, which requires one.
+                    let sql_type = binding.map_or(SqlDataType::UNKNOWN_TYPE, |b| b.sql_type);
+                    dae_buffer_to_value(c_type, sql_type, &dae.buffer)?
                 };
                 dae.collected_values.insert(param_num, value);
                 dae.buffer.clear();
@@ -1539,29 +1625,87 @@ mod tests {
         }
     }
 
+    /// The dialect the `count_params` tests scan with unless they are pinning
+    /// dialect-specific quoting: `"`-delimited identifiers, as
+    /// `Backend::escape_dialect` defaults to.
+    fn ansi() -> crate::escape::EscapeDialect {
+        crate::escape::EscapeDialect::ansi_default()
+    }
+
     #[test]
     fn count_params_no_params() {
-        assert_eq!(count_params("SELECT 1"), 0);
+        assert_eq!(count_params("SELECT 1", &ansi()), 0);
     }
 
     #[test]
     fn count_params_single() {
-        assert_eq!(count_params("SELECT * FROM t WHERE id = ?"), 1);
+        assert_eq!(count_params("SELECT * FROM t WHERE id = ?", &ansi()), 1);
     }
 
     #[test]
     fn count_params_multiple() {
-        assert_eq!(count_params("INSERT INTO t (a, b, c) VALUES (?, ?, ?)"), 3);
+        assert_eq!(
+            count_params("INSERT INTO t (a, b, c) VALUES (?, ?, ?)", &ansi()),
+            3
+        );
     }
 
     #[test]
     fn count_params_ignores_question_mark_in_string_literal() {
-        assert_eq!(count_params("SELECT '?' FROM t WHERE x = ?"), 1);
+        assert_eq!(count_params("SELECT '?' FROM t WHERE x = ?", &ansi()), 1);
     }
 
     #[test]
     fn count_params_handles_escaped_quote() {
-        assert_eq!(count_params("SELECT 'it''s?' FROM t WHERE x = ?"), 1);
+        assert_eq!(
+            count_params("SELECT 'it''s?' FROM t WHERE x = ?", &ansi()),
+            1
+        );
+    }
+
+    /// A `?` inside a delimited identifier is part of the column's name, not a
+    /// parameter marker. Counting it makes `SQLNumParams` over-report and hands
+    /// the backend a value list one longer than the statement has markers.
+    #[test]
+    fn count_params_ignores_question_mark_in_a_quoted_identifier() {
+        assert_eq!(count_params(r#"SELECT "a?b" FROM t"#, &ansi()), 0);
+    }
+
+    /// A doubled `""` escapes the delimiter and keeps the identifier open, the
+    /// same way `''` does inside a string literal.
+    #[test]
+    fn count_params_ignores_question_mark_after_a_doubled_quote_in_an_identifier() {
+        assert_eq!(count_params(r#"SELECT "a""?b" FROM t"#, &ansi()), 0);
+    }
+
+    /// Which characters delimit an identifier is the backend's to state, so the
+    /// scanner reads it from the dialect rather than assuming `"`.
+    #[test]
+    fn count_params_honours_the_dialects_bracket_identifiers() {
+        let bracket = crate::escape::EscapeDialect::ansi_default()
+            .with_identifier_quotes(&[('"', '"'), ('[', ']')]);
+        assert_eq!(count_params("SELECT [a?b] FROM t WHERE x = ?", &bracket), 1);
+    }
+
+    #[test]
+    fn count_params_ignores_question_mark_in_a_line_comment() {
+        assert_eq!(count_params("SELECT 1 -- really?\nWHERE x = ?", &ansi()), 1);
+    }
+
+    /// An unterminated line comment runs to the end of the statement.
+    #[test]
+    fn count_params_ignores_question_mark_in_an_unterminated_line_comment() {
+        assert_eq!(count_params("SELECT 1 -- really?", &ansi()), 0);
+    }
+
+    #[test]
+    fn count_params_ignores_question_mark_in_a_block_comment() {
+        assert_eq!(count_params("SELECT /* a? b */ 1 WHERE x = ?", &ansi()), 1);
+    }
+
+    #[test]
+    fn count_params_ignores_question_mark_in_an_unterminated_block_comment() {
+        assert_eq!(count_params("SELECT 1 /* a? b", &ansi()), 0);
     }
 
     #[test]
@@ -1824,7 +1968,7 @@ mod tests {
             buffer_length: 4,
             str_len_or_ind_ptr: &mut indicator,
         };
-        let val = unsafe { read_param_value(&binding) };
+        let val = unsafe { read_param_value(&binding) }.unwrap();
         assert_eq!(val, ColumnValue::Null);
     }
 
@@ -1841,7 +1985,7 @@ mod tests {
             buffer_length: 4,
             str_len_or_ind_ptr: std::ptr::null_mut(),
         };
-        let val = unsafe { read_param_value(&binding) };
+        let val = unsafe { read_param_value(&binding) }.unwrap();
         assert_eq!(val, ColumnValue::I32(42));
     }
 
@@ -1898,6 +2042,185 @@ mod tests {
         let params = unsafe { collect_params(&bindings, 1) }.unwrap();
 
         assert_eq!(params, vec![ColumnValue::I32(1234)]);
+    }
+
+    /// Build an `SQL_C_CHAR` input binding over `text` with an explicit length.
+    fn char_binding(text: &'static [u8], sql_type: SqlDataType) -> ParameterBinding {
+        ParameterBinding {
+            input_output_type: ParamType::Input,
+            c_type: CDataType::Char,
+            sql_type,
+            col_size: text.len() as ULen,
+            decimal_digits: 0,
+            value_ptr: text.as_ptr().cast_mut().cast::<c_void>(),
+            buffer_length: text.len() as isize,
+            str_len_or_ind_ptr: std::ptr::null_mut(),
+        }
+    }
+
+    /// The reported defect, at the boundary it is observed from: pyodbc binds
+    /// a `Decimal` as `SQL_C_CHAR` + `SQL_NUMERIC`, and reading only the C type
+    /// hands the backend a string. A backend that renders its parameters then
+    /// emits `WHERE col_decimal = '12.34'`, which a typed data source rejects.
+    #[test]
+    fn read_param_value_converts_char_to_the_declared_decimal_type() {
+        let binding = char_binding(b"12.34\0", SqlDataType::NUMERIC);
+
+        let val = unsafe { read_param_value(&binding) }.unwrap();
+
+        assert_eq!(val, ColumnValue::Decimal("12.34".to_string()));
+    }
+
+    #[test]
+    fn read_param_value_converts_wchar_to_the_declared_decimal_type() {
+        let units: Vec<u16> = "12.34".encode_utf16().collect();
+        let mut indicator: isize = (units.len() * 2) as isize;
+        let binding = ParameterBinding {
+            input_output_type: ParamType::Input,
+            c_type: CDataType::WChar,
+            sql_type: SqlDataType::DECIMAL,
+            col_size: 5,
+            decimal_digits: 2,
+            value_ptr: units.as_ptr().cast_mut().cast::<c_void>(),
+            buffer_length: (units.len() * 2) as isize,
+            str_len_or_ind_ptr: &mut indicator,
+        };
+
+        let val = unsafe { read_param_value(&binding) }.unwrap();
+
+        assert_eq!(val, ColumnValue::Decimal("12.34".to_string()));
+    }
+
+    #[test]
+    fn read_param_value_converts_char_to_the_declared_integer_type() {
+        let binding = char_binding(b"42\0", SqlDataType::INTEGER);
+
+        let val = unsafe { read_param_value(&binding) }.unwrap();
+
+        assert_eq!(val, ColumnValue::I32(42));
+    }
+
+    /// A character SQL type is still a string. The declared type is consulted,
+    /// not overridden.
+    #[test]
+    fn read_param_value_leaves_a_char_parameter_for_a_varchar_column_alone() {
+        let binding = char_binding(b"hello\0", SqlDataType::VARCHAR);
+
+        let val = unsafe { read_param_value(&binding) }.unwrap();
+
+        assert_eq!(val, ColumnValue::String("hello".to_string()));
+    }
+
+    /// Text that is not a literal of the declared type is 22018, not something
+    /// quietly forwarded for the data source to choke on.
+    #[test]
+    fn read_param_value_reports_22018_for_text_that_is_not_a_decimal() {
+        let binding = char_binding(b"twelve\0", SqlDataType::DECIMAL);
+
+        let err = unsafe { read_param_value(&binding) }
+            .expect_err("non-numeric text was accepted for a DECIMAL parameter");
+
+        assert_eq!(err.sqlstate().as_str(), "22018");
+    }
+
+    /// A binding whose C type already fixes the value's shape is untouched:
+    /// the declared SQL type only decides how *text* is read.
+    #[test]
+    fn read_param_value_ignores_the_declared_type_for_a_non_character_binding() {
+        let mut v: i32 = 42;
+        let binding = ParameterBinding {
+            input_output_type: ParamType::Input,
+            c_type: CDataType::SLong,
+            sql_type: SqlDataType::DECIMAL,
+            col_size: 10,
+            decimal_digits: 0,
+            value_ptr: std::ptr::from_mut(&mut v).cast::<c_void>(),
+            buffer_length: 4,
+            str_len_or_ind_ptr: std::ptr::null_mut(),
+        };
+
+        let val = unsafe { read_param_value(&binding) }.unwrap();
+
+        assert_eq!(val, ColumnValue::I32(42));
+    }
+
+    /// Data-at-execution delivers the same text by another route, so it gets
+    /// the same conversion — otherwise `SQLPutData` becomes a way to smuggle a
+    /// decimal to the backend as a string.
+    #[test]
+    fn dae_buffer_to_value_converts_char_to_the_declared_decimal_type() {
+        assert_eq!(
+            dae_buffer_to_value(Some(CDataType::Char), SqlDataType::DECIMAL, b"12.34").unwrap(),
+            ColumnValue::Decimal("12.34".to_string())
+        );
+    }
+
+    /// Binary data-at-execution is bytes on the wire; no text conversion
+    /// applies to it whatever the declared type says.
+    #[test]
+    fn dae_buffer_to_value_leaves_binary_alone() {
+        assert_eq!(
+            dae_buffer_to_value(Some(CDataType::Binary), SqlDataType::EXT_BINARY, &[1, 2, 3])
+                .unwrap(),
+            ColumnValue::Bytes(vec![1, 2, 3])
+        );
+    }
+
+    /// Spec, `SQLExecute` / `SQLExecDirect` `07002`, first clause, carrying no
+    /// `(DM)` marker: "The number of parameters specified in
+    /// **SQLBindParameter** was less than the number of parameters in the SQL
+    /// statement". Padding the gap with NULL instead runs a statement the
+    /// application never asked for — `WHERE x = ?` with nothing bound silently
+    /// becomes `WHERE x = NULL`, which matches no row and reports success.
+    #[test]
+    fn collect_params_rejects_a_marker_with_no_binding() {
+        let bindings = std::collections::HashMap::new();
+
+        let err = unsafe { collect_params(&bindings, 1) }
+            .expect_err("an unbound parameter marker was padded with NULL");
+
+        assert_eq!(err.sqlstate().as_str(), "07002");
+    }
+
+    /// The gap is reported even when it is not the last parameter, so the
+    /// diagnostic names the marker the application actually missed.
+    #[test]
+    fn collect_params_rejects_a_gap_between_bound_markers() {
+        let mut v: i32 = 7;
+        let binding = ParameterBinding {
+            input_output_type: ParamType::Input,
+            c_type: CDataType::SLong,
+            sql_type: SqlDataType::INTEGER,
+            col_size: 10,
+            decimal_digits: 0,
+            value_ptr: std::ptr::from_mut(&mut v).cast::<c_void>(),
+            buffer_length: 4,
+            str_len_or_ind_ptr: std::ptr::null_mut(),
+        };
+        let mut bindings = std::collections::HashMap::new();
+        bindings.insert(1u16, binding);
+
+        let err = unsafe { collect_params(&bindings, 2) }
+            .expect_err("a gap after the last bound parameter was padded with NULL");
+
+        assert_eq!(err.sqlstate().as_str(), "07002");
+        assert!(
+            err.to_string().contains('2'),
+            "the diagnostic should name the unbound parameter number, got {err}"
+        );
+    }
+
+    /// The data-at-execution route walks the same `1..=param_count` range and
+    /// must reject the same gap, or it becomes a second way to reach the
+    /// NULL padding this fix removes.
+    #[test]
+    fn find_data_at_exec_params_rejects_a_marker_with_no_binding() {
+        let bindings = std::collections::HashMap::new();
+
+        let err = unsafe { find_data_at_exec_params(&bindings, 1) }
+            .expect_err("an unbound parameter marker was padded with NULL");
+
+        assert_eq!(err.sqlstate().as_str(), "07002");
     }
 
     /// The unsound case, and the reason this is a fix rather than a tidy-up.
@@ -2008,7 +2331,7 @@ mod tests {
             buffer_length: 8,
             str_len_or_ind_ptr: std::ptr::null_mut(),
         };
-        let val = unsafe { read_param_value(&binding) };
+        let val = unsafe { read_param_value(&binding) }.unwrap();
         assert!(matches!(val, ColumnValue::F64(x) if (x - 1.5_f64).abs() < 1e-10));
     }
 
@@ -2026,7 +2349,7 @@ mod tests {
             buffer_length: 6,
             str_len_or_ind_ptr: &mut indicator,
         };
-        let val = unsafe { read_param_value(&binding) };
+        let val = unsafe { read_param_value(&binding) }.unwrap();
         assert_eq!(val, ColumnValue::String("hello".to_string()));
     }
 
@@ -2043,7 +2366,7 @@ mod tests {
             buffer_length: (s.len() * 2) as isize,
             str_len_or_ind_ptr: std::ptr::null_mut(),
         };
-        let val = unsafe { read_param_value(&binding) };
+        let val = unsafe { read_param_value(&binding) }.unwrap();
         assert_eq!(val, ColumnValue::String("world".to_string()));
     }
 
@@ -2062,7 +2385,7 @@ mod tests {
             buffer_length: (s.len() * 2) as isize,
             str_len_or_ind_ptr: &mut indicator,
         };
-        let val = unsafe { read_param_value(&binding) };
+        let val = unsafe { read_param_value(&binding) }.unwrap();
         assert_eq!(val, ColumnValue::String("hi".to_string()));
     }
 
@@ -2081,7 +2404,7 @@ mod tests {
             buffer_length: 6,
             str_len_or_ind_ptr: &mut indicator,
         };
-        let val = unsafe { read_param_value(&binding) };
+        let val = unsafe { read_param_value(&binding) }.unwrap();
         assert_eq!(val, ColumnValue::String("ab".to_string()));
     }
 
@@ -2108,7 +2431,7 @@ mod tests {
             buffer_length: 5,
             str_len_or_ind_ptr: &mut indicator,
         };
-        let val = unsafe { read_param_value(&binding) };
+        let val = unsafe { read_param_value(&binding) }.unwrap();
         assert_eq!(val, ColumnValue::String("hello".to_string()));
     }
 
@@ -2126,7 +2449,7 @@ mod tests {
             buffer_length: 4, // two UTF-16 code units
             str_len_or_ind_ptr: &mut indicator,
         };
-        let val = unsafe { read_param_value(&binding) };
+        let val = unsafe { read_param_value(&binding) }.unwrap();
         assert_eq!(val, ColumnValue::String("hi".to_string()));
     }
 
@@ -2144,7 +2467,7 @@ mod tests {
             buffer_length: 4,
             str_len_or_ind_ptr: &mut indicator,
         };
-        let val = unsafe { read_param_value(&binding) };
+        let val = unsafe { read_param_value(&binding) }.unwrap();
         assert_eq!(val, ColumnValue::Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF]));
     }
 
@@ -2164,7 +2487,7 @@ mod tests {
             buffer_length: 0,
             str_len_or_ind_ptr: &mut indicator,
         };
-        let val = unsafe { read_param_value(&binding) };
+        let val = unsafe { read_param_value(&binding) }.unwrap();
         assert_eq!(val, ColumnValue::String("hello".to_string()));
     }
 
@@ -2182,7 +2505,7 @@ mod tests {
             buffer_length: 11,
             str_len_or_ind_ptr: &mut indicator,
         };
-        let val = unsafe { read_param_value(&binding) };
+        let val = unsafe { read_param_value(&binding) }.unwrap();
         assert_eq!(val, ColumnValue::String("hello".to_string()));
     }
 
@@ -2207,7 +2530,7 @@ mod tests {
             buffer_length: std::mem::size_of::<odbc_sys::Timestamp>() as isize,
             str_len_or_ind_ptr: std::ptr::null_mut(),
         };
-        let val = unsafe { read_param_value(&binding) };
+        let val = unsafe { read_param_value(&binding) }.unwrap();
         assert_eq!(
             val,
             ColumnValue::Timestamp {
@@ -2244,7 +2567,7 @@ mod tests {
             buffer_length: std::mem::size_of::<odbc_sys::Timestamp>() as isize,
             str_len_or_ind_ptr: std::ptr::null_mut(),
         };
-        let val = unsafe { read_param_value(&binding) };
+        let val = unsafe { read_param_value(&binding) }.unwrap();
         assert_eq!(
             val,
             ColumnValue::Timestamp {
@@ -2276,7 +2599,7 @@ mod tests {
             buffer_length: std::mem::size_of::<odbc_sys::Date>() as isize,
             str_len_or_ind_ptr: std::ptr::null_mut(),
         };
-        let val = unsafe { read_param_value(&binding) };
+        let val = unsafe { read_param_value(&binding) }.unwrap();
         assert_eq!(
             val,
             ColumnValue::Date {
@@ -2305,7 +2628,7 @@ mod tests {
             buffer_length: std::mem::size_of::<odbc_sys::Time>() as isize,
             str_len_or_ind_ptr: std::ptr::null_mut(),
         };
-        let val = unsafe { read_param_value(&binding) };
+        let val = unsafe { read_param_value(&binding) }.unwrap();
         assert_eq!(
             val,
             ColumnValue::Time {
@@ -2339,7 +2662,7 @@ mod tests {
             buffer_length: std::mem::size_of::<odbc_sys::Numeric>() as isize,
             str_len_or_ind_ptr: std::ptr::null_mut(),
         };
-        let val = unsafe { read_param_value(&binding) };
+        let val = unsafe { read_param_value(&binding) }.unwrap();
         assert_eq!(val, ColumnValue::Decimal("-123.45".to_string()));
     }
 
@@ -2363,7 +2686,7 @@ mod tests {
             buffer_length: std::mem::size_of::<odbc_sys::Numeric>() as isize,
             str_len_or_ind_ptr: std::ptr::null_mut(),
         };
-        let val = unsafe { read_param_value(&binding) };
+        let val = unsafe { read_param_value(&binding) }.unwrap();
         assert_eq!(val, ColumnValue::Decimal("42".to_string()));
     }
 
@@ -2388,7 +2711,7 @@ mod tests {
             buffer_length: std::mem::size_of::<odbc_sys::Numeric>() as isize,
             str_len_or_ind_ptr: std::ptr::null_mut(),
         };
-        let val = unsafe { read_param_value(&binding) };
+        let val = unsafe { read_param_value(&binding) }.unwrap();
         assert_eq!(val, ColumnValue::Decimal("0.05".to_string()));
     }
 
@@ -2412,7 +2735,7 @@ mod tests {
             buffer_length: std::mem::size_of::<odbc_sys::Guid>() as isize,
             str_len_or_ind_ptr: std::ptr::null_mut(),
         };
-        let val = unsafe { read_param_value(&binding) };
+        let val = unsafe { read_param_value(&binding) }.unwrap();
         assert_eq!(
             val,
             ColumnValue::Guid([
@@ -2527,7 +2850,7 @@ mod tests {
             buffer_length: 4,
             str_len_or_ind_ptr: &mut indicator,
         };
-        let val = unsafe { read_param_value(&binding) };
+        let val = unsafe { read_param_value(&binding) }.unwrap();
         assert_eq!(val, ColumnValue::Bytes(vec![0xDE, 0xAD, 0x00, 0xBE]));
     }
 
@@ -2535,7 +2858,12 @@ mod tests {
     fn dae_buffer_binary_is_bytes() {
         let buf = [0x00u8, 0xFF, 0x10];
         assert_eq!(
-            dae_buffer_to_value(Some(odbc_sys::CDataType::Binary), &buf),
+            dae_buffer_to_value(
+                Some(odbc_sys::CDataType::Binary),
+                SqlDataType::EXT_BINARY,
+                &buf
+            )
+            .unwrap(),
             ColumnValue::Bytes(vec![0x00, 0xFF, 0x10])
         );
     }
@@ -2548,7 +2876,8 @@ mod tests {
             buf.extend_from_slice(&u.to_ne_bytes());
         }
         assert_eq!(
-            dae_buffer_to_value(Some(odbc_sys::CDataType::WChar), &buf),
+            dae_buffer_to_value(Some(odbc_sys::CDataType::WChar), SqlDataType::VARCHAR, &buf)
+                .unwrap(),
             ColumnValue::String("hi".to_string())
         );
     }
@@ -2556,7 +2885,12 @@ mod tests {
     #[test]
     fn dae_buffer_char_is_text() {
         assert_eq!(
-            dae_buffer_to_value(Some(odbc_sys::CDataType::Char), b"abc"),
+            dae_buffer_to_value(
+                Some(odbc_sys::CDataType::Char),
+                SqlDataType::VARCHAR,
+                b"abc"
+            )
+            .unwrap(),
             ColumnValue::String("abc".to_string())
         );
     }
