@@ -84,6 +84,7 @@
 pub use odbc_sys;
 
 pub mod backend;
+pub(crate) mod catalog_ident;
 pub(crate) mod catalog_sort;
 pub mod column_value;
 /// `SQLGetInfoW` return-shape conformance checks, shared with driver test
