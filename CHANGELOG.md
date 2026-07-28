@@ -599,6 +599,12 @@ markers go away and this section becomes the initial-release notes.
 
 ### Fixed
 
+- `SQLFreeHandle` returned a bare `SQL_ERROR` with no diagnostic for
+  `SQL_HANDLE_DESC` and `SQL_HANDLE_DBC_INFO_TOKEN`, so `SQLGetDiagRec` answered
+  `SQL_NO_DATA` and the application had a failure it could neither report nor
+  branch on. It now posts `HY000` — the code this function's diagnostics table
+  actually offers, which lists no `HYC00`.
+
 - `SQLFreeHandle` and `SQLAllocHandle` did not clear the relevant handle's
   diagnostic queue at entry, so a failed call served the *previous* call's
   SQLSTATE as record 1 and an application reading diagnostics saw an error

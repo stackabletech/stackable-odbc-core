@@ -1,6 +1,7 @@
 //! Handle lifecycle entry points: `SQLAllocHandle`, `SQLFreeHandle`, `SQLFreeStmt`.
 
 use crate::backend::Backend;
+use crate::errors::OdbcError;
 use crate::handles::{
     StatementHandle, alloc_connection, alloc_environment, alloc_statement, free_connection,
     free_environment, free_statement,
@@ -183,9 +184,11 @@ pub unsafe fn sql_alloc_handle<B: Backend>(
 /// - `SQL_HANDLE_ENV` (1) — free an environment handle
 /// - `SQL_HANDLE_DBC` (2) — free a connection handle
 /// - `SQL_HANDLE_STMT` (3) — free a statement handle
-/// - `SQL_HANDLE_DESC` (4) — not implemented, returns `SQL_ERROR`
+/// - `SQL_HANDLE_DESC` (4) — not implemented; returns `SQL_ERROR` with HY000
+/// - `SQL_HANDLE_DBC_INFO_TOKEN` — not implemented; returns `SQL_ERROR` with HY000
 ///
-/// Returns `SQL_INVALID_HANDLE` for unrecognized handle types.
+/// Returns `SQL_INVALID_HANDLE` for unrecognized handle types — a value outside
+/// the five the spec defines, which is what the spec prescribes for that case.
 /// If `SQL_ERROR` is returned the handle is still valid.
 ///
 /// # Parameters
@@ -196,7 +199,11 @@ pub unsafe fn sql_alloc_handle<B: Backend>(
 ///
 /// # Spec compliance
 ///
-/// - HY000: General error (driver-manager-handled; not returned here).
+/// - HY000: Returns `SQL_ERROR` with this SQLSTATE when `handle_type` is
+///   `SQL_HANDLE_DESC` or `SQL_HANDLE_DBC_INFO_TOKEN` — both valid handle types
+///   this driver does not implement. The spec's table for this function lists no
+///   `HYC00`, so the catch-all is the correct code here even though
+///   `SQLAllocHandle` answers `HYC00` for the same condition.
 /// - HY001: Memory allocation error (driver-manager-handled; not returned here).
 /// - HY010: Returns `SQL_ERROR` if `handle_type` is `SQL_HANDLE_ENV` and at least one
 ///   connection handle is still allocated under it (`SQLFreeHandle` with `SQL_HANDLE_DBC`
@@ -260,9 +267,26 @@ pub unsafe fn sql_free_handle<B: Backend>(handle_type: i16, handle: *mut c_void)
                 // `unsafe` here is covered by the outer `unsafe` block.
                 HandleType::Stmt => free_statement::<B>(handle),
                 HandleType::Desc | HandleType::DbcInfoToken => {
-                    // Explicit descriptor and DBC_INFO_TOKEN free: not implemented (matching alloc). Deferred.
-                    tracing::error!("SQLFreeHandle: handle type {:?} not implemented", ht);
-                    SqlReturn::ERROR
+                    // Explicit descriptor and DBC_INFO_TOKEN free: not implemented
+                    // (matching alloc). Deferred.
+                    //
+                    // HY000, not HYC00: SQLFreeHandle's diagnostics table has no
+                    // HYC00 row, while HY000 is listed and is the spec's catch-all
+                    // for a condition with no specific SQLSTATE. (SQLAllocHandle's
+                    // table *does* list HYC00 un-annotated, which is why its
+                    // equivalent arm differs — the asymmetry is what the two
+                    // tables say, not an oversight.) Not SQL_INVALID_HANDLE
+                    // either: the spec reserves that for a HandleType outside the
+                    // five valid values, and both of these are valid.
+                    //
+                    // Returned as an error rather than logged so the record
+                    // reaches the queue; `panic_safe` posts it and converts it to
+                    // SQL_ERROR. No `tracing::error!` alongside it — an OdbcError
+                    // already logs, and pairing the two double-logs.
+                    return Err(OdbcError::general(
+                        format!("SQLFreeHandle: handle type {ht:?} is not implemented"),
+                        crate::types::SqlState::general_error(),
+                    ));
                 }
             };
             Ok(ret)
@@ -713,6 +737,37 @@ mod tests {
                     );
                 },
             );
+
+            crate::test_utils::cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
+    #[test]
+    fn free_handle_unimplemented_type_posts_a_diagnostic() {
+        // SQL_HANDLE_DESC is a valid HandleType this driver does not implement,
+        // so SQL_ERROR is right but a bare SQL_ERROR is not: with no record on
+        // the queue, SQLGetDiagRec answers SQL_NO_DATA and the application has
+        // a failure it can neither report nor branch on.
+        //
+        // HY000, not HYC00: SQLFreeHandle's diagnostics table has no HYC00 row,
+        // while HY000 is listed and is the spec's catch-all. Not
+        // SQL_INVALID_HANDLE either — the spec reserves that for a HandleType
+        // outside the five valid values, and SQL_HANDLE_DESC is one of them.
+        unsafe {
+            let (env, conn, stmt) = crate::test_utils::alloc_env_conn_stmt();
+
+            let ret = sql_free_handle::<MockBackend>(HandleType::Desc as i16, stmt);
+            assert_eq!(ret, SqlReturn::ERROR);
+
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+                assert_eq!(
+                    handle.diagnostics.len(),
+                    1,
+                    "SQL_ERROR with no diagnostic is unreportable"
+                );
+                let rec = handle.diagnostics.get(0).expect("record 1 exists");
+                assert_eq!(rec.sqlstate.as_str(), "HY000");
+            });
 
             crate::test_utils::cleanup_env_conn_stmt(env, conn, stmt);
         }
