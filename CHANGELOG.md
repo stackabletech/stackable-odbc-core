@@ -599,6 +599,15 @@ markers go away and this section becomes the initial-release notes.
 
 ### Fixed
 
+- `SQLDescribeCol` reported a column size of `18446744073709551612`
+  (`SQL_NO_TOTAL` widened into the `SQLULEN` the parameter actually is) for any
+  column whose length the backend could not determine, such as an unbounded
+  `VARCHAR` — which is every column a `DESCRIBE`, `SHOW` or `EXPLAIN` returns.
+  An application sizing a buffer from it asks for 18 exabytes. The spec's
+  `ColumnSizePtr` text requires `0` for that case; `SQL_NO_TOTAL` belongs to
+  `SQL_DESC_LENGTH` and `SQL_DESC_DISPLAY_SIZE` via `SQLColAttributeW`, which
+  are unchanged.
+
 - Five statement attributes were accepted, stored and then never acted on, so
   `SQLGetStmtAttr` read them back and confirmed a behaviour the driver did not
   have. They now split two ways, along the line the spec draws.

@@ -958,11 +958,12 @@ pub unsafe fn sql_describe_col_w<B: Backend>(
 
             // Write column_size_ptr if pointer is non-null.
             if !column_size_ptr.is_null() {
-                // `resolve_precision_ulen` substitutes `SQL_NO_TOTAL` for a
-                // backend's "undeterminable length" sentinel (see its doc
-                // comment); every other value is the widening u32 -> usize
-                // cast this always was, which cannot truncate on 32- or
-                // 64-bit targets.
+                // `resolve_precision_ulen` reports 0 for a backend's
+                // "undeterminable length" sentinel, which is what this
+                // parameter's spec text requires (see its doc comment for why
+                // this differs from SQL_DESC_LENGTH); every other value is the
+                // widening u32 -> usize cast this always was, which cannot
+                // truncate on 32- or 64-bit targets.
                 std::ptr::write_unaligned(
                     column_size_ptr,
                     crate::types::resolve_precision_ulen(desc.precision),
@@ -1749,6 +1750,27 @@ mod tests {
         });
     }
 
+    /// Install a result set with one column whose length the backend could not
+    /// determine — the shape a `DESCRIBE`/`SHOW`/`EXPLAIN` result has, where
+    /// every column is an unbounded VARCHAR with no catalog entry to read a
+    /// declared length from.
+    unsafe fn stmt_with_undeterminable_column(stmt: *mut c_void) {
+        with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+            handle.set_result_set(StatementData::Synthetic(SyntheticStatement::new(
+                vec![ColumnDescriptor {
+                    name: "unbounded".into(),
+                    type_name: String::new(),
+                    sql_type: SqlDataType::VARCHAR,
+                    precision: crate::types::PRECISION_UNDETERMINABLE,
+                    scale: 0,
+                    nullable: Nullable::SqlNullable,
+                    ..Default::default()
+                }],
+                vec![],
+            )));
+        });
+    }
+
     #[test]
     fn col_attribute_reports_string_length_in_bytes() {
         // Spec, SQLColAttribute StringLengthPtr: "the total number of bytes
@@ -1822,6 +1844,43 @@ mod tests {
             );
             assert_eq!(ret, SqlReturn::SUCCESS);
             assert_eq!(name_len, 5, "5 characters, not 10 bytes");
+            cleanup(env, conn, stmt);
+        }
+    }
+
+    #[test]
+    fn describe_col_reports_zero_column_size_when_undeterminable() {
+        // Spec, SQLDescribeCol ColumnSizePtr: "If the column size cannot be
+        // determined, the driver returns 0."
+        //
+        // The regression this pins: `SQL_NO_TOTAL` is -4, and -4 widened into
+        // the `SQLULEN` this parameter actually is reads back as
+        // 18_446_744_073_709_551_612.
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            stmt_with_undeterminable_column(stmt);
+            let mut buf = [0u16; 32];
+            let mut name_len: i16 = 0;
+            let mut data_type: i16 = 0;
+            let mut col_size: usize = 12345; // poisoned, so a skipped write fails
+            let mut decimal_digits: i16 = 0;
+            let mut nullable: i16 = 0;
+            let ret = sql_describe_col_w::<MockBackend>(
+                stmt,
+                1,
+                buf.as_mut_ptr(),
+                i16::try_from(buf.len()).expect("buffer fits i16"),
+                &mut name_len,
+                &mut data_type,
+                &mut col_size,
+                &mut decimal_digits,
+                &mut nullable,
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+            assert_eq!(
+                col_size, 0,
+                "spec says 0 when the column size cannot be determined"
+            );
             cleanup(env, conn, stmt);
         }
     }

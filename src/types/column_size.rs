@@ -40,11 +40,12 @@ use odbc_sys::NO_TOTAL;
 /// variable type, it returns SQL_NO_TOTAL." `SQL_NO_TOTAL` (`odbc_sys::NO_TOTAL`,
 /// `-4`) is a signed `Len`/`ULen`-width value and does not fit in the `u32`
 /// `precision` is stored as, so this is a distinct fixed `u32` value instead.
-/// [`resolve_precision_isize`]/[`resolve_precision_ulen`] are the two
-/// places that translate it back to the real `NO_TOTAL` constant for the
-/// pointer-width descriptor fields that actually carry it
-/// (`SQL_DESC_LENGTH`/`SQL_DESC_DISPLAY_SIZE` via `SQLColAttributeW`,
-/// `SQLDescribeCol`'s `ColumnSizePtr`).
+/// [`resolve_precision_isize`] translates it to the real `NO_TOTAL` constant
+/// for the pointer-width descriptor fields that carry it
+/// (`SQL_DESC_LENGTH`/`SQL_DESC_DISPLAY_SIZE` via `SQLColAttributeW`).
+/// [`resolve_precision_ulen`] translates it to `0`, which is what
+/// `SQLDescribeCol`'s `ColumnSizePtr` requires instead — see that function's
+/// doc comment.
 ///
 /// Deliberately `u32::MAX`, not `i32::MAX`: `i32::MAX` is already an
 /// established, different convention in the driver crates for "unbounded but
@@ -67,14 +68,27 @@ pub fn resolve_precision_isize(precision: u32) -> isize {
 }
 
 /// Reinterpret a `ColumnDescriptor::precision` value as the `ULen`
-/// `SQLDescribeCol`'s `ColumnSizePtr` actually wants, substituting
-/// `odbc_sys::NO_TOTAL` for the [`PRECISION_UNDETERMINABLE`] sentinel. `Len`
-/// and `ULen` are the same pointer width, so `NO_TOTAL`'s bit pattern is
-/// preserved by the `as` cast the same way `SQL_NULL_DATA`/other signed
-/// indicator sentinels already are elsewhere at this boundary.
+/// `SQLDescribeCol`'s `ColumnSizePtr` actually wants.
+///
+/// **This is not the same answer as [`resolve_precision_isize`], and the
+/// difference is load-bearing.** Two pieces of spec text govern column size,
+/// and which one applies depends on the destination field:
+///
+/// - `SQLDescribeCol`'s own argument text — this function's only caller —
+///   says: "If the column size cannot be determined, the driver returns **0**."
+/// - The Column Size appendix's footnote (b) and the Display Size appendix's
+///   footnote (a) say `SQL_NO_TOTAL`, and they govern `SQL_DESC_LENGTH` and
+///   `SQL_DESC_DISPLAY_SIZE` reached through `SQLColAttributeW`. That is
+///   [`resolve_precision_isize`], which is correct as written.
+///
+/// The function-specific text wins for `SQLDescribeCol`. Returning
+/// `SQL_NO_TOTAL` here instead put -4 into a `SQLULEN`, so every column whose
+/// length a backend could not determine reported a size of
+/// `18_446_744_073_709_551_612` and an application sizing a buffer from it
+/// asked for 18 exabytes.
 pub fn resolve_precision_ulen(precision: u32) -> odbc_sys::ULen {
     if precision == PRECISION_UNDETERMINABLE {
-        NO_TOTAL as odbc_sys::ULen
+        0
     } else {
         precision as odbc_sys::ULen
     }
@@ -320,11 +334,15 @@ mod tests {
     }
 
     #[test]
-    fn resolve_precision_ulen_substitutes_no_total_for_the_sentinel() {
-        assert_eq!(
-            resolve_precision_ulen(PRECISION_UNDETERMINABLE),
-            NO_TOTAL as odbc_sys::ULen
-        );
+    fn resolve_precision_ulen_reports_zero_for_the_sentinel() {
+        // Spec, SQLDescribeCol ColumnSizePtr: "If the column size cannot be
+        // determined, the driver returns 0." This is deliberately NOT
+        // `SQL_NO_TOTAL`: the Column Size appendix's footnote (b) governs
+        // `SQL_DESC_LENGTH`/`SQL_DESC_DISPLAY_SIZE` via SQLColAttributeW,
+        // which is `resolve_precision_isize`. Writing -4 into a `SQLULEN`
+        // made an unbounded VARCHAR report a column size of 2^64-4, and an
+        // application sizing a buffer from it asks for 18 exabytes.
+        assert_eq!(resolve_precision_ulen(PRECISION_UNDETERMINABLE), 0);
     }
 
     #[test]
