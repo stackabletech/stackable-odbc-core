@@ -144,6 +144,11 @@ pub use result_cols::{
     PrimaryKeysResultCol, TablesResultCol, special_columns_columns, statistics_columns,
 };
 
+mod catalog_rows;
+pub use catalog_rows::{
+    ColumnRow, ForeignKeyRow, PrimaryKeyRow, SpecialColumnRow, StatisticsRow, TableRow,
+};
+
 mod connect_params;
 pub use connect_params::ConnectParams;
 
