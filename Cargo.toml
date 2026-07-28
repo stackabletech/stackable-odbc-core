@@ -69,6 +69,13 @@ tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+[dev-dependencies]
+proptest = "1"
+# For `tests/logging.rs`, which installs a competing global subscriber before
+# calling `init_logging`. That has to run in its own process, so it cannot be a
+# unit test, and an integration test reaches only the public API plus these.
+tracing-subscriber = "0.3"
+
 # Exhaustive interleaving checker for the handle lock discipline. The models
 # themselves live in `src/handles/registry.rs`'s
 # `#[cfg(all(test, loom))] mod loom_tests`, and `src/sync.rs`'s type aliases
@@ -77,13 +84,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # downstream consumer's resolved dependency graph.
 [target.'cfg(loom)'.dev-dependencies]
 loom = "0.7"
-
-[dev-dependencies]
-proptest = "1"
-# For `tests/logging.rs`, which installs a competing global subscriber before
-# calling `init_logging`. That has to run in its own process, so it cannot be a
-# unit test, and an integration test reaches only the public API plus these.
-tracing-subscriber = "0.3"
 
 [lints.rust]
 # `loom` is a custom cfg (see `src/sync.rs`), set via `RUSTFLAGS="--cfg loom"`
