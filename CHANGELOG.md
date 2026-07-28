@@ -599,6 +599,14 @@ markers go away and this section becomes the initial-release notes.
 
 ### Fixed
 
+- `SQLFreeHandle` and `SQLAllocHandle` did not clear the relevant handle's
+  diagnostic queue at entry, so a failed call served the *previous* call's
+  SQLSTATE as record 1 and an application reading diagnostics saw an error
+  describing something else. This was reachable exactly when it mattered: a
+  `SQLFreeHandle` that fails leaves the handle valid, which is when an
+  application reads diagnostics at all. With these two, every FFI entry point
+  that should clear its queue now does.
+
 - `SQLDescribeCol` reported a column size of `18446744073709551612`
   (`SQL_NO_TOTAL` widened into the `SQLULEN` the parameter actually is) for any
   column whose length the backend could not determine, such as an unbounded

@@ -87,7 +87,15 @@ pub unsafe fn sql_alloc_handle<B: Backend>(
     // error path, including a caught panic, leaves it null, and only the
     // success paths overwrite it.
     let ret = unsafe {
-        panic_safe::<B, _>(input_handle, |_scope| {
+        panic_safe::<B, _>(input_handle, |scope| {
+            // Spec: the diagnostic for this call is read with `Handle` set to
+            // `InputHandle`, so that queue is this call's output channel and is
+            // cleared at entry like every other function's. Before any error
+            // return, so a diagnostic this call posts survives. `None` for a
+            // null `InputHandle` (environment allocation, which has no parent).
+            if let Some(queue) = scope.diagnostics::<B>(input_handle) {
+                queue.clear();
+            }
             // Spec HY009: OutputHandlePtr must not be null.
             if output_handle_ptr.is_null() {
                 tracing::error!("SQLAllocHandle: output_handle_ptr is null (HY009)");
@@ -233,6 +241,14 @@ pub unsafe fn sql_free_handle<B: Backend>(handle_type: i16, handle: *mut c_void)
     // for the duration of `free_statement`'s registry unregister and `Box::from_raw`.
     let ret = unsafe {
         panic_safe::<B, _>(handle, |scope| {
+            // Spec: clear at the start of the call. This matters when the free
+            // fails and the handle survives — a connection with live
+            // statements, or an unimplemented handle type — because that is
+            // exactly when an application reads diagnostics, and a stale record
+            // from the previous call would be served as record 1.
+            if let Some(queue) = scope.diagnostics::<B>(handle) {
+                queue.clear();
+            }
             let Some(ht) = handle_type_from_raw(handle_type) else {
                 tracing::error!("SQLFreeHandle: invalid handle_type {}", handle_type);
                 return Ok(SqlReturn::INVALID_HANDLE);
@@ -655,6 +671,90 @@ mod tests {
             let _ = sql_free_handle::<MockBackend>(HandleType::Stmt as i16, stmt);
             let _ = sql_free_handle::<MockBackend>(HandleType::Dbc as i16, conn);
             let _ = sql_free_handle::<MockBackend>(HandleType::Env as i16, env);
+        }
+    }
+
+    #[test]
+    fn free_handle_clears_diagnostics_on_entry() {
+        // Spec: every function clears the handle's diagnostics at the start of
+        // the call. It matters here precisely when the free FAILS and the
+        // handle survives — freeing a connection that still has live
+        // statements — because that is exactly when an application reads them.
+        // A stale record would otherwise be served as record 1, describing a
+        // different call entirely.
+        unsafe {
+            let (env, conn, stmt) = crate::test_utils::alloc_env_conn_stmt();
+
+            with_handle::<MockBackend, crate::handles::ConnectionHandle<MockBackend>, _>(
+                conn,
+                |handle| {
+                    handle.diagnostics.push(&OdbcError::NotConnected);
+                    assert_eq!(handle.diagnostics.len(), 1, "precondition");
+                },
+            );
+
+            // Fails: `stmt` is still allocated on this connection.
+            let ret = sql_free_handle::<MockBackend>(HandleType::Dbc as i16, conn);
+            assert_eq!(ret, SqlReturn::ERROR);
+
+            with_handle::<MockBackend, crate::handles::ConnectionHandle<MockBackend>, _>(
+                conn,
+                |handle| {
+                    assert_eq!(
+                        handle.diagnostics.len(),
+                        1,
+                        "the stale 08003 survived alongside this call's own record"
+                    );
+                    let rec = handle.diagnostics.get(0).expect("record 1 exists");
+                    assert_eq!(
+                        rec.sqlstate.as_str(),
+                        "HY010",
+                        "record 1 must describe this call, not the previous one"
+                    );
+                },
+            );
+
+            crate::test_utils::cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
+    #[test]
+    fn alloc_handle_clears_input_handle_diagnostics_on_entry() {
+        // Spec, SQLAllocHandle Diagnostics: the SQLSTATE is read "with Handle
+        // set to the value of InputHandle" — so InputHandle's queue is this
+        // call's output channel, and must be cleared at entry like any other.
+        unsafe {
+            let mut env: *mut c_void = std::ptr::null_mut();
+            let _ = sql_alloc_handle::<MockBackend>(
+                HandleType::Env as i16,
+                std::ptr::null_mut(),
+                &mut env,
+            );
+
+            with_handle::<MockBackend, crate::handles::EnvironmentHandle<MockBackend>, _>(
+                env,
+                |handle| {
+                    handle.diagnostics.push(&OdbcError::NotConnected);
+                    assert_eq!(handle.diagnostics.len(), 1, "precondition");
+                },
+            );
+
+            let mut conn: *mut c_void = std::ptr::null_mut();
+            let ret = sql_alloc_handle::<MockBackend>(HandleType::Dbc as i16, env, &mut conn);
+            assert_eq!(ret, SqlReturn::SUCCESS);
+
+            with_handle::<MockBackend, crate::handles::EnvironmentHandle<MockBackend>, _>(
+                env,
+                |handle| {
+                    assert_eq!(
+                        handle.diagnostics.len(),
+                        0,
+                        "stale diagnostic survived SQLAllocHandle"
+                    );
+                },
+            );
+
+            crate::test_utils::cleanup_env_conn_stmt(env, conn, std::ptr::null_mut());
         }
     }
 }
