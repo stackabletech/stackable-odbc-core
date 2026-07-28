@@ -156,6 +156,15 @@ markers go away and this section becomes the initial-release notes.
 
 ### Changed
 
+- An infinite `f32`/`f64` read as `SQL_C_CHAR` or `SQL_C_WCHAR` now renders as
+  `Infinity`/`-Infinity` rather than Rust's `inf`/`-inf`. The ODBC spec defines
+  no textual form for a non-finite float, so this is decided by ecosystem fit:
+  Trino, its JDBC driver and PostgreSQL all use `Infinity`. Because this is
+  core's shared coercion path, which a driver cannot override, core should not
+  impose a Rust-ism on every backend. `NaN` is unchanged — Rust and Java already
+  agree on it. Both spellings still parse back into a float, so a backend
+  returning either as text is unaffected.
+
 - `HandleScope` is now `!Send`. It is only valid while the group's `MutexGuard`
   is held, and a guard is itself `!Send` because releasing a lock from a thread
   other than the one that took it is undefined for the underlying primitive; a

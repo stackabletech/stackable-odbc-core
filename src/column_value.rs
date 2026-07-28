@@ -1272,6 +1272,23 @@ unsafe fn write_numeric_pivot(
 // Helper: convert ColumnValue to string for coercion
 // ---------------------------------------------------------------------------
 
+/// The textual form of an infinite float for `SQL_C_CHAR`/`SQL_C_WCHAR`.
+///
+/// The ODBC spec defines no textual form for a non-finite float, so this is
+/// decided by ecosystem fit rather than by conformance. Every relevant
+/// neighbour agrees against Rust: Trino renders `Infinity`, the Trino JDBC
+/// driver renders `Infinity`, and PostgreSQL — the other major data source with
+/// infinite floats — emits `Infinity` in its own text output. Rust's `Display`
+/// gives `inf`/`-inf`, which arrived here by default rather than by decision.
+///
+/// The deciding argument is that this is core's *shared* coercion path and a
+/// driver cannot override it, so core should not impose a Rust-ism on every
+/// backend. `NaN` already agrees between Rust and Java and is deliberately left
+/// alone, so only the two infinities differ from `Display`.
+const fn infinity_text(negative: bool) -> &'static str {
+    if negative { "-Infinity" } else { "Infinity" }
+}
+
 fn column_value_to_string(value: &ColumnValue) -> String {
     match value {
         ColumnValue::Null => String::new(),
@@ -1280,7 +1297,12 @@ fn column_value_to_string(value: &ColumnValue) -> String {
         ColumnValue::I16(v) => v.to_string(),
         ColumnValue::I32(v) => v.to_string(),
         ColumnValue::I64(v) => v.to_string(),
+        // Match guards rather than one shared `f64` helper: widening `f32`
+        // would change every *finite* value too, since `0.1f32` prints as "0.1"
+        // but `0.1f32 as f64` prints as "0.10000000149011612".
+        ColumnValue::F32(v) if v.is_infinite() => infinity_text(v.is_sign_negative()).to_string(),
         ColumnValue::F32(v) => v.to_string(),
+        ColumnValue::F64(v) if v.is_infinite() => infinity_text(v.is_sign_negative()).to_string(),
         ColumnValue::F64(v) => v.to_string(),
         ColumnValue::Bool(v) => {
             if *v {
@@ -2584,6 +2606,76 @@ mod tests {
         let char_count = (ind / 2) as usize;
         let s = String::from_utf16_lossy(&buf[..char_count]);
         assert_eq!(s, "1.5");
+    }
+
+    /// Read a `ColumnValue` back as the text `SQL_C_CHAR` would deliver.
+    fn char_text_of(value: &ColumnValue) -> String {
+        let mut buf = [0u8; 64];
+        let mut ind: isize = 0;
+        let ret = unsafe {
+            write_column_value(
+                value,
+                CDataType::Char,
+                buf.as_mut_ptr() as *mut c_void,
+                64,
+                &mut ind,
+            )
+        };
+        assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
+        let len = usize::try_from(ind).expect("indicator is a byte count");
+        String::from_utf8(buf[..len].to_vec()).expect("ASCII")
+    }
+
+    #[test]
+    fn infinity_renders_as_infinity_not_inf() {
+        // The ODBC spec defines no textual form for a non-finite float, so this
+        // is decided by ecosystem fit: Trino, its JDBC driver and PostgreSQL all
+        // spell it `Infinity`/`-Infinity`, while Rust's `Display` gives
+        // `inf`/`-inf`. This is core's shared coercion path and a driver cannot
+        // override it, so core does not impose a Rust-ism on every backend.
+        assert_eq!(char_text_of(&ColumnValue::F64(f64::INFINITY)), "Infinity");
+        assert_eq!(
+            char_text_of(&ColumnValue::F64(f64::NEG_INFINITY)),
+            "-Infinity"
+        );
+        assert_eq!(char_text_of(&ColumnValue::F32(f32::INFINITY)), "Infinity");
+        assert_eq!(
+            char_text_of(&ColumnValue::F32(f32::NEG_INFINITY)),
+            "-Infinity"
+        );
+    }
+
+    #[test]
+    fn nan_still_renders_as_nan() {
+        // Rust and Java already agree on this one, so it must NOT move with the
+        // infinities.
+        assert_eq!(char_text_of(&ColumnValue::F64(f64::NAN)), "NaN");
+        assert_eq!(char_text_of(&ColumnValue::F32(f32::NAN)), "NaN");
+    }
+
+    #[test]
+    fn finite_floats_are_not_widened_when_rendered() {
+        // Guards the obvious wrong fix: routing `f32` through `f64` to share one
+        // helper. `0.1f32` prints as "0.1", but `0.1f32 as f64` prints as
+        // "0.10000000149011612".
+        assert_eq!(char_text_of(&ColumnValue::F32(0.1)), "0.1");
+        assert_eq!(char_text_of(&ColumnValue::F64(1.5)), "1.5");
+    }
+
+    #[test]
+    fn the_infinity_spelling_parses_back_into_a_float() {
+        // The round trip: a backend returning "Infinity" as *text* that an
+        // application then requests as a numeric type goes through
+        // `parse_numeric_text`. Rust's float parser is ASCII-case-insensitive
+        // over `inf`/`infinity`, so both spellings survive — but nothing pinned
+        // that before, and emitting a spelling core cannot read back would be a
+        // one-way door.
+        for text in ["Infinity", "-Infinity", "inf", "-inf"] {
+            assert!(
+                matches!(parse_numeric_text(text), Some(NumericPivot::Float(f)) if f.is_infinite()),
+                "{text} should parse back to an infinite f64"
+            );
+        }
     }
 
     #[test]
