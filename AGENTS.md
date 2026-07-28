@@ -56,11 +56,16 @@ Every `pub unsafe fn` in `ffi/` must follow this structure:
 // 1. If no parsing: single debug! at entry
 tracing::debug!("SQLFunctionW(handle={:?}, param={})", handle, param);
 
-// OR if parsing raw integers to enums:
+// OR if parsing anything — raw integers to enums, or UTF-16 pointers to strings:
 // 1a. TRACE: raw inputs before parse
 tracing::trace!("SQLFunctionW(handle={:?}, raw={})", handle, raw_int);
 // 1b. DEBUG: parsed/typed values after
 tracing::debug!("SQLFunctionW: attr={:?}", parsed_attr);
+// 1b. ...and for a function taking string arguments, name every one of them:
+tracing::debug!(
+    "SQLFunctionW(handle={:?}, catalog={:?}, schema={:?}, table={:?})",
+    handle, catalog, schema, table,
+);
 
 // 2. WARN: intentional spec deviations (silent accepts, ignored features)
 tracing::warn!("SQLFunctionW: accepting unrecognized X (DM compatibility)");
@@ -70,6 +75,14 @@ tracing::debug!("SQLFunctionW -> {:?}", ret);
 ```
 
 Rules: no passwords or connection string content; `error!` only for validation failures expressed via `OdbcError` (avoid double-logging); stubs use a single `debug!` entry, no exit log.
+
+**A string argument counts as parsed input.** The entry log knows only the
+handle, so a function that logs just that shows *which* call happened and not
+what it asked for — precisely what you need when a client's metadata query comes
+back empty. Every catalog function therefore logs its `parse_filter_param`
+results. This is the rule most easily missed when a stub becomes a real
+implementation, because the stub's single `debug!` looks like it already
+complies.
 
 ### Named constants
 
