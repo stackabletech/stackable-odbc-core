@@ -9,24 +9,48 @@ use crate::types::SqlState;
 
 /// Per-backend escape-translation rules.
 ///
-/// `#[non_exhaustive]`: an all-public, exhaustive struct that every driver is
-/// told to construct. Adding `rewrite_scalar_fn` was already one silent
-/// breaking change (commit `886007b`, labelled `feat:`); it cost nothing only
-/// because nothing was released. Start from [`EscapeDialect::ansi_default`] and
-/// apply the `with_*` builders, which stay source-compatible as rules are
-/// added.
+/// Start from [`EscapeDialect::ansi_default`] and apply the `with_*` builders.
+/// The fields are crate-private and the type is `#[non_exhaustive]`, so a rule
+/// added here is a source-compatible change for every driver: there is no
+/// struct literal to go stale and no field to be missed. Read a rule back
+/// through its accessor.
 #[non_exhaustive]
 pub struct EscapeDialect {
+    pub(crate) identifier_quotes: &'static [(char, char)],
+    pub(crate) remap_scalar_fn: fn(&str) -> Option<&'static str>,
+    pub(crate) rewrite_scalar_fn: fn(name: &str, args: &str) -> Option<String>,
+    pub(crate) render_date: fn(&str) -> String,
+    pub(crate) render_time: fn(&str) -> String,
+    pub(crate) render_timestamp: fn(&str) -> String,
+}
+
+/// Field accessors for [`EscapeDialect`].
+///
+/// The fields themselves are crate-private: this type is `#[non_exhaustive]`
+/// and built through its `with_*` builders, and public fields would have made
+/// both of those advisory. Reading goes through these instead.
+///
+/// Adding an accessor is a source-compatible change, so this set covers every
+/// field rather than only the ones a driver happens to need today.
+impl EscapeDialect {
     /// Identifier-quote open→close pairs copied verbatim, e.g. `('"','"')`,
     /// `('`','`')`, `('[',']')`.
-    pub identifier_quotes: &'static [(char, char)],
+    #[must_use]
+    pub fn identifier_quotes(&self) -> &'static [(char, char)] {
+        self.identifier_quotes
+    }
+
     /// Remap an ODBC `{fn NAME(...)}` scalar-function name to the backend's
     /// name; `None` passes the name through unchanged. Input is the raw name.
     ///
     /// The cheap path: it swaps the identifier in front of the parentheses and
     /// never sees the arguments, which is all `UCASE` → `upper` needs. When
     /// the argument syntax differs too, use [`EscapeDialect::rewrite_scalar_fn`].
-    pub remap_scalar_fn: fn(&str) -> Option<&'static str>,
+    #[must_use]
+    pub fn remap_scalar_fn(&self) -> fn(&str) -> Option<&'static str> {
+        self.remap_scalar_fn
+    }
+
     /// Rewrite a whole `{fn NAME(args)}` escape.
     ///
     /// `args` is the text between the outer parentheses, **already
@@ -47,13 +71,28 @@ pub struct EscapeDialect {
     ///
     /// Only consulted when the call has a balanced parenthesis pair; a
     /// malformed `{fn ...}` takes the pass-through path unchanged.
-    pub rewrite_scalar_fn: fn(name: &str, args: &str) -> Option<String>,
+    #[must_use]
+    pub fn rewrite_scalar_fn(&self) -> fn(name: &str, args: &str) -> Option<String> {
+        self.rewrite_scalar_fn
+    }
+
     /// Render `{d <lit>}` given the raw inner literal text (e.g. `"'2020-01-01'"`).
-    pub render_date: fn(&str) -> String,
+    #[must_use]
+    pub fn render_date(&self) -> fn(&str) -> String {
+        self.render_date
+    }
+
     /// Render `{t <lit>}`.
-    pub render_time: fn(&str) -> String,
+    #[must_use]
+    pub fn render_time(&self) -> fn(&str) -> String {
+        self.render_time
+    }
+
     /// Render `{ts <lit>}`.
-    pub render_timestamp: fn(&str) -> String,
+    #[must_use]
+    pub fn render_timestamp(&self) -> fn(&str) -> String {
+        self.render_timestamp
+    }
 }
 
 impl EscapeDialect {

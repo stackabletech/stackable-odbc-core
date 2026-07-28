@@ -135,6 +135,24 @@ markers go away and this section becomes the initial-release notes.
 
 ### Changed
 
+- **Breaking.** `EscapeDialect`, `ColumnDescriptor` and `TypeInfoRow` have
+  crate-private fields and a full set of accessors. All three were
+  `#[non_exhaustive]` with every field `pub` and a doc comment telling you to
+  use the builders — a combination that guaranteed neither: `#[non_exhaustive]`
+  stopped struct-literal construction, but nothing stopped a driver reading or
+  *assigning* a field directly, so the builders were advisory and core could
+  never add an invariant to one.
+
+  A driver that reads `desc.name` now calls `desc.name()`; the 37 accessors
+  cover every field, so no read has to be given up. Assignment outside the
+  builders is gone by design — that is what the seal is for. Field doc comments
+  moved to the accessors, which is now the only place the API is described, so
+  the two cannot drift.
+
+  Deliberately complete rather than minimal: adding an accessor later is
+  source-compatible, so the cost of covering a field nobody reads yet is nil
+  while the cost of omitting one is a break.
+
 - **Breaking.** `types` re-exports its constants by name instead of through a
   `pub use constants::*` glob. Under the glob every `pub const` added to
   `types/constants.rs` joined the public API silently; the surface is now a
