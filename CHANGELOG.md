@@ -448,6 +448,15 @@ markers go away and this section becomes the initial-release notes.
 
 ### Fixed
 
+- `SQLParamData`, `SQLFetchScroll`, `SQLSetEnvAttr` and `SQLGetEnvAttr` now
+  clear the handle's diagnostic records at the start of the call, as the spec
+  requires of every function except `SQLGetDiagRec` and `SQLGetDiagField`.
+  Previously a record from a failed call could still be on the queue during a
+  later successful one, so `SQLGetDiagRec` reported an error belonging to a
+  call that had already completed. `SQLParamData` was the worst affected: it is
+  the data-at-execution loop, so one stale record was re-reported on every
+  iteration.
+
 - `SQLGetData` and `SQLFetch` perform the temporal struct conversions the
   SQL-to-C table requires. `write_column_value` had an arm for each type to its
   own C struct and nothing else, so four legal conversions fell through to the

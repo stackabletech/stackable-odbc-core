@@ -76,6 +76,8 @@ pub unsafe fn sql_set_env_attr<B: Backend>(
     let ret = unsafe {
         panic_safe::<B, _>(environment_handle, |scope| {
             let env = scope.get::<EnvironmentHandle<B>>(environment_handle)?;
+            // Spec: clear diagnostics at the start of each ODBC call.
+            env.diagnostics.clear();
 
             // Spec HY010: "An application can call SQLSetEnvAttr only if no
             // connection handle is allocated on the environment." The
@@ -192,6 +194,8 @@ pub unsafe fn sql_get_env_attr<B: Backend>(
     let ret = unsafe {
         panic_safe::<B, _>(environment_handle, |scope| {
             let env = scope.get::<EnvironmentHandle<B>>(environment_handle)?;
+            // Spec: clear diagnostics at the start of each ODBC call.
+            env.diagnostics.clear();
 
             match attr {
                 Some(EnvironmentAttribute::OdbcVersion) => {
@@ -247,7 +251,7 @@ mod tests {
     use odbc_sys::HandleType;
 
     use crate::ffi::handle::{sql_alloc_handle, sql_free_handle};
-    use crate::test_utils::MockBackend;
+    use crate::test_utils::{MockBackend, with_handle};
 
     const ENV_ATTR_ODBC_VERSION: i32 = odbc_sys::EnvironmentAttribute::OdbcVersion as i32;
 
@@ -316,6 +320,43 @@ mod tests {
         }
     }
 
+    /// A stale record from a failed call must not still be on the queue
+    /// during a later successful one.
+    #[test]
+    fn set_env_attr_clears_diagnostics_from_an_earlier_call() {
+        unsafe {
+            let mut env: *mut c_void = std::ptr::null_mut();
+            let _ = sql_alloc_handle::<MockBackend>(
+                HandleType::Env as i16,
+                std::ptr::null_mut(),
+                &mut env,
+            );
+
+            // An invalid ODBC version fails with HY024 and leaves a record.
+            let ret =
+                sql_set_env_attr::<MockBackend>(env, ENV_ATTR_ODBC_VERSION, 999 as *mut c_void, 0);
+            assert_eq!(ret, SqlReturn::ERROR);
+            with_handle::<MockBackend, EnvironmentHandle<MockBackend>, _>(env, |h| {
+                assert_eq!(h.diagnostics.len(), 1, "precondition: a record is queued");
+            });
+
+            // The next, valid call must start from an empty queue rather than
+            // appending to the record the failed call left behind.
+            let ret =
+                sql_set_env_attr::<MockBackend>(env, ENV_ATTR_ODBC_VERSION, 3 as *mut c_void, 0);
+            assert_eq!(ret, SqlReturn::SUCCESS);
+            with_handle::<MockBackend, EnvironmentHandle<MockBackend>, _>(env, |h| {
+                assert_eq!(
+                    h.diagnostics.len(),
+                    0,
+                    "the queue must be cleared at entry, not appended to"
+                );
+            });
+
+            let _ = sql_free_handle::<MockBackend>(HandleType::Env as i16, env);
+        }
+    }
+
     #[test]
     fn get_env_attr_unsupported_attribute() {
         unsafe {
@@ -335,6 +376,54 @@ mod tests {
                 std::ptr::null_mut(),
             );
             assert_eq!(ret, SqlReturn::ERROR);
+
+            let _ = sql_free_handle::<MockBackend>(HandleType::Env as i16, env);
+        }
+    }
+
+    /// A stale record from a failed call must not still be on the queue
+    /// during a later successful one.
+    #[test]
+    fn get_env_attr_clears_diagnostics_from_an_earlier_call() {
+        unsafe {
+            let mut env: *mut c_void = std::ptr::null_mut();
+            let _ = sql_alloc_handle::<MockBackend>(
+                HandleType::Env as i16,
+                std::ptr::null_mut(),
+                &mut env,
+            );
+
+            // An unsupported attribute fails with HYC00 and leaves a record.
+            let mut value: i32 = 0;
+            let ret = sql_get_env_attr::<MockBackend>(
+                env,
+                999, // unsupported attribute
+                &mut value as *mut i32 as *mut c_void,
+                0,
+                std::ptr::null_mut(),
+            );
+            assert_eq!(ret, SqlReturn::ERROR);
+            with_handle::<MockBackend, EnvironmentHandle<MockBackend>, _>(env, |h| {
+                assert_eq!(h.diagnostics.len(), 1, "precondition: a record is queued");
+            });
+
+            // The next, valid call must start from an empty queue rather than
+            // appending to the record the failed call left behind.
+            let ret = sql_get_env_attr::<MockBackend>(
+                env,
+                ENV_ATTR_ODBC_VERSION,
+                &mut value as *mut i32 as *mut c_void,
+                0,
+                std::ptr::null_mut(),
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+            with_handle::<MockBackend, EnvironmentHandle<MockBackend>, _>(env, |h| {
+                assert_eq!(
+                    h.diagnostics.len(),
+                    0,
+                    "the queue must be cleared at entry, not appended to"
+                );
+            });
 
             let _ = sql_free_handle::<MockBackend>(HandleType::Env as i16, env);
         }

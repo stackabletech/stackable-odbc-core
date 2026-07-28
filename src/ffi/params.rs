@@ -1048,8 +1048,8 @@ pub unsafe fn sql_param_data<B: Backend>(
     let ret = unsafe {
         panic_safe::<B, _>(statement_handle, |scope| {
             let (stmt, conn) = scope.stmt_with_parent::<B>(statement_handle)?;
-            // Spec: do NOT clear diagnostics; SQLParamData can return diagnostics from the
-            // eventual execution.
+            // Spec: clear diagnostics at the start of each ODBC call.
+            stmt.diagnostics.clear();
 
             // Spec HY010: must be in DAE state. Take ownership so we can
             // work with it directly without repeated borrows into stmt.
@@ -1161,7 +1161,7 @@ mod tests {
     use super::*;
     use crate::{
         ffi::{execute::sql_prepare_w, handle::sql_free_handle},
-        test_utils::{MockBackend, alloc_env_conn_stmt},
+        test_utils::{MockBackend, alloc_env_conn_stmt, with_handle},
         types::{CDataType, ParamType},
     };
 
@@ -2038,6 +2038,38 @@ mod tests {
         let ret = unsafe { sql_param_data::<MockBackend>(stmt, &mut value_ptr) };
         assert_eq!(ret, SqlReturn::ERROR); // HY010
         unsafe { cleanup(env, conn, stmt) };
+    }
+
+    /// A stale record from a failed iteration must not be reported by the next
+    /// successful one. `SQLParamData` is the data-at-execution loop, so an
+    /// uncleared queue is re-reported on every subsequent call.
+    #[test]
+    fn param_data_clears_diagnostics_from_an_earlier_call() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+
+            // A call with no data-at-execution in progress fails with HY010 and
+            // leaves a record.
+            let mut ptr: *mut c_void = std::ptr::null_mut();
+            let ret = sql_param_data::<MockBackend>(stmt, &mut ptr);
+            assert_eq!(ret, SqlReturn::ERROR);
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |h| {
+                assert_eq!(h.diagnostics.len(), 1, "precondition: a record is queued");
+            });
+
+            // The next call must start from an empty queue rather than appending.
+            let ret = sql_param_data::<MockBackend>(stmt, &mut ptr);
+            assert_eq!(ret, SqlReturn::ERROR);
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |h| {
+                assert_eq!(
+                    h.diagnostics.len(),
+                    1,
+                    "the queue must be cleared at entry, not appended to"
+                );
+            });
+
+            cleanup(env, conn, stmt);
+        }
     }
 
     #[test]

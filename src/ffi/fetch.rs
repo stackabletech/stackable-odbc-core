@@ -269,7 +269,13 @@ pub unsafe fn sql_fetch_scroll<B: Backend>(
     // SAFETY: statement_handle is null or a valid StatementHandle<B> allocated by
     // sql_alloc_handle; kind and group are validated by scope.get inside the closure.
     let ret = unsafe {
-        panic_safe::<B, _>(statement_handle, |_scope| {
+        panic_safe::<B, _>(statement_handle, |scope| {
+            let stmt = scope.get::<StatementHandle<B>>(statement_handle)?;
+            // Spec: clear diagnostics at the start of each ODBC call. The
+            // SQL_FETCH_NEXT branch above already cleared via sql_fetch, so
+            // only this non-delegating branch needs its own clear.
+            stmt.diagnostics.clear();
+
             Err(OdbcError::general(
                 format!("SQLFetchScroll: unsupported fetch orientation {fetch_orientation}"),
                 SqlState::fetch_type_out_of_range(),
@@ -599,6 +605,34 @@ mod tests {
             // SQL_FETCH_PRIOR (4) is not supported by forward-only cursor
             let ret = sql_fetch_scroll::<MockBackend>(stmt, 4, 0);
             assert_eq!(ret, SqlReturn::ERROR);
+            cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
+    /// A stale record from a failed call must not still be on the queue during
+    /// a later one; the non-delegating orientation branch must clear on entry
+    /// just like every other statement-level function.
+    #[test]
+    fn fetch_scroll_clears_diagnostics_from_an_earlier_call() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+
+            let ret = sql_fetch_scroll::<MockBackend>(stmt, FetchOrientation::Prior as i16, 0);
+            assert_eq!(ret, SqlReturn::ERROR);
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |h| {
+                assert_eq!(h.diagnostics.len(), 1, "precondition: a record is queued");
+            });
+
+            let ret = sql_fetch_scroll::<MockBackend>(stmt, FetchOrientation::Prior as i16, 0);
+            assert_eq!(ret, SqlReturn::ERROR);
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |h| {
+                assert_eq!(
+                    h.diagnostics.len(),
+                    1,
+                    "the queue must be cleared at entry, not appended to"
+                );
+            });
+
             cleanup_env_conn_stmt(env, conn, stmt);
         }
     }
