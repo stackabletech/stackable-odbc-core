@@ -246,6 +246,15 @@ markers go away and this section becomes the initial-release notes.
   outer-joined column whose nullability it cannot determine, and `SQLDescribeCol`
   was reporting those as `SQL_NO_NULLS` — telling an application it could skip a
   NULL check it needs.
+- **Breaking:** `TypeInfoRow::nullable` is a `Nullable`, not an `i16`, matching
+  `ColumnDescriptor::nullable`: the two describe the same ODBC concept, and
+  leaving one a raw `SQL_NULLABLE_*` literal was the exact kind of untyped
+  integer the project's own conventions rule out elsewhere. `TypeInfoRow::new`'s
+  default and `TypeInfoRow::with_nullable` change accordingly. A driver's
+  `get_type_info` rows built with `.with_nullable(1)` need
+  `.with_nullable(Nullable::SqlNullable)` (or `SqlNoNulls` /
+  `SqlNullableUnknown`) instead; a row still assembled as a struct literal
+  needs the same field-value change.
 - **Breaking:** `ColumnDescriptor` is `#[non_exhaustive]` and gains `searchable`,
   `literal_prefix`, `literal_suffix`, `table_name`, `schema_name` and
   `catalog_name`. `SQLColAttribute` hard-coded all six; a backend that tracks a
@@ -263,6 +272,12 @@ markers go away and this section becomes the initial-release notes.
   Most of `TypeInfoRow`'s builders are `const fn`; the constructor and the
   three builders that set a string field are not — see the entry below on
   `TypeInfoRow`'s `Cow` fields for why.
+- **Breaking:** `FetchResult` and `OutputParam` are `#[non_exhaustive]` too.
+  `FetchResult` gaining a variant is not a hypothetical: block cursors will
+  need one, and a driver that matches on it exhaustively today should get a
+  compiler nudge then rather than force every other driver through a version
+  bump. `OutputParam` already had `OutputParam::new`, so it stays constructible
+  from a driver crate without any further change.
 - **Breaking:** `Backend::sensitive_connect_keywords`, `Backend::get_functions`,
   `Backend::get_type_info`, `Backend::browse_connect_attrs`,
   `Backend::search_pattern_escape` and `Backend::keywords` return

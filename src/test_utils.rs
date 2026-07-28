@@ -1281,7 +1281,7 @@ const fn type_info_row(
         literal_prefix: None,
         literal_suffix: None,
         create_params: None,
-        nullable: 1,
+        nullable: crate::types::Nullable::SqlNullable,
         case_sensitive: false,
         searchable: 3,
         unsigned: None,

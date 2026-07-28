@@ -79,6 +79,12 @@ impl From<Scope> for i16 {
 /// The outcome of a single row advance in a backend's cursor, returned by
 /// [`crate::backend::StatementBackend`] and surfaced to the application as
 /// `SQL_SUCCESS` or `SQL_NO_DATA` from `SQLFetch`.
+///
+/// `#[non_exhaustive]`: adding a variant here must not be a major break —
+/// block cursors will need one, and a driver that matches exhaustively should
+/// get a compiler nudge rather than force a version bump on every other
+/// driver.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FetchResult {
     /// A row was available; its values can be read.
@@ -127,6 +133,13 @@ impl ExecuteOutcome {
 /// A single OUTPUT / INOUT parameter value produced by
 /// [`crate::backend::Backend::execute`], written back into the application's
 /// bound buffer by `stackable-odbc-core`.
+///
+/// `#[non_exhaustive]`: reserves room for a field this contract will need
+/// later (e.g. the parameter's C type, for a backend that cannot infer it
+/// from `value` alone) without a breaking signature change for every
+/// out-of-tree driver. Because it is non-exhaustive, driver crates construct
+/// it through [`OutputParam::new`], never a struct literal.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub struct OutputParam {
     /// The 1-based parameter number, matching `SQLBindParameter`'s
@@ -307,8 +320,8 @@ pub struct TypeInfoRow {
     pub create_params: Option<std::borrow::Cow<'static, str>>,
     /// `NULLABLE` — column 7 of the `SQLGetTypeInfo` result set.
     ///
-    /// Whether the data source accepts `NULL` for this type, as a `SQL_NULLABLE_*` value.
-    pub nullable: i16,
+    /// Whether the data source accepts `NULL` for this type.
+    pub nullable: Nullable,
     /// `CASE_SENSITIVE` — column 8 of the `SQLGetTypeInfo` result set.
     ///
     /// Whether the type is a character type with case-sensitive collation.
@@ -387,7 +400,7 @@ impl TypeInfoRow {
             literal_prefix: None,
             literal_suffix: None,
             create_params: None,
-            nullable: Nullable::SqlNullable as i16,
+            nullable: Nullable::SqlNullable,
             case_sensitive: false,
             searchable: crate::types::SQL_SEARCHABLE,
             unsigned: None,
@@ -432,9 +445,9 @@ impl TypeInfoRow {
         self
     }
 
-    /// Sets `NULLABLE`, one of the `SQL_NULLABLE_*` values.
+    /// Sets `NULLABLE`.
     #[must_use]
-    pub const fn with_nullable(mut self, nullable: i16) -> Self {
+    pub const fn with_nullable(mut self, nullable: Nullable) -> Self {
         self.nullable = nullable;
         self
     }
@@ -549,7 +562,7 @@ impl TypeInfoRow {
                 None => ColumnValue::Null,
             },
             // 7. NULLABLE
-            ColumnValue::I16(self.nullable),
+            ColumnValue::I16(self.nullable as i16),
             // 8. CASE_SENSITIVE
             ColumnValue::I16(i16::from(self.case_sensitive)),
             // 9. SEARCHABLE
@@ -783,5 +796,14 @@ mod tests {
             .with_literal_affixes(Some(String::from("'")), Some(String::from("'")));
         assert_eq!(row.type_name, type_name);
         assert_eq!(row.literal_prefix.as_deref(), Some("'"));
+    }
+
+    /// `TypeInfoRow::nullable` and `ColumnDescriptor::nullable` describe the
+    /// same ODBC concept and must not be two different types.
+    #[test]
+    fn type_info_row_nullable_is_the_typed_enum() {
+        let row =
+            TypeInfoRow::new("VARCHAR", SqlDataType::VARCHAR).with_nullable(Nullable::SqlNoNulls);
+        assert_eq!(row.nullable, Nullable::SqlNoNulls);
     }
 }

@@ -1133,7 +1133,7 @@ mod tests {
             literal_prefix: Some("'".into()),
             literal_suffix: Some("'".into()),
             create_params: Some("length".into()),
-            nullable: 1,
+            nullable: crate::types::Nullable::SqlNullable,
             case_sensitive: true,
             searchable: 3,
             unsigned: None,
