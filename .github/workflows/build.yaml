@@ -107,7 +107,7 @@ jobs:
       # harness = false means it is never run as a test either. Compile it; do
       # not run it.
       - name: Compile benchmarks
-        run: cargo build --locked --benches
+        run: cargo build --benches
         working-directory: bench
 
   miri:
