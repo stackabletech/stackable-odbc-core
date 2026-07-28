@@ -92,6 +92,7 @@ jobs:
         uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b # 1.95.0
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
+          components: clippy
 
       - name: Setup Rust Cache
         uses: Swatinem/rust-cache@98c8021b550208e191a6a3145459bfc9fb29c4c0 # v2.8.0
@@ -101,6 +102,17 @@ jobs:
       # lockfile update fails here instead of drifting.
       - name: Run unit tests
         run: cargo test --locked
+
+      # The pre-commit job runs this same command, but only on Linux — so the
+      # denied lints (unwrap_used / unwrap_in_result / panic, from Cargo.toml)
+      # had never applied to any `#[cfg(windows)]` code: `ffi/setup.rs` and
+      # ConfigDSNW, which is also the least-reviewed code in the crate. Guarded
+      # to Windows because Linux is already covered and running it twice would
+      # only slow the matrix down. Same invocation as the pre-commit hook, so
+      # the two platforms are held to one standard.
+      - name: Clippy (Windows-only code paths)
+        if: runner.os == 'Windows'
+        run: cargo clippy --locked --all-targets -- -D warnings
 
       # `test-support` is gated `#[cfg(any(test, feature = "test-support"))]`, so
       # the job above compiles that module via `cfg(test)` no matter what the

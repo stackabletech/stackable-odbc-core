@@ -127,6 +127,7 @@ fn to_wide_null(s: &str) -> Vec<u16> {
 ///   - `ODBC_ADD_DSN` (1): Add a new data source.
 ///   - `ODBC_CONFIG_DSN` (2): Configure (modify) an existing data source.
 ///   - `ODBC_REMOVE_DSN` (3): Remove an existing data source.
+///
 ///   Any other value returns FALSE (0).
 /// - `lpsz_driver`: Driver description string (e.g. the driver's registered name in the
 ///   Windows registry). Must be non-null; returns FALSE if null.
@@ -186,8 +187,8 @@ pub unsafe fn config_dsn_w(
     // attribute string as guaranteed by the function's safety contract.
     let attrs = unsafe { parse_attributes_w(lpsz_attributes) };
     // Keyword names only. A DSN attribute list routinely carries `PWD=`, and
-    // unlike `ConnectParams` this is a plain `Vec` with no redacting `Debug`.
-    let attr_keys: Vec<&str> = attrs.iter().map(|(k, _)| k.as_str()).collect();
+    // unlike `ConnectParams` this is a plain `HashMap` with no redacting `Debug`.
+    let attr_keys: Vec<&str> = attrs.keys().map(|k| k.as_str()).collect();
     tracing::debug!(
         "ConfigDSNW: request={}, attr_keys={:?}",
         f_request,
