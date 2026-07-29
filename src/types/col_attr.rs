@@ -64,15 +64,9 @@ pub fn get_column_attribute(
         Desc::Type => Ok(ColAttrValue::Numeric(isize::from(verbose_type(
             desc.sql_type,
         )))),
-        Desc::DatetimeIntervalCode => Ok(ColAttrValue::Numeric(
-            if verbose_type(desc.sql_type) == desc.sql_type.0 {
-                // Not a datetime or interval type: the spec leaves this field
-                // undefined, and 0 is the value an application tests against.
-                0
-            } else {
-                isize::from(desc.sql_type.0)
-            },
-        )),
+        Desc::DatetimeIntervalCode => Ok(ColAttrValue::Numeric(isize::from(
+            datetime_interval_subcode(desc.sql_type.0),
+        ))),
         Desc::Precision => Ok(ColAttrValue::Numeric(precision_for(desc))),
         Desc::Length => Ok(ColAttrValue::Numeric(resolve_precision_isize(
             desc.precision,
@@ -138,6 +132,59 @@ pub(crate) fn verbose_type(sql_type: SqlDataType) -> i16 {
         other => other,
     }
 }
+
+/// The `SQL_DESC_DATETIME_INTERVAL_CODE` a concise datetime or interval type
+/// implies, or `0` for a type that is neither.
+///
+/// The counterpart of [`verbose_type`], and the reason both live here: a
+/// concise datetime type determines the verbose type *and* the subcode, so the
+/// two answers come from one place. Every writer of `SQL_DESC_CONCISE_TYPE` —
+/// `SQLBindCol`, `SQLBindParameter`, `SQLSetDescField`, `SQLSetDescRec` — sets
+/// both through [`DescriptorRecord::set_concise_type`], and `SQLColAttribute`
+/// and the IRD read both through here. A second mapping is a second thing to be
+/// wrong about the same column.
+///
+/// The subcode is **not** the concise type. `sqlext.h` builds one from the
+/// other — `SQL_TYPE_DATE` is 91 and `SQL_CODE_DATE` is 1, `SQL_INTERVAL_YEAR`
+/// is defined as `100 + SQL_CODE_YEAR` — so returning the concise type here
+/// would put 91 in a field whose only legal datetime values are 1, 2 and 3, and
+/// the consistency check would then reject a `SQL_C_TYPE_DATE` binding that has
+/// nothing wrong with it.
+///
+/// The spec leaves the field undefined for a type that is neither family, and
+/// `0` is both what an application tests against and what the consistency
+/// check requires there.
+///
+/// [`DescriptorRecord::set_concise_type`]:
+///     crate::descriptor::DescriptorRecord::set_concise_type
+pub(crate) fn datetime_interval_subcode(concise: i16) -> i16 {
+    use crate::types::{SQL_CODE_DATE, SQL_CODE_TIME, SQL_CODE_TIMESTAMP};
+    // `odbc-sys` names the ODBC 3.x concise codes 91/92/93 `DATE`/`TIME`/
+    // `TIMESTAMP`; the 2.x spellings of those names are 9/10/11, which are the
+    // verbose values and are deliberately not datetime concise types here. See
+    // `verbose_type`'s note above.
+    match SqlDataType(concise) {
+        SqlDataType::DATE => SQL_CODE_DATE,
+        SqlDataType::TIME => SQL_CODE_TIME,
+        SqlDataType::TIMESTAMP => SQL_CODE_TIMESTAMP,
+        // The `SQL_INTERVAL_*` concise codes, which `sqlext.h` defines as
+        // `100 + SQL_CODE_xxx`. Core supports no interval types, so nothing
+        // reaches here through a bind; `SQLSetDescField` can still write one.
+        _ if (INTERVAL_TYPE_BASE + 1..=INTERVAL_TYPE_BASE + MAX_INTERVAL_SUBCODE)
+            .contains(&concise) =>
+        {
+            concise - INTERVAL_TYPE_BASE
+        }
+        _ => 0,
+    }
+}
+
+/// `sqlext.h` defines each `SQL_INTERVAL_*` concise type as this plus its
+/// `SQL_CODE_*` subcode.
+const INTERVAL_TYPE_BASE: i16 = 100;
+
+/// `SQL_CODE_MINUTE_TO_SECOND`, the last of the interval subcodes.
+const MAX_INTERVAL_SUBCODE: i16 = 13;
 
 /// Generic SQL type name for a `SqlDataType`.
 ///
@@ -477,9 +524,15 @@ mod tests {
 
     #[test]
     fn desc_type_reports_the_verbose_type_for_datetime_columns() {
-        // The spec splits these: SQL_DESC_CONCISE_TYPE keeps SQL_TYPE_TIMESTAMP,
-        // while SQL_DESC_TYPE reports SQL_DATETIME and the concise code moves to
-        // SQL_DESC_DATETIME_INTERVAL_CODE.
+        // The spec splits these three: SQL_DESC_CONCISE_TYPE keeps
+        // SQL_TYPE_TIMESTAMP, SQL_DESC_TYPE reports the verbose SQL_DATETIME,
+        // and SQL_DESC_DATETIME_INTERVAL_CODE carries the *subcode*.
+        //
+        // The subcode is not the concise type. `sqlext.h` builds one from the
+        // other — SQL_TYPE_TIMESTAMP is 93 and SQL_CODE_TIMESTAMP is 3 — and
+        // this test asserted 93 until the descriptor records started writing 3
+        // through the same mapping, at which point the ARD and the IRD
+        // disagreed about one field of one column.
         let desc = ColumnDescriptor::new("ts", SqlDataType::TIMESTAMP);
         assert_eq!(desc.sql_type.0, 93, "SQL_TYPE_TIMESTAMP");
 
@@ -493,8 +546,35 @@ mod tests {
         );
         assert_eq!(
             expect_numeric(get_column_attribute(&desc, 5, Desc::DatetimeIntervalCode).unwrap()),
-            93
+            isize::from(crate::types::SQL_CODE_TIMESTAMP)
         );
+    }
+
+    /// The two directions of the datetime mapping agree, which is the property
+    /// that makes it safe for both `SQLColAttribute` and a descriptor record to
+    /// use it: what `set_concise_type` writes into an ARD record is what
+    /// `get_column_attribute` reports for the same type through the IRD.
+    #[test]
+    fn the_subcode_a_record_stores_is_the_subcode_sqlcolattribute_reports() {
+        for sql_type in [
+            SqlDataType::DATE,
+            SqlDataType::TIME,
+            SqlDataType::TIMESTAMP,
+            SqlDataType::INTEGER,
+        ] {
+            let mut record = crate::descriptor::DescriptorRecord::default();
+            record.set_concise_type(sql_type.0);
+
+            let desc = ColumnDescriptor::new("c", sql_type);
+            let via_col_attr =
+                expect_numeric(get_column_attribute(&desc, 1, Desc::DatetimeIntervalCode).unwrap());
+
+            assert_eq!(
+                isize::from(record.datetime_interval_code),
+                via_col_attr,
+                "{sql_type:?}: the record and SQLColAttribute disagree about the subcode"
+            );
+        }
     }
 
     #[test]

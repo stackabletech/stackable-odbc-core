@@ -1141,6 +1141,17 @@ Everything a driver has to change for the catalog rework, in one place.
 
 ### Fixed
 
+- **`SQL_DESC_DATETIME_INTERVAL_CODE` is the subcode, not the concise type.**
+  `SQLColAttributeW` reported `SQL_TYPE_TIMESTAMP` (93) for a timestamp column
+  where the spec defines `SQL_CODE_TIMESTAMP` (3); likewise 91 for
+  `SQL_CODE_DATE` and 92 for `SQL_CODE_TIME`. `sqlext.h` builds one value from
+  the other, which is what made them easy to conflate. An application reading
+  the field to distinguish a date from a timestamp got a value outside the range
+  the field is defined over. The mapping now lives beside `verbose_type` in
+  `types/col_attr.rs`, because a concise datetime type determines both answers
+  and a second mapping is a second thing to be wrong; every writer of
+  `SQL_DESC_CONCISE_TYPE` and both readers share it.
+
 - **The descriptor functions no longer fail silently, and are no longer
   advertised.** `SQLGetDescFieldW`, `SQLSetDescFieldW` and `SQLSetDescRec`
   returned a bare `SQL_ERROR` with no diagnostic record, so an application knew

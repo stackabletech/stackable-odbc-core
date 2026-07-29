@@ -169,51 +169,9 @@ impl DescriptorRecord {
     pub fn set_concise_type(&mut self, concise: i16) {
         self.concise_type = concise;
         self.verbose_type = crate::types::col_attr::verbose_type(SqlDataType(concise));
-        self.datetime_interval_code = datetime_interval_subcode(concise);
+        self.datetime_interval_code = crate::types::col_attr::datetime_interval_subcode(concise);
     }
 }
-
-/// The `SQL_DESC_DATETIME_INTERVAL_CODE` a concise datetime or interval type
-/// implies, or `0` for a type that is neither.
-///
-/// The subcode is **not** the concise type. `sqlext.h` builds one from the
-/// other — `SQL_TYPE_DATE` is 91 and `SQL_CODE_DATE` is 1, `SQL_INTERVAL_YEAR`
-/// is defined as `100 + SQL_CODE_YEAR` — so returning the concise type here
-/// would put 91 in a field whose only legal datetime values are 1, 2 and 3, and
-/// the consistency check would then reject a `SQL_C_TYPE_DATE` binding that has
-/// nothing wrong with it.
-///
-/// The spec leaves the field undefined for a type that is neither family, and
-/// `0` is both what an application tests against and what the consistency
-/// check requires there.
-fn datetime_interval_subcode(concise: i16) -> i16 {
-    use crate::types::{SQL_CODE_DATE, SQL_CODE_TIME, SQL_CODE_TIMESTAMP};
-    // `odbc-sys` names the ODBC 3.x concise codes 91/92/93 `DATE`/`TIME`/
-    // `TIMESTAMP`; the 2.x spellings of those names are 9/10/11, which are the
-    // verbose values and are deliberately not datetime concise types here. See
-    // `col_attr::verbose_type`'s note.
-    match SqlDataType(concise) {
-        SqlDataType::DATE => SQL_CODE_DATE,
-        SqlDataType::TIME => SQL_CODE_TIME,
-        SqlDataType::TIMESTAMP => SQL_CODE_TIMESTAMP,
-        // The `SQL_INTERVAL_*` concise codes, which `sqlext.h` defines as
-        // `100 + SQL_CODE_xxx`. Core supports no interval types, so nothing
-        // reaches here through a bind; `SQLSetDescField` can still write one.
-        _ if (INTERVAL_TYPE_BASE + 1..=INTERVAL_TYPE_BASE + MAX_INTERVAL_SUBCODE)
-            .contains(&concise) =>
-        {
-            concise - INTERVAL_TYPE_BASE
-        }
-        _ => 0,
-    }
-}
-
-/// `sqlext.h` defines each `SQL_INTERVAL_*` concise type as this plus its
-/// `SQL_CODE_*` subcode.
-const INTERVAL_TYPE_BASE: i16 = 100;
-
-/// `SQL_CODE_MINUTE_TO_SECOND`, the last of the interval subcodes.
-const MAX_INTERVAL_SUBCODE: i16 = 13;
 
 /// The spec's consistency check, returning `HY021`.
 ///
