@@ -176,11 +176,8 @@ pub(crate) fn text_to_sql_type(
         return to_bit(text);
     }
 
-    if sql_type == SqlDataType::EXT_BINARY
-        || sql_type == SqlDataType::EXT_VAR_BINARY
-        || sql_type == SqlDataType::EXT_LONG_VAR_BINARY
-    {
-        return to_binary(text);
+    if is_binary_sql_type(sql_type) {
+        return to_binary(text, col_size);
     }
 
     // Datetimes. The ODBC 2.0 spellings (`SQL_DATE` 9, `SQL_TIME` 10,
@@ -434,6 +431,39 @@ fn check_declared_char_size(measured: usize, col_size: ULen) -> Result<(), OdbcE
     Ok(())
 }
 
+/// Whether the declared SQL type is one of the three binary types, whose
+/// `ColumnSize` is a byte length.
+pub(crate) fn is_binary_sql_type(sql_type: SqlDataType) -> bool {
+    sql_type == SqlDataType::EXT_BINARY
+        || sql_type == SqlDataType::EXT_VAR_BINARY
+        || sql_type == SqlDataType::EXT_LONG_VAR_BINARY
+}
+
+/// Apply the declared `ColumnSize` to a binary target.
+///
+/// This serves a row in each of the two C-to-SQL tables, because both ask the
+/// same question of the same thing: the byte string about to be sent must not
+/// exceed the declared column length. [C to SQL: Character] words it as
+/// "(Byte length of data) / 2 > column byte length" — the halving is the
+/// hex-pair conversion, so the test is the produced byte count — and
+/// [C to SQL: Binary]'s binary row as "Length of data > column length".
+///
+/// `len` is therefore the number of bytes that will reach the backend, not the
+/// length of whatever the application handed over. A `col_size` of 0 disables
+/// the check, for the reason [`check_declared_char_size`] records.
+///
+/// [C to SQL: Character]: https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/c-to-sql-character
+/// [C to SQL: Binary]: https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/c-to-sql-binary
+pub(crate) fn check_declared_binary_size(len: usize, col_size: ULen) -> Result<(), OdbcError> {
+    if col_size == 0 {
+        return Ok(());
+    }
+    if len > col_size {
+        return Err(oversized(len, "bytes", col_size));
+    }
+    Ok(())
+}
+
 /// Apply the declared `DECIMAL(col_size, decimal_digits)` to a parsed literal.
 ///
 /// These are `SQLBindParameter`'s `ColumnSize` and `DecimalDigits`, which for
@@ -537,12 +567,12 @@ fn to_bit(text: &str) -> Result<ColumnValue, OdbcError> {
 /// Decode hexadecimal digit pairs. "The driver always converts pairs of
 /// hexadecimal digits to individual bytes … if the length of the character
 /// string is odd, the last byte of the string … is not converted."
-fn to_binary(text: &str) -> Result<ColumnValue, OdbcError> {
+fn to_binary(text: &str, col_size: ULen) -> Result<ColumnValue, OdbcError> {
     if !text.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(not_a_literal(text, "hexadecimal"));
     }
     let digits = text.as_bytes();
-    let bytes = digits
+    let bytes: Vec<u8> = digits
         .chunks_exact(2)
         .map(|pair| {
             // SAFETY-of-logic: every byte passed `is_ascii_hexdigit` above, so
@@ -553,6 +583,7 @@ fn to_binary(text: &str) -> Result<ColumnValue, OdbcError> {
             u8::try_from(hi * 16 + lo).unwrap_or(0)
         })
         .collect();
+    check_declared_binary_size(bytes.len(), col_size)?;
     Ok(ColumnValue::Bytes(bytes))
 }
 
@@ -1345,6 +1376,61 @@ mod tests {
         assert_eq!(
             sized("😀", SqlDataType::EXT_W_VARCHAR, 2).expect("two code units fit WVARCHAR(2)"),
             ColumnValue::String("😀".into())
+        );
+    }
+
+    // -- binary targets: the declared size ----------------------------------
+
+    /// Eight hex characters are four bytes, which is what `ColumnSize`
+    /// counts for a binary column.
+    #[test]
+    fn a_binary_value_exactly_the_declared_size_is_accepted() {
+        assert_eq!(
+            sized("DEADBEEF", SqlDataType::EXT_VAR_BINARY, 4).expect("four bytes fit VARBINARY(4)"),
+            ColumnValue::Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF])
+        );
+    }
+
+    #[test]
+    fn a_binary_value_over_the_declared_size_is_22001() {
+        assert_eq!(
+            state_of(sized("DEADBEEF", SqlDataType::EXT_VAR_BINARY, 3)),
+            "22001"
+        );
+    }
+
+    #[test]
+    fn the_declared_size_is_checked_for_binary_and_longvarbinary_too() {
+        assert_eq!(
+            state_of(sized("DEADBEEF", SqlDataType::EXT_BINARY, 3)),
+            "22001"
+        );
+        assert_eq!(
+            state_of(sized("DEADBEEF", SqlDataType::EXT_LONG_VAR_BINARY, 3)),
+            "22001"
+        );
+    }
+
+    #[test]
+    fn a_binary_value_is_unchecked_when_no_size_was_declared() {
+        assert_eq!(
+            sized("DEADBEEF", SqlDataType::EXT_VAR_BINARY, 0).expect("no declared size, no check"),
+            ColumnValue::Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF])
+        );
+    }
+
+    /// "if the length of the character string is odd, the last byte of the
+    /// string ... is not converted" — so the dropped digit is not counted
+    /// against the declared size either. Five hex characters are two bytes.
+    #[test]
+    fn an_odd_length_hex_value_counts_only_the_bytes_it_produces() {
+        assert_eq!(
+            sized("DEADB", SqlDataType::EXT_VAR_BINARY, 2).expect("two bytes fit VARBINARY(2)"),
+            ColumnValue::Bytes(vec![0xDE, 0xAD])
+        );
+        assert_eq!(
+            state_of(sized("DEADB", SqlDataType::EXT_VAR_BINARY, 1)),
+            "22001"
         );
     }
 }
