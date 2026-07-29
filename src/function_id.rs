@@ -272,31 +272,25 @@ pub const CORE_EXPORTED_FUNCTIONS: &[FunctionId] = &[
     FunctionId::EndTran,
     FunctionId::FreeHandle,
     FunctionId::GetConnectAttr,
+    FunctionId::GetDescField,
+    FunctionId::GetDescRec,
     FunctionId::GetDiagField,
     FunctionId::GetDiagRec,
     FunctionId::GetEnvAttr,
     FunctionId::GetStmtAttr,
     FunctionId::SetConnectAttr,
+    FunctionId::SetDescField,
+    FunctionId::SetDescRec,
     FunctionId::SetEnvAttr,
     FunctionId::SetStmtAttr,
     FunctionId::FetchScroll,
 ];
 
-/// The [`FunctionId`]s a driver must not report as supported.
+/// The [`FunctionId`]s core knows the number for but does not export.
 ///
 /// They exist so `function_id_from_raw` recognises every assigned `SQL_API_*`
 /// value and so the ODBC 2.x `SQL_API_ALL_FUNCTIONS` array can be filled from
 /// named values.
-///
-/// Most of them core does not export either, which is what this list was
-/// originally named for. Three are the exception, and the distinction is worth
-/// keeping straight: `GetDescField`, `SetDescField` and `SetDescRec` **are**
-/// exported, as [`crate::ffi::desc`] entry points answering `HYC00`. They
-/// appear here because this list drives what `SQLGetFunctions` reports, and of
-/// the two available lies, reporting a function supported when it is not is the
-/// more damaging one — the symbol has to exist so the Windows Driver Manager's
-/// dispatch table has no NULL entry, but no application should be told to call
-/// it.
 pub const CORE_UNEXPORTED_FUNCTIONS: &[(FunctionId, &str)] = &[
     (
         FunctionId::SetParam,
@@ -322,11 +316,11 @@ pub const CORE_UNEXPORTED_FUNCTIONS: &[(FunctionId, &str)] = &[
         FunctionId::BindParam,
         "superseded by SQLBindParameter, which is exported",
     ),
-    (FunctionId::CopyDesc, "descriptors are not implemented"),
-    (FunctionId::GetDescField, "descriptors are not implemented"),
-    (FunctionId::GetDescRec, "descriptors are not implemented"),
-    (FunctionId::SetDescField, "descriptors are not implemented"),
-    (FunctionId::SetDescRec, "descriptors are not implemented"),
+    (
+        FunctionId::CopyDesc,
+        "explicit descriptors are not implemented; the four accessors over a statement's own \
+         descriptors are",
+    ),
     (
         FunctionId::CancelHandle,
         "not implemented; SQLCancel is exported instead",
@@ -562,23 +556,33 @@ mod tests {
         );
     }
 
-    /// The three descriptor functions core exports are still reported
-    /// unsupported, because they are: they answer `HYC00`. Removing the export
-    /// is not the alternative — that puts a NULL in the Windows Driver
-    /// Manager's dispatch table, which is a crash. `SQLGetDescRec` and
-    /// `SQLCopyDesc` are neither exported nor advertised.
+    /// `SQLCopyDesc` is the last descriptor function still unimplemented, and
+    /// it is neither exported nor advertised. The other four became real in D3;
+    /// this narrowed rather than being deleted, so the claim stays checked
+    /// while it is still a claim.
     #[test]
-    fn no_descriptor_function_is_advertised_as_supported() {
+    fn copy_desc_is_not_advertised_as_supported() {
+        assert!(
+            !CORE_EXPORTED_FUNCTIONS.contains(&FunctionId::CopyDesc),
+            "SQLCopyDesc is advertised, but it is not implemented"
+        );
+    }
+
+    /// The four D3 implemented are reported supported, because they are. A
+    /// function that works and is reported unsupported is the mirror of D1's
+    /// defect: the Driver Manager answers `IM001` and the application never
+    /// calls a function that would have worked.
+    #[test]
+    fn the_implemented_descriptor_functions_are_advertised() {
         for id in [
             FunctionId::GetDescField,
             FunctionId::SetDescField,
-            FunctionId::SetDescRec,
             FunctionId::GetDescRec,
-            FunctionId::CopyDesc,
+            FunctionId::SetDescRec,
         ] {
             assert!(
-                !CORE_EXPORTED_FUNCTIONS.contains(&id),
-                "{id:?} is still advertised as supported"
+                CORE_EXPORTED_FUNCTIONS.contains(&id),
+                "{id:?} works but is reported unsupported"
             );
         }
     }
