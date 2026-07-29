@@ -5,7 +5,7 @@ use std::ffi::c_void;
 use odbc_sys::StatementAttribute;
 
 use crate::backend::Backend;
-use crate::errors::OdbcError;
+use crate::errors::{IntoOdbc, OdbcError};
 use crate::handles::StatementHandle;
 use crate::panic::panic_safe;
 use crate::types::{
@@ -132,13 +132,26 @@ fn substitute_stmt_attr<B: Backend>(
 ///   which is how the application learns what it was given. Attributes with no
 ///   single such value, the pointer-valued ones among them, are stored
 ///   verbatim.
+///
+///   `SQL_ATTR_QUERY_TIMEOUT` is the one member of the list whose substitution
+///   is conditional: it is offered to [`Backend::set_query_timeout`] first, and
+///   substituted only when that reports `NotImplemented` (or there is no open
+///   connection to offer it to). A backend that accepts the timeout gets
+///   `SQL_SUCCESS` and the requested value stored.
+/// - 08S01 Communication link failure: not raised by core, but a
+///   [`Backend::set_query_timeout`] that fails while talking to the data source
+///   is reported with whatever SQLSTATE the backend's error mapping produced,
+///   and this is the one that mapping should produce for a broken link. Such a
+///   failure is deliberately *not* converted into an `01S02` substitution.
 /// - 24000 Invalid cursor state: returned when setting `SQL_ATTR_CONCURRENCY`,
 ///   `SQL_ATTR_CURSOR_TYPE`, `SQL_ATTR_SIMULATE_CURSOR`, or
 ///   `SQL_ATTR_USE_BOOKMARKS` while a cursor is open (`stmt.cursor_open`). A
 ///   statement that is only prepared, or whose cursor `SQLEndTran` closed under
 ///   `SQL_CB_CLOSE`, has no open cursor and is not rejected here (a prepared one
 ///   is rejected by the HY011 check below instead).
-/// - HY000 General error: returned for unexpected internal errors.
+/// - HY000 General error: returned for unexpected internal errors, and for a
+///   [`Backend::set_query_timeout`] failure whose own mapping produced no more
+///   specific state.
 /// - HY001 Memory allocation error: not returned; Rust panics on allocation
 ///   failure, which is caught by `panic_safe` and converted to `SQL_ERROR`/HY000.
 /// - HY009 Invalid use of null pointer: not currently checked; the spec
@@ -172,8 +185,11 @@ fn substitute_stmt_attr<B: Backend>(
 ///   spec's own HYC00 row names), and `SQL_ATTR_ASYNC_ENABLE` =
 ///   `SQL_ASYNC_ENABLE_ON`. These are the unsupported values that the spec's
 ///   `01S02` row does not cover, so there is no substitution to report instead.
-/// - HYT01 Connection timeout expired: not returned; this function does not
-///   communicate with the data source.
+/// - HYT01 Connection timeout expired: not raised by core. Since
+///   `SQL_ATTR_QUERY_TIMEOUT` now reaches [`Backend::set_query_timeout`], this
+///   function *can* communicate with the data source, so a backend whose own
+///   connection timeout expires during that call may report it — but core
+///   neither imposes nor recognises a connection timeout of its own.
 /// - IM001 Driver does not support this function: (driver-manager-handled; not
 ///   returned here).
 ///
@@ -199,7 +215,10 @@ pub unsafe fn sql_set_stmt_attr_w<B: Backend>(
     // panic_safe catches any panics.
     let ret = unsafe {
         panic_safe::<B, _>(statement_handle, |scope| {
-            let stmt = scope.get::<StatementHandle<B>>(statement_handle)?;
+            // The parent comes along for `SQL_ATTR_QUERY_TIMEOUT`, the one
+            // attribute here that has to reach the backend. One acquisition
+            // covers both, per the crate's per-connection lock group.
+            let (stmt, conn) = scope.stmt_with_parent::<B>(statement_handle)?;
             stmt.diagnostics.clear();
 
             let int_val = value_ptr as usize;
@@ -446,20 +465,62 @@ pub unsafe fn sql_set_stmt_attr_w<B: Backend>(
                     ))
                 }
 
-                // `Backend` is synchronous and has no cancellation deadline, so
-                // no timeout is ever applied. Same reasoning as MAX_ROWS above,
-                // and SQL_ATTR_QUERY_TIMEOUT is likewise on the 01S02 list — an
-                // application that sets a 30-second timeout and gets SUCCESS is
-                // entitled to believe a runaway query will be cut off.
+                // A non-zero timeout is offered to the data source, which is the
+                // only party that can enforce one well: it knows when the query
+                // started and can stop the work rather than abandon it.
+                //
+                // `Backend::set_query_timeout` defaults to `NotImplemented`, so
+                // a backend that has said nothing about timeouts still gets the
+                // substitution this arm has always applied — an application
+                // that sets 30 seconds and receives SQL_SUCCESS is entitled to
+                // believe a runaway query will be cut off, and none would be.
+                // SQL_ATTR_QUERY_TIMEOUT is on the spec's own closed 01S02 list,
+                // which is what makes the substitution the right way to say so.
+                //
+                // A *real* backend failure is propagated instead of substituted.
+                // 01S02 tells an application "this driver capped your timeout",
+                // which is a different claim from "the connection is broken",
+                // and quietly reporting the first for the second sends it on to
+                // execute against a connection it has been told is fine.
+                //
+                // The spec's own 01S02 case for this attribute is clamping —
+                // "if the specified timeout exceeds the maximum timeout in the
+                // data source ... SQLSetStmtAttr substitutes that value" — which
+                // core cannot report, because `set_query_timeout` returns no
+                // clamped value. A backend that clamps returns `Ok` and core
+                // stores what was asked for. Reporting the clamped number needs
+                // a `Result<usize, _>` there; deliberately not done, since it
+                // would put a value core never uses into the hook's contract.
                 Some(StatementAttribute::QueryTimeout) if int_val != SQL_QUERY_TIMEOUT_DEFAULT => {
-                    Ok(substitute_stmt_attr(
-                        stmt,
-                        attribute,
-                        "SQL_ATTR_QUERY_TIMEOUT",
-                        int_val,
-                        SQL_QUERY_TIMEOUT_DEFAULT,
-                        "0 (no timeout)",
-                    ))
+                    let substitute = |stmt: &mut StatementHandle<B>| {
+                        substitute_stmt_attr(
+                            stmt,
+                            attribute,
+                            "SQL_ATTR_QUERY_TIMEOUT",
+                            int_val,
+                            SQL_QUERY_TIMEOUT_DEFAULT,
+                            "0 (no timeout)",
+                        )
+                    };
+                    // No connection means nothing to ask. The Driver Manager's
+                    // 08003 keeps a statement from existing on an unconnected
+                    // connection in the first place, so this is core being
+                    // defensive rather than a path an application reaches.
+                    let Some(ref connection) = conn.connection else {
+                        return Ok(substitute(stmt));
+                    };
+                    match B::set_query_timeout(connection, int_val).into_odbc() {
+                        Ok(()) => {
+                            tracing::debug!(
+                                "SQLSetStmtAttrW: SQL_ATTR_QUERY_TIMEOUT={}s applied by the data source",
+                                int_val
+                            );
+                            stmt.attrs.insert(attribute, int_val);
+                            Ok(SqlReturn::SUCCESS)
+                        }
+                        Err(OdbcError::NotImplemented { .. }) => Ok(substitute(stmt)),
+                        Err(e) => Err(e),
+                    }
                 }
 
                 // `sql_fetch` retrieves and writes bound columns
@@ -883,7 +944,11 @@ pub unsafe fn sql_get_stmt_attr_w<B: Backend>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::{MockBackend, alloc_env_conn_stmt, cleanup_env_conn_stmt, with_handle};
+    use crate::handles::ConnectionHandle;
+    use crate::test_utils::{
+        MockBackend, MockFailingQueryTimeoutBackend, MockNoQueryTimeoutBackend,
+        MockQueryTimeoutBackend, alloc_env_conn_stmt, cleanup_env_conn_stmt, with_handle,
+    };
     use crate::types::{SQL_SENSITIVE, SQL_TRUE};
 
     #[test]
@@ -1500,10 +1565,14 @@ mod tests {
     fn set_and_get_query_timeout() {
         // This test previously asserted SUCCESS and a read-back of 30 — that is,
         // it pinned the driver claiming to honour a timeout it never applies.
-        // No timeout is applied anywhere: `Backend` is synchronous and has no
-        // deadline, so an application told SUCCESS would wait forever on a
-        // runaway query. SQL_ATTR_QUERY_TIMEOUT is named on the spec's own 01S02
-        // substitution list for exactly this case.
+        // An application told SUCCESS would wait forever on a runaway query, and
+        // SQL_ATTR_QUERY_TIMEOUT is named on the spec's own 01S02 substitution
+        // list for exactly this case.
+        //
+        // `alloc_env_conn_stmt` does not connect, so this covers the branch
+        // where there is no connection to offer the timeout to. The three tests
+        // below cover the connected branches, which are the ones that reach
+        // `Backend::set_query_timeout` at all.
         unsafe {
             let (env, conn, stmt) = alloc_env_conn_stmt();
             let ret = sql_set_stmt_attr_w::<MockBackend>(
@@ -1540,6 +1609,123 @@ mod tests {
                 "SQLGetStmtAttr must report the substituted no-timeout value"
             );
             cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
+    /// Read `SQL_ATTR_QUERY_TIMEOUT` back for a backend `B`, after setting it
+    /// to `seconds`. Returns the `SQLSetStmtAttr` return code, the first
+    /// diagnostic's SQLSTATE if there is one, and the read-back value.
+    unsafe fn set_then_get_query_timeout<B: Backend>(
+        seconds: usize,
+    ) -> (
+        SqlReturn,
+        Option<String>,
+        usize,
+        *mut c_void,
+        *mut c_void,
+        *mut c_void,
+    ) {
+        unsafe {
+            let (env, conn, stmt) = crate::test_utils::alloc_connected_env_conn_stmt::<B>();
+            let set = sql_set_stmt_attr_w::<B>(
+                stmt,
+                StatementAttribute::QueryTimeout as i32,
+                seconds as *mut c_void,
+                0,
+            );
+            let state = crate::test_utils::with_handle::<B, StatementHandle<B>, _>(stmt, |h| {
+                h.diagnostics
+                    .get(0)
+                    .map(|r| r.sqlstate.as_str().to_string())
+            });
+            let mut val: usize = usize::MAX;
+            let get = sql_get_stmt_attr_w::<B>(
+                stmt,
+                StatementAttribute::QueryTimeout as i32,
+                std::ptr::from_mut(&mut val).cast(),
+                0,
+                std::ptr::null_mut(),
+            );
+            assert_eq!(get, SqlReturn::SUCCESS, "reading the attribute back");
+            (set, state, val, env, conn, stmt)
+        }
+    }
+
+    #[test]
+    fn a_backend_that_can_set_a_query_timeout_gets_the_value_and_no_substitution() {
+        // The point of the hook: the timeout reaches the data source, so core
+        // may honestly store what the application asked for.
+        unsafe {
+            let (set, state, val, env, conn, stmt) =
+                set_then_get_query_timeout::<MockQueryTimeoutBackend>(30);
+
+            assert_eq!(set, SqlReturn::SUCCESS, "the backend accepted the timeout");
+            assert_eq!(state, None, "an accepted timeout is not a substitution");
+            assert_eq!(val, 30, "SQLGetStmtAttr must report what was asked for");
+
+            // The read-back above passes whether or not the hook ran, because
+            // core stores the value either way. This is the assertion that
+            // distinguishes "applied" from "merely stored".
+            with_handle::<MockQueryTimeoutBackend, ConnectionHandle<MockQueryTimeoutBackend>, _>(
+                conn,
+                |c| {
+                    let applied = c
+                        .connection
+                        .as_ref()
+                        .expect("the helper connected")
+                        .query_timeout
+                        .load(std::sync::atomic::Ordering::SeqCst);
+                    assert_eq!(applied, 30, "Backend::set_query_timeout was never called");
+                },
+            );
+
+            crate::test_utils::cleanup_connected_env_conn_stmt::<MockQueryTimeoutBackend>(
+                env, conn, stmt,
+            );
+        }
+    }
+
+    #[test]
+    fn a_backend_that_does_not_implement_the_hook_still_gets_the_01s02_substitution() {
+        // Every driver that predates the hook is this backend. Its behaviour
+        // must be exactly what it was before: 0 stored, 01S02 posted.
+        unsafe {
+            let (set, state, val, env, conn, stmt) =
+                set_then_get_query_timeout::<MockNoQueryTimeoutBackend>(30);
+
+            assert_eq!(set, SqlReturn::SUCCESS_WITH_INFO);
+            assert_eq!(state.as_deref(), Some("01S02"));
+            assert_eq!(
+                val, 0,
+                "an unenforceable timeout must read back as no timeout"
+            );
+
+            crate::test_utils::cleanup_connected_env_conn_stmt::<MockNoQueryTimeoutBackend>(
+                env, conn, stmt,
+            );
+        }
+    }
+
+    #[test]
+    fn a_backend_whose_set_query_timeout_really_fails_reports_the_failure() {
+        // The distinction the arm exists to preserve. 01S02 says "your timeout
+        // was capped"; this backend is saying "I could not talk to the data
+        // source". Reporting the first for the second sends the application on
+        // to execute against a connection it has been told is healthy.
+        unsafe {
+            let (set, state, _val, env, conn, stmt) =
+                set_then_get_query_timeout::<MockFailingQueryTimeoutBackend>(30);
+
+            assert_eq!(set, SqlReturn::ERROR, "a real backend failure is an error");
+            assert_ne!(
+                state.as_deref(),
+                Some("01S02"),
+                "a broken connection must not be reported as a capped timeout"
+            );
+
+            crate::test_utils::cleanup_connected_env_conn_stmt::<MockFailingQueryTimeoutBackend>(
+                env, conn, stmt,
+            );
         }
     }
 

@@ -68,6 +68,70 @@ pub(crate) unsafe fn cleanup_env_conn_stmt(env: *mut c_void, conn: *mut c_void, 
     }
 }
 
+/// [`alloc_env_conn_stmt`] for an arbitrary backend, with the connection
+/// **actually connected**.
+///
+/// The difference from [`alloc_env_conn_stmt`] is the connect, and it is the
+/// whole point: that helper leaves `ConnectionHandle::connection` as `None`, so
+/// any code path guarded by "is there a connection to ask?" takes its
+/// no-connection branch. A test written against it to prove a `Backend` hook is
+/// consulted proves nothing — the hook is never reached and the test passes on
+/// the fallback it was meant to rule out.
+///
+/// # Safety
+///
+/// As [`alloc_env_conn_stmt`]: the caller must free the three tokens with
+/// [`cleanup_connected_env_conn_stmt`] before the test ends.
+pub(crate) unsafe fn alloc_connected_env_conn_stmt<B: Backend>()
+-> (*mut c_void, *mut c_void, *mut c_void) {
+    unsafe {
+        let mut env: *mut c_void = std::ptr::null_mut();
+        let _ = sql_alloc_handle::<B>(HandleType::Env as i16, std::ptr::null_mut(), &mut env);
+        let mut conn: *mut c_void = std::ptr::null_mut();
+        let _ = sql_alloc_handle::<B>(HandleType::Dbc as i16, env, &mut conn);
+        let wide: Vec<u16> = "Host=localhost;Database=test".encode_utf16().collect();
+        assert_eq!(
+            crate::ffi::connect::sql_driver_connect_w::<B>(
+                conn,
+                std::ptr::null_mut(),
+                wide.as_ptr(),
+                i16::try_from(wide.len()).expect("the fixed test connection string is short"),
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                0,
+            ),
+            SqlReturn::SUCCESS,
+            "the helper's whole purpose is an open connection",
+        );
+        let mut stmt: *mut c_void = std::ptr::null_mut();
+        let _ = sql_alloc_handle::<B>(HandleType::Stmt as i16, conn, &mut stmt);
+        (env, conn, stmt)
+    }
+}
+
+/// Tear down a triple from [`alloc_connected_env_conn_stmt`].
+///
+/// Disconnects first: a connected handle cannot be freed, so the plain
+/// [`cleanup_env_conn_stmt`] would leak the connection and the environment and
+/// turn the Miri job red.
+///
+/// # Safety
+///
+/// Each non-null token must be live and not already freed.
+pub(crate) unsafe fn cleanup_connected_env_conn_stmt<B: Backend>(
+    env: *mut c_void,
+    conn: *mut c_void,
+    stmt: *mut c_void,
+) {
+    unsafe {
+        let _ = sql_free_handle::<B>(HandleType::Stmt as i16, stmt);
+        let _ = crate::ffi::connect::sql_disconnect::<B>(conn);
+        let _ = sql_free_handle::<B>(HandleType::Dbc as i16, conn);
+        let _ = sql_free_handle::<B>(HandleType::Env as i16, env);
+    }
+}
+
 /// Read or mutate a handle in a test, holding its group lock exactly as an FFI
 /// entry point would.
 ///
@@ -1214,6 +1278,177 @@ mock_isolation_backend!(
     options = crate::types::SQL_TXN_READ_COMMITTED | crate::types::SQL_TXN_SERIALIZABLE,
     default = crate::types::SQL_TXN_READ_COMMITTED
 );
+
+// ---------------------------------------------------------------------------
+// Mocks that record what core applied to them
+// ---------------------------------------------------------------------------
+
+/// A connection that remembers the last value core pushed through a
+/// "set" hook.
+///
+/// The point is to distinguish *core called the hook* from *core stored the
+/// value and told the application it worked*. A test that only reads the
+/// attribute back through `SQLGetStmtAttr` cannot tell those apart, and the
+/// second is the bug the hook exists to remove.
+///
+/// `AtomicUsize` rather than a plain field because the hooks receive
+/// `&Self::Connection`, not `&mut`. `usize` because `SQL_ATTR_QUERY_TIMEOUT` is
+/// an `SQLULEN`.
+pub struct MockAppliedConnection {
+    pub query_timeout: std::sync::atomic::AtomicUsize,
+}
+
+/// Generates a `Backend` whose only interesting behaviour is the extra items
+/// passed in — everything else is the minimum the trait requires.
+///
+/// Same shape as [`mock_isolation_backend`]: the trailing `$extra` items are
+/// spliced into the `impl`, so a variant that omits one genuinely inherits the
+/// real trait default rather than a copy of it. That is what lets the
+/// "backend said nothing" case be tested against the actual default.
+macro_rules! mock_applied_backend {
+    ($name:ident $(, $extra:item)*) => {
+        mock_applied_backend!(@build $name, MockError $(, $extra)*);
+    };
+    // `error = OdbcError` for a mock that must report a *real* failure.
+    // `MockError` converts to `OdbcError::NotImplemented` by design, so a mock
+    // using it cannot express "this genuinely went wrong" — every error it
+    // returns looks to core like "I do not implement this", which is a
+    // different branch on every hook that distinguishes the two.
+    (error = $err:ty, $name:ident $(, $extra:item)*) => {
+        mock_applied_backend!(@build $name, $err $(, $extra)*);
+    };
+    (@build $name:ident, $err:ty $(, $extra:item)*) => {
+        #[allow(dead_code)]
+        pub struct $name;
+
+        impl Backend for $name {
+            type Connection = MockAppliedConnection;
+            type Statement = MockStatement;
+            type Error = $err;
+            type CancelToken = MockCancelToken;
+
+            fn connect(_: &ConnectParams) -> Result<MockAppliedConnection, $err> {
+                Ok(MockAppliedConnection {
+                    query_timeout: std::sync::atomic::AtomicUsize::new(0),
+                })
+            }
+            fn disconnect(_: &mut MockAppliedConnection) -> Result<(), $err> {
+                Ok(())
+            }
+            fn cancel_token(_conn: &Self::Connection) -> Self::CancelToken {
+                MockCancelToken::default()
+            }
+            fn exec_direct(
+                _: &MockAppliedConnection,
+                _: &Self::CancelToken,
+                _: &str,
+            ) -> Result<MockStatement, $err> {
+                Ok(MockStatement)
+            }
+            fn prepare(
+                _: &MockAppliedConnection,
+                _: &Self::CancelToken,
+                _: &str,
+            ) -> Result<MockStatement, $err> {
+                Ok(MockStatement)
+            }
+            fn execute(
+                _: &MockAppliedConnection,
+                _: &Self::CancelToken,
+                _: &mut MockStatement,
+                _: &[crate::types::ColumnValue],
+            ) -> Result<crate::types::ExecuteOutcome, $err> {
+                Ok(crate::types::ExecuteOutcome::default())
+            }
+            fn get_info(
+                _: &MockAppliedConnection,
+                _: crate::types::InfoType,
+            ) -> Result<InfoValue, $err> {
+                Err(MockError.into())
+            }
+            fn get_functions() -> Cow<'static, [crate::function_id::FunctionId]> {
+                Cow::Borrowed(&[])
+            }
+            fn get_type_info(_conn: &Self::Connection) -> Cow<'static, [TypeInfoRow]> {
+                Cow::Borrowed(&[])
+            }
+            fn tables(
+                _: &MockAppliedConnection,
+                _: &Self::CancelToken,
+                _: Option<&str>,
+                _: Option<&str>,
+                _: Option<&str>,
+                _: &[String],
+            ) -> Result<Vec<TableRow>, $err> {
+                Err(MockError.into())
+            }
+            fn columns(
+                _: &MockAppliedConnection,
+                _: &Self::CancelToken,
+                _: Option<&str>,
+                _: Option<&str>,
+                _: Option<&str>,
+                _: Option<&str>,
+            ) -> Result<Vec<ColumnRow>, $err> {
+                Err(MockError.into())
+            }
+
+            fn supports_catalogs(_conn: &Self::Connection) -> bool {
+                true
+            }
+            fn supports_schemas(_conn: &Self::Connection) -> bool {
+                true
+            }
+            fn alter_table_support(_conn: &Self::Connection) -> u32 {
+                0
+            }
+            fn outer_join_capabilities(_conn: &Self::Connection) -> u32 {
+                0
+            }
+            fn default_txn_isolation(_conn: &Self::Connection) -> u32 {
+                0
+            }
+            fn txn_isolation_options(_conn: &Self::Connection) -> u32 {
+                0
+            }
+
+            minimal_capability_decls!();
+
+            $($extra)*
+        }
+    };
+}
+
+// A data source that really can enforce a deadline: records what it was given
+// and accepts it.
+mock_applied_backend!(
+    MockQueryTimeoutBackend,
+    fn set_query_timeout(conn: &MockAppliedConnection, seconds: usize) -> Result<(), MockError> {
+        conn.query_timeout
+            .store(seconds, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+);
+
+// A data source that supports timeouts but whose connection is broken, so the
+// attempt fails for a reason that is *not* "unimplemented". Pins that core
+// propagates such a failure instead of quietly substituting 0 and reporting
+// 01S02, which would tell the application its timeout was merely capped.
+mock_applied_backend!(
+    error = OdbcError,
+    MockFailingQueryTimeoutBackend,
+    fn set_query_timeout(_conn: &MockAppliedConnection, _seconds: usize) -> Result<(), OdbcError> {
+        Err(OdbcError::general(
+            "mock set_query_timeout failure",
+            crate::types::SqlState::communication_link_failure(),
+        ))
+    }
+);
+
+// Declares nothing about timeouts at all, and so inherits the real
+// `Backend::set_query_timeout` default. This is the backend every existing
+// driver is, and its 01S02 substitution is the behaviour that must not change.
+mock_applied_backend!(MockNoQueryTimeoutBackend);
 
 // ---------------------------------------------------------------------------
 // Transaction-capable mocks

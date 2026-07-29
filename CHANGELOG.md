@@ -56,6 +56,25 @@ Everything a driver has to change for the catalog rework, in one place.
 
 ### Added
 
+- `Backend::set_query_timeout`, defaulted, lets a data source enforce
+  `SQL_ATTR_QUERY_TIMEOUT`. The attribute was substituted to `0` with `01S02`
+  for every driver, so an application that set a 30-second timeout was told the
+  driver had capped it and then waited indefinitely on a runaway query. A
+  backend that can impose a server-side deadline now returns `Ok(())` and core
+  stores the requested value, so `SQLGetStmtAttr` reports what was asked for.
+  The default reports `NotImplemented` and the `01S02` substitution is
+  unchanged, so **no existing driver's behaviour changes** until it implements
+  the hook. A backend failure that is *not* `NotImplemented` is reported as-is
+  rather than substituted: `01S02` tells an application its timeout was capped,
+  which is a different claim from "the connection is broken".
+
+  Two limits worth knowing. The hook receives the connection, not the
+  statement — `SQL_ATTR_QUERY_TIMEOUT` is a statement attribute, so a backend
+  that applies it session-wide gives every statement on that connection the most
+  recently set value; scoping it per statement is the backend's job. And core
+  itself still enforces nothing, so a backend that leaves the hook defaulted has
+  no timeout at all.
+
 - `Backend::current_catalog` and `Backend::set_current_catalog`, both defaulted,
   make `SQL_ATTR_CURRENT_CATALOG` more than a handle-local string.
   `SQLGetConnectAttr` and `SQLGetInfo(SQL_DATABASE_NAME)` — one value under two

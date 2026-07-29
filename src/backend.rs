@@ -215,6 +215,57 @@ pub trait Backend: Sized + Send + Sync + 'static {
         .into())
     }
 
+    /// Ask the data source to stop a statement that runs longer than
+    /// `seconds`.
+    ///
+    /// Called by `SQLSetStmtAttr(SQL_ATTR_QUERY_TIMEOUT)`. `seconds` is the
+    /// spec's `SQLULEN` verbatim, hence `usize`; it is never `0`, because `0`
+    /// means "no timeout" and core handles that without asking.
+    ///
+    /// **This is the server-side half of the timeout.** A data source that can
+    /// enforce a deadline itself does it far better than core can: it knows
+    /// when the query actually started, it stops the work rather than merely
+    /// abandoning it, and it needs no [`Backend::cancel`] implementation.
+    /// Implement this in preference to relying on core's timer.
+    ///
+    /// Three answers, and the difference is load-bearing:
+    ///
+    /// - `Ok(())` — the deadline is in force. Core stores the value, so
+    ///   `SQLGetStmtAttr` reports back what the application asked for.
+    /// - `Err(NotImplemented)`, the default — this backend cannot set a
+    ///   server-side deadline. Core substitutes `0` and posts `01S02`, which is
+    ///   the spec's own answer for `SQL_ATTR_QUERY_TIMEOUT` ("the statement
+    ///   attributes that can be changed are: ... SQL_ATTR_QUERY_TIMEOUT"), so
+    ///   `SQLGetStmtAttr` reports `0` and the application learns it got no
+    ///   timeout rather than believing in one that will never fire.
+    /// - Any other `Err` — a real failure talking to the data source, reported
+    ///   as-is. It is *not* turned into a substitution: an application told
+    ///   `01S02` concludes "this driver caps my timeout", which is a different
+    ///   thing from "the connection is broken".
+    ///
+    /// The spec's own use of `01S02` here is clamping — "if the specified
+    /// timeout exceeds the maximum timeout in the data source or is smaller
+    /// than the minimum timeout, `SQLSetStmtAttr` substitutes that value and
+    /// returns SQLSTATE 01S02". A backend that clamps should therefore *not*
+    /// return an error: return `Ok(())` and core stores what was asked for.
+    /// Reporting the clamped value instead needs core to know it, which this
+    /// signature does not carry — see the note on the `SQL_ATTR_QUERY_TIMEOUT`
+    /// arm in `ffi/stmt_attr.rs`.
+    ///
+    /// **Scope caveat.** `SQL_ATTR_QUERY_TIMEOUT` is a *statement* attribute
+    /// but this hook receives only the connection, so a backend that applies it
+    /// session-wide gives every statement on that connection the most recently
+    /// set value. Core cannot fix that without changing the signature of the
+    /// nine statement-producing methods, which would break every existing
+    /// driver. A backend that can scope a deadline per statement should carry
+    /// the value on its own connection state and apply it at execution time.
+    fn set_query_timeout(_conn: &Self::Connection, _seconds: usize) -> Result<(), Self::Error> {
+        Err(OdbcError::NotImplemented {
+            feature: "SQL_ATTR_QUERY_TIMEOUT".into(),
+        }
+        .into())
+    }
+
     /// Return driver-level info that does not require an active connection.
     ///
     /// The Windows Driver Manager calls `SQLGetInfoW` for types like
