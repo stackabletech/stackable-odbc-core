@@ -751,13 +751,36 @@ mechanism:
   module would be invisible to loom and silently opt its code out of the
   interleaving proof.
 
-**Loom models** the primitives this discipline is built from —
-`Registry` and `GroupLock` (`src/handles/registry.rs`'s
-`#[cfg(all(test, loom))] mod loom_tests`) — not the FFI entry points above
-them, since `registry()` panics outside an active `loom::model` and cannot be
-called from inside one either (loom replays the same closure many times to
-explore interleavings, while a `static` only runs its initializer once). Run
-them with:
+  **One documented exception**: `query_timer.rs`'s `Condvar` and its `Mutex`
+  come from `std::sync`. loom's `Condvar` has no `wait_timeout_while`, and its
+  `wait_timeout` ignores the duration outright — loom 0.7.2's source says
+  "TODO: implement timing out" and always returns `WaitTimeoutResult(false)` —
+  so an instrumented query timer could not model a timeout, which is the only
+  thing about it worth modelling. No loom model reaches that code either. The
+  rule being enforced is "no lock silently opts itself out", so an exception
+  stated in `sync.rs`, in `query_timer.rs` and here does not break it; a quiet
+  one would. Check first whether loom can model the primitive at all: if it
+  can, import it from `sync.rs`.
+
+**Loom models** the primitives this discipline is built from — `Registry`,
+`GroupLock`, and the crate's own nested-lock path
+(`HandleScope::with_child_group_in`) — in `src/handles/registry.rs`'s
+`#[cfg(all(test, loom))] mod loom_tests`. Not the FFI entry points above them,
+since `registry()` panics outside an active `loom::model` and cannot be called
+from inside one either (loom replays the same closure many times to explore
+interleavings, while a `static` only runs its initializer once).
+
+**That constraint is why `with_child_group` has an `_in` variant taking a
+`&Registry`**, and it generalises: when a model can only reach a function by
+re-implementing what it does, the model proves a property of the test rather
+than of the crate. `env_before_connection_cannot_deadlock` spent its life in
+that state — it locked two `GroupLock`s of its own in the right order, so a
+regression reversing the order in `with_child_group` would not have failed it.
+Threading the registry through as a parameter was the whole fix. Before
+accepting "the model cannot reach this", check whether a `&Registry` parameter
+is all that stands in the way.
+
+Run them with:
 
 ```bash
 RUSTFLAGS="--cfg loom" cargo test --lib loom_tests

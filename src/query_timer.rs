@@ -15,12 +15,35 @@
 //! [`Backend::cancel`]: crate::backend::Backend::cancel
 
 use std::any::Any;
+// Deliberately `std::sync::Arc`, not `crate::sync::Arc`, for the type-erased
+// cancel token below — the same exception `Slot::cancel` documents in
+// `handles/registry.rs`. It is a refcounted payload rather than a lock, so
+// instrumenting it under loom would buy nothing, and loom's `Arc` cannot hold a
+// `dyn Any` at all: it has no `CoerceUnsized` impl, so
+// `Arc::new(x) as Arc<dyn Any + Send + Sync>` does not compile for it. Using
+// `crate::sync::Arc` here made the whole crate fail to build under
+// `--cfg loom`, which took every loom model down with it.
+use std::sync::Arc as StdArc;
 use std::time::Duration;
 
 use crate::backend::Backend;
 use crate::errors::OdbcError;
-use crate::sync::{Arc, Condvar, Mutex};
+// `std::sync`, not `crate::sync`, and this is the crate's one documented
+// exception to that rule — see `sync.rs`, which records it too.
+//
+// Two facts make it the right call rather than a shortcut. loom's `Condvar`
+// has no `wait_timeout_while`, and its `wait_timeout` **ignores the duration
+// entirely**, always reporting `WaitTimeoutResult(false)` (loom 0.7.2's own
+// source says "TODO: implement timing out"). So an instrumented query timer
+// could not model a timeout — the only thing about it worth modelling. And no
+// loom model reaches this code: the models are of `Registry` and `GroupLock`
+// in `handles/registry.rs`, and this timer participates in neither.
+//
+// Importing `crate::sync` here bought nothing and cost everything: it made the
+// whole crate fail to compile under `--cfg loom`, which took down the models
+// that do matter. `Arc` stays `std`'s for the separate reason above.
 use crate::types::SqlState;
+use std::sync::{Condvar, Mutex};
 
 /// The state a [`QueryTimer`] shares with its timer thread.
 ///
@@ -57,7 +80,7 @@ pub(crate) struct QueryTimer {
     /// case: no timeout set, or a backend that enforces its own. Nothing is
     /// spawned and every method is a no-op, so an untimed statement pays only
     /// a null check.
-    shared: Option<Arc<Shared>>,
+    shared: Option<StdArc<Shared>>,
 }
 
 impl QueryTimer {
@@ -76,19 +99,19 @@ impl QueryTimer {
     /// still armed.
     pub(crate) fn arm<B: Backend>(
         seconds: Option<usize>,
-        token: &Arc<dyn Any + Send + Sync>,
+        token: &StdArc<dyn Any + Send + Sync>,
     ) -> Self {
         let Some(seconds) = seconds.filter(|s| *s > 0) else {
             return Self::disarmed();
         };
         let deadline = Duration::from_secs(seconds as u64);
 
-        let shared = Arc::new(Shared {
+        let shared = StdArc::new(Shared {
             state: Mutex::new(State::Running),
             signal: Condvar::new(),
         });
-        let thread_shared = Arc::clone(&shared);
-        let thread_token = Arc::clone(token);
+        let thread_shared = StdArc::clone(&shared);
+        let thread_token = StdArc::clone(token);
 
         // A detached thread, deliberately: `Drop` below waits for the state to
         // settle rather than joining, so a `Backend::cancel` that blocks on a
@@ -267,8 +290,8 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore = "wall-clock timing; no unsafe to check")]
     fn an_expired_deadline_cancels_the_token() {
-        let token: Arc<dyn Any + Send + Sync> =
-            Arc::new(MockCancelAwareBackend::cancel_token(&MockConnection));
+        let token: StdArc<dyn Any + Send + Sync> =
+            StdArc::new(MockCancelAwareBackend::cancel_token(&MockConnection));
         let timer = QueryTimer::arm::<MockCancelAwareBackend>(Some(1), &token);
 
         // Longer than the deadline: stands in for a backend call that overruns.
@@ -290,8 +313,8 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore = "wall-clock timing; no unsafe to check")]
     fn a_call_that_returns_in_time_is_not_cancelled() {
-        let token: Arc<dyn Any + Send + Sync> =
-            Arc::new(MockCancelAwareBackend::cancel_token(&MockConnection));
+        let token: StdArc<dyn Any + Send + Sync> =
+            StdArc::new(MockCancelAwareBackend::cancel_token(&MockConnection));
         let timer = QueryTimer::arm::<MockCancelAwareBackend>(Some(60), &token);
         assert!(!timer.fired());
         drop(timer);
@@ -313,8 +336,8 @@ mod tests {
 
     #[test]
     fn no_deadline_arms_nothing() {
-        let token: Arc<dyn Any + Send + Sync> =
-            Arc::new(MockCancelAwareBackend::cancel_token(&MockConnection));
+        let token: StdArc<dyn Any + Send + Sync> =
+            StdArc::new(MockCancelAwareBackend::cancel_token(&MockConnection));
         for seconds in [None, Some(0)] {
             let timer = QueryTimer::arm::<MockCancelAwareBackend>(seconds, &token);
             assert!(
@@ -340,8 +363,8 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore = "wall-clock timing; no unsafe to check")]
     fn reclassify_turns_a_fired_timers_error_into_hyt00() {
-        let token: Arc<dyn Any + Send + Sync> =
-            Arc::new(MockCancelAwareBackend::cancel_token(&MockConnection));
+        let token: StdArc<dyn Any + Send + Sync> =
+            StdArc::new(MockCancelAwareBackend::cancel_token(&MockConnection));
         let timer = QueryTimer::arm::<MockCancelAwareBackend>(Some(1), &token);
         std::thread::sleep(Duration::from_millis(1500));
 
@@ -364,8 +387,8 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore = "wall-clock timing; no unsafe to check")]
     fn a_query_that_beats_its_deadline_to_the_finish_line_still_succeeds() {
-        let token: Arc<dyn Any + Send + Sync> =
-            Arc::new(MockCancelAwareBackend::cancel_token(&MockConnection));
+        let token: StdArc<dyn Any + Send + Sync> =
+            StdArc::new(MockCancelAwareBackend::cancel_token(&MockConnection));
         let timer = QueryTimer::arm::<MockCancelAwareBackend>(Some(1), &token);
         std::thread::sleep(Duration::from_millis(1500));
         assert!(timer.fired(), "the deadline passed");

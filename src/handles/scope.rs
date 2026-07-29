@@ -19,7 +19,7 @@ use std::marker::PhantomData;
 use crate::backend::Backend;
 use crate::diagnostics::DiagnosticQueue;
 use crate::errors::OdbcError;
-use crate::handles::registry::{GroupLock, HandleKind, registry};
+use crate::handles::registry::{GroupLock, HandleKind, Registry, registry};
 use crate::handles::{ConnectionHandle, EnvironmentHandle, HasKind, StatementHandle};
 use crate::sync::{Arc, MutexGuard};
 
@@ -86,8 +86,12 @@ impl<'a> HandleScope<'a> {
     }
 
     /// True when `token` belongs to the group this scope holds.
-    fn holds(&self, token: *mut c_void) -> bool {
-        match (&self.group, registry().group_of(token)) {
+    ///
+    /// Only [`Self::with_child_group_in`] needs this as a separate question:
+    /// [`Self::get`] and [`Self::diagnostics`] fold it into their single
+    /// registry pass. See that method for why the registry is a parameter.
+    fn holds_in(&self, reg: &Registry, token: *mut c_void) -> bool {
+        match (&self.group, reg.group_of(token)) {
             (Some(held), Some(theirs)) => Arc::ptr_eq(held, &theirs),
             _ => false,
         }
@@ -211,13 +215,34 @@ impl<'a> HandleScope<'a> {
         // would hang the application thread with no diagnostic and no
         // SqlReturn. The one legitimate nesting is environment-then-
         // connection, where the groups differ.
-        if self.holds(token) {
+        self.with_child_group_in(registry(), token, f)
+    }
+
+    /// The body of [`Self::with_child_group`], against an explicit registry.
+    ///
+    /// Split out so the loom model can drive the crate's **real** nesting path
+    /// rather than a hand-written imitation of it. `registry()` panics outside
+    /// an active `loom::model` and cannot be called from inside one either (a
+    /// `static` runs its initializer once, while loom replays the closure many
+    /// times), so a model restricted to `with_child_group` could only lock two
+    /// `GroupLock`s of its own in the right order — which proves the ordering
+    /// rule is safe to follow, not that this function follows it. Taking the
+    /// registry as a parameter is what closes that gap: a regression reversing
+    /// the acquisition order here now fails
+    /// `env_before_connection_cannot_deadlock`.
+    pub(crate) fn with_child_group_in<R>(
+        &mut self,
+        reg: &Registry,
+        token: *mut c_void,
+        f: impl FnOnce(&mut HandleScope<'_>) -> R,
+    ) -> Result<R, OdbcError> {
+        if self.holds_in(reg, token) {
             tracing::warn!(
                 "with_child_group: token is already in the held group; not re-acquiring"
             );
             return Ok(f(self));
         }
-        let group = registry().group_of(token).ok_or(OdbcError::InvalidHandle)?;
+        let group = reg.group_of(token).ok_or(OdbcError::InvalidHandle)?;
         let guard = group.lock();
         let mut child = HandleScope::new(Some(Arc::clone(&group)), Some(&guard));
         let result = f(&mut child);

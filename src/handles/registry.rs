@@ -1028,33 +1028,60 @@ mod loom_tests {
         });
     }
 
-    /// Two hand-written lock sequences, each taking an environment's group
-    /// then a connection's group in that order, cannot deadlock against each
-    /// other; loom proves it by exploring every interleaving rather than by
-    /// not observing one. This model calls `GroupLock::lock` directly rather
-    /// than `HandleScope::with_child_group`, so it proves the ordering rule is
-    /// safe to follow, not that the crate's own nested-lock path
-    /// (`SQLEndTran(SQL_HANDLE_ENV)`, the rule's only real caller) actually
-    /// follows it — a regression that reversed the order there would not
-    /// make this model fail.
+    /// Two threads nesting an environment's group then a connection's group
+    /// cannot deadlock against each other, **through the crate's own nesting
+    /// path**: `HandleScope::with_child_group_in`, which is what
+    /// `SQLEndTran(SQL_HANDLE_ENV)` reaches and the only place in the crate
+    /// that holds two groups at once.
+    ///
+    /// This model used to lock two `GroupLock`s of its own in the right order,
+    /// which proved the ordering rule is *safe to follow* and nothing about
+    /// whether the crate follows it — a regression reversing the acquisition
+    /// order in `with_child_group` would not have made it fail. It could not do
+    /// better while that function reached the process-wide `registry()`, which
+    /// panics outside an active `loom::model` and cannot be called from inside
+    /// one either: a `static` runs its initializer once, while loom replays the
+    /// closure many times. Taking the registry as a parameter is what closed
+    /// the gap.
     #[test]
     fn env_before_connection_cannot_deadlock() {
+        use crate::handles::scope::HandleScope;
+
         loom::model(|| {
+            let reg = Arc::new(Registry::new());
             let env_group = GroupLock::new();
+            let (env, _, _) = reg
+                .register(HandleKind::Env, 0x1000, Arc::clone(&env_group), None)
+                .expect("env registered");
             let conn_group = GroupLock::new();
+            let (conn, _, _) = reg
+                .register(
+                    HandleKind::Dbc,
+                    0x2000,
+                    Arc::clone(&conn_group),
+                    Some(env as usize),
+                )
+                .expect("conn registered");
+
+            // Exactly what `SQLEndTran(SQL_HANDLE_ENV)` does: hold the
+            // environment's group, then reach into one of its connections.
+            // The addresses above are never dereferenced — this models lock
+            // acquisition, not handle access — so `f` does nothing with the
+            // child scope it is handed.
+            let nest = move |reg: &Registry, group: &Arc<GroupLock>| {
+                let guard = group.lock();
+                let mut scope = HandleScope::new(Some(Arc::clone(group)), Some(&guard));
+                scope
+                    .with_child_group_in(reg, conn, |_child| {})
+                    .expect("the connection is live");
+            };
 
             let t = {
+                let reg = Arc::clone(&reg);
                 let e = Arc::clone(&env_group);
-                let c = Arc::clone(&conn_group);
-                thread::spawn(move || {
-                    let _env = e.lock();
-                    let _conn = c.lock();
-                })
+                thread::spawn(move || nest(&reg, &e))
             };
-            {
-                let _env = env_group.lock();
-                let _conn = conn_group.lock();
-            }
+            nest(&reg, &env_group);
             t.join().expect("thread panicked");
         });
     }

@@ -462,6 +462,30 @@ Everything a driver has to change for the catalog rework, in one place.
 
 ### Changed
 
+- **The loom models build again, and one of them now proves something.** The
+  models had stopped compiling entirely: `query_timer.rs` imported `Condvar`,
+  `Mutex` and `Arc` from `crate::sync`, which resolve to loom's under
+  `--cfg loom`, and loom's `Arc` has no `CoerceUnsized` impl so it cannot hold
+  the type-erased `Arc<dyn Any + Send + Sync>` cancel token at all. 21 errors,
+  every loom model down with them. The timer now uses `std::sync` directly, as
+  the crate's one documented exception to the single-import rule — loom's
+  `Condvar` has no `wait_timeout_while` and its `wait_timeout` ignores the
+  duration outright ("TODO: implement timing out"), so an instrumented query
+  timer could not model a timeout, which is the only thing about it worth
+  modelling. Recorded in `sync.rs`, in `query_timer.rs` and in AGENTS.md, so
+  the exception is visible rather than silent.
+
+- **`env_before_connection_cannot_deadlock` now exercises the crate's real
+  nested-lock path.** It used to lock two `GroupLock`s of its own in the right
+  order, proving the ordering rule is safe to follow and nothing about whether
+  the crate follows it — a regression reversing the acquisition order in
+  `HandleScope::with_child_group` would not have failed it. It could not do
+  better while that function reached the process-wide `registry()`, which
+  panics outside an active `loom::model` and cannot be called from inside one
+  either. `with_child_group_in` takes a `&Registry`, which is all that stood in
+  the way; the model drives it from two threads and loom now reports
+  `deadlock; threads = [Blocked, Blocked]` when the order is reversed.
+
 - **`HandleScope::get` does one registry lookup instead of two, and
   `push_diagnostic` one instead of seven.** Every `SQLxxx` entry point in the
   crate reaches its handle through `get`, which called `holds` (a `group_of`

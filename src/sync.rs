@@ -19,10 +19,25 @@
 //! those tests out of a build they were never meant to run under.
 
 #[cfg(all(loom, test))]
-pub(crate) use loom::sync::{Arc, Condvar, Mutex, MutexGuard, RwLock};
+pub(crate) use loom::sync::{Arc, Mutex, MutexGuard, RwLock};
 
 #[cfg(not(all(loom, test)))]
-pub(crate) use std::sync::{Arc, Condvar, Mutex, MutexGuard, RwLock};
+pub(crate) use std::sync::{Arc, Mutex, MutexGuard, RwLock};
+
+// `Condvar` is deliberately absent, and that is the crate's one exception to
+// "every lock comes from here". `query_timer.rs` uses `std::sync::Condvar`
+// directly, for two reasons its own comment records in full: loom's `Condvar`
+// has no `wait_timeout_while` and its `wait_timeout` ignores the duration
+// outright (loom 0.7.2: "TODO: implement timing out"), so an instrumented
+// query timer could not model a timeout at all — and no loom model reaches
+// that code, the models being of `Registry` and `GroupLock`.
+//
+// The exception is recorded in both places on purpose. The rule this module
+// exists to enforce is not "use these types" but "no lock silently opts itself
+// out of the proof", and a lock that opts out for a stated, checkable reason
+// does not violate it. One that does so quietly would. Before adding a second
+// exception, check whether loom can model the primitive at all: if it can, the
+// answer is to import it here.
 
 // Not lock-cfg-dependent: loom's `Mutex`/`RwLock` reuse `std::sync::TryLockError`
 // verbatim rather than defining their own (confirmed in loom 0.7.2's own
