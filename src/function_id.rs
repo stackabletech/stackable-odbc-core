@@ -272,24 +272,31 @@ pub const CORE_EXPORTED_FUNCTIONS: &[FunctionId] = &[
     FunctionId::EndTran,
     FunctionId::FreeHandle,
     FunctionId::GetConnectAttr,
-    FunctionId::GetDescField,
     FunctionId::GetDiagField,
     FunctionId::GetDiagRec,
     FunctionId::GetEnvAttr,
     FunctionId::GetStmtAttr,
     FunctionId::SetConnectAttr,
-    FunctionId::SetDescField,
-    FunctionId::SetDescRec,
     FunctionId::SetEnvAttr,
     FunctionId::SetStmtAttr,
     FunctionId::FetchScroll,
 ];
 
-/// The [`FunctionId`]s core knows the number for but does not export.
+/// The [`FunctionId`]s a driver must not report as supported.
 ///
 /// They exist so `function_id_from_raw` recognises every assigned `SQL_API_*`
 /// value and so the ODBC 2.x `SQL_API_ALL_FUNCTIONS` array can be filled from
-/// named values. A driver must not report any of them as supported.
+/// named values.
+///
+/// Most of them core does not export either, which is what this list was
+/// originally named for. Three are the exception, and the distinction is worth
+/// keeping straight: `GetDescField`, `SetDescField` and `SetDescRec` **are**
+/// exported, as [`crate::ffi::desc`] entry points answering `HYC00`. They
+/// appear here because this list drives what `SQLGetFunctions` reports, and of
+/// the two available lies, reporting a function supported when it is not is the
+/// more damaging one — the symbol has to exist so the Windows Driver Manager's
+/// dispatch table has no NULL entry, but no application should be told to call
+/// it.
 pub const CORE_UNEXPORTED_FUNCTIONS: &[(FunctionId, &str)] = &[
     (
         FunctionId::SetParam,
@@ -316,7 +323,10 @@ pub const CORE_UNEXPORTED_FUNCTIONS: &[(FunctionId, &str)] = &[
         "superseded by SQLBindParameter, which is exported",
     ),
     (FunctionId::CopyDesc, "descriptors are not implemented"),
+    (FunctionId::GetDescField, "descriptors are not implemented"),
     (FunctionId::GetDescRec, "descriptors are not implemented"),
+    (FunctionId::SetDescField, "descriptors are not implemented"),
+    (FunctionId::SetDescRec, "descriptors are not implemented"),
     (
         FunctionId::CancelHandle,
         "not implemented; SQLCancel is exported instead",
@@ -550,6 +560,27 @@ mod tests {
             SPEC_IDS.len(),
             "the two lists must partition FunctionId with nothing left over"
         );
+    }
+
+    /// The three descriptor functions core exports are still reported
+    /// unsupported, because they are: they answer `HYC00`. Removing the export
+    /// is not the alternative — that puts a NULL in the Windows Driver
+    /// Manager's dispatch table, which is a crash. `SQLGetDescRec` and
+    /// `SQLCopyDesc` are neither exported nor advertised.
+    #[test]
+    fn no_descriptor_function_is_advertised_as_supported() {
+        for id in [
+            FunctionId::GetDescField,
+            FunctionId::SetDescField,
+            FunctionId::SetDescRec,
+            FunctionId::GetDescRec,
+            FunctionId::CopyDesc,
+        ] {
+            assert!(
+                !CORE_EXPORTED_FUNCTIONS.contains(&id),
+                "{id:?} is still advertised as supported"
+            );
+        }
     }
 
     #[test]

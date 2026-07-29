@@ -1277,14 +1277,11 @@ mod expansion {
             (FunctionId::EndTran, SQLEndTran as *const ()),
             (FunctionId::FreeHandle, SQLFreeHandle as *const ()),
             (FunctionId::GetConnectAttr, SQLGetConnectAttrW as *const ()),
-            (FunctionId::GetDescField, SQLGetDescFieldW as *const ()),
             (FunctionId::GetDiagField, SQLGetDiagFieldW as *const ()),
             (FunctionId::GetDiagRec, SQLGetDiagRecW as *const ()),
             (FunctionId::GetEnvAttr, SQLGetEnvAttr as *const ()),
             (FunctionId::GetStmtAttr, SQLGetStmtAttrW as *const ()),
             (FunctionId::SetConnectAttr, SQLSetConnectAttrW as *const ()),
-            (FunctionId::SetDescField, SQLSetDescFieldW as *const ()),
-            (FunctionId::SetDescRec, SQLSetDescRec as *const ()),
             (FunctionId::SetEnvAttr, SQLSetEnvAttr as *const ()),
             (FunctionId::SetStmtAttr, SQLSetStmtAttrW as *const ()),
             (FunctionId::FetchScroll, SQLFetchScroll as *const ()),
@@ -1301,6 +1298,40 @@ mod expansion {
                 "{id:?} has a symbol but is not listed as exported"
             );
             assert!(!ptr.is_null());
+        }
+    }
+
+    /// The three descriptor entry points are the one place where "has a symbol"
+    /// and "is reported supported" deliberately disagree, so neither direction
+    /// of [`every_exported_function_id_has_a_generated_symbol`] covers them.
+    ///
+    /// Both halves matter and pull opposite ways. The symbol must exist,
+    /// because `SQLGetFunctions` is not the only thing the Windows Driver
+    /// Manager builds its dispatch table from and a NULL entry is a crash
+    /// rather than an error. The report must say unsupported, because
+    /// [`crate::ffi::desc`] answers `HYC00` and nothing else. Deleting either
+    /// assertion turns this into a test that would pass if the pair were
+    /// "fixed" into agreement, which is the mistake it exists to catch.
+    #[test]
+    fn the_exported_descriptor_functions_are_reported_unsupported() {
+        use crate::function_id::{CORE_EXPORTED_FUNCTIONS, CORE_UNEXPORTED_FUNCTIONS, FunctionId};
+
+        let pairs: &[(FunctionId, *const ())] = &[
+            (FunctionId::GetDescField, SQLGetDescFieldW as *const ()),
+            (FunctionId::SetDescField, SQLSetDescFieldW as *const ()),
+            (FunctionId::SetDescRec, SQLSetDescRec as *const ()),
+        ];
+
+        for (id, ptr) in pairs {
+            assert!(!ptr.is_null(), "{id:?} must keep its exported symbol");
+            assert!(
+                !CORE_EXPORTED_FUNCTIONS.contains(id),
+                "{id:?} is reported supported, but it answers HYC00"
+            );
+            assert!(
+                CORE_UNEXPORTED_FUNCTIONS.iter().any(|(u, _)| u == id),
+                "{id:?} must carry a reason string saying why it is not supported"
+            );
         }
     }
 }
