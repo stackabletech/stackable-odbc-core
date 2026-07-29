@@ -797,6 +797,28 @@ Everything a driver has to change for the catalog rework, in one place.
 
 ### Fixed
 
+- **`SQL_ATTR_METADATA_ID` set on a connection never reached its statements.**
+  `SQLSetStmtAttr`'s Comments make it one of exactly two attributes an
+  application may set at the connection level — "ODBC 3.x statement attributes
+  cannot be set at the connection level, with the exception of the
+  SQL_ATTR_METADATA_ID and SQL_ATTR_ASYNC_ENABLE attributes, which are both
+  connection attributes and statement attributes, and can be set at either the
+  connection level or the statement level". `SQLSetConnectAttr` stored the
+  value and `SQLGetConnectAttr` read it back correctly, but nothing else ever
+  looked: `metadata_id_enabled` consults the statement's own attribute map, and
+  a statement was allocated with an empty one. An application taking the
+  connection-level route got `SQL_SUCCESS`, saw its value echoed back, and then
+  had every catalog call treat its arguments as search patterns rather than
+  identifiers — no case folding, no `%`/`_` escaping, and wrong result sets
+  with no diagnostic to explain them. A statement now starts from its
+  connection's value. Per the ODBC 2.x rule the connection-level route
+  inherits, this is the default for statements allocated *afterwards*;
+  statements that already exist are untouched, and a later `SQLSetStmtAttr`
+  overrides the inherited value as before. `SQL_ATTR_ASYNC_ENABLE`, the other
+  of the two, is deliberately not inherited: core reports `SQL_AM_NONE` for
+  `SQL_ASYNC_MODE`, so the only value a connection can hold is the statement
+  default already.
+
 - **Character parameter data ignored the SQL type it was bound as.**
   `SQLBindParameter` takes two types — `ValueType`, the C type the value
   arrives in, and `ParameterType`, the SQL type the data source is to receive —

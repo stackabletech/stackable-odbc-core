@@ -573,6 +573,22 @@ pub unsafe fn alloc_connection<B: Backend>(
 /// Allocate a new statement handle, register it with the parent connection,
 /// and write it to `output`.
 ///
+/// `inherited_metadata_id` is the parent connection's `SQL_ATTR_METADATA_ID`,
+/// or `None` if it was never set there. `SQLSetStmtAttr`'s Comments make this
+/// attribute one of exactly two that may be set at the connection level —
+/// "ODBC 3.x statement attributes cannot be set at the connection level, with
+/// the exception of the SQL_ATTR_METADATA_ID and SQL_ATTR_ASYNC_ENABLE
+/// attributes" — and the connection-level value is the default for statements
+/// allocated afterwards. It is seeded here, at the one site that decides a
+/// statement's initial state, rather than in the caller, so a future
+/// allocation path cannot forget it. A later `SQLSetStmtAttr` overwrites the
+/// seeded entry like any other.
+///
+/// The other of the two, `SQL_ATTR_ASYNC_ENABLE`, is deliberately not
+/// inherited: core reports `SQL_AM_NONE` for `SQL_ASYNC_MODE`, so the only
+/// value a connection can hold is `SQL_ASYNC_ENABLE_OFF`, which is already the
+/// statement default.
+///
 /// # Safety
 ///
 /// `conn_ptr` must point to a valid `ConnectionHandle<B>`. `output` must be a
@@ -582,6 +598,7 @@ pub unsafe fn alloc_connection<B: Backend>(
 pub unsafe fn alloc_statement<B: Backend>(
     conn_ptr: *mut c_void,
     output: *mut *mut c_void,
+    inherited_metadata_id: Option<usize>,
 ) -> SqlReturn {
     // Statements and their descriptors share the connection's lock. One
     // acquisition then covers a call that touches a statement and its parent.
@@ -616,7 +633,17 @@ pub unsafe fn alloc_statement<B: Backend>(
         data_at_exec: None,
         get_data_cursor: None,
         diagnostics: DiagnosticQueue::new(),
-        attrs: std::collections::HashMap::new(),
+        // Seeded from the connection; see this function's doc comment. The two
+        // identifiers are the same number (`SQL_ATTR_METADATA_ID` is 10014 at
+        // both levels), but the statement's own name is written here because
+        // this map is read with it.
+        attrs: match inherited_metadata_id {
+            Some(value) => std::collections::HashMap::from([(
+                odbc_sys::StatementAttribute::MetadataId as i32,
+                value,
+            )]),
+            None => std::collections::HashMap::new(),
+        },
         app_row_desc: alloc_desc(),
         app_param_desc: alloc_desc(),
         imp_row_desc: alloc_desc(),
@@ -1057,7 +1084,7 @@ mod tests {
             let mut conn_ptr: *mut c_void = std::ptr::null_mut();
             let _ = alloc_connection::<MockBackend>(env_ptr, &mut conn_ptr as *mut _);
             let mut stmt_ptr: *mut c_void = std::ptr::null_mut();
-            let _ = alloc_statement::<MockBackend>(conn_ptr, &mut stmt_ptr as *mut _);
+            let _ = alloc_statement::<MockBackend>(conn_ptr, &mut stmt_ptr as *mut _, None);
 
             assert!(resolves_as::<StatementHandle<MockBackend>>(stmt_ptr));
 
@@ -1162,7 +1189,7 @@ mod tests {
             let _ = alloc_environment::<MockBackend>(&mut env_ptr as *mut _);
 
             let mut out: *mut c_void = std::ptr::null_mut();
-            let result = alloc_statement::<MockBackend>(env_ptr, &mut out as *mut _);
+            let result = alloc_statement::<MockBackend>(env_ptr, &mut out as *mut _, None);
             assert_eq!(
                 result,
                 SqlReturn::INVALID_HANDLE,
@@ -1286,7 +1313,7 @@ mod tests {
             let mut conn_ptr: *mut c_void = std::ptr::null_mut();
             let _ = alloc_connection::<MockBackend>(env_ptr, &mut conn_ptr as *mut _);
             let mut stmt_ptr: *mut c_void = std::ptr::null_mut();
-            let result = alloc_statement::<MockBackend>(conn_ptr, &mut stmt_ptr as *mut _);
+            let result = alloc_statement::<MockBackend>(conn_ptr, &mut stmt_ptr as *mut _, None);
             assert_eq!(result, SqlReturn::SUCCESS);
 
             let _ = free_statement::<MockBackend>(stmt_ptr);
@@ -1308,7 +1335,7 @@ mod tests {
             let mut conn_ptr: *mut c_void = std::ptr::null_mut();
             let _ = alloc_connection::<MockBackend>(env_ptr, &mut conn_ptr as *mut _);
             let mut stmt_ptr: *mut c_void = std::ptr::null_mut();
-            let _ = alloc_statement::<MockBackend>(conn_ptr, &mut stmt_ptr as *mut _);
+            let _ = alloc_statement::<MockBackend>(conn_ptr, &mut stmt_ptr as *mut _, None);
 
             let env_group = registry().group_of(env_ptr).expect("live");
             let conn_group = registry().group_of(conn_ptr).expect("live");
@@ -1354,7 +1381,7 @@ mod tests {
             let mut conn_ptr: *mut c_void = std::ptr::null_mut();
             let _ = alloc_connection::<MockBackend>(env_ptr, &mut conn_ptr as *mut _);
             let mut stmt_ptr: *mut c_void = std::ptr::null_mut();
-            let _ = alloc_statement::<MockBackend>(conn_ptr, &mut stmt_ptr as *mut _);
+            let _ = alloc_statement::<MockBackend>(conn_ptr, &mut stmt_ptr as *mut _, None);
 
             let result = free_conn(conn_ptr);
             assert_eq!(result, SqlReturn::ERROR);
@@ -1436,7 +1463,7 @@ mod tests {
             let mut conn: *mut c_void = std::ptr::null_mut();
             let _ = alloc_connection::<MockBackend>(env, &mut conn as *mut _);
             let mut stmt: *mut c_void = std::ptr::null_mut();
-            let _ = alloc_statement::<MockBackend>(conn, &mut stmt as *mut _);
+            let _ = alloc_statement::<MockBackend>(conn, &mut stmt as *mut _, None);
             (env, conn, stmt)
         }
     }
@@ -1455,7 +1482,7 @@ mod tests {
             let (env, conn, stmt_a) = alloc_env_conn_stmt();
             let mut out: *mut c_void = std::ptr::null_mut();
             assert_eq!(
-                alloc_statement::<MockBackend>(conn, &mut out),
+                alloc_statement::<MockBackend>(conn, &mut out, None),
                 SqlReturn::SUCCESS
             );
             let stmt_b = out;

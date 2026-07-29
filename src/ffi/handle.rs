@@ -3,8 +3,8 @@
 use crate::backend::Backend;
 use crate::errors::OdbcError;
 use crate::handles::{
-    StatementHandle, alloc_connection, alloc_environment, alloc_statement, free_connection,
-    free_environment, free_statement,
+    ConnectionHandle, StatementHandle, alloc_connection, alloc_environment, alloc_statement,
+    free_connection, free_environment, free_statement,
 };
 use crate::panic::panic_safe;
 use crate::types::{SqlReturn, free_stmt_option_from_raw, handle_type_from_raw};
@@ -155,11 +155,31 @@ pub unsafe fn sql_alloc_handle<B: Backend>(
                         );
                         return Ok(SqlReturn::ERROR);
                     }
+                    // The connection's `SQL_ATTR_METADATA_ID`, which the new
+                    // statement starts from — see `alloc_statement`'s doc
+                    // comment for why this attribute and no other. Read
+                    // through the scope, so the value comes from a validated
+                    // handle under the group lock this call already holds.
+                    // A connection that never had it set contributes nothing.
+                    let inherited_metadata_id = scope
+                        .get::<ConnectionHandle<B>>(input_handle)
+                        .ok()
+                        .and_then(|conn| {
+                            conn.attrs
+                                .get(&crate::types::ConnectionAttribute::METADATA_ID.0)
+                                .copied()
+                        });
+                    if let Some(value) = inherited_metadata_id {
+                        tracing::debug!(
+                            "SQLAllocHandle: statement inherits SQL_ATTR_METADATA_ID={} from its connection",
+                            value
+                        );
+                    }
                     // SAFETY: input_handle is non-null (checked above); alloc_statement looks
                     // it up in the registry, which validates liveness and that it names a
                     // connection specifically, without ever dereferencing it. output_handle_ptr
                     // is non-null.
-                    alloc_statement::<B>(input_handle, output_handle_ptr)
+                    alloc_statement::<B>(input_handle, output_handle_ptr, inherited_metadata_id)
                 }
                 HandleType::Desc => {
                     // Explicit descriptor handle allocation (SQL_HANDLE_DESC) is not yet implemented.

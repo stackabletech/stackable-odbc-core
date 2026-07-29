@@ -3756,6 +3756,157 @@ mod tests {
         }
     }
 
+    /// Set `SQL_ATTR_METADATA_ID` to `SQL_TRUE` on a **connection** through the
+    /// real entry point.
+    unsafe fn set_connection_metadata_id_true<B: Backend>(conn: *mut c_void) {
+        let ret = unsafe {
+            crate::ffi::connect_attr::sql_set_connect_attr_w::<B>(
+                conn,
+                crate::types::ConnectionAttribute::METADATA_ID.0,
+                SQL_TRUE as usize as *mut c_void,
+                0,
+            )
+        };
+        assert_eq!(
+            ret,
+            SqlReturn::SUCCESS,
+            "setting SQL_ATTR_METADATA_ID on the connection failed"
+        );
+    }
+
+    unsafe fn alloc_stmt_on<B: Backend>(conn: *mut c_void) -> *mut c_void {
+        let mut stmt: *mut c_void = std::ptr::null_mut();
+        let ret = unsafe { sql_alloc_handle::<B>(HandleType::Stmt as i16, conn, &mut stmt) };
+        assert_eq!(ret, SqlReturn::SUCCESS, "allocating a statement failed");
+        stmt
+    }
+
+    /// Spec, `SQLSetStmtAttr` Comments: "ODBC 3.x statement attributes cannot
+    /// be set at the connection level, with the exception of the
+    /// SQL_ATTR_METADATA_ID and SQL_ATTR_ASYNC_ENABLE attributes, which are
+    /// both connection attributes and statement attributes, and can be set at
+    /// either the connection level or the statement level."
+    ///
+    /// So the connection-level route is legal, and a statement allocated after
+    /// it must catalog-call as an identifier argument. Before this test the
+    /// value was stored on the connection and read by nobody: the application
+    /// got `SQL_SUCCESS`, read the value back correctly, and then had every
+    /// catalog call treat its arguments as patterns.
+    #[test]
+    fn metadata_id_set_on_the_connection_reaches_a_statement_allocated_afterwards() {
+        unsafe {
+            let (env, conn, first) = alloc_env_conn_stmt_for::<MockCatalogArgsBackend>();
+            set_connection_metadata_id_true::<MockCatalogArgsBackend>(conn);
+            let stmt = alloc_stmt_on::<MockCatalogArgsBackend>(conn);
+
+            let empty = utf16_of("");
+            let name = utf16_of("my_table");
+            let ret = sql_tables_w::<MockCatalogArgsBackend>(
+                stmt,
+                empty.as_ptr(),
+                SQL_NTS_I16,
+                empty.as_ptr(),
+                SQL_NTS_I16,
+                name.as_ptr(),
+                SQL_NTS_I16,
+                std::ptr::null(),
+                0,
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+
+            let args = MockCatalogArgsBackend::recorded().expect("Backend::tables was called");
+            assert_eq!(
+                args.table.as_deref(),
+                Some("MY\\_TABLE"),
+                "a statement allocated after the connection-level set must inherit it"
+            );
+
+            let _ = sql_free_handle::<MockCatalogArgsBackend>(HandleType::Stmt as i16, stmt);
+            cleanup_for::<MockCatalogArgsBackend>(env, conn, first);
+        }
+    }
+
+    /// The ODBC 2.x rule the connection-level route inherits: the value is the
+    /// default for statements allocated *afterwards*, and does not reach back
+    /// to statements that already exist. Without this, setting the attribute
+    /// mid-session would silently reinterpret the arguments of a statement the
+    /// application had already configured.
+    #[test]
+    fn metadata_id_set_on_the_connection_leaves_an_existing_statement_alone() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCatalogArgsBackend>();
+            set_connection_metadata_id_true::<MockCatalogArgsBackend>(conn);
+
+            let empty = utf16_of("");
+            let name = utf16_of("my_table");
+            let ret = sql_tables_w::<MockCatalogArgsBackend>(
+                stmt,
+                empty.as_ptr(),
+                SQL_NTS_I16,
+                empty.as_ptr(),
+                SQL_NTS_I16,
+                name.as_ptr(),
+                SQL_NTS_I16,
+                std::ptr::null(),
+                0,
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+
+            let args = MockCatalogArgsBackend::recorded().expect("Backend::tables was called");
+            assert_eq!(
+                args.table.as_deref(),
+                Some("my_table"),
+                "the statement predates the connection-level set and keeps SQL_FALSE"
+            );
+            cleanup_for::<MockCatalogArgsBackend>(env, conn, stmt);
+        }
+    }
+
+    /// Inheritance seeds the statement's own value; it does not pin it. A
+    /// statement-level `SQL_FALSE` after inheriting `SQL_TRUE` must win, or an
+    /// application could never turn the treatment off for one statement.
+    #[test]
+    fn a_statement_level_metadata_id_overrides_the_inherited_connection_value() {
+        unsafe {
+            let (env, conn, first) = alloc_env_conn_stmt_for::<MockCatalogArgsBackend>();
+            set_connection_metadata_id_true::<MockCatalogArgsBackend>(conn);
+            let stmt = alloc_stmt_on::<MockCatalogArgsBackend>(conn);
+
+            let ret = crate::ffi::stmt_attr::sql_set_stmt_attr_w::<MockCatalogArgsBackend>(
+                stmt,
+                StatementAttribute::MetadataId as i32,
+                SQL_FALSE as usize as *mut c_void,
+                0,
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+
+            let empty = utf16_of("");
+            let name = utf16_of("my_table");
+            let ret = sql_tables_w::<MockCatalogArgsBackend>(
+                stmt,
+                empty.as_ptr(),
+                SQL_NTS_I16,
+                empty.as_ptr(),
+                SQL_NTS_I16,
+                name.as_ptr(),
+                SQL_NTS_I16,
+                std::ptr::null(),
+                0,
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+
+            let args = MockCatalogArgsBackend::recorded().expect("Backend::tables was called");
+            assert_eq!(
+                args.table.as_deref(),
+                Some("my_table"),
+                "the statement-level SQL_FALSE must override the inherited SQL_TRUE"
+            );
+
+            let _ = sql_free_handle::<MockCatalogArgsBackend>(HandleType::Stmt as i16, stmt);
+            cleanup_for::<MockCatalogArgsBackend>(env, conn, first);
+        }
+    }
+
     /// Spec, `SQLTables` `TableType`: "the SQL_ATTR_METADATA_ID statement
     /// attribute has no effect upon the TableType argument. TableType is a
     /// value list argument, regardless of the setting of
