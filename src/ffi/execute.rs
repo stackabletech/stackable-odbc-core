@@ -61,10 +61,12 @@ unsafe fn report_param_set<B: Backend>(stmt: &StatementHandle<B>, succeeded: boo
 /// - 08S01: Communication link failure — propagated from backend.
 /// - 21S01: Insert value list does not match column list — propagated from backend.
 /// - 21S02: Degree of derived table does not match column list — propagated from backend.
-/// - 22001: String data, right truncation — returned here when converting character
-///   parameter data to the declared SQL type would truncate it: fractional digits dropped
-///   for an exact-numeric target, or whole digits lost (`crate::param_convert`, the
-///   "C to SQL: Character" table). Also propagated from backend.
+/// - 22001: String data, right truncation — returned here when a parameter value does not
+///   fit the SQL type the application declared: fractional digits dropped or whole digits
+///   lost for an exact-numeric target, or a value longer than the declared `ColumnSize` for
+///   a character or binary target (`crate::param_convert`, the "C to SQL: Character" table,
+///   and its "C to SQL: Binary" counterpart for a `SQL_C_BINARY` value bound to a binary
+///   type). Also propagated from backend.
 /// - 22002: Indicator variable required but not supplied — propagated from backend.
 /// - 22003: Numeric value out of range — returned here when character parameter data falls
 ///   outside the range of the declared approximate-numeric or `SQL_BIT` type
@@ -507,10 +509,12 @@ pub unsafe fn sql_prepare_w<B: Backend>(
 /// - 07S01: Invalid use of default parameter — propagated from backend.
 /// - 08S01: Communication link failure — propagated from backend.
 /// - 21S02: Degree of derived table does not match column list — propagated from backend.
-/// - 22001: String data, right truncation — returned here when converting character
-///   parameter data to the declared SQL type would truncate it: fractional digits dropped
-///   for an exact-numeric target, or whole digits lost (`crate::param_convert`, the
-///   "C to SQL: Character" table). Also propagated from backend.
+/// - 22001: String data, right truncation — returned here when a parameter value does not
+///   fit the SQL type the application declared: fractional digits dropped or whole digits
+///   lost for an exact-numeric target, or a value longer than the declared `ColumnSize` for
+///   a character or binary target (`crate::param_convert`, the "C to SQL: Character" table,
+///   and its "C to SQL: Binary" counterpart for a `SQL_C_BINARY` value bound to a binary
+///   type). Also propagated from backend.
 /// - 22002: Indicator variable required but not supplied — propagated from backend.
 /// - 22003: Numeric value out of range — returned here when character parameter data falls
 ///   outside the range of the declared approximate-numeric or `SQL_BIT` type

@@ -1124,6 +1124,20 @@ Everything a driver has to change for the catalog rework, in one place.
 
 ### Fixed
 
+- **`SQLBindParameter`'s `ColumnSize` is now enforced for character and binary
+  parameters.** A value longer than the declared size is rejected with `22001`
+  ("string data, right truncation") instead of reaching the backend whole, per
+  the `SQL_CHAR`, `SQL_WCHAR` and `SQL_BINARY` rows of the "C to SQL:
+  Character" conversion table and the binary row of "C to SQL: Binary". A
+  `ColumnSize` of `0` still means "no size declared" and disables the check, as
+  it already does for `SQL_DECIMAL` and `SQL_NUMERIC`. The narrow character row
+  is measured in characters rather than the spec's literal bytes, because
+  `ColumnSize` is declared in characters and a literal reading rejects valid
+  multi-byte values; the reason is recorded on `text_to_sql_type`. A
+  `SQL_C_BINARY` parameter bound to a *non*-binary SQL type is still unchecked
+  and still reaches the backend as raw bytes — that is a missing conversion
+  rather than a missing check, and is tracked on the same doc comment.
+
 - **`SQLDescribeColW` and `SQLColAttributeW` no longer report every describe
   failure as `07009` "column number out of range".** Both wrapped
   `StatementBackend::describe_col` in a `map_err(|_| ...)` that discarded the

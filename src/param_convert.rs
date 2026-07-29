@@ -22,8 +22,15 @@
 //! SQLSTATE for each outcome — which is why the failures here are 22018 /
 //! 22001 / 22003 / 22008 rather than a single general error.
 //!
+//! It also owns one row of the neighbouring [C to SQL: Binary] table — the
+//! binary-to-binary size test — because that row and this table's binary row
+//! ask the same question of the same thing: the byte string about to be sent
+//! must not exceed the declared column length. See
+//! [`check_declared_binary_size`].
+//!
 //! [Converting Data from C to SQL Data Types]: https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/converting-data-from-c-to-sql-data-types
 //! [C to SQL: Character]: https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/c-to-sql-character
+//! [C to SQL: Binary]: https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/c-to-sql-binary
 
 use odbc_sys::SqlDataType;
 
@@ -92,32 +99,53 @@ fn datetime_overflow(text: &str, what: &str) -> OdbcError {
 /// # Declared size
 ///
 /// `col_size` and `decimal_digits` are `SQLBindParameter`'s `ColumnSize` and
-/// `DecimalDigits`. They are enforced for `SQL_DECIMAL` and `SQL_NUMERIC` only
-/// — see [`check_declared_decimal_size`], which also records why the numeric
-/// and integer types need no such check.
+/// `DecimalDigits`. Every row of the table that tests a value against them is
+/// enforced here:
 ///
-/// Two rows of the table still ask for a size check that is not made here, and
-/// both are deliberate rather than forgotten:
-///
+/// - **Exact numerics.** `SQL_DECIMAL` and `SQL_NUMERIC` — see
+///   [`check_declared_decimal_size`], which also records why the four integer
+///   types need no such check.
 /// - **Character targets.** "Byte length of data > Column length" is 22001 for
 ///   `SQL_CHAR`/`SQL_VARCHAR`/`SQL_LONGVARCHAR`, and the `SQL_W*` row states
-///   the same test in *characters*. The wide row is implementable — UTF-16 code
-///   units are well defined — but the narrow one is not: "byte length" is in
-///   the data source's own encoding, which core does not know and which differs
-///   between a UTF-8 backend and a Shift-JIS one. Answering it needs a
-///   `Backend` hook, so it waits for a driver that needs one.
+///   the same test in characters. Both are measured **in characters**, and the
+///   narrow row's deviation from its own wording is deliberate: `ColumnSize`
+///   for a character column is declared in characters, and the row's byte
+///   wording dates from when the two coincided. Under UTF-8 they do not —
+///   `"äöüßx"` is five characters and nine bytes — so reading it literally
+///   would reject a value bound at its column's own declared length, which the
+///   data source would have accepted. A false 22001 is a worse outcome than
+///   the missing diagnostic this check replaced. An astral character therefore
+///   counts once against a `VARCHAR` and twice against a `WVARCHAR`; the two
+///   rows are different tests and a test pins both.
 /// - **Binary targets.** "(Byte length of data) / 2 > column byte length" is
-///   22001, and unlike the character case it has no encoding question. It is
-///   simply not done yet.
+///   22001, the halving being the hex-pair conversion — see
+///   [`check_declared_binary_size`].
 ///
-/// Until then the declared size for those targets is unenforced, and the effect
-/// is a missing diagnostic rather than wrong data: the value reaches the
-/// backend as the application wrote it, and the data source applies its own
-/// column constraints. An application relying on the driver to police its
-/// declared parameter size is not told; one relying on the data source is
-/// unaffected.
+/// A `col_size` of 0 disables all of them, for the reason
+/// [`check_declared_char_size`] records.
+///
+/// # Not done here
+///
+/// **`SQL_C_BINARY` has no conversion to a non-binary SQL type.** That is the
+/// first three rows of [C to SQL: Binary] — its two character-target rows and
+/// its exact-width 22003 row covering every numeric and datetime type — and
+/// they are deferred together because none can be answered without the
+/// conversion. [`crate::ffi::params::read_param_value`] returns
+/// [`ColumnValue::Bytes`] for every `SQL_C_BINARY` parameter whatever
+/// `sql_type` was declared, so a value bound as `SQL_INTEGER` reaches the
+/// backend as raw bytes: a wrong *value*, not a missing diagnostic, and a
+/// wider gap than anything this function currently closes. Checking a size
+/// while still sending the value wrongly would diagnose the smaller problem
+/// and leave the larger one, so the size rows wait for it. Closing it needs
+/// its own spec pass over [Converting Data from C to SQL Data Types], for byte
+/// order and for what C binary → SQL character produces.
+///
+/// That table's fourth row — binary data to a binary target — needs no
+/// conversion and *is* enforced, at the two `params.rs` sites named above.
 ///
 /// [C to SQL: Character]: https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/c-to-sql-character
+/// [C to SQL: Binary]: https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/c-to-sql-binary
+/// [Converting Data from C to SQL Data Types]: https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/converting-data-from-c-to-sql-data-types
 pub(crate) fn text_to_sql_type(
     text: &str,
     sql_type: SqlDataType,

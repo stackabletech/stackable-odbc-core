@@ -323,13 +323,14 @@ unsafe impl Sync for ColumnBinding {}
 /// Parameter binding information stored by `SQLBindParameter`.
 ///
 /// `col_size` and `decimal_digits` are `SQLBindParameter`'s `ColumnSize` and
-/// `DecimalDigits`, the declared size of the parameter. They are read for
-/// `SQL_DECIMAL` and `SQL_NUMERIC` parameters, whose precision and scale
-/// [`crate::param_convert`] enforces; for the character and binary types the
-/// declared size is recorded but not yet checked (see `text_to_sql_type`'s
-/// "Declared size" note for why). Either way they are what `SQLDescribeParam`
-/// has to report back, so dropping them would mean `SQLBindParameter`
-/// discarding the only copy of what the application declared.
+/// `DecimalDigits`, the declared size of the parameter. [`crate::param_convert`]
+/// enforces them at execute time: the precision and scale of a `SQL_DECIMAL` or
+/// `SQL_NUMERIC` parameter, the declared character length of a character one,
+/// and the declared byte length of a binary one (see `text_to_sql_type`'s
+/// "Declared size" note, and its "Not done here" note for the one target class
+/// still unchecked). They are also what `SQLDescribeParam` has to report back,
+/// so dropping them would mean `SQLBindParameter` discarding the only copy of
+/// what the application declared.
 ///
 /// `sql_type` **is** read: it is `SQLBindParameter`'s `ParameterType`, the SQL
 /// type the value is converted to before it reaches the backend. For every C
