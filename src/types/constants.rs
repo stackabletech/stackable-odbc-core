@@ -1024,6 +1024,16 @@ pub const SQL_ENSURE: u16 = 1;
 /// supports (SQL_CURSOR_FORWARD_ONLY = 0).
 pub const SQL_CURSOR_FORWARD_ONLY: usize = 0;
 
+// --- SQL_ATTR_APP_ROW_DESC / SQL_ATTR_APP_PARAM_DESC values (sql.h) ---
+/// `SQL_ATTR_APP_ROW_DESC` / `SQL_ATTR_APP_PARAM_DESC`: revert to the
+/// descriptor implicitly allocated with the statement (`SQL_NULL_DESC = 0`).
+///
+/// The same numeric value as `SQL_NULL_HANDLE`, and deliberately its own name:
+/// `SQLSetStmtAttr`'s description of these two attributes calls it
+/// `SQL_NULL_DESC` and gives it a meaning a null handle does not have — not
+/// "no descriptor", but "the one this statement started with".
+pub const SQL_NULL_DESC: usize = 0;
+
 // --- SQL_ATTR_CONNECTION_DEAD values (sqlext.h) ---
 /// SQL_ATTR_CONNECTION_DEAD: the connection is still alive (SQL_CD_FALSE = 0).
 pub const SQL_CD_FALSE: usize = 0;

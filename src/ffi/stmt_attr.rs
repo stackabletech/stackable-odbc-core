@@ -9,8 +9,8 @@ use crate::errors::{IntoOdbc, OdbcError};
 use crate::handles::StatementHandle;
 use crate::panic::panic_safe;
 use crate::types::{
-    QueryTimeout, SQL_CURSOR_FORWARD_ONLY, SQL_FALSE, SQL_UNSPECIFIED, SqlReturn, SqlState,
-    statement_attribute_from_raw,
+    QueryTimeout, SQL_CURSOR_FORWARD_ONLY, SQL_FALSE, SQL_NULL_DESC, SQL_UNSPECIFIED, SqlReturn,
+    SqlState, statement_attribute_from_raw,
 };
 
 // SQL_ATTR_CURSOR_SCROLLABLE values
@@ -243,10 +243,14 @@ fn offer_to_data_source<B: Backend, T>(
 ///   `Some`).
 /// - HY013 Memory management error: not returned; Rust panics on memory errors,
 ///   caught by `panic_safe` and converted to `SQL_ERROR`/HY000.
-/// - HY017 Invalid use of an automatically allocated descriptor handle:
-///   (driver-manager-handled; not returned here). Descriptor
-///   attributes are accepted silently because descriptors are not yet
-///   fully implemented.
+/// - HY017 Invalid use of an automatically allocated descriptor handle: **(DM)** on
+///   *both* of its clauses, and core adds neither check. The DM rejects
+///   `SQL_ATTR_IMP_ROW_DESC` / `SQL_ATTR_IMP_PARAM_DESC`, and rejects an implicitly
+///   allocated handle passed to `SQL_ATTR_APP_ROW_DESC` / `SQL_ATTR_APP_PARAM_DESC`
+///   that is not the one originally allocated for that statement's ARD or APD. Both
+///   therefore reach core unchecked, and the two implementation descriptors are
+///   accepted here. What core *does* return, for an explicitly allocated descriptor
+///   it cannot honour, is HYC00 — a different question with a different code.
 /// - HY024 Invalid attribute value: not returned. A value core cannot honour
 ///   takes one of the two paths above — 01S02 substitution on the spec's list,
 ///   HYC00 off it — rather than being rejected as invalid, since the values in
@@ -258,7 +262,9 @@ fn offer_to_data_source<B: Backend, T>(
 /// - HY117 Connection is suspended due to unknown transaction state:
 ///   (driver-manager-handled; not returned here).
 /// - HYC00 Optional feature not implemented: returned for
-///   `SQL_ATTR_USE_BOOKMARKS` other than `SQL_UB_OFF`,
+///   `SQL_ATTR_APP_ROW_DESC` / `SQL_ATTR_APP_PARAM_DESC` set to anything but
+///   `SQL_NULL_DESC` (core cannot allocate an explicit descriptor, so it cannot
+///   honour one being swapped in), `SQL_ATTR_USE_BOOKMARKS` other than `SQL_UB_OFF`,
 ///   `SQL_ATTR_RETRIEVE_DATA` = `SQL_RD_OFF`, `SQL_ATTR_CURSOR_SENSITIVITY` =
 ///   `SQL_SENSITIVE`, `SQL_ATTR_ENABLE_AUTO_IPD` = `SQL_TRUE` (a case the
 ///   spec's own HYC00 row names), and `SQL_ATTR_ASYNC_ENABLE` =
@@ -431,21 +437,45 @@ pub unsafe fn sql_set_stmt_attr_w<B: Backend>(
                     Ok(SqlReturn::SUCCESS)
                 }
 
-                // Descriptor handle attrs (AppRowDesc, AppParamDesc, ImpRowDesc,
-                // ImpParamDesc): accept silently; we don't implement descriptors yet.
-                Some(
-                    StatementAttribute::AppRowDesc
-                    | StatementAttribute::AppParamDesc
-                    | StatementAttribute::ImpRowDesc
-                    | StatementAttribute::ImpParamDesc,
-                ) => {
-                    tracing::warn!(
-                        "SQLSetStmtAttrW: descriptor attribute {} ({:?}) ignored \
-                         (descriptors not yet implemented)",
-                        attribute,
+                // The two implementation descriptors are read-only, but saying
+                // so is the Driver Manager's job, not core's: `SQLSetStmtAttr`'s
+                // HY017 row marks *both* of its clauses (DM). A driver-side
+                // check here would return a code the spec assigns to the DM,
+                // which the project's non-negotiable rule forbids.
+                Some(StatementAttribute::ImpRowDesc | StatementAttribute::ImpParamDesc) => {
+                    tracing::debug!(
+                        "SQLSetStmtAttrW: {:?} reached the driver; HY017 is (DM), so it is \
+                         accepted here",
                         attr
                     );
                     Ok(SqlReturn::SUCCESS)
+                }
+
+                // An application descriptor. `SQL_NULL_DESC` means "revert to
+                // the descriptor implicitly allocated with this statement",
+                // which is the only state core has, so it is a genuine no-op
+                // success rather than a refusal. Any other value is an
+                // explicitly allocated descriptor, and core cannot allocate one
+                // at all — `SQLAllocHandle` refuses `SQL_HANDLE_DESC` with
+                // HYC00 — so it cannot honour one being swapped in either.
+                //
+                // This used to accept every value with a warning and ignore it,
+                // which told the application its own ARD was in use when the
+                // statement's was.
+                Some(StatementAttribute::AppRowDesc | StatementAttribute::AppParamDesc) => {
+                    if int_val == SQL_NULL_DESC {
+                        tracing::debug!(
+                            "SQLSetStmtAttrW: {:?} set to SQL_NULL_DESC (revert to the implicit \
+                             descriptor); no-op",
+                            attr
+                        );
+                        return Ok(SqlReturn::SUCCESS);
+                    }
+                    Err(OdbcError::NotImplemented {
+                        feature: format!(
+                            "SQLSetStmtAttr: {attr:?} set to an explicitly allocated descriptor"
+                        ),
+                    })
                 }
 
                 // Only single-row rowsets are implemented: SQLFetch reads one
@@ -1061,6 +1091,85 @@ mod tests {
                 usize::from(SQL_UNSPECIFIED),
                 "SQLGetStmtAttr reported a different cursor sensitivity than SQLGetInfo"
             );
+
+            cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
+    /// `SQL_NULL_DESC` means "revert to the descriptor implicitly allocated
+    /// with this statement", and that implicit descriptor is the only state
+    /// core has — so this is a legitimate no-op success, not a refusal. The
+    /// regression guard against over-refusing once the arm below started
+    /// refusing anything.
+    #[test]
+    fn setting_an_application_descriptor_to_null_desc_succeeds() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+
+            for attr in [
+                StatementAttribute::AppRowDesc,
+                StatementAttribute::AppParamDesc,
+            ] {
+                let ret = sql_set_stmt_attr_w::<MockBackend>(
+                    stmt,
+                    attr as i32,
+                    std::ptr::without_provenance_mut(SQL_NULL_DESC),
+                    0,
+                );
+                assert_eq!(ret, SqlReturn::SUCCESS, "{attr:?} with SQL_NULL_DESC");
+
+                with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+                    assert_eq!(
+                        handle.diagnostics.len(),
+                        0,
+                        "{attr:?} with SQL_NULL_DESC posted a diagnostic"
+                    );
+                });
+            }
+
+            cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
+    /// Core cannot allocate an explicit descriptor — `SQLAllocHandle` refuses
+    /// `SQL_HANDLE_DESC` with HYC00 — so it cannot honour one being swapped in.
+    /// It used to accept and ignore, which told the application its own
+    /// descriptor was in use when the statement's was.
+    ///
+    /// There is deliberately no counterpart for `SQL_ATTR_IMP_ROW_DESC` or
+    /// `SQL_ATTR_IMP_PARAM_DESC`: HY017 is **(DM)** on both clauses, so a test
+    /// there would pin behaviour the driver must not have.
+    #[test]
+    fn setting_an_application_descriptor_to_a_handle_reports_hyc00() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+
+            for attr in [
+                StatementAttribute::AppRowDesc,
+                StatementAttribute::AppParamDesc,
+            ] {
+                // Any non-null value: the point is that core refuses to pretend
+                // it applied one, not that this particular token resolves.
+                let ret = sql_set_stmt_attr_w::<MockBackend>(
+                    stmt,
+                    attr as i32,
+                    std::ptr::without_provenance_mut(0x1234usize),
+                    0,
+                );
+                assert_eq!(ret, SqlReturn::ERROR, "{attr:?} swap was accepted");
+
+                with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+                    let record = handle
+                        .diagnostics
+                        .get(0)
+                        .expect("no diagnostic was recorded for the refused swap");
+                    assert_eq!(
+                        record.sqlstate.as_str(),
+                        crate::types::sql_state::OPTIONAL_FEATURE_NOT_IMPLEMENTED,
+                        "{attr:?} was refused with the wrong SQLSTATE"
+                    );
+                });
+            }
 
             cleanup_env_conn_stmt(env, conn, stmt);
         }
