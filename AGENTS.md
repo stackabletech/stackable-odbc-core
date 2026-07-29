@@ -17,7 +17,7 @@ framework itself and, where relevant, how a downstream driver crate consumes it.
 | [Converting raw values](#converting-raw-values-to-strongly-typed-enums) | Handling raw integers from the C ABI |
 | [Adding a new driver](#adding-a-new-driver) | Creating a new backend crate on top of core |
 | [Testing](#testing) | Writing tests, or running Miri / fuzz |
-| [Descriptors](#descriptors) | Touching a binding, a descriptor, or a statement attribute that is a header field |
+| [Descriptors](#descriptors) | Touching a binding, a descriptor field, the `HY021` consistency check, or a statement attribute that is a header field |
 | [Concurrency: the lock discipline](#concurrency-the-lock-discipline) | Understanding the per-connection lock, `HandleScope`, `SQLCancel`'s exemption, or loom |
 | [Architecture](#architecture) | Understanding call flow or crate layout |
 
@@ -803,69 +803,113 @@ there is one storage, not a binding map beside a descriptor:
 
 | Descriptor | Field | Records | What they are |
 |---|---|---|---|
-| ARD | `app_row_desc` | `ColumnBinding` | what `SQLBindCol` set |
-| APD | `app_param_desc` | `ApdRecord` | `SQLBindParameter`'s C-side buffer |
-| IPD | `imp_param_desc` | `IpdRecord` | `SQLBindParameter`'s declared SQL type |
-| IRD | `imp_row_desc` | `()` | deliberately unbacked |
+| ARD | `app_row_desc` | `DescriptorRecord` | what `SQLBindCol` set |
+| APD | `app_param_desc` | `DescriptorRecord` | `SQLBindParameter`'s C-side buffer |
+| IPD | `imp_param_desc` | `DescriptorRecord` | `SQLBindParameter`'s declared SQL type |
+| IRD | `imp_row_desc` | none stored | computed from `ColumnDescriptor` on read |
 
-`Descriptor<R>` is generic over the record type so a role mismatch cannot be
-written. Four points follow, and each of them has already been the wrong answer
+`Descriptor` carries a `role: DescriptorRole` rather than a type parameter,
+because ODBC has one record shape and four *readings* of it: `SQLSetDescField`
+accepts any field identifier against any descriptor and decides validity from
+the role. Six points follow, and each of them has already been the wrong answer
 once:
 
-- **`SQLBindParameter` writes two descriptors.** The C-side fields are an
-  `ApdRecord` and the declared type is an `IpdRecord`, under the same key,
-  removed together. One struct spanning both is what makes `SQLSetDescField`
+- **`SQLBindParameter` writes two descriptors.** The C-side fields are an APD
+  record and the declared type is an IPD record, under the same key, removed
+  together. One record spanning both is what makes `SQLSetDescField`
   unimplementable. Readers take `ParamRecord<'_>`, a borrowed view of both
   halves, from `ParamRecords::get`.
-- **The IRD is unbacked on purpose.** `SQLDescribeColW` and `SQLColAttributeW`
-  answer from `ColumnDescriptor` directly, so backing it would mean deciding
-  when it is populated, what `SQLMoreResults` does to it and what a pre-execute
-  read returns — and inventing a second source of truth for column metadata is
-  the failure this whole model exists to prevent. `()` says so at the type
-  level. D3/D4 decide.
+- **The IRD is a computed view, never stored state.** `SQLGetDescField` and
+  `SQLGetDescRec` on the IRD delegate to `col_attr::get_column_attribute`, which
+  is also `SQLColAttributeW`'s implementation — the two are spellings of one
+  question, and answering them from two places is how they come to differ. A
+  read before the statement has produced column metadata is `HY007`; the spec:
+  "Until the IRD has been populated, any attempt to gain access to a field of an
+  IRD will return an error." A write is `HY016`, except the two header fields
+  that row exempts by name.
+- **A binding is a non-null `SQL_DESC_DATA_PTR`, not a present key.** A record
+  exists as soon as any one field is set, so `records.contains_key` stopped
+  answering "is this bound". Every site that tests boundness calls
+  `DescriptorRecord::is_bound`. The visible half of getting this wrong is the
+  *indicator*: `write_column_value` declines to write through a null target but
+  writes the length indicator unconditionally.
+- **`set_concise_type` is the only writer of the type trio.** Setting
+  `SQL_DESC_CONCISE_TYPE` also sets `SQL_DESC_TYPE` and
+  `SQL_DESC_DATETIME_INTERVAL_CODE`, and the subcode is **not** the concise type
+  — `SQL_TYPE_DATE` is 91 and `SQL_CODE_DATE` is 1. `col_attr` holds both
+  mappings (`verbose_type` and `datetime_interval_subcode`) so the descriptor
+  and `SQLColAttribute` cannot disagree about one column.
 - **Eight statement attributes are descriptor header fields**, per
   `SQLSetStmtAttr`'s own mapping table, which says setting one sets the other.
   `HeaderOwner::of` names them and `StatementHandle::attr_store(_mut)` is the
   only way to reach an attribute's storage, so `stmt.attrs` no longer holds
-  those keys at all. The four IRD- and IPD-side pairs
+  those keys at all. `descriptor::header_attribute` is the same table read in
+  the other direction, for `SQLGetDescField`. The four IRD- and IPD-side pairs
   (`SQL_ATTR_ROW_STATUS_PTR`, `SQL_ATTR_ROWS_FETCHED_PTR`,
-  `SQL_ATTR_PARAM_STATUS_PTR`, `SQL_ATTR_PARAMS_PROCESSED_PTR`) are absent
-  deliberately and stay on `stmt.attrs`.
+  `SQL_ATTR_PARAM_STATUS_PTR`, `SQL_ATTR_PARAMS_PROCESSED_PTR`) stay on
+  `stmt.attrs`, and `attr_store` routes them there so no caller needs to know.
 - **`odbc-sys` misspells one of the eight.** `SQL_ATTR_PARAM_OPERATION_PTR` is
   `StatementAttribute::ParamOpterationPtr` — transposed letters, upstream. A
   grep for the correct spelling finds nothing and reads as "core does not
   implement it", which is false.
 
+#### The consistency check runs at all four sites
+
+`descriptor::consistency_check` returns `HY021`, and `SQLSetDescRec`'s own
+"Consistency Checks" section says when it runs: "This check is always performed
+when **SQLBindParameter** or **SQLBindCol** is called or when **SQLSetDescRec**
+is called for an APD, ARD, or IPD" — plus `SQLSetDescField` when it sets
+`SQL_DESC_DATA_PTR`.
+
+**So `SQLBindCol` and `SQLBindParameter` can now fail where they did not.** That
+was taken deliberately; `CHANGELOG.md` carries it as a migration note. The
+function's doc comment lists all five of the spec's clauses and states which
+core reduces and why — it supports no interval types, so the interval clauses
+become the converse check.
+
+A value core cannot honour must be refused identically through both doors:
+`SQL_DESC_ARRAY_SIZE` set through `SQLSetDescField` routes through the same
+`01S02` substitution `SQLSetStmtAttr(SQL_ATTR_ROW_ARRAY_SIZE)` applies, because
+they are one value.
+
 #### Reaching a descriptor
 
 **Through the statement's own field, or resolved alone — never both at once.**
 There is no `stmt_with_desc` combinator and there must not be: the four
-`Box<Descriptor<_>>` fields *are* reachable through `StatementHandle`'s `&mut`,
+`Box<Descriptor>` fields *are* reachable through `StatementHandle`'s `&mut`,
 so a combinator built like `stmt_with_parent` would alias under Stacked/Tree
 Borrows even though the two addresses differ (see `handles/scope.rs`).
 
-`Descriptor<R>` therefore has **no `HasKind` impl**, and that is load-bearing
+`Descriptor` therefore has **no `HasKind` impl**, and that is load-bearing
 rather than an omission. `HandleScope::get` dispatches on `HandleKind` alone and
-all four descriptors register as `HandleKind::Desc`, so
-`get::<Descriptor<A>>` on a token naming a `Descriptor<B>` would pass every
-check the registry can make and hand back the wrong type. Without the impl it
-does not compile.
+all four descriptors register as `HandleKind::Desc`, so `get::<Descriptor>` on a
+token would resolve any one of a statement's four as any other, passing every
+check the registry can make. Without the impl it does not compile.
 
-What resolves a descriptor token instead is `HandleScope::descriptor_diagnostics`,
+What resolves a descriptor token instead is `HandleScope::descriptor_owner`,
 which reads `Slot::parent` for the owning statement and compares the token
-against its four fields. That identifies the role exactly, rather than assuming
-it, and reaches the descriptor through the statement — the only form the borrow
-rule permits. Anything D3 adds should be built the same way.
+against its four fields, returning `(&mut StatementHandle<B>, DescriptorRole)`.
+Returning the *statement* is what makes the IRD-as-view workable — the column
+metadata and the descriptor are both fields of the one statement, so one borrow
+reaches both — and it is the only form the borrow rule permits.
+`descriptor_diagnostics` is a thin wrapper on it, and
+`StatementHandle::descriptor_mut` turns the role back into the field.
 
 #### What is still missing
 
-`SQLGetDescFieldW`, `SQLSetDescFieldW` and `SQLSetDescRec` are exported and
-answer `HYC00` with a posted diagnostic (`src/ffi/desc.rs`); `SQLGetDescRec` and
-`SQLCopyDesc` are not exported. None of the five is reported supported by
-`SQLGetFunctions`, and `SQLAllocHandle(SQL_HANDLE_DESC)` refuses with `HYC00`.
-The symbols stay exported because a NULL in the Windows Driver Manager's
-dispatch table is a crash, not an error — so "has a symbol" and "is reported
-supported" deliberately disagree here, and a test pins both halves.
+`SQLGetDescFieldW`, `SQLSetDescFieldW`, `SQLGetDescRecW` and `SQLSetDescRec` are
+implemented over the four descriptors a statement owns, and `SQLGetFunctions`
+reports all four supported. What remains is D4: **explicit** descriptors —
+`SQLAllocHandle(SQL_HANDLE_DESC)`, which still refuses with `HYC00`, and
+`SQLCopyDesc`, which is neither exported nor advertised.
+
+D4 is the harder half, and the reason is architectural rather than clerical: an
+explicit descriptor is allocated against a **connection**, so it has no owning
+statement and `descriptor_owner`'s parent routing does not reach it. A statement
+must be able to use a descriptor it does not own, and several statements may
+share one, so `StatementHandle`'s four owned `Box` fields become a reference of
+some kind — which is the registry, lock-group and Stacked-Borrows work the
+D1/D2 design flagged.
 
 `SQLSetStmtAttrW` accepts `SQL_ATTR_APP_ROW_DESC` / `SQL_ATTR_APP_PARAM_DESC`
 only as `SQL_NULL_DESC` (revert to the implicit descriptor, which is the only
@@ -873,11 +917,9 @@ state core has) and answers `HYC00` otherwise. It does **not** check
 `SQL_ATTR_IMP_ROW_DESC` / `SQL_ATTR_IMP_PARAM_DESC`: `HY017` is `(DM)` on
 *both* of its clauses, so core adds neither check.
 
-D3 (the four accessor functions over the implicit descriptors) and D4 (explicit
-descriptors, `SQLAllocHandle(SQL_HANDLE_DESC)`, `SQLCopyDesc`, and the registry
-and Stacked-Borrows work they carry) remain. **`SQL_OIC_CORE` is not satisfied
-yet** — Core-level conformance requires working descriptors, and what has landed
-so far only makes the driver's self-description true.
+**`SQL_OIC_CORE` is not satisfied yet** — Core-level conformance requires
+working descriptors, and a statement's own descriptors being real is not the
+whole of that. D4 is what closes it.
 
 ### Fuzzing
 
@@ -1037,6 +1079,7 @@ Generic framework. Zero database-specific code.
 | `conformance.rs` | Shared support for the `SQLGetInfoW` info-type conformance test (return shape + Driver-Manager-safe value), reused by core and by driver test suites |
 | `escape.rs` | ODBC escape-sequence translation (`{fn}`, `{d/t/ts}`, `{oj}`, `{escape}`); a shared scanner with a per-backend `EscapeDialect` |
 | `errors.rs` | `OdbcError` with SQLSTATE mapping and `SqlReturn` conversion |
+| `descriptor.rs` | `DescriptorRecord`, `DescriptorRole`, the per-role field tables (`field_access`, the sole authority on `HY091`), the header-field mapping, and the `HY021` consistency check. No FFI, no handles |
 | `diagnostics.rs` | Per-handle diagnostic queue (`SQLGetDiagRecW` reads from here) |
 | `handles/mod.rs` | `EnvironmentHandle<B>`, `ConnectionHandle<B>`, `StatementHandle<B>`, alloc/free (`pub(crate)`) |
 | `handles/registry.rs` | The live-handle table (`Registry`, `Slot`), per-connection `GroupLock`s, cancel tokens, and the loom models (`#[cfg(all(test, loom))] mod loom_tests`) |
@@ -1058,6 +1101,7 @@ Generic framework. Zero database-specific code.
 | `ffi/metadata.rs` | `sql_describe_col_w<B>`, `sql_col_attribute_w<B>`, `sql_tables_w<B>`, `sql_columns_w<B>`, `sql_primary_keys_w<B>`, `sql_foreign_keys_w<B>`, `sql_statistics_w<B>`, `sql_special_columns_w<B>`, `sql_procedures_w<B>`, `sql_procedure_columns_w<B>`, `sql_column_privileges_w<B>`, `sql_table_privileges_w<B>` |
 | `ffi/params.rs` | `sql_bind_parameter<B>`, `sql_num_params<B>`, `sql_describe_param<B>`, `sql_put_data<B>`, `sql_param_data<B>` |
 | `ffi/bind.rs` | `sql_bind_col<B>` |
+| `ffi/desc.rs` | `sql_get_desc_field_w<B>`, `sql_set_desc_field_w<B>`, `sql_get_desc_rec_w<B>`, `sql_set_desc_rec<B>` — argument marshalling over `descriptor.rs`'s tables |
 | `ffi/stmt_attr.rs` | `sql_set_stmt_attr_w<B>`, `sql_get_stmt_attr_w<B>` |
 | `ffi/info.rs` | `sql_get_info_w<B>`, `sql_get_type_info<B>`, `sql_get_functions<B>` |
 | `ffi/tran.rs` | `sql_end_tran<B>` |

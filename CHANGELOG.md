@@ -18,6 +18,24 @@ baseline that a driver built against it has to act on when it moves to this
 crate, which is what the two sibling drivers are doing. At the 0.1.0 cut these
 markers go away and this section becomes the initial-release notes.
 
+### Migration: SQLBindCol and SQLBindParameter now run the consistency check
+
+The ODBC spec requires a consistency check whenever `SQL_DESC_DATA_PTR` is set,
+and states that it "is always performed when **SQLBindParameter** or
+**SQLBindCol** is called". Core did not perform it; it now does, at all four
+sites, returning `HY021` (inconsistent descriptor information).
+
+**A bind that succeeded before can now fail.** The checks are the spec's own:
+the type must be a valid ODBC C or SQL type or a driver-specific SQL type; a
+numeric type's precision and scale must be valid for it; a datetime or interval
+type's `SQL_DESC_DATETIME_INTERVAL_CODE` must be one of the valid codes. A
+driver whose tests bind, say, `SQL_DECIMAL` with a `DecimalDigits` larger than
+its `ColumnSize` will see that call start returning `SQL_ERROR`.
+
+Run your driver's test suite against this version before shipping it. If a bind
+that your data source genuinely accepts is now rejected, that is a bug in the
+check and not in your driver — report it rather than working around it.
+
 ### Migration: the catalog functions
 
 Everything a driver has to change for the catalog rework, in one place.
@@ -55,6 +73,23 @@ Everything a driver has to change for the catalog rework, in one place.
    functions must *not* check it, and do not.
 
 ### Added
+
+- **The descriptor fields are reachable.** `SQLGetDescFieldW`,
+  `SQLSetDescFieldW`, `SQLGetDescRecW` and `SQLSetDescRec` are implemented over
+  the four descriptors a statement owns, and `SQLGetFunctions` reports them
+  supported. A binding built entirely through `SQLSetDescField` is a binding:
+  `SQLFetch` writes through it, because ODBC makes a bound column *be* an ARD
+  record and core now has one storage rather than two. The IRD is answered as a
+  computed view over the same `ColumnDescriptor` `SQLColAttributeW` reads, so
+  the two cannot disagree about a column; a read before the statement is
+  prepared or executed is `HY007`, as the spec requires.
+
+  `SQLGetDescRecW` is newly exported — the `W` suffix because it takes a `Name`
+  buffer, and the project exports every string-bearing function in its Wide form
+  only.
+
+  `SQLCopyDesc` and `SQLAllocHandle(SQL_HANDLE_DESC)` remain unimplemented, so
+  **`SQL_OIC_CORE` is still not satisfied**.
 
 - **A guard test that the set of group-lock acquisition sites is closed**
   (`the_set_of_group_lock_acquisition_sites_is_closed`, `handles/registry.rs`).
@@ -482,6 +517,20 @@ Everything a driver has to change for the catalog rework, in one place.
   tables, while the identical sentence in the other two is not.
 
 ### Changed
+
+- **One descriptor record type.** `ColumnBinding`, `ApdRecord` and `IpdRecord`
+  become a single `DescriptorRecord` carrying every `SQL_DESC_*` record field,
+  which is ODBC's own model — each descriptor role uses a subset, and that is
+  why `SQLSetDescField` takes any field identifier against any descriptor.
+  `Descriptor` loses its type parameter and gains a `role`. Which descriptor
+  holds what is unchanged: a bound parameter is still one record in the APD and
+  one in the IPD.
+
+- **A binding is a non-null `SQL_DESC_DATA_PTR`, not a present key.** Records
+  now exist as soon as any field is set, so `SQLFetch` and the parameter
+  collectors test the data pointer rather than the record's presence. No
+  exported behaviour changes for an application that binds through `SQLBindCol`
+  and `SQLBindParameter`, which still create and remove records whole.
 
 - **Column and parameter bindings now live in the descriptors that own them.**
   ODBC makes a binding *be* a descriptor record rather than a copy of one, and
@@ -1152,21 +1201,21 @@ Everything a driver has to change for the catalog rework, in one place.
   and a second mapping is a second thing to be wrong; every writer of
   `SQL_DESC_CONCISE_TYPE` and both readers share it.
 
-- **The descriptor functions no longer fail silently, and are no longer
-  advertised.** `SQLGetDescFieldW`, `SQLSetDescFieldW` and `SQLSetDescRec`
-  returned a bare `SQL_ERROR` with no diagnostic record, so an application knew
-  something had failed and could not learn what. They now return `HYC00` with a
-  retrievable diagnostic, posted on the descriptor handle the call named — which
-  needed a diagnostic queue on the descriptor, and a way to reach it. `HYC00` is
-  in none of the three functions' diagnostics tables, and `src/ffi/desc.rs`'s
-  module docs record why it is used anyway: `IM001` is the exact meaning but is
-  **(DM)** on all three pages, and `HY000` is the catch-all that distinguishes
-  nothing. `SQLGetFunctions` no longer reports any of the five descriptor
-  functions supported. The three symbols stay exported, because a NULL entry in
-  the Windows Driver Manager's dispatch table is a crash rather than an error —
-  so "has a symbol" and "is reported supported" now deliberately disagree, and a
-  test pins both halves. **This does not make `SQL_OIC_CORE` true**; it makes the
-  driver's self-description true, which is a smaller claim. D3 and D4 remain.
+- **The descriptor functions no longer fail silently.** `SQLGetDescFieldW`,
+  `SQLSetDescFieldW` and `SQLSetDescRec` returned a bare `SQL_ERROR` with no
+  diagnostic record, so an application knew something had failed and could not
+  learn what. Fixing that gave each descriptor a diagnostic queue of its own and
+  a way to reach it — through the owning statement, since `HandleKind::Desc` is
+  one kind covering four roles — which is what the implementations above are
+  built on.
+
+  The intermediate step, where the three answered `HYC00` and `SQLGetFunctions`
+  reported all five descriptor functions unsupported, is superseded within this
+  same unreleased cycle: four of the five are now implemented and advertised.
+  What survives it is the rule that produced it — `SQLGetFunctions` must not
+  claim a function before it works, and of the two available lies, reporting a
+  function supported when it is not is the more damaging one. `SQLCopyDesc` is
+  still held to it.
 
 - **`SQLSetStmtAttrW` no longer accepts a descriptor swap it cannot honour.**
   Setting `SQL_ATTR_APP_ROW_DESC` or `SQL_ATTR_APP_PARAM_DESC` to an explicitly
