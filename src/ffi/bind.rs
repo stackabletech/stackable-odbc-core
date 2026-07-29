@@ -3,7 +3,7 @@
 use std::ffi::c_void;
 
 use crate::backend::Backend;
-use crate::descriptor::DescriptorRecord;
+use crate::descriptor::{DescriptorRecord, DescriptorRole};
 use crate::handles::StatementHandle;
 use crate::panic::panic_safe;
 use crate::types::SqlReturn;
@@ -107,17 +107,19 @@ pub unsafe fn sql_bind_col<B: Backend>(
                     c_type,
                     buffer_length
                 );
-                stmt.app_row_desc.records.insert(
-                    column_number,
-                    DescriptorRecord {
-                        concise_type: c_type as i16,
-                        verbose_type: c_type as i16,
-                        data_ptr: target_value_ptr,
-                        octet_length: buffer_length,
-                        indicator_ptr: str_len_or_ind_ptr,
-                        ..DescriptorRecord::default()
-                    },
-                );
+                let mut record = DescriptorRecord {
+                    data_ptr: target_value_ptr,
+                    octet_length: buffer_length,
+                    indicator_ptr: str_len_or_ind_ptr,
+                    ..DescriptorRecord::default()
+                };
+                record.set_concise_type(c_type as i16);
+                // Spec HY021, `SQLSetDescRec`'s "Consistency Checks": "This
+                // check is always performed when SQLBindParameter or
+                // SQLBindCol is called". Before the insert, so a rejected bind
+                // leaves the previous binding — or no binding — in place.
+                crate::descriptor::consistency_check(&record, DescriptorRole::Ard)?;
+                stmt.app_row_desc.records.insert(column_number, record);
             }
 
             Ok(SqlReturn::SUCCESS)
@@ -233,6 +235,51 @@ mod tests {
                 assert_eq!(record.data_ptr, buf_ptr);
                 assert_eq!(record.octet_length, std::mem::size_of::<i64>() as isize);
                 assert_eq!(record.indicator_ptr, indicator_ptr);
+            });
+
+            cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
+    /// The consistency check runs at `SQLBindCol` too, and a datetime column is
+    /// where it would wrongly fire.
+    ///
+    /// `SQL_DESC_DATETIME_INTERVAL_CODE` holds the *subcode* — `SQL_CODE_DATE`
+    /// is 1 — while the concise type is `SQL_TYPE_DATE`, which is 91. A record
+    /// built by copying the concise type into the subcode would carry 91 in a
+    /// field whose only legal datetime values are 1, 2 and 3, and the check
+    /// would then reject a binding that has nothing wrong with it. That is the
+    /// one way this task could have broken an existing driver silently.
+    #[test]
+    fn bind_col_accepts_a_date_column_and_records_its_subcode() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            let mut buf = [0u8; 6];
+            let buf_ptr = buf.as_mut_ptr().cast::<c_void>();
+
+            let ret = sql_bind_col::<MockBackend>(
+                stmt,
+                1,
+                CDataType::TypeDate as i16,
+                buf_ptr,
+                buf.len() as isize,
+                std::ptr::null_mut(),
+            );
+            assert_eq!(
+                ret,
+                SqlReturn::SUCCESS,
+                "the consistency check rejected a plain SQL_C_TYPE_DATE binding"
+            );
+
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+                let record = handle
+                    .app_row_desc
+                    .records
+                    .get(&1)
+                    .expect("SQLBindCol did not write a record into the ARD");
+                assert_eq!(record.concise_type, CDataType::TypeDate as i16);
+                assert_eq!(record.verbose_type, crate::types::SQL_DATETIME);
+                assert_eq!(record.datetime_interval_code, crate::types::SQL_CODE_DATE);
             });
 
             cleanup_env_conn_stmt(env, conn, stmt);

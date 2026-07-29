@@ -155,6 +155,177 @@ impl DescriptorRecord {
     pub fn is_bound(&self) -> bool {
         !self.data_ptr.is_null()
     }
+
+    /// Set `SQL_DESC_CONCISE_TYPE`, and with it the two fields the spec makes
+    /// follow from it.
+    ///
+    /// "When the SQL_DESC_CONCISE_TYPE field is set, the SQL_DESC_TYPE field is
+    /// set to the corresponding verbose type, and the
+    /// SQL_DESC_DATETIME_INTERVAL_CODE field is set to the corresponding
+    /// subcode." One act, not three, so every writer of a concise type goes
+    /// through here — `SQLBindCol`, `SQLBindParameter`, `SQLSetDescField` and
+    /// `SQLSetDescRec` alike. A site that set the three itself would be one
+    /// datetime bind away from failing its own consistency check.
+    pub fn set_concise_type(&mut self, concise: i16) {
+        self.concise_type = concise;
+        self.verbose_type = crate::types::col_attr::verbose_type(SqlDataType(concise));
+        self.datetime_interval_code = datetime_interval_subcode(concise);
+    }
+}
+
+/// The `SQL_DESC_DATETIME_INTERVAL_CODE` a concise datetime or interval type
+/// implies, or `0` for a type that is neither.
+///
+/// The subcode is **not** the concise type. `sqlext.h` builds one from the
+/// other — `SQL_TYPE_DATE` is 91 and `SQL_CODE_DATE` is 1, `SQL_INTERVAL_YEAR`
+/// is defined as `100 + SQL_CODE_YEAR` — so returning the concise type here
+/// would put 91 in a field whose only legal datetime values are 1, 2 and 3, and
+/// the consistency check would then reject a `SQL_C_TYPE_DATE` binding that has
+/// nothing wrong with it.
+///
+/// The spec leaves the field undefined for a type that is neither family, and
+/// `0` is both what an application tests against and what the consistency
+/// check requires there.
+fn datetime_interval_subcode(concise: i16) -> i16 {
+    use crate::types::{SQL_CODE_DATE, SQL_CODE_TIME, SQL_CODE_TIMESTAMP};
+    // `odbc-sys` names the ODBC 3.x concise codes 91/92/93 `DATE`/`TIME`/
+    // `TIMESTAMP`; the 2.x spellings of those names are 9/10/11, which are the
+    // verbose values and are deliberately not datetime concise types here. See
+    // `col_attr::verbose_type`'s note.
+    match SqlDataType(concise) {
+        SqlDataType::DATE => SQL_CODE_DATE,
+        SqlDataType::TIME => SQL_CODE_TIME,
+        SqlDataType::TIMESTAMP => SQL_CODE_TIMESTAMP,
+        // The `SQL_INTERVAL_*` concise codes, which `sqlext.h` defines as
+        // `100 + SQL_CODE_xxx`. Core supports no interval types, so nothing
+        // reaches here through a bind; `SQLSetDescField` can still write one.
+        _ if (INTERVAL_TYPE_BASE + 1..=INTERVAL_TYPE_BASE + MAX_INTERVAL_SUBCODE)
+            .contains(&concise) =>
+        {
+            concise - INTERVAL_TYPE_BASE
+        }
+        _ => 0,
+    }
+}
+
+/// `sqlext.h` defines each `SQL_INTERVAL_*` concise type as this plus its
+/// `SQL_CODE_*` subcode.
+const INTERVAL_TYPE_BASE: i16 = 100;
+
+/// `SQL_CODE_MINUTE_TO_SECOND`, the last of the interval subcodes.
+const MAX_INTERVAL_SUBCODE: i16 = 13;
+
+/// The spec's consistency check, returning `HY021`.
+///
+/// `SQLSetDescRec`'s "Consistency Checks" section, which states when it runs:
+/// "This check is always performed when **SQLBindParameter** or **SQLBindCol**
+/// is called or when **SQLSetDescRec** is called for an APD, ARD, or IPD" —
+/// and `SQLSetDescField` adds a fourth site, when it sets
+/// `SQL_DESC_DATA_PTR`. All four call this.
+///
+/// The five clauses, and what core does with each:
+///
+/// 1. **"The SQL_DESC_TYPE field must be one of the valid ODBC C or SQL types
+///    or a driver-specific SQL type."** Checked for an ARD and APD, where the
+///    type is a C type and the set is closed. Not checked for an IPD: "or a
+///    driver-specific SQL type" leaves no value to reject, since a driver may
+///    define any of them.
+/// 2. **"If the SQL_DESC_TYPE field is SQL_DATETIME or SQL_INTERVAL, the
+///    SQL_DESC_DATETIME_INTERVAL_CODE field must be one of the valid datetime
+///    or interval codes."** Checked for datetime. **Reduced for interval:**
+///    core supports no interval types, so it cannot enumerate their codes, and
+///    the half of the clause it can act on is the converse — a datetime or
+///    interval subcode on a type that has neither is rejected.
+/// 3. **"If the type is numeric, the SQL_DESC_PRECISION and SQL_DESC_SCALE
+///    fields are verified to be valid."** Checked for the exact numeric types,
+///    where both fields are defined: a negative precision or scale, or a scale
+///    exceeding the precision.
+/// 4. **"If SQL_DESC_CONCISE_TYPE is a time or timestamp type, or an interval
+///    with a seconds component, SQL_DESC_PRECISION is a valid seconds
+///    precision."** Checked for time and timestamp. **Reduced for interval,**
+///    as clause 2.
+/// 5. **"If SQL_DESC_CONCISE_TYPE is an interval type,
+///    SQL_DESC_DATETIME_INTERVAL_PRECISION is a valid interval leading
+///    precision."** **Not checked:** core supports no interval types, so there
+///    is no leading precision it could validate against.
+pub fn consistency_check(record: &DescriptorRecord, role: DescriptorRole) -> Result<(), OdbcError> {
+    use crate::types::{
+        SQL_CODE_DATE, SQL_CODE_TIME, SQL_CODE_TIMESTAMP, SQL_DATETIME, SQL_INTERVAL,
+    };
+
+    let concise = record.concise_type;
+
+    // Clause 1.
+    if matches!(role, DescriptorRole::Ard | DescriptorRole::Apd)
+        && c_data_type_from_raw(concise).is_none()
+    {
+        return Err(inconsistent(format!(
+            "SQL_DESC_CONCISE_TYPE {concise} is not an ODBC C data type"
+        )));
+    }
+
+    // Clause 2.
+    let verbose = crate::types::col_attr::verbose_type(SqlDataType(concise));
+    if verbose == SQL_DATETIME {
+        if !matches!(
+            record.datetime_interval_code,
+            SQL_CODE_DATE | SQL_CODE_TIME | SQL_CODE_TIMESTAMP
+        ) {
+            return Err(inconsistent(format!(
+                "SQL_DESC_DATETIME_INTERVAL_CODE {} is not a valid datetime code",
+                record.datetime_interval_code
+            )));
+        }
+    } else if verbose != SQL_INTERVAL && record.datetime_interval_code != 0 {
+        return Err(inconsistent(format!(
+            "SQL_DESC_DATETIME_INTERVAL_CODE is {} on type {concise}, which is neither \
+             a datetime nor an interval type",
+            record.datetime_interval_code
+        )));
+    }
+
+    // Clause 3. The exact numerics are the types for which the spec defines
+    // both fields; for every other type SQL_DESC_SCALE is undefined, so there
+    // is nothing to verify it against.
+    if concise == SqlDataType::DECIMAL.0 || concise == SqlDataType::NUMERIC.0 {
+        if record.precision < 0 || record.scale < 0 {
+            return Err(inconsistent(format!(
+                "SQL_DESC_PRECISION {} and SQL_DESC_SCALE {} must not be negative",
+                record.precision, record.scale
+            )));
+        }
+        if record.scale > record.precision {
+            return Err(inconsistent(format!(
+                "SQL_DESC_SCALE {} exceeds SQL_DESC_PRECISION {}",
+                record.scale, record.precision
+            )));
+        }
+    }
+
+    // Clause 4. A seconds precision is a count of fractional-second digits,
+    // which ODBC bounds at nine.
+    if verbose == SQL_DATETIME
+        && matches!(
+            record.datetime_interval_code,
+            SQL_CODE_TIME | SQL_CODE_TIMESTAMP
+        )
+        && !(0..=MAX_SECONDS_PRECISION).contains(&record.precision)
+    {
+        return Err(inconsistent(format!(
+            "SQL_DESC_PRECISION {} is not a valid seconds precision",
+            record.precision
+        )));
+    }
+
+    Ok(())
+}
+
+/// The largest fractional-seconds precision ODBC defines, in digits.
+const MAX_SECONDS_PRECISION: i16 = 9;
+
+/// `HY021` — "inconsistent descriptor information".
+fn inconsistent(detail: String) -> OdbcError {
+    OdbcError::general(detail, SqlState::inconsistent_descriptor_information())
 }
 
 /// Whether a field is readable, writable or undefined for a descriptor role.
@@ -403,20 +574,9 @@ pub fn set_record_field(
 
     match field {
         // Setting the concise type sets the verbose type and the
-        // datetime/interval code with it — the spec makes them one act, and
-        // `col_attr::verbose_type` is the existing mapping between the two.
-        // Restating it here is how the descriptor view and `SQLColAttribute`
-        // come to disagree about the same column.
-        Desc::ConciseType => {
-            let concise = narrow_i16(n, field)?;
-            record.concise_type = concise;
-            record.verbose_type = crate::types::col_attr::verbose_type(SqlDataType(concise));
-            record.datetime_interval_code = if record.verbose_type == concise {
-                0
-            } else {
-                concise
-            };
-        }
+        // datetime/interval code with it — the spec makes them one act. See
+        // [`DescriptorRecord::set_concise_type`], which every writer shares.
+        Desc::ConciseType => record.set_concise_type(narrow_i16(n, field)?),
         // The other direction. For a non-datetime type the two are equal, so
         // the concise type follows; for `SQL_DATETIME` or `SQL_INTERVAL` the
         // concise type is only determined once
@@ -793,6 +953,86 @@ mod tests {
             err.sqlstate().as_str(),
             crate::types::sql_state::INVALID_DESCRIPTOR_FIELD_IDENTIFIER
         );
+    }
+
+    /// `SQLSetDescRec`'s "Consistency Checks": "If the SQL_DESC_TYPE field
+    /// indicates a numeric type, the SQL_DESC_PRECISION and SQL_DESC_SCALE
+    /// fields are verified to be valid."
+    #[test]
+    fn a_scale_larger_than_the_precision_is_inconsistent() {
+        let record = DescriptorRecord {
+            concise_type: SqlDataType::DECIMAL.0,
+            precision: 5,
+            scale: 9,
+            data_ptr: std::ptr::dangling_mut(),
+            ..Default::default()
+        };
+
+        let err = consistency_check(&record, DescriptorRole::Ipd)
+            .expect_err("DECIMAL(5,9) has more scale than precision");
+
+        assert_eq!(
+            err.sqlstate().as_str(),
+            crate::types::sql_state::INCONSISTENT_DESCRIPTOR_INFORMATION
+        );
+    }
+
+    /// "The SQL_DESC_TYPE field must be one of the valid ODBC C or SQL types or
+    /// a driver-specific SQL type." An ARD's is a C type, and 31337 is not one.
+    #[test]
+    fn an_unknown_c_type_on_an_ard_is_inconsistent() {
+        let record = DescriptorRecord {
+            concise_type: 31337,
+            data_ptr: std::ptr::dangling_mut(),
+            ..Default::default()
+        };
+
+        let err = consistency_check(&record, DescriptorRole::Ard)
+            .expect_err("31337 is not a C data type");
+
+        assert_eq!(
+            err.sqlstate().as_str(),
+            crate::types::sql_state::INCONSISTENT_DESCRIPTOR_INFORMATION
+        );
+    }
+
+    /// "If the SQL_DESC_TYPE record field is SQL_DATETIME or SQL_INTERVAL, the
+    /// SQL_DESC_DATETIME_INTERVAL_CODE field must be one of the valid datetime
+    /// or interval codes." Core supports no interval types, so the reduction
+    /// this check makes is to reject an interval code on a type that is not an
+    /// interval — which is the half of the clause core can act on.
+    #[test]
+    fn a_datetime_interval_code_on_a_plain_type_is_inconsistent() {
+        let record = DescriptorRecord {
+            concise_type: SqlDataType::INTEGER.0,
+            datetime_interval_code: crate::types::SQL_CODE_DATE,
+            data_ptr: std::ptr::dangling_mut(),
+            ..Default::default()
+        };
+
+        let err = consistency_check(&record, DescriptorRole::Ipd)
+            .expect_err("an INTEGER has no datetime/interval code");
+
+        assert_eq!(
+            err.sqlstate().as_str(),
+            crate::types::sql_state::INCONSISTENT_DESCRIPTOR_INFORMATION
+        );
+    }
+
+    /// A consistent record passes. Without this the check could reject
+    /// everything and the three tests above would still be green.
+    #[test]
+    fn a_consistent_record_passes() {
+        let record = DescriptorRecord {
+            concise_type: SqlDataType::DECIMAL.0,
+            precision: 9,
+            scale: 2,
+            data_ptr: std::ptr::dangling_mut(),
+            ..Default::default()
+        };
+
+        consistency_check(&record, DescriptorRole::Ipd)
+            .expect("DECIMAL(9,2) is a consistent record");
     }
 
     /// A numeric value handed to a string field, or the reverse, is `HY092`

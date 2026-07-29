@@ -9,7 +9,7 @@ use odbc_sys::SqlDataType;
 use crate::{
     backend::{Backend, StatementBackend},
     cancel::reclassify_cancelled_opt,
-    descriptor::DescriptorRecord,
+    descriptor::{DescriptorRecord, DescriptorRole},
     errors::OdbcError,
     handles::{ParamRecord, ParamRecords, StatementHandle},
     panic::panic_safe,
@@ -177,28 +177,41 @@ pub unsafe fn sql_bind_parameter<B: Backend>(
                 // page maps the C-side arguments onto APD fields and the
                 // declared-type arguments onto IPD fields. Both are written
                 // under the same key, and both are removed together above.
-                stmt.app_param_desc.records.insert(
-                    parameter_number,
-                    DescriptorRecord {
-                        concise_type: c_data_type as i16,
-                        verbose_type: c_data_type as i16,
-                        data_ptr: parameter_value_ptr,
-                        octet_length: buffer_length,
-                        indicator_ptr: str_len_or_ind_ptr,
-                        ..DescriptorRecord::default()
-                    },
-                );
-                stmt.imp_param_desc.records.insert(
-                    parameter_number,
-                    DescriptorRecord {
-                        concise_type: sql_type.0,
-                        verbose_type: sql_type.0,
-                        length: column_size,
-                        scale: decimal_digits,
-                        parameter_type: io_type,
-                        ..DescriptorRecord::default()
-                    },
-                );
+                let mut apd = DescriptorRecord {
+                    data_ptr: parameter_value_ptr,
+                    octet_length: buffer_length,
+                    indicator_ptr: str_len_or_ind_ptr,
+                    ..DescriptorRecord::default()
+                };
+                apd.set_concise_type(c_data_type as i16);
+
+                let mut ipd = DescriptorRecord {
+                    length: column_size,
+                    scale: decimal_digits,
+                    parameter_type: io_type,
+                    ..DescriptorRecord::default()
+                };
+                ipd.set_concise_type(sql_type.0);
+                // `ColumnSize` is `SQL_DESC_PRECISION` for the exact numerics
+                // and `SQL_DESC_LENGTH` for everything else, per
+                // `SQLBindParameter`'s own mapping table. `length` carries it
+                // in both cases because `param_convert` and `SQLDescribeParam`
+                // read it there; `precision` is what the consistency check and
+                // `SQLGetDescField` need, so a DECIMAL sets both.
+                if sql_type == SqlDataType::DECIMAL || sql_type == SqlDataType::NUMERIC {
+                    ipd.precision = i16::try_from(column_size).unwrap_or(i16::MAX);
+                }
+
+                // Spec HY021, `SQLSetDescRec`'s "Consistency Checks": "This
+                // check is always performed when SQLBindParameter or
+                // SQLBindCol is called". Both halves, before either map is
+                // written, so a rejected bind leaves neither descriptor
+                // changed.
+                crate::descriptor::consistency_check(&apd, DescriptorRole::Apd)?;
+                crate::descriptor::consistency_check(&ipd, DescriptorRole::Ipd)?;
+
+                stmt.app_param_desc.records.insert(parameter_number, apd);
+                stmt.imp_param_desc.records.insert(parameter_number, ipd);
             }
 
             Ok(SqlReturn::SUCCESS)
@@ -1826,6 +1839,50 @@ mod tests {
                 assert!(
                     !handle.imp_param_desc.records.contains_key(&1),
                     "the IPD record survived the unbind"
+                );
+            });
+
+            cleanup(env, conn, stmt);
+        }
+    }
+
+    /// The spec runs the consistency check at bind, not only through the
+    /// descriptor: "This check is always performed when SQLBindParameter or
+    /// SQLBindCol is called". A binding that cannot be consistent is rejected
+    /// before the statement runs rather than converted at execute time.
+    #[test]
+    fn bind_parameter_rejects_an_inconsistent_decimal_with_hy021() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            let mut val: i32 = 0;
+
+            let ret = sql_bind_parameter::<MockBackend>(
+                stmt,
+                1,
+                ParamType::Input as i16,
+                CDataType::SLong as i16,
+                SqlDataType::DECIMAL.0,
+                5, // ColumnSize    -> SQL_DESC_PRECISION for an exact numeric
+                9, // DecimalDigits -> SQL_DESC_SCALE
+                std::ptr::from_mut(&mut val).cast::<c_void>(),
+                4,
+                std::ptr::null_mut(),
+            );
+            assert_eq!(ret, SqlReturn::ERROR);
+
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+                let record = handle
+                    .diagnostics
+                    .get(0)
+                    .expect("no diagnostic was recorded for the inconsistent bind");
+                assert_eq!(
+                    record.sqlstate.as_str(),
+                    crate::types::sql_state::INCONSISTENT_DESCRIPTOR_INFORMATION
+                );
+                assert!(
+                    !handle.app_param_desc.records.contains_key(&1)
+                        && !handle.imp_param_desc.records.contains_key(&1),
+                    "a rejected bind must leave neither descriptor written"
                 );
             });
 
