@@ -458,7 +458,7 @@ pub unsafe fn sql_free_stmt<B: Backend>(statement_handle: *mut c_void, option: u
                         return Err(e);
                     }
                 }
-                FreeStmtOption::Unbind => stmt.bindings.clear(),
+                FreeStmtOption::Unbind => stmt.app_row_desc.records.clear(),
                 FreeStmtOption::ResetParams => stmt.param_bindings.clear(),
             }
 

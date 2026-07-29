@@ -92,7 +92,7 @@ pub unsafe fn sql_bind_col<B: Backend>(
             if target_value_ptr.is_null() {
                 // Unbind the column
                 tracing::debug!("SQLBindCol: col={} unbind", column_number);
-                stmt.bindings.remove(&column_number);
+                stmt.app_row_desc.records.remove(&column_number);
             } else {
                 let c_type = crate::types::c_data_type_from_raw(target_type).ok_or_else(|| {
                     crate::errors::OdbcError::general(
@@ -106,7 +106,7 @@ pub unsafe fn sql_bind_col<B: Backend>(
                     c_type,
                     buffer_length
                 );
-                stmt.bindings.insert(
+                stmt.app_row_desc.records.insert(
                     column_number,
                     ColumnBinding {
                         target_type: c_type,
@@ -169,7 +169,7 @@ mod tests {
 
             // Verify binding exists
             with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
-                assert!(handle.bindings.contains_key(&1));
+                assert!(handle.app_row_desc.records.contains_key(&1));
             });
 
             // Unbind by passing null target_value_ptr
@@ -183,7 +183,50 @@ mod tests {
             );
             assert_eq!(ret, SqlReturn::SUCCESS);
             with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
-                assert!(!handle.bindings.contains_key(&1));
+                assert!(!handle.app_row_desc.records.contains_key(&1));
+            });
+
+            cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
+    /// The spec makes binding a column *be* setting ARD fields — "when
+    /// `SQLBindCol` is called, the driver sets fields in the ARD". After this
+    /// change there is one storage rather than a binding map beside a
+    /// descriptor, so the two cannot disagree, which is the whole point.
+    ///
+    /// Every field is checked, not just the key: a record found under the right
+    /// number with the wrong buffer would satisfy `contains_key` above and
+    /// still hand `SQLFetch` the wrong pointer.
+    #[test]
+    fn a_bound_column_is_a_record_in_the_ard() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            let mut buf: i64 = 0;
+            let mut indicator: isize = 0;
+            let buf_ptr = std::ptr::from_mut(&mut buf).cast::<c_void>();
+            let indicator_ptr = std::ptr::from_mut(&mut indicator);
+
+            let ret = sql_bind_col::<MockBackend>(
+                stmt,
+                1,
+                CDataType::SBigInt as i16,
+                buf_ptr,
+                std::mem::size_of::<i64>() as isize,
+                indicator_ptr,
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+                let record = handle
+                    .app_row_desc
+                    .records
+                    .get(&1)
+                    .expect("SQLBindCol did not write a record into the ARD");
+                assert_eq!(record.target_type, CDataType::SBigInt);
+                assert_eq!(record.target_value_ptr, buf_ptr);
+                assert_eq!(record.buffer_length, std::mem::size_of::<i64>() as isize);
+                assert_eq!(record.str_len_or_ind_ptr, indicator_ptr);
             });
 
             cleanup_env_conn_stmt(env, conn, stmt);

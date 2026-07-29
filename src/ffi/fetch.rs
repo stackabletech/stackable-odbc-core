@@ -265,7 +265,8 @@ pub unsafe fn sql_fetch<B: Backend>(statement_handle: *mut c_void) -> SqlReturn 
                         isize,
                         *mut isize,
                     )> = stmt
-                        .bindings
+                        .app_row_desc
+                        .records
                         .iter()
                         .map(|(&col, b)| {
                             (

@@ -53,15 +53,53 @@ use scope::HandleScope;
 /// SQL for escape sequences.
 const SQL_NOSCAN_ON: usize = 1;
 
-/// Minimal descriptor handle.
+/// One ODBC descriptor (`SQL_HANDLE_DESC`), generic over the kind of record it
+/// holds.
+///
+/// A statement owns four of these — the ARD, APD, IRD and IPD — and the ODBC
+/// spec makes them the *definition* of a binding rather than a copy of one:
+/// "when `SQLBindCol` is called, the driver sets fields in the ARD". So a bound
+/// column is a record in [`StatementHandle::app_row_desc`], and a bound
+/// parameter is a record in the APD together with one in the IPD. There is one
+/// storage, so a binding and its descriptor cannot disagree.
+///
+/// `R` differs per role, which is what makes that impossible to get wrong:
+/// `ColumnBinding` for the ARD, [`ApdRecord`] and [`IpdRecord`] for the two
+/// parameter descriptors, and `()` for the IRD, which is deliberately unbacked
+/// — `SQLDescribeColW` and `SQLColAttributeW` answer from `ColumnDescriptor`
+/// directly, and inventing a second source of truth for column metadata is the
+/// exact failure this type exists to prevent. D3 and D4 decide when the IRD is
+/// populated; until then `()` says "nothing here" at the type level rather than
+/// in a comment.
 ///
 /// The Windows Driver Manager queries `SQLGetStmtAttrW` for descriptor handle
 /// attributes (10010–10013) immediately after allocating a statement. If the
 /// driver returns NULL or ERROR, the DM's CLI dispatch table pointer stays
 /// NULL and all subsequent application-facing calls crash. These handles
 /// satisfy that requirement.
+///
+/// # Why there is no `HasKind` impl
+///
+/// Every other handle type has one, and a descriptor deliberately does not.
+/// [`HandleScope::get`] dispatches on [`HandleKind`] alone, and all four
+/// descriptors register as `HandleKind::Desc` — so `get::<Descriptor<A>>` on a
+/// token that names a `Descriptor<B>` would pass every check the registry can
+/// make and hand back a reference of the wrong type. Without the impl that call
+/// does not compile, which is the point.
+///
+/// A descriptor is reached instead through the statement that owns it, by
+/// [`HandleScope::descriptor_diagnostics`] and whatever D3 adds beside it.
+/// That is also the only form the borrow rule permits — see
+/// [`HandleScope::stmt_with_parent`]'s comment on why a `stmt_with_desc`
+/// combinator must never be written.
+///
+/// [`HandleScope::get`]: crate::handles::scope::HandleScope::get
+/// [`HandleScope::descriptor_diagnostics`]:
+///     crate::handles::scope::HandleScope::descriptor_diagnostics
+/// [`HandleScope::stmt_with_parent`]:
+///     crate::handles::scope::HandleScope::stmt_with_parent
 #[repr(C)]
-pub struct DescriptorHandle {
+pub struct Descriptor<R> {
     header: HandleHeader,
     /// This descriptor's own diagnostic queue.
     ///
@@ -69,19 +107,35 @@ pub struct DescriptorHandle {
     /// SQLSTATE "can be obtained by calling **SQLGetDiagRec** with a
     /// *HandleType* of SQL_HANDLE_DESC and a *Handle* of *DescriptorHandle*",
     /// so a descriptor that carried no queue could report a failure and nothing
-    /// about it. Reached through the owning statement — see
-    /// [`HandleScope::descriptor_diagnostics`].
-    ///
-    /// [`HandleScope::descriptor_diagnostics`]:
-    ///     crate::handles::scope::HandleScope::descriptor_diagnostics
+    /// about it.
     pub diagnostics: DiagnosticQueue,
+    /// The descriptor's records, keyed by the 1-based column or parameter
+    /// number — record 0, the bookmark record, is not supported.
+    ///
+    /// `SQL_DESC_COUNT` is derived from this map rather than stored beside it,
+    /// so the two cannot disagree.
+    pub records: std::collections::HashMap<u16, R>,
+    /// The descriptor's header fields, keyed by raw attribute value.
+    ///
+    /// Eight `SQL_ATTR_*` statement attributes **are** descriptor header
+    /// fields, per `SQLSetStmtAttr`'s own mapping table, which states that
+    /// setting one sets the other. They live here and not in
+    /// [`StatementHandle::attrs`] for the same reason records do: one storage
+    /// cannot disagree with itself.
+    pub attrs: std::collections::HashMap<i32, usize>,
 }
 
-impl HasKind for DescriptorHandle {
-    const KIND: HandleKind = HandleKind::Desc;
-}
+impl<R> Descriptor<R> {
+    /// An empty descriptor, before it is registered.
+    fn new() -> Self {
+        Self {
+            header: HandleHeader::PLACEHOLDER,
+            diagnostics: DiagnosticQueue::new(),
+            records: std::collections::HashMap::new(),
+            attrs: std::collections::HashMap::new(),
+        }
+    }
 
-impl DescriptorHandle {
     /// The token `SQLGetStmtAttrW` hands to the application for this
     /// descriptor.
     ///
@@ -90,6 +144,38 @@ impl DescriptorHandle {
     /// statement was freed.
     pub fn token(&self) -> *mut c_void {
         self.header.token()
+    }
+}
+
+/// Register one of a statement's four descriptors, joining the statement's lock
+/// group and recording it as the parent.
+///
+/// Generic because the four descriptors are four different types; a single loop
+/// over them cannot be written, and writing the body out four times is how one
+/// of them comes to be registered under the wrong parent.
+///
+/// A registration failure leaves the descriptor's header at
+/// [`HandleHeader::PLACEHOLDER`], whose generation 0 is never issued, so it has
+/// no valid token rather than a wrong one.
+///
+/// # Safety
+///
+/// `desc` must point to a live `Descriptor<R>` owned by the statement
+/// `stmt_token` names.
+unsafe fn register_descriptor<R>(
+    desc: *mut Descriptor<R>,
+    group: &Arc<GroupLock>,
+    stmt_token: *mut c_void,
+) {
+    if let Some((_, slot, generation)) = registry().register(
+        HandleKind::Desc,
+        desc as usize,
+        Arc::clone(group),
+        Some(stmt_token as usize),
+    ) {
+        // SAFETY: the caller guarantees `desc` is live, and this is the only
+        // write to its header.
+        unsafe { (*desc).header = HandleHeader { slot, generation } };
     }
 }
 
@@ -472,8 +558,6 @@ pub struct StatementHandle<B: Backend> {
     pub prepared_sql: Option<String>,
     /// Number of `?` parameter markers counted in `prepared_sql` by `SQLPrepareW`.
     pub param_count: Option<u16>,
-    /// Column bindings set by `SQLBindCol`. Key is 1-based column number.
-    pub bindings: std::collections::HashMap<u16, ColumnBinding>,
     /// Parameter bindings set by `SQLBindParameter`. Key is 1-based parameter number.
     pub param_bindings: std::collections::HashMap<u16, ParameterBinding>,
     /// Cursor name set by SQLSetCursorNameW or auto-generated by SQLGetCursorNameW.
@@ -508,13 +592,22 @@ pub struct StatementHandle<B: Backend> {
     /// [`Backend::set_query_timeout`]: crate::backend::Backend::set_query_timeout
     /// [`QueryTimeout::CoreCancels`]: crate::types::QueryTimeout::CoreCancels
     pub core_query_timeout: Option<usize>,
-    /// Descriptor handles required by the Windows Driver Manager.
-    /// The DM queries these via SQLGetStmtAttrW(10010–10013) after statement
-    /// allocation. Without valid handles, the DM crashes.
-    pub app_row_desc: Box<DescriptorHandle>,
-    pub app_param_desc: Box<DescriptorHandle>,
-    pub imp_row_desc: Box<DescriptorHandle>,
-    pub imp_param_desc: Box<DescriptorHandle>,
+    /// The application row descriptor. Its records are the column bindings
+    /// `SQLBindCol` sets — the spec makes binding a column *be* setting ARD
+    /// fields, so this is the binding, not a copy of it.
+    pub app_row_desc: Box<Descriptor<ColumnBinding>>,
+    /// The application parameter descriptor. Records still to come: the
+    /// parameter split lands in the commit after this one, and until it does
+    /// [`Self::param_bindings`] holds both halves.
+    pub app_param_desc: Box<Descriptor<()>>,
+    /// The implementation row descriptor, deliberately unbacked — see
+    /// [`Descriptor`]. It exists because the Windows Driver Manager queries
+    /// `SQLGetStmtAttrW(10010–10013)` after statement allocation and crashes
+    /// without a valid handle for each.
+    pub imp_row_desc: Box<Descriptor<()>>,
+    /// The implementation parameter descriptor. Records still to come, as for
+    /// [`Self::app_param_desc`].
+    pub imp_param_desc: Box<Descriptor<()>>,
 }
 
 impl<B: Backend> HasKind for StatementHandle<B> {
@@ -691,12 +784,6 @@ pub unsafe fn alloc_statement<B: Backend>(
     // Each descriptor gets its own registry slot: `SQLGetStmtAttrW` hands
     // these out to the application, so they need tokens of their own or the
     // application would receive a raw address it could not be validated from.
-    let alloc_desc = || {
-        Box::new(DescriptorHandle {
-            header: HandleHeader::PLACEHOLDER,
-            diagnostics: DiagnosticQueue::new(),
-        })
-    };
     let handle = Box::new(StatementHandle::<B> {
         header: HandleHeader::PLACEHOLDER,
         conn: conn_ptr,
@@ -704,7 +791,6 @@ pub unsafe fn alloc_statement<B: Backend>(
         cursor_open: false,
         prepared_sql: None,
         param_count: None,
-        bindings: std::collections::HashMap::new(),
         param_bindings: std::collections::HashMap::new(),
         cursor_name: None,
         data_at_exec: None,
@@ -725,10 +811,10 @@ pub unsafe fn alloc_statement<B: Backend>(
         // statement attribute, so a fresh statement starts with no deadline
         // until something sets one on it.
         core_query_timeout: None,
-        app_row_desc: alloc_desc(),
-        app_param_desc: alloc_desc(),
-        imp_row_desc: alloc_desc(),
-        imp_param_desc: alloc_desc(),
+        app_row_desc: Box::new(Descriptor::new()),
+        app_param_desc: Box::new(Descriptor::new()),
+        imp_row_desc: Box::new(Descriptor::new()),
+        imp_param_desc: Box::new(Descriptor::new()),
     });
     let ptr = Box::into_raw(handle);
     // SAFETY: as in `alloc_environment`.
@@ -745,25 +831,23 @@ pub unsafe fn alloc_statement<B: Backend>(
         (*ptr).header = HandleHeader { slot, generation };
         // Register the four descriptors now that the statement owns them.
         // Each shares the statement's group and records the statement as its
-        // parent.
-        for desc in [
-            std::ptr::from_mut(&mut *(*ptr).app_row_desc),
+        // parent, which is what makes a descriptor token resolvable at all —
+        // see `HandleScope::descriptor_diagnostics`.
+        //
+        // Four calls rather than a loop: the four are four different types now,
+        // so there is no array to iterate.
+        register_descriptor(std::ptr::from_mut(&mut *(*ptr).app_row_desc), &group, token);
+        register_descriptor(
             std::ptr::from_mut(&mut *(*ptr).app_param_desc),
-            std::ptr::from_mut(&mut *(*ptr).imp_row_desc),
+            &group,
+            token,
+        );
+        register_descriptor(std::ptr::from_mut(&mut *(*ptr).imp_row_desc), &group, token);
+        register_descriptor(
             std::ptr::from_mut(&mut *(*ptr).imp_param_desc),
-        ] {
-            if let Some((_, dslot, dgen)) = registry().register(
-                HandleKind::Desc,
-                desc as usize,
-                Arc::clone(&group),
-                Some(token as usize),
-            ) {
-                (*desc).header = HandleHeader {
-                    slot: dslot,
-                    generation: dgen,
-                };
-            }
-        }
+            &group,
+            token,
+        );
         std::ptr::write_unaligned(output, token);
     }
     SqlReturn::SUCCESS
@@ -986,14 +1070,12 @@ pub(crate) unsafe fn free_statement_allocation<B: Backend>(token: *mut c_void) -
     // SAFETY: `unregister` returned the address registered in
     // `alloc_statement` and retired the slot.
     let stmt = unsafe { Box::from_raw(addr as *mut StatementHandle<B>) };
-    for desc in [
-        &stmt.app_row_desc,
-        &stmt.app_param_desc,
-        &stmt.imp_row_desc,
-        &stmt.imp_param_desc,
-    ] {
-        registry().unregister(desc.header.token(), HandleKind::Desc);
-    }
+    // Four statements rather than a loop, for the same reason `alloc_statement`
+    // has four calls: the four descriptors are four different types.
+    registry().unregister(stmt.app_row_desc.token(), HandleKind::Desc);
+    registry().unregister(stmt.app_param_desc.token(), HandleKind::Desc);
+    registry().unregister(stmt.imp_row_desc.token(), HandleKind::Desc);
+    registry().unregister(stmt.imp_param_desc.token(), HandleKind::Desc);
     // `stmt` drops here, taking the descriptor allocations with it.
     SqlReturn::SUCCESS
 }

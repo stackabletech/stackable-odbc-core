@@ -1196,7 +1196,7 @@ mod tests {
                 stmt,
                 |handle| {
                     handle.cursor_name = Some("C1".to_string());
-                    handle.bindings.insert(
+                    handle.app_row_desc.records.insert(
                         1,
                         crate::handles::ColumnBinding {
                             target_type: crate::types::CDataType::SLong,
@@ -1237,7 +1237,7 @@ mod tests {
                         "SQL_CB_DELETE cleared the cursor name"
                     );
                     assert!(
-                        handle.bindings.contains_key(&1),
+                        handle.app_row_desc.records.contains_key(&1),
                         "SQL_CB_DELETE cleared the column bindings"
                     );
                     assert!(
