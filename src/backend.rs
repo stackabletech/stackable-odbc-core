@@ -2515,6 +2515,114 @@ mod tests {
         );
     }
 
+    /// Info types [`common_get_info_raw`] answers identically for **every**
+    /// backend, each with the reason core is entitled to decide it. The
+    /// raw-path sibling of [`CORE_FACTS`], and held to the same standard.
+    #[rustfmt::skip]
+    const RAW_PATH_CORE_FACTS: &[(u16, &str)] = &[
+        (
+            crate::types::SQL_ROW_UPDATES,
+            "describes a keyset-driven or mixed cursor's row-version detection, and core drives neither",
+        ),
+        (
+            crate::types::SQL_PROCEDURES,
+            "the spec's conjunction requires the driver to support ODBC procedure-invocation syntax, and escape.rs rejects {call} with HYC00",
+        ),
+        (
+            crate::types::SQL_PROCEDURE_TERM,
+            "the spec mandates the empty string while SQL_PROCEDURES is \"N\"",
+        ),
+        (
+            crate::types::SQL_TABLE_TERM,
+            "ODBC's generic word for the one object every data source has; a vendor that calls it something else overrides the info type in get_info",
+        ),
+        (
+            crate::types::SQL_FILE_USAGE,
+            "core builds a driver that is not single-tier and file-based",
+        ),
+    ];
+
+    /// Info types [`common_get_info_raw`] answers identically for every backend
+    /// where that answer is a claim about the *data source*, which core is not
+    /// in a position to make.
+    ///
+    /// Every entry is outstanding work, not a justification: each needs either
+    /// a `Backend` method to state it or a derivation from one that already
+    /// exists. The list exists so the count can only go down — a new hard-coded
+    /// data-source claim on this path fails the test rather than joining them
+    /// silently.
+    #[rustfmt::skip]
+    const RAW_PATH_GAPS: &[(u16, &str)] = &[
+        (
+            crate::types::SQL_QUOTED_IDENTIFIER_CASE,
+            "how the catalog stores quoted identifiers is a data source fact, and SQL_IC_SENSITIVE is one of four possible answers; needs a Backend method, the counterpart of the required `identifier_case`",
+        ),
+        (
+            crate::types::SQL_MULTIPLE_ACTIVE_TXN,
+            "whether more than one transaction can be active at a time is a data source fact; \"N\" understates a driver whose connections are independent; needs a Backend method",
+        ),
+        (
+            crate::types::SQL_DATABASE_NAME,
+            "the spec equates this with SQLGetConnectAttr(SQL_ATTR_CURRENT_CATALOG), which the connection already stores; derive it from there rather than answering the empty string",
+        ),
+    ];
+
+    /// The raw-path sibling of
+    /// [`default_get_info_answers_are_backend_derived_or_declared_core_facts`],
+    /// asking the same question of the same two mocks: **does the answer move
+    /// when the backend does?**
+    ///
+    /// `common_get_info_raw` is the only place several info types are ever
+    /// answered — `SQL_CURSOR_ROLLBACK_BEHAVIOR` has no `odbc_sys::InfoType`
+    /// variant at all, and `SQL_TABLE_TERM`, `SQL_PROCEDURES` and their
+    /// neighbours have one but no arm in `default_get_info`. Without this test
+    /// that path is unpoliced, and a hard-coded claim about the data source can
+    /// live there indefinitely.
+    ///
+    /// The whole `u16` range is scanned rather than a hand-picked set: what is
+    /// answered here is exactly what the function's `match` decides, and a list
+    /// maintained beside it would be a second statement of the same fact.
+    #[test]
+    fn common_get_info_raw_answers_are_backend_derived_or_declared() {
+        use crate::test_utils::MockAltBackend;
+
+        let mut undeclared = Vec::new();
+        let mut stale = Vec::new();
+
+        for raw in 0..=u16::MAX {
+            let mine = common_get_info_raw::<MockBackend>(Some(&MockConnection), raw);
+            let theirs = common_get_info_raw::<MockAltBackend>(Some(&MockConnection), raw);
+            let declared = RAW_PATH_CORE_FACTS.iter().any(|(t, _)| *t == raw)
+                || RAW_PATH_GAPS.iter().any(|(t, _)| *t == raw);
+
+            match (mine.is_some() && mine == theirs, declared) {
+                // Core decides it, and said why — or said it is a known gap.
+                (true, true) => {}
+                // Core decides it, and neither is recorded.
+                (true, false) => undeclared.push(raw),
+                // Backend-derived (or unanswered) but still listed — the entry
+                // outlived the hard-coded value it described.
+                (false, true) => stale.push(raw),
+                (false, false) => {}
+            }
+        }
+
+        assert!(
+            undeclared.is_empty(),
+            "these raw info types answer the same for two backends with nothing \
+             in common, so core is deciding them. Either derive each from a \
+             `Backend` method, or record it in RAW_PATH_CORE_FACTS with the \
+             reason core is entitled to decide it — or in RAW_PATH_GAPS if it is \
+             a claim about the data source that still needs a hook: {undeclared:?}"
+        );
+        assert!(
+            stale.is_empty(),
+            "these are recorded in RAW_PATH_CORE_FACTS or RAW_PATH_GAPS but are \
+             not answered identically for every backend; drop the stale \
+             entries: {stale:?}"
+        );
+    }
+
     /// The classification above is only as strong as the two mocks differing.
     /// A hook added to `MockBackend` and copied verbatim into `MockAltBackend`
     /// would silently turn a backend-derived info type into a "core fact"
