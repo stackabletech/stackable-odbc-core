@@ -140,6 +140,40 @@ fn validate_txn_isolation<B: Backend>(
     Ok(())
 }
 
+/// Whether any statement on this connection currently has a result set open.
+///
+/// Backs the spec's `24000` row for `SQLSetConnectAttr`: "The *Attribute*
+/// argument was SQL_ATTR_CURRENT_CATALOG, and a result set was pending." The
+/// row carries no `(DM)` marker, so it is the driver's to return, and a pending
+/// result set is exactly an open cursor on one of the connection's statements.
+///
+/// **This is not transaction state.** The neighbouring `HY011` row —
+/// "the *Attribute* argument was SQL_ATTR_TXN_ISOLATION, and a transaction was
+/// open" — is a different condition over different state. Answering either with
+/// the other's fact makes both wrong: a `SELECT` under autocommit leaves a
+/// cursor open with no transaction, and a committed-but-uncleared transaction
+/// has no cursor.
+///
+/// Reads `cursor_open` rather than `statement.is_some()` for the reason that
+/// field exists: `SQLPrepareW` stores a backend statement without opening a
+/// cursor, so a merely-prepared statement has no result set pending.
+///
+/// Walking the registry is sound without any further locking because statements
+/// share their connection's group lock, which the caller's scope already holds.
+fn connection_has_result_set_pending<B: Backend>(
+    scope: &mut crate::handles::scope::HandleScope<'_>,
+    conn_token: *mut c_void,
+) -> bool {
+    crate::handles::registry::registry()
+        .children_of(conn_token)
+        .into_iter()
+        .any(|stmt_ptr| {
+            scope
+                .get::<crate::handles::StatementHandle<B>>(stmt_ptr)
+                .is_ok_and(|stmt| stmt.cursor_open)
+        })
+}
+
 /// Generic implementation of SQLSetConnectAttrW.
 ///
 /// Spec: <https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlsetconnectattr-function>
@@ -169,8 +203,12 @@ fn validate_txn_isolation<B: Backend>(
 /// - 08003 Connection not open: (driver-manager-handled; not returned here).
 /// - 08S01 Communication link failure: not applicable; this function does not
 ///   communicate with the data source.
-/// - 24000 Invalid cursor state: not returned. Connection-level result-set state
-///   is not currently tracked. Deferred.
+/// - 24000 Invalid cursor state: returned for `SQL_ATTR_CURRENT_CATALOG` when
+///   any statement on the connection has an open cursor — the spec's row is
+///   "the *Attribute* argument was SQL_ATTR_CURRENT_CATALOG, and a result set
+///   was pending", and it carries no `(DM)` marker, so the driver owes it. See
+///   `connection_has_result_set_pending`; note in particular that this is a
+///   *cursor* condition, not the transaction condition HY011 describes.
 /// - 25000 Illegal operation while in a local transaction: not applicable;
 ///   distributed transactions (DTC) are not supported, and
 ///   `SQL_ATTR_ENLIST_IN_DTC` reports HYC00 before a transaction can be
@@ -262,8 +300,25 @@ pub unsafe fn sql_set_connect_attr_w<B: Backend>(
     // sql_alloc_handle; kind and group are validated by scope.get inside the closure.
     let ret = unsafe {
         panic_safe::<B, _>(connection_handle, |scope| {
+            {
+                let conn = scope.get::<ConnectionHandle<B>>(connection_handle)?;
+                conn.diagnostics.clear();
+            }
+
+            // Spec 24000, checked before the connection borrow below because
+            // both need the scope and that borrow lasts the whole match.
+            // Gated on the one attribute the spec's row names, so no other
+            // attribute pays for the walk.
+            if attr == ConnectionAttribute::CURRENT_CATALOG
+                && connection_has_result_set_pending::<B>(scope, connection_handle)
+            {
+                return Err(OdbcError::general(
+                    "SQL_ATTR_CURRENT_CATALOG cannot be set while a result set is pending",
+                    SqlState::invalid_cursor_state(),
+                ));
+            }
+
             let conn = scope.get::<ConnectionHandle<B>>(connection_handle)?;
-            conn.diagnostics.clear();
 
             match attr {
                 // Discrete-valued attributes: validate before storing (HY024).
@@ -759,8 +814,8 @@ mod tests {
     use super::*;
     use crate::ffi::handle::{sql_alloc_handle, sql_free_handle};
     use crate::test_utils::{
-        MockAltBackend, MockBackend, MockConnection, MockIsolationBackend, MockIsolationConnection,
-        MockUnappliedIsolationBackend, with_handle,
+        MockAltBackend, MockBackend, MockCancelAwareBackend, MockConnection, MockIsolationBackend,
+        MockIsolationConnection, MockUnappliedIsolationBackend, with_handle,
     };
     use odbc_sys::HandleType;
 
@@ -849,6 +904,115 @@ mod tests {
             assert_eq!(ret, SqlReturn::SUCCESS);
             assert_eq!(val, SQL_AUTOCOMMIT_ON as u32);
             cleanup(env, conn);
+        }
+    }
+
+    /// Spec `SQLSetConnectAttr` 24000: "The *Attribute* argument was
+    /// SQL_ATTR_CURRENT_CATALOG, and a result set was pending." The row carries
+    /// no `(DM)` marker, so the driver owes it.
+    ///
+    /// Driven through a real `SQLExecDirect` rather than by poking
+    /// `cursor_open`, so it also pins that an ordinary execution is what makes a
+    /// result set "pending" — `MockCancelAwareBackend` reports one column, and
+    /// core opens a cursor for any execution that has columns.
+    #[test]
+    fn setting_current_catalog_while_a_result_set_is_pending_is_24000() {
+        unsafe {
+            let (env, conn, stmt) =
+                crate::test_utils::alloc_connected_env_conn_stmt::<MockCancelAwareBackend>();
+
+            let sql: Vec<u16> = "SELECT 1".encode_utf16().collect();
+            assert_eq!(
+                crate::ffi::execute::sql_exec_direct_w::<MockCancelAwareBackend>(
+                    stmt,
+                    sql.as_ptr(),
+                    sql.len() as i32,
+                ),
+                SqlReturn::SUCCESS,
+            );
+            with_handle::<
+                MockCancelAwareBackend,
+                crate::handles::StatementHandle<MockCancelAwareBackend>,
+                _,
+            >(stmt, |h| {
+                assert!(h.cursor_open, "the execution was supposed to open a cursor");
+            });
+
+            let catalog: Vec<u16> = "other".encode_utf16().collect();
+            let ret = sql_set_connect_attr_w::<MockCancelAwareBackend>(
+                conn,
+                ConnectionAttribute::CURRENT_CATALOG.0,
+                catalog.as_ptr() as *mut c_void,
+                (catalog.len() * 2) as i32,
+            );
+            assert_eq!(ret, SqlReturn::ERROR);
+
+            let state = with_handle::<
+                MockCancelAwareBackend,
+                ConnectionHandle<MockCancelAwareBackend>,
+                _,
+            >(conn, |c| {
+                c.diagnostics
+                    .get(0)
+                    .expect("a diagnostic record")
+                    .sqlstate
+                    .as_str()
+                    .to_owned()
+            });
+            assert_eq!(state, "24000");
+
+            crate::test_utils::cleanup_connected_env_conn_stmt::<MockCancelAwareBackend>(
+                env, conn, stmt,
+            );
+        }
+    }
+
+    /// The control: the same connection with the same statement allocated on
+    /// it, but no cursor open. Without this, the test above would still pass if
+    /// the check rejected SQL_ATTR_CURRENT_CATALOG unconditionally.
+    ///
+    /// The backend leaves `set_current_catalog` defaulted, so the expected
+    /// answer is that HYC00 — the point is that it is *not* 24000, i.e. the
+    /// request got past the cursor check and reached the backend.
+    #[test]
+    fn setting_current_catalog_with_no_cursor_open_is_not_24000() {
+        unsafe {
+            let (env, conn, stmt) =
+                crate::test_utils::alloc_connected_env_conn_stmt::<MockCancelAwareBackend>();
+
+            let catalog: Vec<u16> = "other".encode_utf16().collect();
+            let ret = sql_set_connect_attr_w::<MockCancelAwareBackend>(
+                conn,
+                ConnectionAttribute::CURRENT_CATALOG.0,
+                catalog.as_ptr() as *mut c_void,
+                (catalog.len() * 2) as i32,
+            );
+            assert_eq!(
+                ret,
+                SqlReturn::ERROR,
+                "the default set_current_catalog refuses"
+            );
+
+            let state = with_handle::<
+                MockCancelAwareBackend,
+                ConnectionHandle<MockCancelAwareBackend>,
+                _,
+            >(conn, |c| {
+                c.diagnostics
+                    .get(0)
+                    .expect("a diagnostic record")
+                    .sqlstate
+                    .as_str()
+                    .to_owned()
+            });
+            assert_ne!(
+                state, "24000",
+                "no cursor is open, so the pending-result-set check must not fire"
+            );
+
+            crate::test_utils::cleanup_connected_env_conn_stmt::<MockCancelAwareBackend>(
+                env, conn, stmt,
+            );
         }
     }
 

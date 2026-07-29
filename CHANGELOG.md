@@ -945,6 +945,22 @@ Everything a driver has to change for the catalog rework, in one place.
 
 ### Fixed
 
+- **`SQLSetConnectAttr(SQL_ATTR_CURRENT_CATALOG)` now returns `24000` when a
+  result set is pending.** The spec's row — "the *Attribute* argument was
+  SQL_ATTR_CURRENT_CATALOG, and a result set was pending" — carries no `(DM)`
+  marker, so it is the driver's to return, and it was not returned at all.
+  Switching the catalog out from under an open cursor leaves the application
+  fetching rows from one catalog while its unqualified names resolve in another.
+
+  A pending result set is an open cursor on one of the connection's statements,
+  which core already tracked per statement, so this needs no new state and no
+  backend hook. Note that this is deliberately *not* the same condition as the
+  neighbouring `HY011` row ("the *Attribute* argument was
+  SQL_ATTR_TXN_ISOLATION, and a transaction was open"), which remains
+  unimplemented: a `SELECT` under autocommit leaves a cursor open with no
+  transaction, so answering either condition with the other's state would make
+  both wrong.
+
 - **`Backend::cancel_token`'s doc comment described the opposite lifetime to the
   one core implements.** It stated that a token, once built, "is never replaced
   for the life of the statement, including across a later `SQLExecute` on the
