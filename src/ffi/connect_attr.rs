@@ -10,7 +10,8 @@ use crate::errors::{IntoOdbc, OdbcError};
 use crate::handles::ConnectionHandle;
 use crate::panic::panic_safe;
 use crate::types::{
-    SQL_AUTOCOMMIT_OFF, SQL_AUTOCOMMIT_ON, SQL_CD_FALSE, SQL_FALSE, SQL_NTS, SqlReturn, SqlState,
+    SQL_AUTOCOMMIT_OFF, SQL_AUTOCOMMIT_ON, SQL_CD_FALSE, SQL_CD_TRUE, SQL_FALSE, SQL_NTS,
+    SqlReturn, SqlState,
 };
 #[cfg(test)]
 use crate::types::{SQL_TXN_READ_COMMITTED, SQL_TXN_REPEATABLE_READ, SQL_TXN_SERIALIZABLE};
@@ -487,7 +488,10 @@ pub unsafe fn sql_set_connect_attr_w<B: Backend>(
 ///   `write_utf16` when the string value is truncated to fit `buffer_length`.
 /// - 08003 Connection not open: (driver-manager-handled; not returned here).
 /// - 08S01 Communication link failure: not applicable; this function does not
-///   communicate with the data source.
+///   communicate with the data source. `SQL_ATTR_CONNECTION_DEAD` is not an
+///   exception — [`Backend::connection_dead`] is documented to answer from state
+///   the backend already holds rather than by probing the link, because a
+///   connection pool may read it on every checkout.
 /// - HY000 General error: returned for unexpected internal errors.
 /// - HY001 Memory allocation error: not returned; Rust panics on allocation
 ///   failure, which is caught by `panic_safe` and converted to `SQL_ERROR`/HY000.
@@ -679,9 +683,19 @@ pub unsafe fn sql_get_connect_attr_w<B: Backend>(
                     Ok(SqlReturn::SUCCESS)
                 }
 
-                // SQL_ATTR_CONNECTION_DEAD: always report connection is alive.
+                // SQL_ATTR_CONNECTION_DEAD: whatever the backend knows about
+                // its own liveness.
+                //
+                // A handle with no connection is not a *lost* connection — it
+                // never had one, or `SQLDisconnect` closed it deliberately —
+                // and SQL_CD_TRUE asserts the first. The Driver Manager's 08003
+                // covers the not-connected case for the attributes that require
+                // one, so core has nothing to add here beyond declining to call
+                // a hook it has no connection to pass.
                 _ if attr == ConnectionAttribute::CONNECTION_DEAD => {
-                    write_u32(SQL_CD_FALSE as u32);
+                    let dead = conn.connection.as_ref().is_some_and(B::connection_dead);
+                    tracing::debug!("SQLGetConnectAttrW: SQL_ATTR_CONNECTION_DEAD -> {}", dead);
+                    write_u32(if dead { SQL_CD_TRUE } else { SQL_CD_FALSE } as u32);
                     Ok(SqlReturn::SUCCESS)
                 }
 
@@ -839,7 +853,11 @@ mod tests {
     }
 
     #[test]
-    fn get_connection_dead_always_false() {
+    fn get_connection_dead_on_an_unconnected_handle_is_false() {
+        // A handle that never had a connection has not *lost* one, and
+        // SQL_CD_TRUE asserts exactly that it was lost. `alloc_env_conn` does
+        // not connect, so this is the no-connection branch specifically; the
+        // two tests below cover the branches that reach the backend.
         unsafe {
             let (env, conn) = alloc_env_conn();
             let mut val: u32 = 99;
@@ -853,6 +871,52 @@ mod tests {
             assert_eq!(ret, SqlReturn::SUCCESS);
             assert_eq!(val, SQL_CD_FALSE as u32);
             cleanup(env, conn);
+        }
+    }
+
+    /// Read `SQL_ATTR_CONNECTION_DEAD` over a genuinely connected handle of
+    /// backend `B`.
+    unsafe fn connection_dead_for<B: Backend>() -> u32 {
+        unsafe {
+            let (env, conn, stmt) = crate::test_utils::alloc_connected_env_conn_stmt::<B>();
+            let mut val: u32 = 99;
+            let ret = sql_get_connect_attr_w::<B>(
+                conn,
+                ConnectionAttribute::CONNECTION_DEAD.0,
+                &mut val as *mut u32 as *mut c_void,
+                0,
+                std::ptr::null_mut(),
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+            crate::test_utils::cleanup_connected_env_conn_stmt::<B>(env, conn, stmt);
+            val
+        }
+    }
+
+    #[test]
+    fn a_backend_that_reports_a_lost_connection_is_read_as_sql_cd_true() {
+        // What a connection pool reads before handing a connection out. Before
+        // `Backend::connection_dead` existed this was hardcoded SQL_CD_FALSE,
+        // so a pool would serve a connection whose socket had already closed.
+        unsafe {
+            assert_eq!(
+                connection_dead_for::<crate::test_utils::MockDeadConnectionBackend>(),
+                SQL_CD_TRUE as u32,
+            );
+        }
+    }
+
+    #[test]
+    fn a_backend_with_no_liveness_signal_is_read_as_sql_cd_false() {
+        // The control for the test above: same code path, same connected
+        // handle, a backend that leaves `connection_dead` defaulted. Pins that
+        // the answer moves with the backend rather than being hardcoded either
+        // way.
+        unsafe {
+            assert_eq!(
+                connection_dead_for::<crate::test_utils::MockNoQueryTimeoutBackend>(),
+                SQL_CD_FALSE as u32,
+            );
         }
     }
 

@@ -1519,7 +1519,19 @@ mock_applied_backend!(
 // Declares nothing about timeouts at all, and so inherits the real
 // `Backend::set_query_timeout` default. This is the backend every existing
 // driver is, and its 01S02 substitution is the behaviour that must not change.
+//
+// It doubles as the `connection_dead` control: it inherits that default too, so
+// a test pairing it with `MockDeadConnectionBackend` below sees the answer move
+// with the backend rather than with the test.
 mock_applied_backend!(MockNoQueryTimeoutBackend);
+
+// A backend whose connection has been lost — what a pool must not be handed.
+mock_applied_backend!(
+    MockDeadConnectionBackend,
+    fn connection_dead(_conn: &MockAppliedConnection) -> bool {
+        true
+    }
+);
 
 // ---------------------------------------------------------------------------
 // Transaction-capable mocks

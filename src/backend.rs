@@ -215,6 +215,35 @@ pub trait Backend: Sized + Send + Sync + 'static {
         .into())
     }
 
+    /// Whether the connection to the data source has been lost.
+    ///
+    /// Read by `SQLGetConnectAttr(SQL_ATTR_CONNECTION_DEAD)`, which the spec
+    /// makes read-only: "Both SQL_ATTR_AUTO_IPD and SQL_ATTR_CONNECTION_DEAD
+    /// connection attributes can be returned by a call to `SQLGetConnectAttr`
+    /// but cannot be set by a call to `SQLSetConnectAttr`." `true` becomes
+    /// `SQL_CD_TRUE`, `false` becomes `SQL_CD_FALSE`.
+    ///
+    /// **This is what a connection pool reads before handing a connection
+    /// out.** Answering `false` for a connection whose socket closed an hour
+    /// ago is how a pool serves a dead connection to the next caller, which
+    /// then fails on its first query for no reason the application can see.
+    ///
+    /// **Answer from state you already have; do not make a round trip.** The
+    /// spec's own note on this function is that "a driver can improve
+    /// performance by minimizing the number of times that information is sent
+    /// or requested from the server", and a pool may call this on every
+    /// checkout. A flag the error-mapping function sets when it sees a
+    /// connection-level failure, or whatever liveness the client library
+    /// already tracks, is the intended source.
+    ///
+    /// The default is `false`, which is correct for a backend that cannot tell:
+    /// `SQL_CD_TRUE` asserts the connection *has been lost*, and a backend with
+    /// no liveness signal has not observed that. Note the asymmetry — `false`
+    /// means "not known to be dead", not "known to be alive".
+    fn connection_dead(_conn: &Self::Connection) -> bool {
+        false
+    }
+
     /// Ask the data source to stop a statement that runs longer than
     /// `seconds`.
     ///

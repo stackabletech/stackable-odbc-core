@@ -56,6 +56,22 @@ Everything a driver has to change for the catalog rework, in one place.
 
 ### Added
 
+- `Backend::connection_dead`, defaulted to `false`, backs
+  `SQLGetConnectAttr(SQL_ATTR_CONNECTION_DEAD)`, which was hardcoded
+  `SQL_CD_FALSE`. That is the attribute a connection pool reads before handing a
+  connection out, so a pool talking to any driver built on core would cheerfully
+  serve a connection whose socket had already closed, and the borrower's first
+  query failed for no reason it could see. A backend should answer from liveness
+  state it already holds — the spec's own note is that "a driver can improve
+  performance by minimizing the number of times that information is sent or
+  requested from the server", and a pool may call this on every checkout.
+
+  The default keeps today's answer, so no existing driver changes. Note the
+  asymmetry it encodes: `false` means "not known to be dead", not "known to be
+  alive", which is the honest reading for a backend with no liveness signal —
+  `SQL_CD_TRUE` asserts the connection *has been lost*. A handle with no
+  connection at all also reads `SQL_CD_FALSE`, because it never lost one.
+
 - `Backend::set_query_timeout` and the `QueryTimeout` type make
   `SQL_ATTR_QUERY_TIMEOUT` real. The attribute was substituted to `0` with
   `01S02` for every driver, so an application that set a 30-second timeout was
