@@ -1,43 +1,38 @@
-//! `SQLGetDescFieldW`, `SQLSetDescFieldW` and `SQLSetDescRec` — the descriptor
-//! entry points, which report that descriptors are not implemented.
+//! `SQLGetDescFieldW`, `SQLSetDescFieldW`, `SQLGetDescRecW` and `SQLSetDescRec`
+//! — the four accessors over a statement's own descriptors.
 //!
-//! # Why these exist at all, and why they answer `HYC00`
+//! # How a call reaches a field
 //!
-//! The three symbols stay exported. Removing them would put a NULL in the
-//! Windows Driver Manager's dispatch table, which is a crash rather than an
-//! error — the same reason `AGENTS.md`'s Windows checklist exists. What
-//! changes is what they *say*: [`crate::function_id::CORE_UNEXPORTED_FUNCTIONS`]
-//! lists all five descriptor functions, so `SQLGetFunctions` reports them
-//! unsupported and a Driver Manager acting on that answers `IM001` without ever
-//! reaching this module.
+//! Every one of the four takes a descriptor handle and nothing that says which
+//! of the four descriptors it is. `HandleScope::descriptor_owner` answers that:
+//! it resolves the token to the *statement* that owns it and to the role, by
+//! comparing the token against the statement's four fields. Casting the address
+//! the registry stored could not, because `HandleKind::Desc` is one kind
+//! covering four roles — see that function, and `Descriptor`'s note on why it
+//! deliberately has no `HasKind` impl.
 //!
-//! When one is called anyway, it returns `HYC00` ("optional feature not
-//! implemented") **with a diagnostic record posted on the descriptor handle**.
-//! The diagnostic is the point: these entry points previously returned a bare
-//! `SQL_ERROR` and posted nothing, so an application learned that something had
-//! failed and could not learn what.
+//! From that one `&mut` the caller reaches whichever of three sources owns the
+//! field:
 //!
-//! `HYC00` does not appear in any of the three functions' diagnostics tables,
-//! and that is a deliberate choice rather than an oversight:
+//! - the **record map**, for the ARD, APD and IPD;
+//! - the **header storage**, which is the same storage `SQLGetStmtAttr` reads
+//!   for the eight statement attributes ODBC defines as descriptor header
+//!   fields;
+//! - the **IRD's computed view** over the current result set's
+//!   `ColumnDescriptor`s, which stores nothing and delegates to the same
+//!   `get_column_attribute` that implements `SQLColAttributeW`.
 //!
-//! - The tables list what a driver that *implements* descriptors returns. The
-//!   spec's own wording is "the SQLSTATE values **commonly** returned", not an
-//!   exhaustive set.
-//! - `IM001` ("driver does not support this function") is the exact meaning,
-//!   and every one of the three tables marks it **(DM)**. The project's
-//!   non-negotiable rule forbids a driver-side return of a Driver-Manager code,
-//!   and the DM produces it from `SQLGetFunctions` regardless.
-//! - `HY000` is in all three tables and un-annotated, but it is the "no
-//!   specific SQLSTATE" catch-all. An application distinguishing "unimplemented
-//!   feature" from "something went wrong" gets nothing from it.
-//! - `HYC00` is what `SQLAllocHandle` already returns for
-//!   `SQL_HANDLE_DESC` (`crate::ffi::handle`), so an application that tried to
-//!   allocate a descriptor and an application that tried to use one get the
-//!   same answer.
+//! `descriptor::field_access` decides `HY091` for all of them, from the spec's
+//! "Initialization of Descriptor Fields" tables.
 //!
-//! None of this makes `SQL_OIC_CORE` true. Core-level conformance requires
-//! working descriptors; these functions only stop the driver claiming it has
-//! them.
+//! # What is still missing
+//!
+//! `SQLCopyDesc` and `SQLAllocHandle(SQL_HANDLE_DESC)` — explicitly allocated
+//! descriptors, which belong to a *connection* rather than a statement and so
+//! do not resolve through `descriptor_owner`'s parent routing at all. Until
+//! they land, **`SQL_OIC_CORE` is not satisfied**: Core-level conformance
+//! requires working descriptors, and these four make a statement's own
+//! descriptors real without making an application's own possible.
 
 use std::ffi::c_void;
 
@@ -53,34 +48,6 @@ use crate::handles::StatementHandle;
 use crate::panic::panic_safe;
 use crate::types::col_attr::{ColAttrValue, get_column_attribute};
 use crate::types::{SqlReturn, SqlState};
-
-/// Post `HYC00` on `descriptor_handle` and return it, for a descriptor entry
-/// point that is not implemented.
-///
-/// The three functions differ only in their arguments and their logging, all of
-/// which happens before this is called, so the body they share is written once.
-///
-/// # Safety
-///
-/// `descriptor_handle` must be null or a token issued by one of the `alloc_*`
-/// functions in `handles`.
-unsafe fn not_implemented<B: Backend>(descriptor_handle: *mut c_void, feature: &str) -> SqlReturn {
-    unsafe {
-        panic_safe::<B, _>(descriptor_handle, |scope| {
-            // Validates that the token really names a descriptor in this
-            // scope's group, and clears the queue as the spec requires at the
-            // start of every call. `panic_safe` posts the error below through
-            // the same accessor.
-            scope
-                .descriptor_diagnostics::<B>(descriptor_handle)
-                .ok_or(OdbcError::InvalidHandle)?
-                .clear();
-            Err(OdbcError::NotImplemented {
-                feature: feature.into(),
-            })
-        })
-    }
-}
 
 /// Generic implementation of SQLGetDescFieldW.
 ///
@@ -802,9 +769,21 @@ unsafe fn write_small_int(ptr: *mut i16, value: isize) {
 ///
 /// Spec: <https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlsetdescrec-function>
 ///
-/// Descriptors are not implemented, so this reports `HYC00` on the descriptor
-/// handle. See the [module docs](self) for why that code and not one from the
-/// table below.
+/// Eight record fields in one call, where [`sql_set_desc_field_w`] sets one
+/// named field — and the consistency check runs once at the end rather than on
+/// every field, because a record assembled field by field is inconsistent for
+/// most of that.
+///
+/// Two differences from [`sql_get_desc_rec_w`], both from the page's own
+/// argument descriptions:
+///
+/// - **A `record_number` above `SQL_DESC_COUNT` raises the count** rather than
+///   answering `SQL_NO_DATA`. This function grows the record set; the read one
+///   reports the end of it.
+/// - **`HY016` is unconditional on an IRD.** `SQLSetDescField` exempts
+///   `SQL_DESC_ARRAY_STATUS_PTR` and `SQL_DESC_ROWS_PROCESSED_PTR`, but those
+///   are header fields and this function sets record fields only, so no
+///   exemption can apply.
 ///
 /// No `W` suffix: every argument is numeric or a deferred data pointer, so
 /// there is one spelling of this function rather than an ANSI and a Wide form.
@@ -814,11 +793,13 @@ unsafe fn write_small_int(ptr: *mut i16, value: isize) {
 /// - `descriptor_handle`: Descriptor handle.
 /// - `record_number`: The descriptor record to write to.
 /// - `value_type`: The value for `SQL_DESC_TYPE`.
-/// - `sub_type`: The value for `SQL_DESC_DATETIME_INTERVAL_CODE`.
+/// - `sub_type`: The value for `SQL_DESC_DATETIME_INTERVAL_CODE`, for a datetime or
+///   interval `value_type`.
 /// - `length`: The value for `SQL_DESC_OCTET_LENGTH`.
 /// - `precision`: The value for `SQL_DESC_PRECISION`.
 /// - `scale`: The value for `SQL_DESC_SCALE`.
-/// - `data_ptr`: The value for `SQL_DESC_DATA_PTR`. Never dereferenced.
+/// - `data_ptr`: The value for `SQL_DESC_DATA_PTR`. A deferred pointer, never dereferenced
+///   here; null unbinds.
 /// - `string_length_ptr`: The value for `SQL_DESC_OCTET_LENGTH_PTR`. Never dereferenced.
 /// - `indicator_ptr`: The value for `SQL_DESC_INDICATOR_PTR`. Never dereferenced.
 ///
@@ -826,35 +807,27 @@ unsafe fn write_small_int(ptr: *mut i16, value: isize) {
 ///
 /// Diagnostics from the ODBC spec Diagnostics table:
 ///
-/// - `01000` General warning — (not returned here; nothing succeeds with info)
-/// - `07009` Invalid descriptor index — (not returned here; no clause of this row is
-///   annotated `(DM)`, but no record is reachable to index into, so `record_number` is never
-///   validated)
+/// - `01000` General warning — (not returned here; core raises no general warning)
+/// - `07009` Invalid descriptor index — returned for a negative `record_number` on an ARD or
+///   an APD. No clause of this row is annotated `(DM)`
 /// - `08S01` Communication link failure — (not returned here; this function performs no I/O)
 /// - `HY000` General error — returned only for an internal panic caught by `panic_safe`
 /// - `HY001` Memory allocation error — (not returned here; nothing is allocated)
 /// - `HY010` Function sequence error — **(DM)** on all four of its clauses; not returned here
 /// - `HY013` Memory management error — (not returned here)
-/// - `HY016` Cannot modify an implementation row descriptor — (not returned here; the IRD is
-///   deliberately unbacked, so every descriptor gets the same unimplemented answer)
-/// - `HY021` Inconsistent descriptor information — (not returned here; the consistency check
-///   the spec describes has no stored fields to check)
+/// - `HY016` Cannot modify an implementation row descriptor — returned for any IRD write
+/// - `HY021` Inconsistent descriptor information — returned when the assembled record fails
+///   the spec's consistency check
 /// - `HY090` Invalid string or buffer length — **(DM)**; not returned here
 /// - `HY117` Connection is suspended — **(DM)**; not returned here
 /// - `HYT01` Connection timeout expired — (not returned here; this function performs no I/O)
-/// - `IM001` Driver does not support this function — **(DM)**; the Driver Manager returns it
-///   from the `SQLGetFunctions` answer, which reports this function unsupported
-///
-/// Not in the table, but what this function returns:
-///
-/// - `HYC00` Optional feature not implemented — descriptors are not implemented. See the
-///   [module docs](self).
+/// - `IM001` Driver does not support this function — **(DM)**; not returned here
 ///
 /// # Safety
 ///
 /// `descriptor_handle` must be null or a token issued by one of the `alloc_*`
 /// functions in `handles`. `data_ptr`, `string_length_ptr` and
-/// `indicator_ptr` are never dereferenced.
+/// `indicator_ptr` are stored as given and never dereferenced.
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn sql_set_desc_rec<B: Backend>(
     descriptor_handle: *mut c_void,
@@ -882,11 +855,92 @@ pub unsafe fn sql_set_desc_rec<B: Backend>(
         string_length_ptr,
         indicator_ptr,
     );
+    // SAFETY: `descriptor_handle` is null or a token, which `descriptor_owner`
+    // validates without dereferencing. The three pointer arguments are stored
+    // as values and never read through.
     let ret = unsafe {
-        not_implemented::<B>(
-            descriptor_handle,
-            "SQLSetDescRec: descriptors are not implemented",
-        )
+        panic_safe::<B, _>(descriptor_handle, |scope| {
+            let (stmt, role) = scope.descriptor_owner::<B>(descriptor_handle)?;
+            // Spec: clear diagnostics at the start of each ODBC call.
+            stmt.descriptor_mut(role).diagnostics.clear();
+
+            // Spec 07009, as in the other three. No clause of this function's
+            // row is annotated `(DM)`.
+            if record_number < 0 && matches!(role, DescriptorRole::Ard | DescriptorRole::Apd) {
+                return Err(OdbcError::general(
+                    format!("Record number {record_number} is negative"),
+                    SqlState::invalid_descriptor_index(),
+                ));
+            }
+
+            // Spec HY016: "The DescriptorHandle argument was associated with an
+            // IRD." Unconditional, because the two fields `SQLSetDescField`'s
+            // HY016 row exempts are header fields and this function sets record
+            // fields only.
+            if role == DescriptorRole::Ird {
+                return Err(OdbcError::general(
+                    "An implementation row descriptor cannot be modified",
+                    SqlState::cannot_modify_ird(),
+                ));
+            }
+
+            // The spec's own list, in its order. Each goes through
+            // `set_record_field` so the `HY091` rules are identical to
+            // `SQLSetDescField`'s — a field this role does not define is
+            // refused the same way through both doors.
+            //
+            // `SQL_DESC_TYPE` is set before the subcode, because setting the
+            // type resets the subcode for a non-datetime type and would
+            // otherwise discard what this call was given.
+            let fields = [
+                (Desc::Type, isize::from(value_type)),
+                (Desc::DatetimeIntervalCode, isize::from(sub_type)),
+                (Desc::OctetLength, length),
+                (Desc::Precision, isize::from(precision)),
+                (Desc::Scale, isize::from(scale)),
+                (Desc::DataPtr, data_ptr as isize),
+                (Desc::OctetLengthPtr, string_length_ptr as isize),
+                (Desc::IndicatorPtr, indicator_ptr as isize),
+            ];
+
+            // `or_default` creates the record if `record_number` is above the
+            // current `SQL_DESC_COUNT`: the *RecNumber* description makes this
+            // function grow the record set, which is the difference from
+            // `SQLGetDescRec` answering `SQL_NO_DATA` there.
+            let record_key = u16::try_from(record_number).unwrap_or(0);
+            let record = stmt
+                .descriptor_mut(role)
+                .records
+                .entry(record_key)
+                .or_default();
+
+            for (field, value) in fields {
+                // The IPD defines neither pointer field, and the spec expects
+                // this call to work against one — its `SQL_DESC_DATA_PTR` is
+                // the documented oddity below. Skipping them here rather than
+                // reporting `HY091` is what lets an application set an IPD
+                // record with the same call it uses for an APD.
+                if field_access(role, field) != FieldAccess::ReadWrite {
+                    continue;
+                }
+                set_record_field(record, role, field, DescFieldValue::Numeric(value))?;
+            }
+
+            // Spec: "The SQL_DESC_DATA_PTR field of the IPD can be set to force
+            // a consistency check ... the value that the SQL_DESC_DATA_PTR
+            // field of the IPD is set to is not actually stored and cannot be
+            // retrieved by a call to SQLGetDescField or SQLGetDescRec; the
+            // setting is made only to force the consistency check."
+            // `set_record_field` already discards it for the IPD; the check
+            // below is the part that is not discarded.
+            //
+            // Once, at the end. `SQLSetDescField` runs it when
+            // `SQL_DESC_DATA_PTR` is set because that is the field the spec
+            // names there; here the whole record arrives at once, so there is
+            // one consistent moment to check and this is it.
+            consistency_check(record, role)?;
+            Ok(SqlReturn::SUCCESS)
+        })
     };
     tracing::debug!("SQLSetDescRec -> {:?}", ret);
     ret
@@ -1303,35 +1357,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn set_desc_rec_reports_hyc00_and_posts_a_diagnostic() {
-        unsafe {
-            let (env, conn, stmt) = alloc_env_conn_stmt();
-            let ard = ard_of(stmt);
-
-            let ret = sql_set_desc_rec::<MockBackend>(
-                ard,
-                1,
-                odbc_sys::SqlDataType::INTEGER.0,
-                0,
-                4,
-                0,
-                0,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            );
-
-            assert_eq!(ret, SqlReturn::ERROR);
-            assert_eq!(
-                first_sqlstate(ard),
-                sql_state::OPTIONAL_FEATURE_NOT_IMPLEMENTED
-            );
-
-            cleanup_env_conn_stmt(env, conn, stmt);
-        }
-    }
-
     /// The spec's `HY016` row: a write to the IRD is refused unless the field
     /// is `SQL_DESC_ARRAY_STATUS_PTR` or `SQL_DESC_ROWS_PROCESSED_PTR`, which
     /// it names as the exceptions.
@@ -1543,6 +1568,160 @@ mod tests {
             crate::test_utils::cleanup_connected_env_conn_stmt::<MockLongDataBackend>(
                 env, conn, stmt,
             );
+        }
+    }
+
+    /// One call sets eight fields, and the consistency check runs once at the
+    /// end — `SQL_DESC_DATA_PTR` is among them.
+    #[test]
+    fn set_desc_rec_sets_the_record_in_one_call() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            let ard = ard_of(stmt);
+            let mut buf: i64 = 0;
+
+            let ret = sql_set_desc_rec::<MockBackend>(
+                ard,
+                1,
+                CDataType::SBigInt as i16,
+                0,
+                std::mem::size_of::<i64>() as isize,
+                0,
+                0,
+                std::ptr::from_mut(&mut buf).cast::<c_void>(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+                let record = handle
+                    .app_row_desc
+                    .records
+                    .get(&1)
+                    .expect("SQLSetDescRec wrote no record");
+                assert_eq!(record.concise_type, CDataType::SBigInt as i16);
+                assert_eq!(record.octet_length, std::mem::size_of::<i64>() as isize);
+                assert!(record.is_bound());
+            });
+
+            cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
+    /// "The DataPtr argument can be set to a null pointer ... If the handle in
+    /// the DescriptorHandle argument is associated with an ARD, this unbinds
+    /// the column."
+    #[test]
+    fn set_desc_rec_with_a_null_data_pointer_unbinds() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            let ard = ard_of(stmt);
+            let mut buf: i64 = 0;
+
+            let ret = sql_set_desc_rec::<MockBackend>(
+                ard,
+                1,
+                CDataType::SBigInt as i16,
+                0,
+                std::mem::size_of::<i64>() as isize,
+                0,
+                0,
+                std::ptr::from_mut(&mut buf).cast::<c_void>(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+
+            let ret = sql_set_desc_rec::<MockBackend>(
+                ard,
+                1,
+                CDataType::SBigInt as i16,
+                0,
+                std::mem::size_of::<i64>() as isize,
+                0,
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+                let record = handle
+                    .app_row_desc
+                    .records
+                    .get(&1)
+                    .expect("the record itself still exists");
+                assert!(!record.is_bound(), "a null DataPtr did not unbind");
+            });
+
+            cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
+    /// `HY016`: "The DescriptorHandle argument was associated with an IRD."
+    /// Unconditional here — unlike `SQLSetDescField`, this function has no
+    /// exempt header fields, because it sets record fields only.
+    #[test]
+    fn set_desc_rec_on_the_ird_reports_hy016() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            let ird = ird_of(stmt);
+
+            let ret = sql_set_desc_rec::<MockBackend>(
+                ird,
+                1,
+                CDataType::SBigInt as i16,
+                0,
+                8,
+                0,
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            );
+
+            assert_eq!(ret, SqlReturn::ERROR);
+            assert_eq!(first_sqlstate(ird), sql_state::CANNOT_MODIFY_IRD);
+
+            cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
+    /// The consistency check runs here too, and this is the test that proves
+    /// it: the three above all set consistent records, so removing the check
+    /// entirely would leave every one of them green.
+    ///
+    /// `DECIMAL(5,9)` has more scale than precision, which is the clause
+    /// "if the SQL_DESC_TYPE field indicates a numeric type, the
+    /// SQL_DESC_PRECISION and SQL_DESC_SCALE fields are verified to be valid".
+    #[test]
+    fn set_desc_rec_runs_the_consistency_check() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            let ipd = ipd_of(stmt);
+
+            let ret = sql_set_desc_rec::<MockBackend>(
+                ipd,
+                1,
+                SqlDataType::DECIMAL.0,
+                0,
+                8,
+                5, // precision
+                9, // scale
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            );
+
+            assert_eq!(ret, SqlReturn::ERROR);
+            assert_eq!(
+                first_sqlstate(ipd),
+                sql_state::INCONSISTENT_DESCRIPTOR_INFORMATION
+            );
+
+            cleanup_env_conn_stmt(env, conn, stmt);
         }
     }
 
