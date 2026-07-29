@@ -63,6 +63,18 @@ const SQL_NOSCAN_ON: usize = 1;
 #[repr(C)]
 pub struct DescriptorHandle {
     header: HandleHeader,
+    /// This descriptor's own diagnostic queue.
+    ///
+    /// `SQLGetDescField`, `SQLSetDescField` and `SQLSetDescRec` all say their
+    /// SQLSTATE "can be obtained by calling **SQLGetDiagRec** with a
+    /// *HandleType* of SQL_HANDLE_DESC and a *Handle* of *DescriptorHandle*",
+    /// so a descriptor that carried no queue could report a failure and nothing
+    /// about it. Reached through the owning statement — see
+    /// [`HandleScope::descriptor_diagnostics`].
+    ///
+    /// [`HandleScope::descriptor_diagnostics`]:
+    ///     crate::handles::scope::HandleScope::descriptor_diagnostics
+    pub diagnostics: DiagnosticQueue,
 }
 
 impl HasKind for DescriptorHandle {
@@ -682,6 +694,7 @@ pub unsafe fn alloc_statement<B: Backend>(
     let alloc_desc = || {
         Box::new(DescriptorHandle {
             header: HandleHeader::PLACEHOLDER,
+            diagnostics: DiagnosticQueue::new(),
         })
     };
     let handle = Box::new(StatementHandle::<B> {

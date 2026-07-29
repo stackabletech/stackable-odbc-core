@@ -228,11 +228,17 @@ impl Registry {
     ///
     /// The diagnostic-queue lookups, which accept any handle type and dispatch
     /// on what they find.
+    ///
+    /// The parent token comes back from the same pass because a descriptor is
+    /// not reachable any other way: its four roles are fields of the owning
+    /// statement, and picking the right one means asking the statement. Reading
+    /// it here costs nothing — the slot is already in hand — and saves the
+    /// caller a second acquisition of this lock.
     pub(crate) fn resolve_any_in_group(
         &self,
         token: *mut c_void,
         group: &Arc<GroupLock>,
-    ) -> Option<(HandleKind, usize)> {
+    ) -> Option<(HandleKind, usize, Option<*mut c_void>)> {
         if token.is_null() {
             return None;
         }
@@ -242,7 +248,7 @@ impl Registry {
         if slot.generation != generation || !Arc::ptr_eq(&slot.group, group) {
             return None;
         }
-        Some((slot.kind?, slot.addr))
+        Some((slot.kind?, slot.addr, slot.parent.map(|p| p as *mut c_void)))
     }
 
     /// Register a freshly allocated handle and return its token.

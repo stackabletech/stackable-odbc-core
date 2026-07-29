@@ -6,6 +6,7 @@ pub mod bind;
 pub mod connect;
 pub mod connect_attr;
 pub mod cursor;
+pub mod desc;
 pub mod diag;
 pub mod env;
 pub mod execute;

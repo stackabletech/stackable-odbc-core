@@ -273,11 +273,14 @@ impl<'a> HandleScope<'a> {
     /// queue and must leave it untouched, so this hands back a plain
     /// `&mut DiagnosticQueue` rather than the whole handle, and — like
     /// [`Self::get`] and [`Self::push_diagnostic`] — refuses a token outside
-    /// the held group. Descriptors carry no diagnostic queue and get `None`,
-    /// the same answer a stale or foreign token gets.
+    /// the held group. A descriptor is dispatched to
+    /// [`Self::descriptor_diagnostics`], which cannot use the cast below.
     pub fn diagnostics<B: Backend>(&mut self, token: *mut c_void) -> Option<&mut DiagnosticQueue> {
-        let held = self.group.as_ref()?;
-        let (kind, addr) = registry().resolve_any_in_group(token, held)?;
+        let (kind, addr) = {
+            let held = self.group.as_ref()?;
+            let (kind, addr, _parent) = registry().resolve_any_in_group(token, held)?;
+            (kind, addr)
+        };
         // SAFETY: the lookup confirmed this scope owns the lock guarding
         // `token`'s group, and the registry produced `addr` for exactly `kind`,
         // so the cast below matches what the corresponding `alloc_*` function
@@ -292,9 +295,60 @@ impl<'a> HandleScope<'a> {
             HandleKind::Stmt => {
                 Some(unsafe { &mut (*(addr as *mut StatementHandle<B>)).diagnostics })
             }
-            // Descriptors carry no diagnostic queue of their own.
-            HandleKind::Desc => None,
+            HandleKind::Desc => self.descriptor_diagnostics::<B>(token),
         }
+    }
+
+    /// Borrow a descriptor's diagnostic queue, through the statement that owns
+    /// it.
+    ///
+    /// Every other handle kind is reached by casting the address the registry
+    /// stored. A descriptor **must not** be, and the reason outlives this
+    /// function: `HandleKind::Desc` is one kind covering four roles, so a cast
+    /// to any one descriptor type would be a guess about which role the token
+    /// names. Today all four are the same Rust type and the guess would be
+    /// right; the moment they differ — a role-specific record map is exactly
+    /// where this is going — it becomes type confusion the registry cannot
+    /// catch, because the kind check has already passed.
+    ///
+    /// Asking the owning statement answers the question the cast could only
+    /// assume. `Slot::parent` records it at `alloc_statement` time, and
+    /// comparing the token against the statement's four fields identifies the
+    /// role exactly. It also happens to be the only form the borrow rule in
+    /// [`Self::stmt_with_parent`]'s comment permits: the descriptor is reached
+    /// *through* the statement's own `&mut`, never alongside it.
+    ///
+    /// `None` for a token that is stale, outside the held group, not a
+    /// descriptor, or somehow parentless — the same answer, because none of
+    /// them names a queue this scope may write to.
+    pub fn descriptor_diagnostics<B: Backend>(
+        &mut self,
+        token: *mut c_void,
+    ) -> Option<&mut DiagnosticQueue> {
+        let parent = {
+            let held = self.group.as_ref()?;
+            let (kind, _addr, parent) = registry().resolve_any_in_group(token, held)?;
+            if kind != HandleKind::Desc {
+                return None;
+            }
+            parent?
+        };
+        // A descriptor shares its statement's group, so this resolves under the
+        // lock already held.
+        let stmt: &mut StatementHandle<B> = self.get(parent).ok()?;
+        if stmt.app_row_desc.token() == token {
+            return Some(&mut stmt.app_row_desc.diagnostics);
+        }
+        if stmt.app_param_desc.token() == token {
+            return Some(&mut stmt.app_param_desc.diagnostics);
+        }
+        if stmt.imp_row_desc.token() == token {
+            return Some(&mut stmt.imp_row_desc.diagnostics);
+        }
+        if stmt.imp_param_desc.token() == token {
+            return Some(&mut stmt.imp_param_desc.diagnostics);
+        }
+        None
     }
 }
 

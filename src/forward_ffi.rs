@@ -863,43 +863,54 @@ macro_rules! forward_ffi {
         #[allow(non_snake_case, clippy::missing_safety_doc)]
         #[unsafe(no_mangle)]
         pub unsafe extern "system" fn SQLGetDescFieldW(
-            _desc: *mut ::std::ffi::c_void,
-            _rec: i16,
-            _field: i16,
-            _value: *mut ::std::ffi::c_void,
-            _buf_len: i32,
-            _str_len: *mut i32,
+            desc: *mut ::std::ffi::c_void,
+            rec: i16,
+            field: i16,
+            value: *mut ::std::ffi::c_void,
+            buf_len: i32,
+            str_len: *mut i32,
         ) -> $crate::types::SqlReturn {
-            $crate::types::SqlReturn::ERROR
+            unsafe {
+                $crate::ffi::desc::sql_get_desc_field_w::<$B>(
+                    desc, rec, field, value, buf_len, str_len,
+                )
+            }
         }
 
         #[allow(non_snake_case, clippy::missing_safety_doc)]
         #[unsafe(no_mangle)]
         pub unsafe extern "system" fn SQLSetDescFieldW(
-            _desc: *mut ::std::ffi::c_void,
-            _rec: i16,
-            _field: i16,
-            _value: *mut ::std::ffi::c_void,
-            _buf_len: i32,
+            desc: *mut ::std::ffi::c_void,
+            rec: i16,
+            field: i16,
+            value: *mut ::std::ffi::c_void,
+            buf_len: i32,
         ) -> $crate::types::SqlReturn {
-            $crate::types::SqlReturn::ERROR
+            unsafe {
+                $crate::ffi::desc::sql_set_desc_field_w::<$B>(desc, rec, field, value, buf_len)
+            }
         }
 
         #[allow(non_snake_case, clippy::too_many_arguments, clippy::missing_safety_doc)]
         #[unsafe(no_mangle)]
         pub unsafe extern "system" fn SQLSetDescRec(
-            _desc: *mut ::std::ffi::c_void,
-            _rec: i16,
-            _type: i16,
-            _subtype: i16,
-            _length: isize,
-            _precision: i16,
-            _scale: i16,
-            _data: *mut ::std::ffi::c_void,
-            _str_len: *mut isize,
-            _indicator: *mut isize,
+            desc: *mut ::std::ffi::c_void,
+            rec: i16,
+            value_type: i16,
+            subtype: i16,
+            length: isize,
+            precision: i16,
+            scale: i16,
+            data: *mut ::std::ffi::c_void,
+            str_len: *mut isize,
+            indicator: *mut isize,
         ) -> $crate::types::SqlReturn {
-            $crate::types::SqlReturn::ERROR
+            unsafe {
+                $crate::ffi::desc::sql_set_desc_rec::<$B>(
+                    desc, rec, value_type, subtype, length, precision, scale, data, str_len,
+                    indicator,
+                )
+            }
         }
 
         // ---------------------------------------------------------------------------
