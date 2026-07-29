@@ -56,6 +56,27 @@ Everything a driver has to change for the catalog rework, in one place.
 
 ### Added
 
+- `ConnectParams::login_timeout` and `ConnectParams::connection_timeout` give
+  `Backend::connect` the two timeouts it could not previously see.
+  `SQL_ATTR_LOGIN_TIMEOUT` and `SQL_ATTR_CONNECTION_TIMEOUT` are set through
+  `SQLSetConnectAttr`, not through the connection string, and `connect` receives
+  only a `ConnectParams` — so an application setting a 15-second login timeout
+  got no timeout, and no driver had any way to offer one. The login timeout is
+  settable "Before" only precisely because it bounds that call. Core now copies
+  both into the `ConnectParams` it passes, at all three connect entry points.
+
+  They are carried as dedicated fields rather than as synthetic connection-string
+  keys, so `ConnectParams::to_connection_string` — which `SQLDriverConnect`
+  echoes back to the application in *OutConnectionString* — does not gain keys
+  the application never wrote.
+
+  `None` and `Some(0)` are different answers and a backend must not conflate
+  them: `None` means unset, so use the driver's own default, while `Some(0)`
+  for the login timeout means "the timeout is disabled and a connection attempt
+  will wait indefinitely". Core does not enforce either value — `connect` is
+  synchronous and no cancel token exists before a connection does — so a backend
+  that wants them honoured passes them to its own client library.
+
 - `Backend::set_access_mode` carries `SQL_ATTR_ACCESS_MODE` to the data source.
   The attribute was validated and stored but never applied, so a data source
   with a real read-only session mode never entered it and the optimisation the

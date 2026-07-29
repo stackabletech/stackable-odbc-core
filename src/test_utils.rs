@@ -1301,6 +1301,11 @@ pub struct MockAppliedConnection {
     /// `None` ("core never called the hook") are exactly what an access-mode
     /// test has to tell apart, and a plain `bool` collapses them.
     pub access_mode: crate::sync::Mutex<Option<bool>>,
+    /// What `ConnectParams::login_timeout` / `connection_timeout` reported at
+    /// the moment `Backend::connect` ran. Captured there rather than read later
+    /// because that call is the only place a backend ever sees them.
+    pub seen_login_timeout: Option<u32>,
+    pub seen_connection_timeout: Option<u32>,
 }
 
 /// Generates a `Backend` whose only interesting behaviour is the extra items
@@ -1332,10 +1337,12 @@ macro_rules! mock_applied_backend {
             type Error = $err;
             type CancelToken = MockCancelToken;
 
-            fn connect(_: &ConnectParams) -> Result<MockAppliedConnection, $err> {
+            fn connect(params: &ConnectParams) -> Result<MockAppliedConnection, $err> {
                 Ok(MockAppliedConnection {
                     query_timeout: std::sync::atomic::AtomicUsize::new(0),
                     access_mode: crate::sync::Mutex::new(None),
+                    seen_login_timeout: params.login_timeout(),
+                    seen_connection_timeout: params.connection_timeout(),
                 })
             }
             fn disconnect(_: &mut MockAppliedConnection) -> Result<(), $err> {

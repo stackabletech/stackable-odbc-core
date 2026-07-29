@@ -10,8 +10,8 @@ use crate::errors::{IntoOdbc, OdbcError};
 use crate::handles::ConnectionHandle;
 use crate::panic::panic_safe;
 use crate::types::{
-    SQL_AUTOCOMMIT_OFF, SQL_AUTOCOMMIT_ON, SQL_CD_FALSE, SQL_CD_TRUE, SQL_FALSE, SQL_NTS,
-    SqlReturn, SqlState,
+    ConnectParams, SQL_AUTOCOMMIT_OFF, SQL_AUTOCOMMIT_ON, SQL_CD_FALSE, SQL_CD_TRUE, SQL_FALSE,
+    SQL_NTS, SqlReturn, SqlState,
 };
 #[cfg(test)]
 use crate::types::{SQL_TXN_READ_COMMITTED, SQL_TXN_REPEATABLE_READ, SQL_TXN_SERIALIZABLE};
@@ -49,6 +49,47 @@ pub(crate) fn apply_pending_connect_attrs<B: Backend>(
     apply_pending_txn_isolation::<B>(handle)?;
     apply_pending_access_mode::<B>(handle)?;
     apply_pending_current_catalog::<B>(handle)
+}
+
+/// Copy the connection attributes `Backend::connect` may need into the
+/// `ConnectParams` it is about to be given.
+///
+/// `SQL_ATTR_LOGIN_TIMEOUT` and `SQL_ATTR_CONNECTION_TIMEOUT` are set through
+/// `SQLSetConnectAttr`, not through the connection string, so without this a
+/// backend has no way to see them — `connect` receives only `ConnectParams`.
+/// The login timeout in particular is useless anywhere else: the spec lists it
+/// as settable "Before" only, because it bounds the very call that establishes
+/// the connection.
+///
+/// Core does not enforce either one. `Backend::connect` is synchronous and
+/// there is no cancel token before a connection exists, so a backend that wants
+/// these honoured passes them to its own client library.
+///
+/// A value that does not fit in `u32` is dropped rather than truncated: both
+/// attributes are `SQLUINTEGER`, so a larger one is a caller error, and
+/// silently wrapping it to a small number would impose a timeout far shorter
+/// than anything the application asked for.
+pub(crate) fn carry_connect_timeouts<B: Backend>(
+    handle: &ConnectionHandle<B>,
+    params: &mut ConnectParams,
+) {
+    let read = |attr: i32| {
+        handle
+            .attrs
+            .get(&attr)
+            .copied()
+            .and_then(|v| u32::try_from(v).ok())
+    };
+    let login = read(ConnectionAttribute::LOGIN_TIMEOUT.0);
+    let connection = read(ConnectionAttribute::CONNECTION_TIMEOUT.0);
+    if login.is_some() || connection.is_some() {
+        tracing::debug!(
+            "connect: login_timeout={:?}s, connection_timeout={:?}s",
+            login,
+            connection
+        );
+    }
+    params.set_timeouts(login, connection);
 }
 
 /// Apply a `SQL_ATTR_ACCESS_MODE` value that was set before the connection was
@@ -972,6 +1013,100 @@ mod tests {
             assert_eq!(ret, SqlReturn::SUCCESS);
             assert_eq!(val, SQL_AUTOCOMMIT_ON as u32);
             cleanup(env, conn);
+        }
+    }
+
+    /// Set login and connection timeouts before connecting, then report what
+    /// `Backend::connect` actually saw.
+    unsafe fn timeouts_seen_by_connect(
+        login: Option<usize>,
+        connection: Option<usize>,
+    ) -> (Option<u32>, Option<u32>) {
+        unsafe {
+            type B = crate::test_utils::MockAccessModeBackend;
+            let mut env: *mut c_void = std::ptr::null_mut();
+            let _ = sql_alloc_handle::<B>(HandleType::Env as i16, std::ptr::null_mut(), &mut env);
+            let mut conn: *mut c_void = std::ptr::null_mut();
+            let _ = sql_alloc_handle::<B>(HandleType::Dbc as i16, env, &mut conn);
+
+            for (attr, value) in [
+                (ConnectionAttribute::LOGIN_TIMEOUT.0, login),
+                (ConnectionAttribute::CONNECTION_TIMEOUT.0, connection),
+            ] {
+                if let Some(v) = value {
+                    assert_eq!(
+                        sql_set_connect_attr_w::<B>(
+                            conn,
+                            attr,
+                            std::ptr::without_provenance_mut::<c_void>(v),
+                            0,
+                        ),
+                        SqlReturn::SUCCESS,
+                    );
+                }
+            }
+
+            let wide: Vec<u16> = "Host=localhost".encode_utf16().collect();
+            assert_eq!(
+                crate::ffi::connect::sql_driver_connect_w::<B>(
+                    conn,
+                    std::ptr::null_mut(),
+                    wide.as_ptr(),
+                    wide.len() as i16,
+                    std::ptr::null_mut(),
+                    0,
+                    std::ptr::null_mut(),
+                    0,
+                ),
+                SqlReturn::SUCCESS,
+            );
+
+            let seen = with_handle::<B, ConnectionHandle<B>, _>(conn, |c| {
+                let c = c.connection.as_ref().expect("connected");
+                (c.seen_login_timeout, c.seen_connection_timeout)
+            });
+
+            let _ = crate::ffi::connect::sql_disconnect::<B>(conn);
+            let _ = sql_free_handle::<B>(HandleType::Dbc as i16, conn);
+            let _ = sql_free_handle::<B>(HandleType::Env as i16, env);
+            seen
+        }
+    }
+
+    #[test]
+    fn login_and_connection_timeouts_reach_the_backend() {
+        // Both are set through SQLSetConnectAttr rather than the connection
+        // string, so without core carrying them across, `Backend::connect` -
+        // which receives only ConnectParams - could never see them. The login
+        // timeout is settable "Before" only precisely because it bounds this
+        // call.
+        unsafe {
+            assert_eq!(
+                timeouts_seen_by_connect(Some(15), Some(45)),
+                (Some(15), Some(45)),
+            );
+        }
+    }
+
+    #[test]
+    fn an_unset_timeout_is_none_and_a_zero_timeout_is_some_zero() {
+        // The distinction is the spec's, and collapsing it inverts the
+        // behaviour: unset means "use the driver's own default", while 0 for
+        // SQL_ATTR_LOGIN_TIMEOUT means "the timeout is disabled and a
+        // connection attempt will wait indefinitely". A backend that read
+        // Some(0) as unset would impose a default on an application that asked
+        // for no limit at all.
+        unsafe {
+            assert_eq!(
+                timeouts_seen_by_connect(None, None),
+                (None, None),
+                "nothing was set, so the backend must see nothing",
+            );
+            assert_eq!(
+                timeouts_seen_by_connect(Some(0), Some(0)),
+                (Some(0), Some(0)),
+                "an explicit 0 is a value, not an absence",
+            );
         }
     }
 

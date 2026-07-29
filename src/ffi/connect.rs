@@ -132,7 +132,8 @@ pub unsafe fn sql_driver_connect_w<B: Backend>(
             }
 
             let conn_str = utf16_to_string(in_connection_string, string_length1.into())?;
-            let params = merge_dsn_params::<B>(&conn_str, read_dsn_keys)?;
+            let mut params = merge_dsn_params::<B>(&conn_str, read_dsn_keys)?;
+            crate::ffi::connect_attr::carry_connect_timeouts::<B>(handle, &mut params);
             let connection = B::connect(&params).into_odbc()?;
             handle.connection = Some(connection);
             // A deferred attribute the backend cannot honour fails the
@@ -303,6 +304,7 @@ pub unsafe fn sql_connect_w<B: Backend>(
             {
                 params.insert("password", auth);
             }
+            crate::ffi::connect_attr::carry_connect_timeouts::<B>(handle, &mut params);
             tracing::debug!("SQLConnectW: params = {:?}", params);
             let connection = B::connect(&params).into_odbc()?;
             handle.connection = Some(connection);
@@ -505,6 +507,7 @@ pub unsafe fn sql_browse_connect_w<B: Backend>(
             }
 
             // All required attributes are present; connect.
+            crate::ffi::connect_attr::carry_connect_timeouts::<B>(handle, &mut merged);
             let connection = B::connect(&merged).into_odbc()?;
             handle.connection = Some(connection);
             // A deferred attribute the backend cannot honour fails the

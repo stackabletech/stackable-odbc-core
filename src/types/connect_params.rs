@@ -29,6 +29,17 @@ pub struct ConnectParams {
     /// Keyword names the backend has declared as carrying secrets. Additive to
     /// `SENSITIVE_KEYWORD_MARKERS`; see [`ConnectParams::declare_sensitive_keywords`].
     sensitive_keywords: Cow<'static, [Cow<'static, str>]>,
+    /// `SQL_ATTR_LOGIN_TIMEOUT`, in seconds, if the application set one.
+    ///
+    /// A separate field rather than a synthetic entry in `params` on purpose:
+    /// this did not come from the connection string, and `to_connection_string`
+    /// echoes `params` back to the application through
+    /// `SQLDriverConnect`'s *OutConnectionString*. A key invented here would
+    /// appear in that echo as though the application had written it.
+    login_timeout: Option<u32>,
+    /// `SQL_ATTR_CONNECTION_TIMEOUT`, in seconds, if the application set one.
+    /// Kept out of `params` for the same reason as [`Self::login_timeout`].
+    connection_timeout: Option<u32>,
 }
 
 /// Substrings that mark a connection-string keyword as carrying a credential.
@@ -184,6 +195,11 @@ impl ConnectParams {
         Ok(Self {
             params,
             sensitive_keywords: Cow::Borrowed(&[]),
+            // Not in the connection string by definition; core fills these in
+            // from the connection attributes just before calling
+            // `Backend::connect`.
+            login_timeout: None,
+            connection_timeout: None,
         })
     }
 
@@ -226,6 +242,61 @@ impl ConnectParams {
     /// Returns the `SAVEFILE` parameter if present (ODBC spec: save connection string to file DSN).
     pub fn savefile(&self) -> Option<&str> {
         self.get(SAVEFILE)
+    }
+
+    /// The `SQL_ATTR_LOGIN_TIMEOUT` the application set, in seconds.
+    ///
+    /// `None` means the application set nothing and the backend should use its
+    /// own default; the spec says "the default is driver-dependent". `Some(0)`
+    /// is **not** the same thing and must not be treated as unset — the spec is
+    /// explicit that "if *ValuePtr* is 0, the timeout is disabled and a
+    /// connection attempt will wait indefinitely".
+    ///
+    /// This is the number of seconds "to wait for a login request to complete
+    /// before returning to the application", so it bounds
+    /// [`Backend::connect`](crate::backend::Backend::connect) itself. Core
+    /// cannot enforce it — `connect` is synchronous and there is no cancel
+    /// token before a connection exists — so a backend that wants a login
+    /// timeout has to pass this to its own client library.
+    ///
+    /// A backend that clamps this to a maximum it supports should report
+    /// `01S02`, which the spec names for exactly that: "if the specified
+    /// timeout exceeds the maximum login timeout in the data source, the driver
+    /// substitutes that value and returns SQLSTATE 01S02".
+    pub fn login_timeout(&self) -> Option<u32> {
+        self.login_timeout
+    }
+
+    /// The `SQL_ATTR_CONNECTION_TIMEOUT` the application set, in seconds.
+    ///
+    /// `None` means unset; `Some(0)` means "no timeout", which the spec states
+    /// directly: "if *ValuePtr* is equal to 0 (the default), there is no
+    /// timeout."
+    ///
+    /// Unlike [`Self::login_timeout`] this bounds "any request on the
+    /// connection", not just the login, and the spec tells a driver what to
+    /// report when it expires: "the driver should return SQLSTATE HYT00
+    /// (Timeout expired) anytime that it is possible to time out in a situation
+    /// not associated with query execution or login." Core does not enforce it;
+    /// a backend that honours it does so in its own client library.
+    ///
+    /// The spec lists this attribute as settable either side of a connection,
+    /// so a value set *after* connecting never passes through here — this
+    /// carries only what was set before, which is what `Backend::connect` can
+    /// act on.
+    pub fn connection_timeout(&self) -> Option<u32> {
+        self.connection_timeout
+    }
+
+    /// Record the connection attributes that are not connection-string
+    /// keywords, just before [`Backend::connect`](crate::backend::Backend::connect).
+    ///
+    /// Called by the three connect entry points; not public, because these
+    /// values come from `SQLSetConnectAttr` rather than from anything a driver
+    /// parses.
+    pub(crate) fn set_timeouts(&mut self, login: Option<u32>, connection: Option<u32>) {
+        self.login_timeout = login;
+        self.connection_timeout = connection;
     }
 
     /// Insert a key-value pair. The key is stored in lowercase for case-insensitive lookup.
@@ -292,6 +363,8 @@ impl FromIterator<(String, String)> for ConnectParams {
         Self {
             params,
             sensitive_keywords: Cow::Borrowed(&[]),
+            login_timeout: None,
+            connection_timeout: None,
         }
     }
 }
