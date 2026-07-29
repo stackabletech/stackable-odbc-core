@@ -35,6 +35,21 @@ pub const CLIENT_UNABLE_TO_ESTABLISH_CONNECTION: &str = "08001";
 /// diagnostics tables of `SQLExecute`, `SQLFetch`, `SQLGetInfo` and friends.
 pub const COMMUNICATION_LINK_FAILURE: &str = "08S01";
 
+/// Invalid catalog name — 3D000
+///
+/// `SQLSetConnectAttr`'s row is "the *Attribute* argument was
+/// SQL_CURRENT_CATALOG, and the specified catalog name was invalid", and it
+/// carries no `(DM)` marker, so it is the driver's to return. Core cannot
+/// produce it: only the data source knows which catalogs exist, and the
+/// attribute's own description has the driver send something to it — "in SQL
+/// Server, the catalog is a database, so the driver sends a **USE** *database*
+/// statement". A backend's [`crate::backend::Backend::set_current_catalog`]
+/// maps "no such catalog" to this, and core propagates it unchanged.
+///
+/// Also listed by `SQLExecDirect` and `SQLPrepare`, for a catalog named in the
+/// SQL text itself.
+pub const INVALID_CATALOG_NAME: &str = "3D000";
+
 /// Connection name in use — 08002
 pub const CONNECTION_IN_USE: &str = "08002";
 
@@ -333,6 +348,16 @@ impl SqlState {
     /// Communication link failure — 08S01
     pub fn communication_link_failure() -> Self {
         Self::new(COMMUNICATION_LINK_FAILURE)
+    }
+
+    /// Invalid catalog name — 3D000
+    ///
+    /// For a backend's [`crate::backend::Backend::set_current_catalog`] to
+    /// report that the data source has no such catalog, and for a driver
+    /// mapping the same complaint out of `SQLExecDirect` or `SQLPrepare`. Core
+    /// never constructs it: see [`INVALID_CATALOG_NAME`].
+    pub fn invalid_catalog_name() -> Self {
+        Self::new(INVALID_CATALOG_NAME)
     }
 
     /// Numeric value out of range — 22003

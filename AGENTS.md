@@ -143,6 +143,33 @@ whose `connect` performs no network I/O will only ever see post-connection
 failures, and should map them to `08S01`; a driver that opens a real connection
 in `connect` is where `08001` legitimately originates.
 
+### A SQLSTATE only the data source can determine
+
+Some states are the driver's to return by the spec's `(DM)` rules, yet core
+cannot produce them, because the fact they assert lives at the data source.
+`3D000` ("invalid catalog name") is the type case: `SQLSetConnectAttr`'s row
+carries no `(DM)` marker, but only the data source knows which catalogs exist,
+and the attribute's description has the driver *send* something to find out
+("the driver sends a **USE** *database* statement"). Core's part is threefold —
+name the state (`SqlState::invalid_catalog_name`), call the hook, and propagate
+what it returns unchanged. A backend that maps "no such catalog" to a generic
+`HY000` is the only reason an application would not see `3D000`.
+
+Two consequences generalise to any hook of this shape:
+
+- **A "not returned by this driver" doc line is a claim about the whole path,
+  not about core's own code.** `3D000` was recorded that way while core was
+  already propagating it, because whoever wrote the line was looking at core and
+  the state comes from the backend.
+- **A pending connection attribute moves the SQLSTATE to a different
+  function.** `SQL_ATTR_CURRENT_CATALOG` and `SQL_ATTR_ACCESS_MODE` are settable
+  either side of a connection, and the spec says interoperable applications set
+  them *before* — so core applies them during `SQLDriverConnectW` and a hook
+  failure surfaces there, carrying a state that function's own diagnostics table
+  may not list (`3D000`, or `HYC00` from an unimplemented hook). Propagate it
+  rather than degrading it; a connection that failed because the catalog does
+  not exist should say so.
+
 ## Adding a new ODBC function
 
 1. **Read the ODBC spec first.** Every function has a spec page at `https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/<function-name>-function?view=sql-server-ver17` (e.g. `sqlallochandle-function`). Read it in detail before writing any code.

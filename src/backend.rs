@@ -208,6 +208,24 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// `SQL_SUCCESS` would tell an application its unqualified names now
     /// resolve somewhere they do not. Core stores the value only once this
     /// returns `Ok`.
+    ///
+    /// **Map "no such catalog" to `3D000`**, via
+    /// [`crate::types::SqlState::invalid_catalog_name`].
+    /// `SQLSetConnectAttr`'s `3D000` row — "the *Attribute* argument was
+    /// SQL_CURRENT_CATALOG, and the specified catalog name was invalid" —
+    /// carries no `(DM)` marker, so the driver owes it, and this method is the
+    /// only place it can come from: core has no way to know which catalogs a
+    /// data source has. Core propagates whatever this returns unchanged, so a
+    /// backend that reports a bad catalog name as a generic `HY000` is the only
+    /// reason an application would not see `3D000`.
+    ///
+    /// Note where the error surfaces. The spec lists this attribute as settable
+    /// either side of a connection and notes that interoperable applications set
+    /// it *before* one, in which case core applies it during `SQLDriverConnectW`
+    /// / `SQLConnectW` / `SQLBrowseConnectW` and a failure here fails the
+    /// connect — `3D000` from a function whose own diagnostics table does not
+    /// list it. That is deliberate: degrading it would tell the application its
+    /// connection failed for some unrelated reason.
     fn set_current_catalog(_conn: &Self::Connection, _catalog: &str) -> Result<(), Self::Error> {
         Err(OdbcError::NotImplemented {
             feature: "SQL_ATTR_CURRENT_CATALOG".into(),

@@ -50,6 +50,13 @@ use crate::utf16::{utf16_to_string, write_utf16};
 ///   establishing the connection is 08001. 08S01 applies once the connection
 ///   exists (see AGENTS.md, "08001 versus 08S01").
 /// - 28000: Invalid authorization specification — may be returned by the backend via `B::connect`.
+/// - 3D000: Invalid catalog name — **absent from this function's diagnostics table**, yet
+///   returned by this driver. A `SQL_ATTR_CURRENT_CATALOG` set before connecting is applied here,
+///   and [`crate::backend::Backend::set_current_catalog`] owes `3D000` for a catalog the data
+///   source does not have. The state is propagated rather than degraded: telling the application
+///   its connection failed for an unrelated reason would be worse than naming a state this table
+///   omits. The spec notes interoperable applications set this attribute *before* connecting, so
+///   this is the path that matters most.
 /// - HY000: General error — returned for any backend error with no specific SQLSTATE.
 /// - HY001: Memory allocation failure — not returned here (Rust panics on alloc failure).
 /// - HY008: Operation canceled; not returned here. Cancelling a connection-level call needs
@@ -65,7 +72,11 @@ use crate::utf16::{utf16_to_string, write_utf16};
 ///   as a defence-in-depth guard when called outside a full Driver Manager stack.
 /// - HY092: Invalid attribute/option identifier — (driver-manager-handled; not returned here).
 /// - HY110: Invalid driver completion — (driver-manager-handled; not returned here).
-/// - HYC00: Optional feature not implemented — not returned here at connect time.
+/// - HYC00: Optional feature not implemented — **returned by this driver**, but only from a
+///   connection attribute set before the connect. Core applies those here (see
+///   `apply_pending_connect_attrs`), and an unimplemented hook — most often the defaulted
+///   [`crate::backend::Backend::set_current_catalog`] — reports `HYC00`, which fails the connect
+///   and tears it down. Nothing in the connect path itself produces it.
 /// - HYT00: Login timeout expired — not returned here (login timeout not enforced).
 /// - HYT01: Connection timeout expired — not returned here (connection timeout not enforced).
 /// - S1118: Driver does not support asynchronous notification (driver-manager-handled; not returned here).
@@ -209,6 +220,13 @@ pub unsafe fn sql_driver_connect_w<B: Backend>(
 ///   establishing the connection is 08001. 08S01 applies once the connection
 ///   exists (see AGENTS.md, "08001 versus 08S01").
 /// - 28000: Invalid authorization specification — may be returned by the backend via `B::connect`.
+/// - 3D000: Invalid catalog name — **absent from this function's diagnostics table**, yet
+///   returned by this driver. A `SQL_ATTR_CURRENT_CATALOG` set before connecting is applied here,
+///   and [`crate::backend::Backend::set_current_catalog`] owes `3D000` for a catalog the data
+///   source does not have. The state is propagated rather than degraded: telling the application
+///   its connection failed for an unrelated reason would be worse than naming a state this table
+///   omits. The spec notes interoperable applications set this attribute *before* connecting, so
+///   this is the path that matters most.
 /// - HY000: General error — returned for any backend error with no specific SQLSTATE.
 /// - HY001: Memory allocation failure — (driver-manager-handled; not returned here).
 /// - HY008: Operation canceled; not returned here. Cancelling a connection-level call needs
@@ -376,6 +394,13 @@ pub unsafe fn sql_connect_w<B: Backend>(
 ///   establishing the connection is 08001. 08S01 applies once the connection
 ///   exists (see AGENTS.md, "08001 versus 08S01").
 /// - 28000: Invalid authorization specification — may be returned by the backend via `B::connect`.
+/// - 3D000: Invalid catalog name — **absent from this function's diagnostics table**, yet
+///   returned by this driver. A `SQL_ATTR_CURRENT_CATALOG` set before connecting is applied here,
+///   and [`crate::backend::Backend::set_current_catalog`] owes `3D000` for a catalog the data
+///   source does not have. The state is propagated rather than degraded: telling the application
+///   its connection failed for an unrelated reason would be worse than naming a state this table
+///   omits. The spec notes interoperable applications set this attribute *before* connecting, so
+///   this is the path that matters most.
 /// - HY000: General error — returned for any backend error with no specific SQLSTATE.
 /// - HY001: Memory allocation failure — not returned here (Rust panics on alloc failure).
 /// - HY008: Operation canceled; not returned here. Cancelling a connection-level call needs
@@ -389,7 +414,11 @@ pub unsafe fn sql_connect_w<B: Backend>(
 /// - HY090: Invalid string or buffer length — returned when `string_length1 < 0 && != SQL_NTS`,
 ///   or when `buffer_length < 0`. Note: spec marks these as `(DM)`, but checked here as
 ///   defence-in-depth when called outside a full Driver Manager stack.
-/// - HYC00: Optional feature not implemented — not returned here at connect time.
+/// - HYC00: Optional feature not implemented — **returned by this driver**, but only from a
+///   connection attribute set before the connect. Core applies those here (see
+///   `apply_pending_connect_attrs`), and an unimplemented hook — most often the defaulted
+///   [`crate::backend::Backend::set_current_catalog`] — reports `HYC00`, which fails the connect
+///   and tears it down. Nothing in the connect path itself produces it.
 /// - HYT00: Login timeout expired — not returned here (login timeout not enforced).
 /// - HYT01: Connection timeout expired — not returned here (connection timeout not enforced).
 /// - IM001: Driver does not support this function — (driver-manager-handled; not returned here).

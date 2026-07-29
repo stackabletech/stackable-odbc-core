@@ -276,8 +276,16 @@ fn connection_has_result_set_pending<B: Backend>(
 ///   distributed transactions (DTC) are not supported, and
 ///   `SQL_ATTR_ENLIST_IN_DTC` reports HYC00 before a transaction can be
 ///   enlisted in one.
-/// - 3D000 Invalid catalog name: not returned; the catalog string is stored
-///   verbatim without validation.
+/// - 3D000 Invalid catalog name: **returned by this driver**, propagated
+///   unchanged from [`Backend::set_current_catalog`]. The row — "the *Attribute*
+///   argument was SQL_CURRENT_CATALOG, and the specified catalog name was
+///   invalid" — carries no `(DM)` marker, so it is the driver's to return, and
+///   core cannot produce it: only the data source knows which catalogs exist,
+///   and the attribute's own description has the driver send something to it
+///   ("the driver sends a **USE** *database* statement"). Core asks the hook and
+///   stores the value only if it succeeds, so a rejected catalog is never
+///   recorded as the current one. A backend reports this with
+///   [`SqlState::invalid_catalog_name`].
 /// - HY000 General error: returned for unexpected internal errors.
 /// - HY001 Memory allocation error: not returned; Rust panics on allocation
 ///   failure, which is caught by `panic_safe` and converted to `SQL_ERROR`/HY000.
@@ -923,8 +931,9 @@ mod tests {
     use super::*;
     use crate::ffi::handle::{sql_alloc_handle, sql_free_handle};
     use crate::test_utils::{
-        MockAltBackend, MockBackend, MockCancelAwareBackend, MockConnection, MockIsolationBackend,
-        MockIsolationConnection, MockUnappliedIsolationBackend, with_handle,
+        MockAltBackend, MockBackend, MockCancelAwareBackend, MockCatalogRejectingBackend,
+        MockConnection, MockIsolationBackend, MockIsolationConnection,
+        MockUnappliedIsolationBackend, with_handle,
     };
     use odbc_sys::HandleType;
 
@@ -2367,6 +2376,135 @@ mod tests {
             );
 
             cleanup_for::<MockUnappliedIsolationBackend>(env, conn);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // F3: 3D000 invalid catalog name
+    // -----------------------------------------------------------------------
+
+    /// Set `SQL_ATTR_CURRENT_CATALOG` to `catalog` on a connected handle and
+    /// return the call's `SqlReturn` plus the first diagnostic's SQLSTATE.
+    unsafe fn set_catalog<B: Backend>(
+        conn: *mut c_void,
+        catalog: &str,
+    ) -> (SqlReturn, Option<String>) {
+        unsafe {
+            let wide: Vec<u16> = catalog.encode_utf16().collect();
+            let ret = sql_set_connect_attr_w::<B>(
+                conn,
+                ConnectionAttribute::CURRENT_CATALOG.0,
+                wide.as_ptr() as *mut c_void,
+                i32::try_from(wide.len() * 2).expect("length fits in i32"),
+            );
+            let state = with_handle::<B, ConnectionHandle<B>, _>(conn, |h| {
+                h.diagnostics.get(0).map(|d| d.sqlstate.as_str().to_owned())
+            });
+            (ret, state)
+        }
+    }
+
+    /// `3D000` was recorded as "not returned; the catalog string is stored
+    /// verbatim without validation", which was never true of the code: core
+    /// calls `Backend::set_current_catalog` and stores the value only if that
+    /// succeeds. The spec's row carries no `(DM)` marker, so the state is the
+    /// driver's, and core has no way to produce it — only the data source knows
+    /// which catalogs exist. This pins the propagation the contract relies on.
+    #[test]
+    fn set_current_catalog_propagates_the_backends_3d000() {
+        unsafe {
+            let (env, conn) = alloc_env_conn_for::<MockCatalogRejectingBackend>();
+            assert_eq!(
+                driver_connect::<MockCatalogRejectingBackend>(conn),
+                SqlReturn::SUCCESS,
+                "precondition: connected, so the hook is reached",
+            );
+
+            let (ret, state) = set_catalog::<MockCatalogRejectingBackend>(conn, "nope");
+            assert_eq!(ret, SqlReturn::ERROR);
+            assert_eq!(
+                state.as_deref(),
+                Some("3D000"),
+                "the data source's verdict on the catalog name, not a state core invented",
+            );
+
+            cleanup_for::<MockCatalogRejectingBackend>(env, conn);
+        }
+    }
+
+    /// The other half: a catalog the data source accepts is stored, so
+    /// `SQLGetConnectAttr` reads it back. Without this, the test above could
+    /// not tell "core propagated the backend's verdict" from "core rejects
+    /// every catalog".
+    #[test]
+    fn set_current_catalog_stores_a_catalog_the_backend_accepted() {
+        unsafe {
+            let (env, conn) = alloc_env_conn_for::<MockCatalogRejectingBackend>();
+            assert_eq!(
+                driver_connect::<MockCatalogRejectingBackend>(conn),
+                SqlReturn::SUCCESS,
+                "precondition: connected, so the hook is reached",
+            );
+
+            let (ret, _) = set_catalog::<MockCatalogRejectingBackend>(conn, "good");
+            assert_eq!(ret, SqlReturn::SUCCESS);
+
+            let stored = with_handle::<
+                MockCatalogRejectingBackend,
+                ConnectionHandle<MockCatalogRejectingBackend>,
+                _,
+            >(conn, |h| {
+                h.attr_strings
+                    .get(&ConnectionAttribute::CURRENT_CATALOG.0)
+                    .cloned()
+            });
+            assert_eq!(
+                stored.as_deref(),
+                Some("good"),
+                "core stores the value only once the data source agreed to it",
+            );
+
+            cleanup_for::<MockCatalogRejectingBackend>(env, conn);
+        }
+    }
+
+    /// A catalog set *before* connecting is applied by
+    /// `apply_pending_connect_attrs`, so its `3D000` surfaces from the connect
+    /// function rather than from `SQLSetConnectAttr`.
+    ///
+    /// Worth pinning because `SQLDriverConnect`'s own diagnostics table has no
+    /// `3D000` row: the state is real and reported anyway, since degrading it
+    /// would tell the application its connection failed for some unrelated
+    /// reason. The spec lists this attribute as settable either side of a
+    /// connection and notes interoperable applications set it *before*, so this
+    /// is the path that matters most.
+    #[test]
+    fn a_pre_connect_catalog_the_backend_rejects_fails_the_connect_with_3d000() {
+        unsafe {
+            let (env, conn) = alloc_env_conn_for::<MockCatalogRejectingBackend>();
+
+            let (ret, _) = set_catalog::<MockCatalogRejectingBackend>(conn, "nope");
+            assert_eq!(
+                ret,
+                SqlReturn::SUCCESS,
+                "precondition: with no connection yet the value is only stored",
+            );
+
+            assert_eq!(
+                driver_connect::<MockCatalogRejectingBackend>(conn),
+                SqlReturn::ERROR,
+                "a catalog the data source rejects must not be reported as applied",
+            );
+            let state = with_handle::<
+                MockCatalogRejectingBackend,
+                ConnectionHandle<MockCatalogRejectingBackend>,
+                _,
+            >(conn, |h| {
+                h.diagnostics.get(0).map(|d| d.sqlstate.as_str().to_owned())
+            });
+            assert_eq!(state.as_deref(), Some("3D000"));
+
+            cleanup_for::<MockCatalogRejectingBackend>(env, conn);
         }
     }
 }

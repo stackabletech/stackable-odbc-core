@@ -3968,3 +3968,120 @@ impl Backend for MockFailingDescribeBackend {
 
     minimal_capability_decls!();
 }
+
+// ---------------------------------------------------------------------------
+// A backend that rejects an unknown catalog, for 3D000
+// ---------------------------------------------------------------------------
+
+/// Rejects any catalog but `"good"`, with the spec's `3D000`.
+///
+/// `type Error = OdbcError` so the rejection is a genuine failure rather than
+/// the `NotImplemented` a `MockError` collapses to — which core treats as "this
+/// backend has no catalogs" and reports as `HYC00`, a different answer entirely.
+///
+/// Accepting *one* name matters as much as rejecting the rest: a mock that
+/// failed unconditionally could not tell "core propagated the backend's
+/// verdict" apart from "core rejects every catalog", and the success case is
+/// what proves core stores the value only when the data source agreed to it.
+pub struct MockCatalogRejectingBackend;
+
+impl Backend for MockCatalogRejectingBackend {
+    type Connection = MockConnection;
+    type Statement = MockStatement;
+    type Error = OdbcError;
+    type CancelToken = MockCancelToken;
+
+    fn connect(_: &ConnectParams) -> Result<MockConnection, OdbcError> {
+        Ok(MockConnection)
+    }
+    fn disconnect(_: &mut MockConnection) -> Result<(), OdbcError> {
+        Ok(())
+    }
+    fn cancel_token(_conn: &Self::Connection) -> Self::CancelToken {
+        MockCancelToken::default()
+    }
+    fn set_current_catalog(_conn: &Self::Connection, catalog: &str) -> Result<(), OdbcError> {
+        if catalog == "good" {
+            Ok(())
+        } else {
+            Err(OdbcError::general(
+                format!("no such catalog: {catalog}"),
+                crate::types::SqlState::invalid_catalog_name(),
+            ))
+        }
+    }
+    fn exec_direct(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: &str,
+    ) -> Result<MockStatement, OdbcError> {
+        Ok(MockStatement)
+    }
+    fn prepare(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: &str,
+    ) -> Result<MockStatement, OdbcError> {
+        Ok(MockStatement)
+    }
+    fn execute(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: &mut MockStatement,
+        _: &[crate::types::ColumnValue],
+    ) -> Result<crate::types::ExecuteOutcome, OdbcError> {
+        Ok(crate::types::ExecuteOutcome::default())
+    }
+    fn get_info(_: &MockConnection, _: crate::types::InfoType) -> Result<InfoValue, OdbcError> {
+        Err(OdbcError::NotImplemented {
+            feature: "get_info".into(),
+        })
+    }
+    fn get_functions() -> Cow<'static, [crate::function_id::FunctionId]> {
+        Cow::Borrowed(&[])
+    }
+    fn get_type_info(_conn: &Self::Connection) -> Cow<'static, [TypeInfoRow]> {
+        Cow::Borrowed(&[])
+    }
+    fn tables(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: &[String],
+    ) -> Result<Vec<TableRow>, OdbcError> {
+        Ok(Vec::new())
+    }
+    fn columns(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+    ) -> Result<Vec<ColumnRow>, OdbcError> {
+        Ok(Vec::new())
+    }
+
+    fn supports_catalogs(_conn: &Self::Connection) -> bool {
+        true
+    }
+    fn supports_schemas(_conn: &Self::Connection) -> bool {
+        false
+    }
+    fn alter_table_support(_conn: &Self::Connection) -> u32 {
+        0
+    }
+    fn outer_join_capabilities(_conn: &Self::Connection) -> u32 {
+        0
+    }
+    fn default_txn_isolation(_conn: &Self::Connection) -> u32 {
+        0
+    }
+    fn txn_isolation_options(_conn: &Self::Connection) -> u32 {
+        0
+    }
+
+    minimal_capability_decls!();
+}

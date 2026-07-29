@@ -56,6 +56,24 @@ Everything a driver has to change for the catalog rework, in one place.
 
 ### Added
 
+- **`SqlState::invalid_catalog_name()` and `INVALID_CATALOG_NAME` (`3D000`).**
+  `SQLSetConnectAttr`'s `3D000` row carries no `(DM)` marker, so it is the
+  driver's to return — but core had no name for it, so a driver told to report
+  it had no way to say so. Core still never constructs it: only the data source
+  knows which catalogs exist, and the attribute's own description has the driver
+  send something to it ("the driver sends a **USE** *database* statement").
+  `Backend::set_current_catalog` now documents that "no such catalog" maps to
+  this state, and core's propagation of it is pinned by tests on both paths —
+  through `SQLSetConnectAttrW`, and through the connect functions for a catalog
+  set before connecting.
+
+  The old claim that core "stored the catalog string verbatim without
+  validation" was never true of the code: core has always asked the hook and
+  stored the value only on success. Two further doc corrections follow from
+  that — the connect functions can return `3D000`, which their own diagnostics
+  table does not list, and they can return `HYC00` from an unimplemented
+  pending-attribute hook, which their doc comments claimed they could not.
+
 - `Backend::set_max_rows` and `Backend::set_max_length` let the data source
   apply `SQL_ATTR_MAX_ROWS` and `SQL_ATTR_MAX_LENGTH`, which were substituted to
   `0` with `01S02` for every driver. Both default to `NotImplemented`, keeping
