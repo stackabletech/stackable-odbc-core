@@ -191,19 +191,23 @@ pub(crate) fn text_to_sql_type(
     }
 
     // Datetimes. The ODBC 2.0 spellings (`SQL_DATE` 9, `SQL_TIME` 10,
-    // `SQL_TIMESTAMP` 11) are grouped with their 3.x counterparts exactly as
-    // `types::col_attr` already groups them, so a parameter bound by an ODBC
-    // 2.x application does not lose its type for using the older number.
-    if sql_type == SqlDataType::DATE {
+    // `SQL_TIMESTAMP` 11) are grouped with their 3.x counterparts, so a
+    // parameter bound by an ODBC 2.x application does not lose its type for
+    // using the older number.
+    //
+    // `odbc_sys` names 9 `DATETIME`, which is the *verbose* `SQL_DATETIME`
+    // spelling of the same number — but `SQLBindParameter`'s `ParameterType` is
+    // a **concise** type, where 9 is `SQL_DATE`. It therefore belongs with date
+    // and not with timestamp, which is where it sat until this was checked
+    // against AWS's Redshift ODBC driver: `convertCParamDataToSQLData` opens
+    // that branch `case SQL_TYPE_DATE: case SQL_DATE:`.
+    if sql_type == SqlDataType::DATE || sql_type == SqlDataType::DATETIME {
         return to_date(text);
     }
     if sql_type == SqlDataType::TIME || sql_type == SqlDataType::EXT_TIME_OR_INTERVAL {
         return to_time(text);
     }
-    if sql_type == SqlDataType::TIMESTAMP
-        || sql_type == SqlDataType::DATETIME
-        || sql_type == SqlDataType::EXT_TIMESTAMP
-    {
+    if sql_type == SqlDataType::TIMESTAMP || sql_type == SqlDataType::EXT_TIMESTAMP {
         return to_timestamp(text);
     }
 
@@ -1278,6 +1282,24 @@ mod tests {
         assert_eq!(
             convert("whatever", SqlDataType(4242)),
             ColumnValue::String("whatever".into())
+        );
+    }
+
+    /// `SqlDataType::DATETIME` is the number 9, which `odbc_sys` names after
+    /// the *verbose* `SQL_DATETIME`. `SQLBindParameter`'s `ParameterType` is a
+    /// **concise** type, where 9 is the ODBC 2.0 `SQL_DATE` — so an ODBC 2.x
+    /// application binding a date parameter gets a date, not a timestamp. AWS's
+    /// Redshift ODBC driver reads it the same way, opening that branch of
+    /// `convertCParamDataToSQLData` with `case SQL_TYPE_DATE: case SQL_DATE:`.
+    #[test]
+    fn the_2x_date_spelling_converts_to_a_date_not_a_timestamp() {
+        assert_eq!(
+            convert("2026-07-29", SqlDataType::DATETIME),
+            ColumnValue::Date {
+                year: 2026,
+                month: 7,
+                day: 29
+            }
         );
     }
 

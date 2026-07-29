@@ -73,8 +73,9 @@ pub(crate) fn is_binary_sql_type(sql_type: SqlDataType) -> bool {
 ///
 /// The ODBC 2.0 datetime spellings are grouped with their 3.x counterparts
 /// exactly as [`crate::param_convert`] and [`crate::types::col_attr`] group
-/// them — note that this puts `DATETIME` (9) with timestamp rather than date,
-/// which those two also do.
+/// them. Note that `odbc_sys` names 9 `DATETIME`, after the *verbose*
+/// `SQL_DATETIME`, but `ParameterType` is a **concise** type where 9 is
+/// `SQL_DATE` — so it belongs with date.
 fn fixed_width(sql_type: SqlDataType) -> Option<usize> {
     use std::mem::size_of;
 
@@ -99,16 +100,13 @@ fn fixed_width(sql_type: SqlDataType) -> Option<usize> {
     if sql_type == SqlDataType::EXT_BIT {
         return Some(size_of::<u8>());
     }
-    if sql_type == SqlDataType::DATE {
+    if sql_type == SqlDataType::DATE || sql_type == SqlDataType::DATETIME {
         return Some(size_of::<odbc_sys::Date>());
     }
     if sql_type == SqlDataType::TIME || sql_type == SqlDataType::EXT_TIME_OR_INTERVAL {
         return Some(size_of::<odbc_sys::Time>());
     }
-    if sql_type == SqlDataType::TIMESTAMP
-        || sql_type == SqlDataType::DATETIME
-        || sql_type == SqlDataType::EXT_TIMESTAMP
-    {
+    if sql_type == SqlDataType::TIMESTAMP || sql_type == SqlDataType::EXT_TIMESTAMP {
         return Some(size_of::<odbc_sys::Timestamp>());
     }
     None
@@ -220,7 +218,7 @@ pub(crate) fn binary_to_sql_type(
     // `read_unaligned` imposes no alignment requirement on the `u8` pointer it
     // reads through — which matters, because a bound parameter buffer inside a
     // packed row-wise structure has no guaranteed alignment.
-    if sql_type == SqlDataType::DATE {
+    if sql_type == SqlDataType::DATE || sql_type == SqlDataType::DATETIME {
         let d = unsafe { std::ptr::read_unaligned(bytes.as_ptr().cast::<odbc_sys::Date>()) };
         return Ok(ColumnValue::Date {
             year: d.year,
@@ -239,10 +237,7 @@ pub(crate) fn binary_to_sql_type(
             fraction: 0,
         });
     }
-    if sql_type == SqlDataType::TIMESTAMP
-        || sql_type == SqlDataType::DATETIME
-        || sql_type == SqlDataType::EXT_TIMESTAMP
-    {
+    if sql_type == SqlDataType::TIMESTAMP || sql_type == SqlDataType::EXT_TIMESTAMP {
         let ts = unsafe { std::ptr::read_unaligned(bytes.as_ptr().cast::<odbc_sys::Timestamp>()) };
         return Ok(ColumnValue::Timestamp {
             year: ts.year,
@@ -514,15 +509,36 @@ mod tests {
         );
     }
 
-    /// `DATETIME` is 9, which is both the 3.x verbose datetime identifier and
-    /// the ODBC 2.0 concise `SQL_DATE`. `param_convert` and `col_attr` both
-    /// group it with timestamp; this module follows them rather than inventing
-    /// a third answer. See the design doc's "Adjacent finding".
+    /// `DATETIME` is 9, which is both the 3.x *verbose* datetime identifier and
+    /// the ODBC 2.0 *concise* `SQL_DATE`. `ParameterType` is a concise type, so
+    /// 9 is a date. AWS's Redshift ODBC driver reads it the same way — its
+    /// parameter conversion opens that branch `case SQL_TYPE_DATE: case
+    /// SQL_DATE:`. `param_convert` and `col_attr` agree.
     #[test]
-    fn the_datetime_spelling_is_grouped_with_timestamp_as_elsewhere_in_the_crate() {
+    fn the_2x_date_spelling_is_a_date_not_a_timestamp() {
         assert_eq!(
             fixed_width(SqlDataType::DATETIME),
-            Some(std::mem::size_of::<odbc_sys::Timestamp>())
+            Some(std::mem::size_of::<odbc_sys::Date>())
+        );
+
+        let d = odbc_sys::Date {
+            year: 2026,
+            month: 7,
+            day: 29,
+        };
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                std::ptr::addr_of!(d).cast::<u8>(),
+                std::mem::size_of::<odbc_sys::Date>(),
+            )
+        };
+        assert_eq!(
+            convert(bytes, SqlDataType::DATETIME).expect("six bytes"),
+            ColumnValue::Date {
+                year: 2026,
+                month: 7,
+                day: 29
+            }
         );
     }
 

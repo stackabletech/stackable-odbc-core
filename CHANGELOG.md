@@ -1124,6 +1124,19 @@ Everything a driver has to change for the catalog rework, in one place.
 
 ### Fixed
 
+- **`SQL_DATE` (9) is a date again, not a timestamp.** `odbc-sys` names the
+  value 9 `DATETIME`, after the ODBC 3.x *verbose* `SQL_DATETIME`, and core had
+  grouped it with `SQL_TYPE_TIMESTAMP` on the strength of that name.
+  `SQLBindParameter`'s `ParameterType` and a column's reported type are both
+  **concise** types, where 9 is the ODBC 2.0 `SQL_DATE` — so an ODBC 2.x
+  application binding a date parameter was getting it converted as a timestamp,
+  and a column of that type was named `TIMESTAMP`. Fixed in `param_convert`,
+  `binary_convert` and `types::col_attr`, each with a test. AWS's Redshift ODBC
+  driver reads it the same way, opening that branch of
+  `convertCParamDataToSQLData` with `case SQL_TYPE_DATE: case SQL_DATE:`.
+  `col_attr::verbose_type` is unaffected: it deliberately maps only the 3.x
+  concise codes 91-95, because there 9 genuinely is the verbose value.
+
 - **A `SQL_C_BINARY` parameter is now converted to the SQL type the application
   declared.** Both delivery paths previously returned the raw bytes whatever
   `ParameterType` said, and `Backend::execute` receives only `&[ColumnValue]`,

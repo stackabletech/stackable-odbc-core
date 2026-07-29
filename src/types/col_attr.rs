@@ -182,14 +182,15 @@ fn type_name_for(sql_type: SqlDataType) -> &'static str {
         "VARBINARY"
     } else if sql_type == SqlDataType::EXT_LONG_VAR_BINARY {
         "LONGVARBINARY"
-    } else if sql_type == SqlDataType::DATE {
+    // `odbc_sys` names 9 `DATETIME` after the *verbose* `SQL_DATETIME`, but as
+    // a concise type — which is what a backend reports for a column — 9 is the
+    // ODBC 2.0 `SQL_DATE`. See `verbose_type` below for the other direction,
+    // where 9 is deliberately not treated as a concise datetime code at all.
+    } else if sql_type == SqlDataType::DATE || sql_type == SqlDataType::DATETIME {
         "DATE"
     } else if sql_type == SqlDataType::TIME || sql_type == SqlDataType::EXT_TIME_OR_INTERVAL {
         "TIME"
-    } else if sql_type == SqlDataType::TIMESTAMP
-        || sql_type == SqlDataType::DATETIME
-        || sql_type == SqlDataType::EXT_TIMESTAMP
-    {
+    } else if sql_type == SqlDataType::TIMESTAMP || sql_type == SqlDataType::EXT_TIMESTAMP {
         "TIMESTAMP"
     } else if sql_type == SqlDataType::EXT_GUID {
         "GUID"
@@ -607,6 +608,18 @@ mod tests {
             ColAttrValue::Numeric(n) => assert_eq!(n, 0),
             ColAttrValue::String(_) => panic!("expected numeric"),
         }
+    }
+
+    /// 9 is `SQL_DATE` as a concise type, which is what a backend reports for a
+    /// column, even though `odbc_sys` names it after the verbose
+    /// `SQL_DATETIME`. `verbose_type` deliberately treats the same number
+    /// differently, and its own comment says why.
+    #[test]
+    fn the_2x_date_spelling_names_a_date_not_a_timestamp() {
+        assert_eq!(type_name_for(SqlDataType::DATETIME), "DATE");
+        assert_eq!(type_name_for(SqlDataType::DATE), "DATE");
+        assert_eq!(type_name_for(SqlDataType::EXT_TIMESTAMP), "TIMESTAMP");
+        assert_eq!(type_name_for(SqlDataType::EXT_TIME_OR_INTERVAL), "TIME");
     }
 
     #[test]
