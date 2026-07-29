@@ -187,35 +187,59 @@ impl Registry {
         }
     }
 
-    /// Resolve a token to the address of a live handle of the expected kind.
+    /// Resolve a token to a live handle's address, checking its kind **and**
+    /// that it belongs to `group`, in a single pass over the table.
     ///
-    /// Returns `None` for a token that was never issued, was issued for a
-    /// different kind, or has been freed — **without dereferencing `token`**.
-    pub(crate) fn resolve(&self, token: *mut c_void, expected: HandleKind) -> Option<usize> {
+    /// What [`HandleScope::get`] needs, and the reason it is one method rather
+    /// than a [`Self::group_of`] followed by a [`Self::resolve`]: every FFI
+    /// entry point in the crate goes through that call, so it paid two
+    /// acquisitions of this lock, two token decodes and two bounds checks to
+    /// answer one question about one slot. It also paid an `Arc` clone —
+    /// `group_of` hands back a counted reference purely so the caller can
+    /// compare it and drop it, which is an atomic increment and decrement on a
+    /// refcount every other thread on the connection is touching. Comparing
+    /// with [`Arc::ptr_eq`] against the borrowed `group` while the read guard
+    /// is already held answers the same question and clones nothing.
+    ///
+    /// [`HandleScope::get`]: crate::handles::scope::HandleScope::get
+    pub(crate) fn resolve_in_group(
+        &self,
+        token: *mut c_void,
+        expected: HandleKind,
+        group: &Arc<GroupLock>,
+    ) -> Option<usize> {
         if token.is_null() {
             return None;
         }
         let (index, generation) = decode_token(token);
         let slots = self.read();
         let slot = slots.get(index)?;
-        if slot.generation != generation || slot.kind != Some(expected) {
+        if slot.generation != generation
+            || slot.kind != Some(expected)
+            || !Arc::ptr_eq(&slot.group, group)
+        {
             return None;
         }
         Some(slot.addr)
     }
 
-    /// Resolve a token to `(kind, address)` without knowing its kind in
-    /// advance.
+    /// [`Self::resolve_in_group`] for a caller that does not know the kind in
+    /// advance and wants it back.
     ///
-    /// Used by the diagnostic-queue lookup, which accepts any handle type.
-    pub(crate) fn resolve_any(&self, token: *mut c_void) -> Option<(HandleKind, usize)> {
+    /// The diagnostic-queue lookups, which accept any handle type and dispatch
+    /// on what they find.
+    pub(crate) fn resolve_any_in_group(
+        &self,
+        token: *mut c_void,
+        group: &Arc<GroupLock>,
+    ) -> Option<(HandleKind, usize)> {
         if token.is_null() {
             return None;
         }
         let (index, generation) = decode_token(token);
         let slots = self.read();
         let slot = slots.get(index)?;
-        if slot.generation != generation {
+        if slot.generation != generation || !Arc::ptr_eq(&slot.group, group) {
             return None;
         }
         Some((slot.kind?, slot.addr))
@@ -561,11 +585,15 @@ mod tests {
     #[test]
     fn a_freed_token_never_resolves_again() {
         let reg = Registry::new();
+        let group = GroupLock::new();
         let (token, _, _) = reg
-            .register(HandleKind::Dbc, 0x1000, GroupLock::new(), None)
+            .register(HandleKind::Dbc, 0x1000, Arc::clone(&group), None)
             .expect("registered");
         reg.unregister(token, HandleKind::Dbc).expect("was live");
-        assert!(reg.resolve(token, HandleKind::Dbc).is_none());
+        assert!(
+            reg.resolve_in_group(token, HandleKind::Dbc, &group)
+                .is_none()
+        );
         assert!(reg.group_of(token).is_none());
     }
 
@@ -710,8 +738,8 @@ mod loom_tests {
                 thread::spawn(move || {
                     let g = reg.group_of(stmt).expect("live");
                     let _guard = g.lock();
-                    assert!(reg.resolve(stmt, HandleKind::Stmt).is_some());
-                    assert!(reg.resolve(conn, HandleKind::Dbc).is_some());
+                    assert!(reg.resolve_in_group(stmt, HandleKind::Stmt, &g).is_some());
+                    assert!(reg.resolve_in_group(conn, HandleKind::Dbc, &g).is_some());
                 })
             };
             let b = {
@@ -719,7 +747,7 @@ mod loom_tests {
                 thread::spawn(move || {
                     let g = reg.group_of(conn).expect("live");
                     let _guard = g.lock();
-                    assert!(reg.resolve(conn, HandleKind::Dbc).is_some());
+                    assert!(reg.resolve_in_group(conn, HandleKind::Dbc, &g).is_some());
                 })
             };
             a.join().expect("thread a panicked");
@@ -982,7 +1010,10 @@ mod loom_tests {
                             continue; // exit one: already retired
                         };
                         let _guard = group.lock();
-                        if reg.resolve(token, HandleKind::Dbc).is_none() {
+                        if reg
+                            .resolve_in_group(token, HandleKind::Dbc, &group)
+                            .is_none()
+                        {
                             continue; // exit two: stale after the lock
                         }
                     }

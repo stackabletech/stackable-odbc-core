@@ -809,14 +809,27 @@ See [`fuzz/README.md`](fuzz/README.md) for what is and is not worth fuzzing.
 
 ### Benchmarks
 
-Core has a Criterion fetch-throughput benchmark (in-memory, no backend). It
-lives in `bench/`, its own detached crate, for the same reason `fuzz/` does:
+Core has two Criterion benchmarks, both in `bench/`, its own detached crate,
+for the same reason `fuzz/` does:
 
 ```bash
 cd bench && cargo bench
 ```
 
-`BENCH_ROWS` overrides the row count.
+- **`fetch_throughput`** — drives `SyntheticStatement` directly (in-memory, no
+  backend), measuring the marshalling path. `BENCH_ROWS` overrides the row
+  count.
+- **`handle_lookup`** — goes through the FFI entry points, so it is the only one
+  that sees the handle registry. `fetch_throughput` never touches it, which is
+  why a lookup that ran twice per FFI call went unnoticed. Two shapes, because
+  the error path is not the success path scaled: `get` (one `HandleScope::get`,
+  then trivial work) and `get_then_push_diagnostic` (the error path, where
+  `panic_safe` also has to find the handle again).
+
+Pick the one that can actually see what you changed. A registry or locking
+change is invisible to `fetch_throughput`; a `ColumnValue` conversion is
+invisible to `handle_lookup`. If neither covers it, that is a reason to add a
+third rather than to quote a number from the wrong one.
 
 Keeping it out of core's manifest is deliberate. A `[[bench]]` target that is
 excluded from the published package makes `cargo package` warn on every

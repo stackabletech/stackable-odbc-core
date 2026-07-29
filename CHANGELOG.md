@@ -462,6 +462,27 @@ Everything a driver has to change for the catalog rework, in one place.
 
 ### Changed
 
+- **`HandleScope::get` does one registry lookup instead of two, and
+  `push_diagnostic` one instead of seven.** Every `SQLxxx` entry point in the
+  crate reaches its handle through `get`, which called `holds` (a `group_of`
+  lookup) and then `resolve` — two acquisitions of the registry lock, two token
+  decodes and two bounds checks to answer one question about one slot, plus an
+  `Arc` clone `holds` made only to compare and drop, which is an atomic
+  increment and decrement on a refcount every other thread on the connection is
+  touching. `Registry::resolve_in_group` answers all three questions — live,
+  right kind, right group — in a single pass, comparing the group with
+  `Arc::ptr_eq` under the read guard and cloning nothing.
+
+  `push_diagnostic`, which runs on **every** error, spelled out a dispatch that
+  `diagnostics` already performed: a `holds`, then up to three `get`s each doing
+  a `holds` of its own. It now delegates to `diagnostics`, which resolves the
+  kind once via the new `resolve_any_in_group`.
+
+  Measured with the new `handle_lookup` benchmark in `bench/`: a bare lookup
+  21.16 ns → 15.25 ns (−27.8%), and the error path 76.65 ns → 45.00 ns (−41.3%),
+  both p = 0.00. `Registry::resolve` and `Registry::resolve_any` are removed,
+  having no callers left.
+
 - **`StatementBackend::close_cursor` is now called by `SQLCloseCursor` and
   `SQLFreeStmt(SQL_CLOSE)`, not only by `SQLEndTran`.** Both previously reached
   only `discard_result_set`, which drops the backend statement — so a backend

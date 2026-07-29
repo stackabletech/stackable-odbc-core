@@ -102,17 +102,23 @@ impl<'a> HandleScope<'a> {
     /// The returned lifetime is tied to `&mut self`, so two handles cannot be
     /// held at once. Use [`Self::stmt_with_parent`] when both a statement and
     /// its connection are needed.
+    /// One registry pass answers all three questions — live, right kind, right
+    /// group — because this is the hottest lookup in the crate: it is on every
+    /// FFI entry point. It used to be two, a [`Self::holds`] and a
+    /// `Registry::resolve`, each taking the lock and decoding the token
+    /// separately, plus an `Arc` clone `holds` made only to compare and drop.
     pub fn get<T: HasKind>(&mut self, token: *mut c_void) -> Result<&mut T, OdbcError> {
-        if !self.holds(token) {
-            return Err(OdbcError::InvalidHandle);
-        }
+        // `None` is the null-handle case, where nothing is locked and so no
+        // handle is reachable.
+        let held = self.group.as_ref().ok_or(OdbcError::InvalidHandle)?;
         let addr = registry()
-            .resolve(token, T::KIND)
+            .resolve_in_group(token, T::KIND, held)
             .ok_or(OdbcError::InvalidHandle)?;
         // SAFETY: the registry produced `addr`, so it came from `Box::into_raw`
         // in an `alloc_*` function for a handle of exactly `T::KIND` and has not
-        // been freed. `holds` established that this scope owns the lock guarding
-        // it, so no other thread can hold a reference to the same handle.
+        // been freed. The same lookup established that the slot's group is the
+        // one this scope holds the lock for, so no other thread can hold a
+        // reference to the same handle.
         Ok(unsafe { &mut *(addr as *mut T) })
     }
 
@@ -224,16 +230,14 @@ impl<'a> HandleScope<'a> {
     /// Used by `panic_safe` on the error path. Silently does nothing for
     /// a token outside the held group or of a kind that carries no queue
     /// (descriptors), because there is no better handle to report against.
+    /// Expressed through [`Self::diagnostics`] because that method already
+    /// answers the same question — which queue, if any, does this token name —
+    /// and answers it in one registry pass. Spelling the dispatch out a second
+    /// time here cost seven lookups on a path that runs on **every** error:
+    /// a `holds`, then up to three `get`s each doing a `holds` of its own.
     pub fn push_diagnostic<B: Backend>(&mut self, token: *mut c_void, err: &OdbcError) {
-        if !self.holds(token) {
-            return;
-        }
-        if let Ok(env) = self.get::<EnvironmentHandle<B>>(token) {
-            env.diagnostics.push(err);
-        } else if let Ok(conn) = self.get::<ConnectionHandle<B>>(token) {
-            conn.diagnostics.push(err);
-        } else if let Ok(stmt) = self.get::<StatementHandle<B>>(token) {
-            stmt.diagnostics.push(err);
+        if let Some(queue) = self.diagnostics::<B>(token) {
+            queue.push(err);
         }
     }
 
@@ -247,13 +251,11 @@ impl<'a> HandleScope<'a> {
     /// the held group. Descriptors carry no diagnostic queue and get `None`,
     /// the same answer a stale or foreign token gets.
     pub fn diagnostics<B: Backend>(&mut self, token: *mut c_void) -> Option<&mut DiagnosticQueue> {
-        if !self.holds(token) {
-            return None;
-        }
-        let (kind, addr) = registry().resolve_any(token)?;
-        // SAFETY: `holds` confirmed this scope owns the lock guarding `token`'s
-        // group, and the registry produced `addr` for exactly `kind`, so the
-        // cast below matches what the corresponding `alloc_*` function
+        let held = self.group.as_ref()?;
+        let (kind, addr) = registry().resolve_any_in_group(token, held)?;
+        // SAFETY: the lookup confirmed this scope owns the lock guarding
+        // `token`'s group, and the registry produced `addr` for exactly `kind`,
+        // so the cast below matches what the corresponding `alloc_*` function
         // allocated (same reasoning as [`Self::get`]).
         match kind {
             HandleKind::Env => {

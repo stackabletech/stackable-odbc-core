@@ -26,3 +26,7 @@ criterion = { version = "0.8", features = ["html_reports"] }
 [[bench]]
 name = "fetch_throughput"
 harness = false
+
+[[bench]]
+name = "handle_lookup"
+harness = false
