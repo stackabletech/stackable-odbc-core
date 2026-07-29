@@ -1124,6 +1124,20 @@ Everything a driver has to change for the catalog rework, in one place.
 
 ### Fixed
 
+- **A `SQL_C_BINARY` parameter is now converted to the SQL type the application
+  declared.** Both delivery paths previously returned the raw bytes whatever
+  `ParameterType` said, and `Backend::execute` receives only `&[ColumnValue]`,
+  so the declared type was lost entirely — a parameter bound `SQL_C_BINARY` +
+  `SQL_INTEGER` reached the data source as four uninterpreted bytes. Core now
+  implements the "C to SQL: Binary" table: the fixed-width numeric targets, the
+  three datetime structs, and `SQL_BIT`, each requiring exactly the type's width
+  and reporting `22003` otherwise. Byte order is native, which the spec never
+  states — the ruling and its evidence are recorded on `crate::binary_convert`.
+  `SQL_DECIMAL`/`SQL_NUMERIC` and every character target are refused with
+  `07006`, because ODBC specifies neither a decimal width nor an encoding for
+  these bytes; that refusal is raised by `SQLBindParameter` rather than at
+  execute time, so an application fails before running its query.
+
 - **`SQLBindParameter`'s `ColumnSize` is now enforced for character and binary
   parameters.** A value longer than the declared size is rejected with `22001`
   ("string data, right truncation") instead of reaching the backend whole, per

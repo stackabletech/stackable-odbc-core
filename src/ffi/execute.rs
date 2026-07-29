@@ -55,7 +55,9 @@ unsafe fn report_param_set<B: Backend>(stmt: &StatementHandle<B>, succeeded: boo
 ///   padded with NULL (`ffi::params::collect_params`). The second clause, a binding whose
 ///   `ParameterValuePtr` is null with a non-`SQL_NULL_DATA`/`SQL_DATA_AT_EXEC` indicator, is
 ///   rejected by `SQLBindParameter` itself. Also propagated from backend.
-/// - 07006: Restricted data type attribute violation — propagated from backend.
+/// - 07006: Restricted data type attribute violation — `SQLBindParameter` refuses a
+///   `SQL_C_BINARY` parameter bound to a target core cannot convert it to, so it does not
+///   reach execution (`crate::binary_convert`). Also propagated from backend.
 /// - 07007: Restricted parameter value violation — propagated from backend.
 /// - 07S01: Invalid use of default parameter — propagated from backend.
 /// - 08S01: Communication link failure — propagated from backend.
@@ -70,7 +72,9 @@ unsafe fn report_param_set<B: Backend>(stmt: &StatementHandle<B>, succeeded: boo
 /// - 22002: Indicator variable required but not supplied — propagated from backend.
 /// - 22003: Numeric value out of range — returned here when character parameter data falls
 ///   outside the range of the declared approximate-numeric or `SQL_BIT` type
-///   (`crate::param_convert`). Also propagated from backend.
+///   (`crate::param_convert`), or when a `SQL_C_BINARY` parameter's byte count is not
+///   exactly the declared SQL type's width (`crate::binary_convert`, the "C to SQL: Binary"
+///   table). Also propagated from backend.
 /// - 22007: Invalid datetime format — returned here for character parameter data that is a
 ///   datetime literal with an out-of-range field (`crate::param_convert`). Also propagated
 ///   from backend.
@@ -504,7 +508,9 @@ pub unsafe fn sql_prepare_w<B: Backend>(
 ///   padded with NULL (`ffi::params::collect_params`). The second clause, a binding whose
 ///   `ParameterValuePtr` is null with a non-`SQL_NULL_DATA`/`SQL_DATA_AT_EXEC` indicator, is
 ///   rejected by `SQLBindParameter` itself. Also propagated from backend.
-/// - 07006: Restricted data type attribute violation — propagated from backend.
+/// - 07006: Restricted data type attribute violation — `SQLBindParameter` refuses a
+///   `SQL_C_BINARY` parameter bound to a target core cannot convert it to, so it does not
+///   reach execution (`crate::binary_convert`). Also propagated from backend.
 /// - 07007: Restricted parameter value violation — propagated from backend.
 /// - 07S01: Invalid use of default parameter — propagated from backend.
 /// - 08S01: Communication link failure — propagated from backend.
@@ -518,7 +524,9 @@ pub unsafe fn sql_prepare_w<B: Backend>(
 /// - 22002: Indicator variable required but not supplied — propagated from backend.
 /// - 22003: Numeric value out of range — returned here when character parameter data falls
 ///   outside the range of the declared approximate-numeric or `SQL_BIT` type
-///   (`crate::param_convert`). Also propagated from backend.
+///   (`crate::param_convert`), or when a `SQL_C_BINARY` parameter's byte count is not
+///   exactly the declared SQL type's width (`crate::binary_convert`, the "C to SQL: Binary"
+///   table). Also propagated from backend.
 /// - 22007: Invalid datetime format — returned here for character parameter data that is a
 ///   datetime literal with an out-of-range field (`crate::param_convert`). Also propagated
 ///   from backend.

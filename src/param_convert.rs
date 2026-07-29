@@ -22,11 +22,10 @@
 //! SQLSTATE for each outcome — which is why the failures here are 22018 /
 //! 22001 / 22003 / 22008 rather than a single general error.
 //!
-//! It also owns one row of the neighbouring [C to SQL: Binary] table — the
-//! binary-to-binary size test — because that row and this table's binary row
-//! ask the same question of the same thing: the byte string about to be sent
-//! must not exceed the declared column length. See
-//! [`check_declared_binary_size`].
+//! [`check_declared_binary_size`] lives here and is shared with
+//! [`crate::binary_convert`], which is the [C to SQL: Binary] table. Both
+//! tables have a binary-target row asking the same question of the same thing:
+//! the byte string about to be sent must not exceed the declared column length.
 //!
 //! [Converting Data from C to SQL Data Types]: https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/converting-data-from-c-to-sql-data-types
 //! [C to SQL: Character]: https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/c-to-sql-character
@@ -124,28 +123,11 @@ fn datetime_overflow(text: &str, what: &str) -> OdbcError {
 /// A `col_size` of 0 disables all of them, for the reason
 /// [`check_declared_char_size`] records.
 ///
-/// # Not done here
-///
-/// **`SQL_C_BINARY` has no conversion to a non-binary SQL type.** That is the
-/// first three rows of [C to SQL: Binary] — its two character-target rows and
-/// its exact-width 22003 row covering every numeric and datetime type — and
-/// they are deferred together because none can be answered without the
-/// conversion. [`crate::ffi::params::read_param_value`] returns
-/// [`ColumnValue::Bytes`] for every `SQL_C_BINARY` parameter whatever
-/// `sql_type` was declared, so a value bound as `SQL_INTEGER` reaches the
-/// backend as raw bytes: a wrong *value*, not a missing diagnostic, and a
-/// wider gap than anything this function currently closes. Checking a size
-/// while still sending the value wrongly would diagnose the smaller problem
-/// and leave the larger one, so the size rows wait for it. Closing it needs
-/// its own spec pass over [Converting Data from C to SQL Data Types], for byte
-/// order and for what C binary → SQL character produces.
-///
-/// That table's fourth row — binary data to a binary target — needs no
-/// conversion and *is* enforced, at the two `params.rs` sites named above.
+/// The `SQL_C_BINARY` side of the same question lives in
+/// [`crate::binary_convert`], which is the [C to SQL: Binary] table.
 ///
 /// [C to SQL: Character]: https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/c-to-sql-character
 /// [C to SQL: Binary]: https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/c-to-sql-binary
-/// [Converting Data from C to SQL Data Types]: https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/converting-data-from-c-to-sql-data-types
 pub(crate) fn text_to_sql_type(
     text: &str,
     sql_type: SqlDataType,
