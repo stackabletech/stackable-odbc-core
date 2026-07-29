@@ -896,6 +896,17 @@ Everything a driver has to change for the catalog rework, in one place.
 
 ### Fixed
 
+- **`Backend::cancel_token`'s doc comment described the opposite lifetime to the
+  one core implements.** It stated that a token, once built, "is never replaced
+  for the life of the statement, including across a later `SQLExecute` on the
+  same handle". `mint_cancel_token` in fact mints a new token at every
+  statement-producing call and replaces the statement's stored one, which is the
+  deliberate behaviour — a single token per statement left a cancelled statement
+  permanently unusable, contradicting the spec's "After the statement has been
+  canceled, the application can call SQLExecute or SQLExecDirect again." No
+  behaviour change; the documentation a driver author designs their token
+  against now matches the code.
+
 - **`SQLGetStmtAttr` wrote four bytes where the spec declares `SQLULEN`.** Every
   non-pointer attribute on the `SQLSetStmtAttr` page is declared "An SQLULEN
   value" — not one is `SQLUINTEGER` — and `BufferLength` is ignored for them, so

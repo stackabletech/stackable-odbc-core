@@ -635,11 +635,23 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// unused — harmless, since it is cheap and the statement may yet make a
     /// real call later.
     ///
-    /// Once built, the token is never replaced for the life of the
-    /// statement, including across a later `SQLExecute` on the same handle: a
-    /// fresh token per execution would let a `SQLCancel` that had already
-    /// cloned the previous one signal an execution that already finished,
-    /// while the one actually running goes uncancelled.
+    /// A **new token is minted at every statement-producing call**, including
+    /// a second `SQLExecute` on the same handle; the statement's stored token
+    /// is replaced each time, and the cursor-consuming calls (`SQLFetch`,
+    /// `SQLGetData`, ...) read that execution's token rather than minting one.
+    /// An earlier revision built a single token per statement and never
+    /// replaced it, which left a cancelled statement permanently unusable —
+    /// `Backend::cancel` marks the token, and the next execution reused the
+    /// marked one. The spec requires the opposite: "After the statement has
+    /// been canceled, the application can call SQLExecute or SQLExecDirect
+    /// again."
+    ///
+    /// The consequence a backend author should plan for is that a `SQLCancel`
+    /// which cloned an *earlier* execution's token signals only that
+    /// execution. That is the spec's own outcome for a cancel arriving when
+    /// the work it named is already over: "a call to SQLCancel when no
+    /// processing is being done on the statement ... has is \[sic\] no effect
+    /// at all."
     ///
     /// Build the token with the connection's parameters in hand here —
     /// do not defer the real assembly to `cancel`. MariaDB's ODBC-401 is the
