@@ -9,8 +9,9 @@ use odbc_sys::SqlDataType;
 use crate::{
     backend::{Backend, StatementBackend},
     cancel::reclassify_cancelled_opt,
+    descriptor::DescriptorRecord,
     errors::OdbcError,
-    handles::{ApdRecord, IpdRecord, ParamRecord, ParamRecords, StatementHandle},
+    handles::{ParamRecord, ParamRecords, StatementHandle},
     panic::panic_safe,
     types::{
         ColumnValue, ParamDescriptor, SQL_DATA_AT_EXEC, SQL_DEFAULT_PARAM_SIZE,
@@ -178,20 +179,24 @@ pub unsafe fn sql_bind_parameter<B: Backend>(
                 // under the same key, and both are removed together above.
                 stmt.app_param_desc.records.insert(
                     parameter_number,
-                    ApdRecord {
-                        c_type: c_data_type,
-                        value_ptr: parameter_value_ptr,
-                        buffer_length,
-                        str_len_or_ind_ptr,
+                    DescriptorRecord {
+                        concise_type: c_data_type as i16,
+                        verbose_type: c_data_type as i16,
+                        data_ptr: parameter_value_ptr,
+                        octet_length: buffer_length,
+                        indicator_ptr: str_len_or_ind_ptr,
+                        ..DescriptorRecord::default()
                     },
                 );
                 stmt.imp_param_desc.records.insert(
                     parameter_number,
-                    IpdRecord {
-                        sql_type,
-                        col_size: column_size,
-                        decimal_digits,
-                        input_output_type: io_type,
+                    DescriptorRecord {
+                        concise_type: sql_type.0,
+                        verbose_type: sql_type.0,
+                        length: column_size,
+                        scale: decimal_digits,
+                        parameter_type: io_type,
+                        ..DescriptorRecord::default()
                     },
                 );
             }
@@ -524,75 +529,69 @@ pub(crate) unsafe fn read_param_value(rec: ParamRecord<'_>) -> Result<ColumnValu
     let ParamRecord { apd, ipd } = rec;
 
     // Check indicator for NULL.
-    if !apd.str_len_or_ind_ptr.is_null() {
+    if !apd.indicator_ptr.is_null() {
         // SAFETY: str_len_or_ind_ptr is non-null and the caller guarantees it points to a valid isize.
-        let indicator = unsafe { std::ptr::read_unaligned(apd.str_len_or_ind_ptr) };
+        let indicator = unsafe { std::ptr::read_unaligned(apd.indicator_ptr) };
         if indicator == SQL_NULL_DATA {
             return Ok(ColumnValue::Null);
         }
     }
 
-    if apd.value_ptr.is_null() {
+    if apd.data_ptr.is_null() {
         return Ok(ColumnValue::Null);
     }
 
-    Ok(match apd.c_type {
+    Ok(match apd.c_type()? {
         // SAFETY for all integer/float reads below: value_ptr is non-null (guarded above) and the
         // caller guarantees it points to a valid value of the appropriate C type provided by the
         // ODBC caller via SQLBindParameter. `read_unaligned` tolerates the arbitrary offsets
         // row-wise binding can place an application buffer at, where a plain dereference of a
         // multi-byte type would be UB.
         CDataType::SLong => {
-            ColumnValue::I32(unsafe { std::ptr::read_unaligned(apd.value_ptr as *const i32) })
+            ColumnValue::I32(unsafe { std::ptr::read_unaligned(apd.data_ptr as *const i32) })
         }
         CDataType::SShort => {
-            ColumnValue::I16(unsafe { std::ptr::read_unaligned(apd.value_ptr as *const i16) })
+            ColumnValue::I16(unsafe { std::ptr::read_unaligned(apd.data_ptr as *const i16) })
         }
         CDataType::STinyInt => {
-            ColumnValue::I8(unsafe { std::ptr::read_unaligned(apd.value_ptr as *const i8) })
+            ColumnValue::I8(unsafe { std::ptr::read_unaligned(apd.data_ptr as *const i8) })
         }
         CDataType::SBigInt => {
-            ColumnValue::I64(unsafe { std::ptr::read_unaligned(apd.value_ptr as *const i64) })
+            ColumnValue::I64(unsafe { std::ptr::read_unaligned(apd.data_ptr as *const i64) })
         }
         CDataType::ULong => {
-            ColumnValue::I64(
-                unsafe { std::ptr::read_unaligned(apd.value_ptr as *const u32) } as i64,
-            )
+            ColumnValue::I64(unsafe { std::ptr::read_unaligned(apd.data_ptr as *const u32) } as i64)
         }
         CDataType::UShort => {
-            ColumnValue::I16(
-                unsafe { std::ptr::read_unaligned(apd.value_ptr as *const u16) } as i16,
-            )
+            ColumnValue::I16(unsafe { std::ptr::read_unaligned(apd.data_ptr as *const u16) } as i16)
         }
         CDataType::UTinyInt => {
-            ColumnValue::I8(unsafe { std::ptr::read_unaligned(apd.value_ptr as *const u8) } as i8)
+            ColumnValue::I8(unsafe { std::ptr::read_unaligned(apd.data_ptr as *const u8) } as i8)
         }
         CDataType::UBigInt => {
-            ColumnValue::I64(
-                unsafe { std::ptr::read_unaligned(apd.value_ptr as *const u64) } as i64,
-            )
+            ColumnValue::I64(unsafe { std::ptr::read_unaligned(apd.data_ptr as *const u64) } as i64)
         }
         CDataType::Double => {
-            ColumnValue::F64(unsafe { std::ptr::read_unaligned(apd.value_ptr as *const f64) })
+            ColumnValue::F64(unsafe { std::ptr::read_unaligned(apd.data_ptr as *const f64) })
         }
         CDataType::Float => {
-            ColumnValue::F32(unsafe { std::ptr::read_unaligned(apd.value_ptr as *const f32) })
+            ColumnValue::F32(unsafe { std::ptr::read_unaligned(apd.data_ptr as *const f32) })
         }
         CDataType::Bit => {
-            ColumnValue::Bool(unsafe { std::ptr::read_unaligned(apd.value_ptr as *const u8) } != 0)
+            ColumnValue::Bool(unsafe { std::ptr::read_unaligned(apd.data_ptr as *const u8) } != 0)
         }
         CDataType::Char => {
-            let ptr = apd.value_ptr as *const u8;
-            let byte_len = if apd.str_len_or_ind_ptr.is_null() {
+            let ptr = apd.data_ptr as *const u8;
+            let byte_len = if apd.indicator_ptr.is_null() {
                 None
             } else {
                 // SAFETY: str_len_or_ind_ptr is non-null and the caller guarantees it points
                 // to a valid isize provided by the ODBC caller.
-                let l = unsafe { std::ptr::read_unaligned(apd.str_len_or_ind_ptr) };
+                let l = unsafe { std::ptr::read_unaligned(apd.indicator_ptr) };
                 if l == SQL_NTS as isize || l < 0 {
                     None
                 } else {
-                    Some(clamp_to_bound_buffer(l as usize, apd.buffer_length))
+                    Some(clamp_to_bound_buffer(l as usize, apd.octet_length))
                 }
             };
             let bytes = if let Some(n) = byte_len {
@@ -607,14 +606,14 @@ pub(crate) unsafe fn read_param_value(rec: ParamRecord<'_>) -> Result<ColumnValu
             };
             return crate::param_convert::text_to_sql_type(
                 &String::from_utf8_lossy(bytes),
-                ipd.sql_type,
-                ipd.col_size,
-                ipd.decimal_digits,
+                ipd.sql_type(),
+                ipd.length,
+                ipd.scale,
             );
         }
         CDataType::WChar => {
-            let ptr = apd.value_ptr as *const u16;
-            let code_units = if apd.str_len_or_ind_ptr.is_null() {
+            let ptr = apd.data_ptr as *const u16;
+            let code_units = if apd.indicator_ptr.is_null() {
                 // Indicator pointer absent: treat as null-terminated (SQL_NTS).
                 // Use utf16_to_string which bounds the scan to MAX_NTS_SCAN code units.
                 // SAFETY: caller guarantees ptr is a valid, null-terminated UTF-16 string.
@@ -622,14 +621,14 @@ pub(crate) unsafe fn read_param_value(rec: ParamRecord<'_>) -> Result<ColumnValu
                 debug_assert!(!ptr.is_null(), "value_ptr null case excluded above");
                 return crate::param_convert::text_to_sql_type(
                     &unsafe { utf16_to_string(ptr, SQL_NTS) }.unwrap_or_default(),
-                    ipd.sql_type,
-                    ipd.col_size,
-                    ipd.decimal_digits,
+                    ipd.sql_type(),
+                    ipd.length,
+                    ipd.scale,
                 );
             } else {
                 // SAFETY: str_len_or_ind_ptr is non-null and the caller guarantees it points
                 // to a valid isize provided by the ODBC caller.
-                let l = unsafe { std::ptr::read_unaligned(apd.str_len_or_ind_ptr) };
+                let l = unsafe { std::ptr::read_unaligned(apd.indicator_ptr) };
                 if l == SQL_NTS as isize || l < 0 {
                     // Null-terminated: delegate to bounded NTS scan helper.
                     // SAFETY: caller guarantees ptr is a valid, null-terminated UTF-16 string.
@@ -637,15 +636,15 @@ pub(crate) unsafe fn read_param_value(rec: ParamRecord<'_>) -> Result<ColumnValu
                     debug_assert!(!ptr.is_null(), "value_ptr null case excluded above");
                     return crate::param_convert::text_to_sql_type(
                         &unsafe { utf16_to_string(ptr, SQL_NTS) }.unwrap_or_default(),
-                        ipd.sql_type,
-                        ipd.col_size,
-                        ipd.decimal_digits,
+                        ipd.sql_type(),
+                        ipd.length,
+                        ipd.scale,
                     );
                 } else {
                     // Explicit byte length: ODBC reports lengths in bytes for WChar.
                     // Clamp before halving, because buffer_length is in bytes too.
                     // Divide by 2 because UTF-16 encodes each code unit as exactly 2 bytes.
-                    clamp_to_bound_buffer(l as usize, apd.buffer_length) / 2
+                    clamp_to_bound_buffer(l as usize, apd.octet_length) / 2
                 }
             };
             // SAFETY: value_ptr is non-null and the caller guarantees it points to at least
@@ -658,23 +657,23 @@ pub(crate) unsafe fn read_param_value(rec: ParamRecord<'_>) -> Result<ColumnValu
                 .collect();
             return crate::param_convert::text_to_sql_type(
                 &String::from_utf16_lossy(&units),
-                ipd.sql_type,
-                ipd.col_size,
-                ipd.decimal_digits,
+                ipd.sql_type(),
+                ipd.length,
+                ipd.scale,
             );
         }
         CDataType::Binary => {
-            let ptr = apd.value_ptr as *const u8;
-            let byte_len = if apd.str_len_or_ind_ptr.is_null() {
+            let ptr = apd.data_ptr as *const u8;
+            let byte_len = if apd.indicator_ptr.is_null() {
                 None
             } else {
                 // SAFETY: str_len_or_ind_ptr is non-null and the caller guarantees it points
                 // to a valid isize provided by the ODBC caller.
-                let l = unsafe { std::ptr::read_unaligned(apd.str_len_or_ind_ptr) };
+                let l = unsafe { std::ptr::read_unaligned(apd.indicator_ptr) };
                 if l < 0 {
                     None
                 } else {
-                    Some(clamp_to_bound_buffer(l as usize, apd.buffer_length))
+                    Some(clamp_to_bound_buffer(l as usize, apd.octet_length))
                 }
             };
             match byte_len {
@@ -687,8 +686,8 @@ pub(crate) unsafe fn read_param_value(rec: ParamRecord<'_>) -> Result<ColumnValu
                     // refused any target this cannot convert.
                     return crate::binary_convert::binary_to_sql_type(
                         bytes,
-                        ipd.sql_type,
-                        ipd.col_size,
+                        ipd.sql_type(),
+                        ipd.length,
                     );
                 }
                 None => {
@@ -707,7 +706,7 @@ pub(crate) unsafe fn read_param_value(rec: ParamRecord<'_>) -> Result<ColumnValu
         // application buffer at, where a plain dereference would be UB.
         CDataType::TypeTimestamp | CDataType::TimeStamp => {
             let ts =
-                unsafe { std::ptr::read_unaligned(apd.value_ptr as *const odbc_sys::Timestamp) };
+                unsafe { std::ptr::read_unaligned(apd.data_ptr as *const odbc_sys::Timestamp) };
             ColumnValue::Timestamp {
                 year: ts.year,
                 month: ts.month,
@@ -719,7 +718,7 @@ pub(crate) unsafe fn read_param_value(rec: ParamRecord<'_>) -> Result<ColumnValu
             }
         }
         CDataType::TypeDate | CDataType::Date => {
-            let d = unsafe { std::ptr::read_unaligned(apd.value_ptr as *const odbc_sys::Date) };
+            let d = unsafe { std::ptr::read_unaligned(apd.data_ptr as *const odbc_sys::Date) };
             ColumnValue::Date {
                 year: d.year,
                 month: d.month,
@@ -728,7 +727,7 @@ pub(crate) unsafe fn read_param_value(rec: ParamRecord<'_>) -> Result<ColumnValu
         }
         CDataType::TypeTime | CDataType::Time => {
             // SQL_TIME_STRUCT carries no fractional seconds; report 0.
-            let t = unsafe { std::ptr::read_unaligned(apd.value_ptr as *const odbc_sys::Time) };
+            let t = unsafe { std::ptr::read_unaligned(apd.data_ptr as *const odbc_sys::Time) };
             ColumnValue::Time {
                 hour: t.hour,
                 minute: t.minute,
@@ -737,18 +736,18 @@ pub(crate) unsafe fn read_param_value(rec: ParamRecord<'_>) -> Result<ColumnValu
             }
         }
         CDataType::Numeric => {
-            let n = unsafe { std::ptr::read_unaligned(apd.value_ptr as *const odbc_sys::Numeric) };
+            let n = unsafe { std::ptr::read_unaligned(apd.data_ptr as *const odbc_sys::Numeric) };
             ColumnValue::Decimal(numeric_struct_to_decimal_string(&n))
         }
         CDataType::Guid => {
-            let g = unsafe { std::ptr::read_unaligned(apd.value_ptr as *const odbc_sys::Guid) };
+            let g = unsafe { std::ptr::read_unaligned(apd.data_ptr as *const odbc_sys::Guid) };
             ColumnValue::Guid(guid_struct_to_bytes(&g))
         }
         // Interval and SQL Server extended C types are not marshalled. Emitting
         // NULL loses data silently, so warn rather than accept in silence.
         _ => {
             tracing::warn!(
-                c_type = ?apd.c_type,
+                c_type = ?apd.c_type()?,
                 "read_param_value: unsupported C data type for input parameter; treating as NULL"
             );
             ColumnValue::Null
@@ -850,7 +849,7 @@ pub(crate) unsafe fn collect_params(
             // `InputOutput` is read: it carries an input value the application
             // did initialise, and `write_output_params` writes the result back
             // through the same binding afterwards.
-            Some(rec) if rec.ipd.input_output_type != ParamType::Output => {
+            Some(rec) if rec.ipd.parameter_type != ParamType::Output => {
                 // SAFETY: the caller guarantees all APD value and indicator
                 // pointers point to valid memory of the appropriate type.
                 params.push(unsafe { read_param_value(rec) }?);
@@ -945,7 +944,7 @@ pub(crate) unsafe fn write_output_params(
             continue;
         };
         if !matches!(
-            rec.ipd.input_output_type,
+            rec.ipd.parameter_type,
             ParamType::Output | ParamType::InputOutput
         ) {
             // Input-only binding: never write back through it.
@@ -961,10 +960,10 @@ pub(crate) unsafe fn write_output_params(
         let _ = unsafe {
             crate::column_value::write_column_value(
                 &out.value,
-                rec.apd.c_type,
-                rec.apd.value_ptr,
-                rec.apd.buffer_length,
-                rec.apd.str_len_or_ind_ptr,
+                rec.apd.c_type()?,
+                rec.apd.data_ptr,
+                rec.apd.octet_length,
+                rec.apd.indicator_ptr,
             )
         }?;
     }
@@ -1043,9 +1042,9 @@ pub(crate) unsafe fn find_data_at_exec_params(
 
     for i in 1..=param_count {
         if let Some(rec) = records.get(i)? {
-            let is_dae = if !rec.apd.str_len_or_ind_ptr.is_null() {
+            let is_dae = if !rec.apd.indicator_ptr.is_null() {
                 // SAFETY: caller guarantees str_len_or_ind_ptr points to valid memory.
-                let indicator = unsafe { std::ptr::read_unaligned(rec.apd.str_len_or_ind_ptr) };
+                let indicator = unsafe { std::ptr::read_unaligned(rec.apd.indicator_ptr) };
                 is_data_at_exec(indicator)
             } else {
                 false
@@ -1318,13 +1317,13 @@ pub unsafe fn sql_param_data<B: Backend>(
                     ColumnValue::Null
                 } else {
                     let rec = stmt.param_records().get(param_num)?;
-                    let c_type = rec.map(|r| r.apd.c_type);
+                    let c_type = rec.map(|r| r.apd.c_type()).transpose()?;
                     // An absent binding cannot reach here — `SQLParamData` only
                     // offers a parameter that `find_data_at_exec_params` found
                     // a data-at-execution indicator on, which requires one.
-                    let sql_type = rec.map_or(SqlDataType::UNKNOWN_TYPE, |r| r.ipd.sql_type);
-                    let col_size = rec.map_or(0, |r| r.ipd.col_size);
-                    let decimal_digits = rec.map_or(0, |r| r.ipd.decimal_digits);
+                    let sql_type = rec.map_or(SqlDataType::UNKNOWN_TYPE, |r| r.ipd.sql_type());
+                    let col_size = rec.map_or(0, |r| r.ipd.length);
+                    let decimal_digits = rec.map_or(0, |r| r.ipd.scale);
                     dae_buffer_to_value(c_type, sql_type, col_size, decimal_digits, &dae.buffer)?
                 };
                 dae.collected_values.insert(param_num, value);
@@ -1339,7 +1338,7 @@ pub unsafe fn sql_param_data<B: Backend>(
                 // can identify which parameter is being requested.
                 if !value_ptr_ptr.is_null() {
                     if let Some(rec) = stmt.param_records().get(next_param)? {
-                        std::ptr::write_unaligned(value_ptr_ptr, rec.apd.value_ptr);
+                        std::ptr::write_unaligned(value_ptr_ptr, rec.apd.data_ptr);
                     } else {
                         std::ptr::write_unaligned(value_ptr_ptr, std::ptr::null_mut());
                     }
@@ -1467,19 +1466,23 @@ mod tests {
     }
 
     impl BoundParam {
-        fn split(&self) -> (ApdRecord, IpdRecord) {
+        fn split(&self) -> (DescriptorRecord, DescriptorRecord) {
             (
-                ApdRecord {
-                    c_type: self.c_type,
-                    value_ptr: self.value_ptr,
-                    buffer_length: self.buffer_length,
-                    str_len_or_ind_ptr: self.str_len_or_ind_ptr,
+                DescriptorRecord {
+                    concise_type: self.c_type as i16,
+                    verbose_type: self.c_type as i16,
+                    data_ptr: self.value_ptr,
+                    octet_length: self.buffer_length,
+                    indicator_ptr: self.str_len_or_ind_ptr,
+                    ..Default::default()
                 },
-                IpdRecord {
-                    sql_type: self.sql_type,
-                    col_size: self.col_size,
-                    decimal_digits: self.decimal_digits,
-                    input_output_type: self.input_output_type,
+                DescriptorRecord {
+                    concise_type: self.sql_type.0,
+                    verbose_type: self.sql_type.0,
+                    length: self.col_size,
+                    scale: self.decimal_digits,
+                    parameter_type: self.input_output_type,
+                    ..Default::default()
                 },
             )
         }
@@ -1504,8 +1507,8 @@ mod tests {
     /// A set of [`BoundParam`]s, split into the two record maps the readers
     /// take.
     struct BoundParams {
-        apd: std::collections::HashMap<u16, ApdRecord>,
-        ipd: std::collections::HashMap<u16, IpdRecord>,
+        apd: std::collections::HashMap<u16, DescriptorRecord>,
+        ipd: std::collections::HashMap<u16, DescriptorRecord>,
     }
 
     impl BoundParams {
@@ -1753,20 +1756,24 @@ mod tests {
                     .records
                     .get(&1)
                     .expect("no APD record was written");
-                assert_eq!(apd.c_type, CDataType::SLong);
-                assert_eq!(apd.value_ptr, val_ptr);
-                assert_eq!(apd.buffer_length, 4);
-                assert_eq!(apd.str_len_or_ind_ptr, indicator_ptr);
+                assert_eq!(
+                    apd.c_type()
+                        .expect("SQLBindParameter stored a valid C type"),
+                    CDataType::SLong
+                );
+                assert_eq!(apd.data_ptr, val_ptr);
+                assert_eq!(apd.octet_length, 4);
+                assert_eq!(apd.indicator_ptr, indicator_ptr);
 
                 let ipd = handle
                     .imp_param_desc
                     .records
                     .get(&1)
                     .expect("no IPD record was written");
-                assert_eq!(ipd.sql_type, SqlDataType::INTEGER);
-                assert_eq!(ipd.col_size, 10);
-                assert_eq!(ipd.decimal_digits, 0);
-                assert_eq!(ipd.input_output_type, ParamType::Input);
+                assert_eq!(ipd.sql_type(), SqlDataType::INTEGER);
+                assert_eq!(ipd.length, 10);
+                assert_eq!(ipd.scale, 0);
+                assert_eq!(ipd.parameter_type, ParamType::Input);
             });
 
             cleanup(env, conn, stmt);

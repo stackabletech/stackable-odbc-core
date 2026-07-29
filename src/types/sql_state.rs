@@ -92,6 +92,9 @@ pub const INVALID_AUTH_SPEC: &str = "28000";
 /// Invalid application buffer type — HY003
 pub const INVALID_APPLICATION_BUFFER_TYPE: &str = "HY003";
 
+/// Associated statement is not prepared — HY007
+pub const ASSOCIATED_STATEMENT_NOT_PREPARED: &str = "HY007";
+
 /// Operation canceled — HY008
 pub const OPERATION_CANCELED: &str = "HY008";
 
@@ -104,11 +107,20 @@ pub const FUNCTION_SEQUENCE_ERROR: &str = "HY010";
 /// Attribute cannot be set now — HY011
 pub const ATTRIBUTE_CANNOT_BE_SET_NOW: &str = "HY011";
 
+/// Cannot modify an implementation row descriptor — HY016
+pub const CANNOT_MODIFY_IRD: &str = "HY016";
+
+/// Inconsistent descriptor information — HY021
+pub const INCONSISTENT_DESCRIPTOR_INFORMATION: &str = "HY021";
+
 /// Invalid attribute value — HY024
 pub const INVALID_ATTRIBUTE_VALUE: &str = "HY024";
 
 /// Invalid string or buffer length — HY090
 pub const INVALID_STRING_OR_BUFFER_LENGTH: &str = "HY090";
+
+/// Invalid descriptor field identifier — HY091
+pub const INVALID_DESCRIPTOR_FIELD_IDENTIFIER: &str = "HY091";
 
 /// Invalid attribute/option identifier — HY092
 pub const INVALID_ATTRIBUTE_OPTION_IDENTIFIER: &str = "HY092";
@@ -315,6 +327,26 @@ impl SqlState {
     /// Invalid attribute/option identifier — HY092
     pub fn invalid_attribute_option_identifier() -> Self {
         Self::new(INVALID_ATTRIBUTE_OPTION_IDENTIFIER)
+    }
+
+    /// Associated statement is not prepared — HY007
+    pub fn associated_statement_not_prepared() -> Self {
+        Self::new(ASSOCIATED_STATEMENT_NOT_PREPARED)
+    }
+
+    /// Cannot modify an implementation row descriptor — HY016
+    pub fn cannot_modify_ird() -> Self {
+        Self::new(CANNOT_MODIFY_IRD)
+    }
+
+    /// Inconsistent descriptor information — HY021
+    pub fn inconsistent_descriptor_information() -> Self {
+        Self::new(INCONSISTENT_DESCRIPTOR_INFORMATION)
+    }
+
+    /// Invalid descriptor field identifier — HY091
+    pub fn invalid_descriptor_field_identifier() -> Self {
+        Self::new(INVALID_DESCRIPTOR_FIELD_IDENTIFIER)
     }
 
     /// Invalid parameter type — HY105

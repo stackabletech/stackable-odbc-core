@@ -271,20 +271,20 @@ pub unsafe fn sql_fetch<B: Backend>(statement_handle: *mut c_void) -> SqlReturn 
                         .records
                         .iter()
                         .map(|(&col, b)| {
-                            (
+                            Ok((
                                 col,
-                                b.target_type,
+                                b.c_type()?,
                                 // SAFETY: the application supplied both the base
                                 // pointer and the offset, and the spec makes the
                                 // sum its responsibility to keep in bounds — the
                                 // same contract as the unoffset pointer. Byte
                                 // arithmetic, because the offset is in bytes.
-                                b.target_value_ptr.wrapping_byte_add(bind_offset),
-                                b.buffer_length,
-                                b.str_len_or_ind_ptr.wrapping_byte_add(bind_offset),
-                            )
+                                b.data_ptr.wrapping_byte_add(bind_offset),
+                                b.octet_length,
+                                b.indicator_ptr.wrapping_byte_add(bind_offset),
+                            ))
                         })
-                        .collect();
+                        .collect::<Result<Vec<_>, OdbcError>>()?;
 
                     let mut truncated = false;
                     if let Some(ref mut statement) = stmt.statement {

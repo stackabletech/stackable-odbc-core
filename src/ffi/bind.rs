@@ -3,7 +3,8 @@
 use std::ffi::c_void;
 
 use crate::backend::Backend;
-use crate::handles::{ColumnBinding, StatementHandle};
+use crate::descriptor::DescriptorRecord;
+use crate::handles::StatementHandle;
 use crate::panic::panic_safe;
 use crate::types::SqlReturn;
 
@@ -108,11 +109,13 @@ pub unsafe fn sql_bind_col<B: Backend>(
                 );
                 stmt.app_row_desc.records.insert(
                     column_number,
-                    ColumnBinding {
-                        target_type: c_type,
-                        target_value_ptr,
-                        buffer_length,
-                        str_len_or_ind_ptr,
+                    DescriptorRecord {
+                        concise_type: c_type as i16,
+                        verbose_type: c_type as i16,
+                        data_ptr: target_value_ptr,
+                        octet_length: buffer_length,
+                        indicator_ptr: str_len_or_ind_ptr,
+                        ..DescriptorRecord::default()
                     },
                 );
             }
@@ -223,10 +226,13 @@ mod tests {
                     .records
                     .get(&1)
                     .expect("SQLBindCol did not write a record into the ARD");
-                assert_eq!(record.target_type, CDataType::SBigInt);
-                assert_eq!(record.target_value_ptr, buf_ptr);
-                assert_eq!(record.buffer_length, std::mem::size_of::<i64>() as isize);
-                assert_eq!(record.str_len_or_ind_ptr, indicator_ptr);
+                assert_eq!(
+                    record.c_type().expect("SQLBindCol stored a valid C type"),
+                    CDataType::SBigInt
+                );
+                assert_eq!(record.data_ptr, buf_ptr);
+                assert_eq!(record.octet_length, std::mem::size_of::<i64>() as isize);
+                assert_eq!(record.indicator_ptr, indicator_ptr);
             });
 
             cleanup_env_conn_stmt(env, conn, stmt);

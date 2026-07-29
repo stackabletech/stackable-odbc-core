@@ -37,11 +37,11 @@ use std::sync::Arc as StdArc;
 use odbc_sys::AttrOdbcVersion;
 
 use crate::backend::{Backend, StatementBackend};
+use crate::descriptor::{DescriptorRecord, DescriptorRole};
 use crate::diagnostics::DiagnosticQueue;
 use crate::errors::{IntoOdbc, OdbcError};
 use crate::sync::Arc;
-use crate::types::{ColumnDescriptor, ColumnValue, ConnectParams, FetchResult, SqlReturn, ULen};
-use odbc_sys::{CDataType, ParamType, SqlDataType};
+use crate::types::{ColumnDescriptor, ColumnValue, ConnectParams, FetchResult, SqlReturn};
 
 pub(crate) mod registry;
 pub(crate) mod scope;
@@ -53,8 +53,7 @@ use scope::HandleScope;
 /// SQL for escape sequences.
 const SQL_NOSCAN_ON: usize = 1;
 
-/// One ODBC descriptor (`SQL_HANDLE_DESC`), generic over the kind of record it
-/// holds.
+/// One ODBC descriptor (`SQL_HANDLE_DESC`).
 ///
 /// A statement owns four of these — the ARD, APD, IRD and IPD — and the ODBC
 /// spec makes them the *definition* of a binding rather than a copy of one:
@@ -63,14 +62,14 @@ const SQL_NOSCAN_ON: usize = 1;
 /// parameter is a record in the APD together with one in the IPD. There is one
 /// storage, so a binding and its descriptor cannot disagree.
 ///
-/// `R` differs per role, which is what makes that impossible to get wrong:
-/// `ColumnBinding` for the ARD, [`ApdRecord`] and [`IpdRecord`] for the two
-/// parameter descriptors, and `()` for the IRD, which is deliberately unbacked
-/// — `SQLDescribeColW` and `SQLColAttributeW` answer from `ColumnDescriptor`
-/// directly, and inventing a second source of truth for column metadata is the
-/// exact failure this type exists to prevent. D3 and D4 decide when the IRD is
-/// populated; until then `()` says "nothing here" at the type level rather than
-/// in a comment.
+/// [`Self::role`] is what tells the four apart, and it is a field rather than a
+/// type parameter because ODBC has one record shape and four *readings* of it:
+/// `SQLSetDescField` accepts any field identifier against any descriptor and
+/// decides validity from the role. Core stores no records for the IRD; reads
+/// there are computed from `ColumnDescriptor`, which is how `SQLColAttributeW`
+/// and `SQLGetDescField` stay one answer rather than two — inventing a second
+/// source of truth for column metadata is the exact failure this type exists to
+/// prevent.
 ///
 /// The Windows Driver Manager queries `SQLGetStmtAttrW` for descriptor handle
 /// attributes (10010–10013) immediately after allocating a statement. If the
@@ -82,10 +81,11 @@ const SQL_NOSCAN_ON: usize = 1;
 ///
 /// Every other handle type has one, and a descriptor deliberately does not.
 /// [`HandleScope::get`] dispatches on [`HandleKind`] alone, and all four
-/// descriptors register as `HandleKind::Desc` — so `get::<Descriptor<A>>` on a
-/// token that names a `Descriptor<B>` would pass every check the registry can
-/// make and hand back a reference of the wrong type. Without the impl that call
-/// does not compile, which is the point.
+/// descriptors register as `HandleKind::Desc` — so `get::<Descriptor>` on a
+/// token would resolve any of a statement's four descriptors as any other,
+/// passing every check the registry can make. Without the impl that call does
+/// not compile, which is the point: the role has to come from the owning
+/// statement, not from the token's kind.
 ///
 /// A descriptor is reached instead through the statement that owns it, by
 /// [`HandleScope::descriptor_diagnostics`] and whatever D3 adds beside it.
@@ -99,7 +99,7 @@ const SQL_NOSCAN_ON: usize = 1;
 /// [`HandleScope::stmt_with_parent`]:
 ///     crate::handles::scope::HandleScope::stmt_with_parent
 #[repr(C)]
-pub struct Descriptor<R> {
+pub struct Descriptor {
     header: HandleHeader,
     /// This descriptor's own diagnostic queue.
     ///
@@ -114,7 +114,7 @@ pub struct Descriptor<R> {
     ///
     /// `SQL_DESC_COUNT` is derived from this map rather than stored beside it,
     /// so the two cannot disagree.
-    pub records: std::collections::HashMap<u16, R>,
+    pub records: std::collections::HashMap<u16, DescriptorRecord>,
     /// The descriptor's header fields, keyed by raw attribute value.
     ///
     /// Eight `SQL_ATTR_*` statement attributes **are** descriptor header
@@ -123,16 +123,23 @@ pub struct Descriptor<R> {
     /// [`StatementHandle::attrs`] for the same reason records do: one storage
     /// cannot disagree with itself.
     pub attrs: std::collections::HashMap<i32, usize>,
+    /// Which of the four this descriptor is.
+    ///
+    /// Fixed at allocation for an implicit descriptor. It is what `HY091` is
+    /// decided from: a field defined for an ARD may be undefined on an IPD, and
+    /// `SQL_DESC_CONCISE_TYPE` names a C type on one and a SQL type on another.
+    pub role: DescriptorRole,
 }
 
-impl<R> Descriptor<R> {
+impl Descriptor {
     /// An empty descriptor, before it is registered.
-    fn new() -> Self {
+    fn new(role: DescriptorRole) -> Self {
         Self {
             header: HandleHeader::PLACEHOLDER,
             diagnostics: DiagnosticQueue::new(),
             records: std::collections::HashMap::new(),
             attrs: std::collections::HashMap::new(),
+            role,
         }
     }
 
@@ -150,20 +157,16 @@ impl<R> Descriptor<R> {
 /// Register one of a statement's four descriptors, joining the statement's lock
 /// group and recording it as the parent.
 ///
-/// Generic because the four descriptors are four different types; a single loop
-/// over them cannot be written, and writing the body out four times is how one
-/// of them comes to be registered under the wrong parent.
-///
 /// A registration failure leaves the descriptor's header at
 /// [`HandleHeader::PLACEHOLDER`], whose generation 0 is never issued, so it has
 /// no valid token rather than a wrong one.
 ///
 /// # Safety
 ///
-/// `desc` must point to a live `Descriptor<R>` owned by the statement
+/// `desc` must point to a live [`Descriptor`] owned by the statement
 /// `stmt_token` names.
-unsafe fn register_descriptor<R>(
-    desc: *mut Descriptor<R>,
+unsafe fn register_descriptor(
+    desc: *mut Descriptor,
     group: &Arc<GroupLock>,
     stmt_token: *mut c_void,
 ) {
@@ -399,101 +402,36 @@ impl<B: Backend> StatementBackend for StatementData<B> {
     }
 }
 
-/// Column binding information stored by `SQLBindCol`.
-#[derive(Debug)]
-pub struct ColumnBinding {
-    /// Target C data type requested by the application.
-    pub target_type: CDataType,
-    /// Pointer to the application's data buffer.
-    pub target_value_ptr: *mut c_void,
-    /// Size of the application's data buffer in bytes.
-    pub buffer_length: isize,
-    /// Pointer to the length/indicator value.
-    pub str_len_or_ind_ptr: *mut isize,
-}
-
-// SAFETY: ColumnBinding holds raw pointers that point to application-owned buffers.
-// The ODBC contract guarantees these buffers remain valid until the binding is
-// changed or the statement is freed.
-unsafe impl Send for ColumnBinding {}
-unsafe impl Sync for ColumnBinding {}
-
-/// The application-side half of a `SQLBindParameter` call: an APD record.
-///
-/// These four are what the ODBC spec's `SQLBindParameter` page maps onto
-/// application parameter descriptor fields — `SQL_DESC_CONCISE_TYPE`,
-/// `SQL_DESC_DATA_PTR`, `SQL_DESC_OCTET_LENGTH` and
-/// `SQL_DESC_OCTET_LENGTH_PTR` / `SQL_DESC_INDICATOR_PTR`. They describe the
-/// *buffer* the application supplied, and say nothing about the parameter's
-/// type at the data source; that is [`IpdRecord`].
-///
-/// One struct holding both halves is what would make `SQLSetDescField`
-/// unimplementable: setting `SQL_DESC_DATA_PTR` on the APD would have to reach
-/// into a record that also claims to be the IPD's.
-#[derive(Debug)]
-pub struct ApdRecord {
-    /// The C data type of the value buffer (`SQL_DESC_CONCISE_TYPE`).
-    pub c_type: CDataType,
-    /// Pointer to the value buffer, which may be null for output-only
-    /// parameters (`SQL_DESC_DATA_PTR`).
-    pub value_ptr: *mut c_void,
-    /// Size of the value buffer in bytes (`SQL_DESC_OCTET_LENGTH`).
-    pub buffer_length: isize,
-    /// Pointer to the length/indicator value; `SQL_NULL_DATA` (-1) signals NULL
-    /// (`SQL_DESC_OCTET_LENGTH_PTR` / `SQL_DESC_INDICATOR_PTR`).
-    pub str_len_or_ind_ptr: *mut isize,
-}
-
-// SAFETY: ApdRecord holds raw pointers to application-owned buffers.
-// The ODBC contract guarantees these buffers remain valid until the binding is
-// changed or the statement is freed.
-unsafe impl Send for ApdRecord {}
-unsafe impl Sync for ApdRecord {}
-
-/// The data-source-side half of a `SQLBindParameter` call: an IPD record.
-///
-/// `col_size` and `decimal_digits` are `SQLBindParameter`'s `ColumnSize` and
-/// `DecimalDigits`, the declared size of the parameter. [`crate::param_convert`]
-/// enforces them at execute time: the precision and scale of a `SQL_DECIMAL` or
-/// `SQL_NUMERIC` parameter, the declared character length of a character one,
-/// and the declared byte length of a binary one (see `text_to_sql_type`'s
-/// "Declared size" note, and its "Not done here" note for the one target class
-/// still unchecked). They are also what `SQLDescribeParam` has to report back,
-/// so dropping them would mean `SQLBindParameter` discarding the only copy of
-/// what the application declared.
-///
-/// `sql_type` **is** read: it is `SQLBindParameter`'s `ParameterType`, the SQL
-/// type the value is converted to before it reaches the backend. For every C
-/// type but the two character ones the conversion is a no-op, because
-/// [`ApdRecord::c_type`] already fixes the value's shape — but for `SQL_C_CHAR`
-/// and `SQL_C_WCHAR` this field is the only statement of what the text *is*.
-/// See [`crate::param_convert`].
-#[derive(Debug)]
-pub struct IpdRecord {
-    /// The SQL data type of the parameter (`SQL_DESC_CONCISE_TYPE`).
-    pub sql_type: SqlDataType,
-    /// Column size: precision for numerics, length for strings
-    /// (`SQL_DESC_LENGTH`).
-    pub col_size: ULen,
-    /// Decimal digits, the scale for numerics (`SQL_DESC_SCALE`).
-    pub decimal_digits: i16,
-    /// Whether this is an input, output, or input/output parameter
-    /// (`SQL_DESC_PARAMETER_TYPE`).
-    pub input_output_type: ParamType,
-}
-
 /// Both halves of one bound parameter, borrowed together.
 ///
 /// What the readers of a parameter binding want: they need the buffer from the
 /// APD and the declared type from the IPD, and a value assembled from two
 /// different parameters' records would be nonsense. Constructed only by
 /// [`ParamRecords::get`], which will not pair records under different keys.
+///
+/// Both halves are [`DescriptorRecord`]s, and which of its fields each half
+/// speaks for is the split itself:
+///
+/// - The **APD** half carries `SQL_DESC_CONCISE_TYPE` read as a C type, plus
+///   `SQL_DESC_DATA_PTR`, `SQL_DESC_OCTET_LENGTH` and
+///   `SQL_DESC_INDICATOR_PTR` — what `SQLBindParameter`'s page maps onto
+///   application parameter descriptor fields. It describes the *buffer* the
+///   application supplied and says nothing about the parameter's type at the
+///   data source.
+/// - The **IPD** half carries `SQL_DESC_CONCISE_TYPE` read as a SQL type —
+///   `SQLBindParameter`'s `ParameterType`, the type the value is converted to
+///   before it reaches the backend. For every C type but the two character ones
+///   that conversion is a no-op, because the APD's C type already fixes the
+///   value's shape; for `SQL_C_CHAR` and `SQL_C_WCHAR` it is the only statement
+///   of what the text *is*. Its `length` and `scale` are `ColumnSize` and
+///   `DecimalDigits`, which [`crate::param_convert`] enforces at execute time
+///   and `SQLDescribeParam` reports back.
 #[derive(Clone, Copy)]
 pub(crate) struct ParamRecord<'a> {
     /// The APD half: where the value is and how it is laid out.
-    pub apd: &'a ApdRecord,
+    pub apd: &'a DescriptorRecord,
     /// The IPD half: what the value is declared to be.
-    pub ipd: &'a IpdRecord,
+    pub ipd: &'a DescriptorRecord,
 }
 
 /// The two parameter descriptors' record maps, borrowed together.
@@ -504,9 +442,9 @@ pub(crate) struct ParamRecord<'a> {
 #[derive(Clone, Copy)]
 pub(crate) struct ParamRecords<'a> {
     /// The APD's records.
-    pub apd: &'a std::collections::HashMap<u16, ApdRecord>,
+    pub apd: &'a std::collections::HashMap<u16, DescriptorRecord>,
     /// The IPD's records.
-    pub ipd: &'a std::collections::HashMap<u16, IpdRecord>,
+    pub ipd: &'a std::collections::HashMap<u16, DescriptorRecord>,
 }
 
 impl<'a> ParamRecords<'a> {
@@ -665,19 +603,20 @@ pub struct StatementHandle<B: Backend> {
     /// The application row descriptor. Its records are the column bindings
     /// `SQLBindCol` sets — the spec makes binding a column *be* setting ARD
     /// fields, so this is the binding, not a copy of it.
-    pub app_row_desc: Box<Descriptor<ColumnBinding>>,
+    pub app_row_desc: Box<Descriptor>,
     /// The application parameter descriptor. Its records are the C-side half of
-    /// each `SQLBindParameter` call — see [`ApdRecord`].
-    pub app_param_desc: Box<Descriptor<ApdRecord>>,
-    /// The implementation row descriptor, deliberately unbacked — see
-    /// [`Descriptor`]. It exists because the Windows Driver Manager queries
-    /// `SQLGetStmtAttrW(10010–10013)` after statement allocation and crashes
-    /// without a valid handle for each.
-    pub imp_row_desc: Box<Descriptor<()>>,
+    /// each `SQLBindParameter` call — see [`ParamRecord`].
+    pub app_param_desc: Box<Descriptor>,
+    /// The implementation row descriptor. Core stores no records here — reads
+    /// are computed from the current result set's `ColumnDescriptor`s, so the
+    /// map stays empty; see [`Descriptor`]. It exists as a handle because the
+    /// Windows Driver Manager queries `SQLGetStmtAttrW(10010–10013)` after
+    /// statement allocation and crashes without a valid handle for each.
+    pub imp_row_desc: Box<Descriptor>,
     /// The implementation parameter descriptor. Its records are the
     /// data-source-side half of each `SQLBindParameter` call — see
-    /// [`IpdRecord`].
-    pub imp_param_desc: Box<Descriptor<IpdRecord>>,
+    /// [`ParamRecord`].
+    pub imp_param_desc: Box<Descriptor>,
 }
 
 impl<B: Backend> HasKind for StatementHandle<B> {
@@ -985,10 +924,10 @@ pub unsafe fn alloc_statement<B: Backend>(
         // statement attribute, so a fresh statement starts with no deadline
         // until something sets one on it.
         core_query_timeout: None,
-        app_row_desc: Box::new(Descriptor::new()),
-        app_param_desc: Box::new(Descriptor::new()),
-        imp_row_desc: Box::new(Descriptor::new()),
-        imp_param_desc: Box::new(Descriptor::new()),
+        app_row_desc: Box::new(Descriptor::new(DescriptorRole::Ard)),
+        app_param_desc: Box::new(Descriptor::new(DescriptorRole::Apd)),
+        imp_row_desc: Box::new(Descriptor::new(DescriptorRole::Ird)),
+        imp_param_desc: Box::new(Descriptor::new(DescriptorRole::Ipd)),
     });
     let ptr = Box::into_raw(handle);
     // SAFETY: as in `alloc_environment`.
@@ -1008,8 +947,8 @@ pub unsafe fn alloc_statement<B: Backend>(
         // parent, which is what makes a descriptor token resolvable at all —
         // see `HandleScope::descriptor_diagnostics`.
         //
-        // Four calls rather than a loop: the four are four different types now,
-        // so there is no array to iterate.
+        // Four calls rather than a loop: the four live in four distinct fields
+        // of the statement, so there is no array to iterate.
         register_descriptor(std::ptr::from_mut(&mut *(*ptr).app_row_desc), &group, token);
         register_descriptor(
             std::ptr::from_mut(&mut *(*ptr).app_param_desc),

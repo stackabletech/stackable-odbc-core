@@ -94,6 +94,7 @@ pub mod column_value;
 #[cfg(any(test, feature = "test-support"))]
 pub mod conformance;
 
+pub(crate) mod descriptor;
 pub(crate) mod diagnostics;
 pub mod errors;
 pub mod escape;

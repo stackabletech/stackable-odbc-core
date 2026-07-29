@@ -1198,29 +1198,35 @@ mod tests {
                     handle.cursor_name = Some("C1".to_string());
                     handle.app_row_desc.records.insert(
                         1,
-                        crate::handles::ColumnBinding {
-                            target_type: crate::types::CDataType::SLong,
-                            target_value_ptr: std::ptr::null_mut(),
-                            buffer_length: 4,
-                            str_len_or_ind_ptr: std::ptr::null_mut(),
+                        crate::descriptor::DescriptorRecord {
+                            concise_type: crate::types::CDataType::SLong as i16,
+                            verbose_type: crate::types::CDataType::SLong as i16,
+                            data_ptr: std::ptr::null_mut(),
+                            octet_length: 4,
+                            indicator_ptr: std::ptr::null_mut(),
+                            ..Default::default()
                         },
                     );
                     handle.app_param_desc.records.insert(
                         1,
-                        crate::handles::ApdRecord {
-                            c_type: crate::types::CDataType::SLong,
-                            value_ptr: std::ptr::null_mut(),
-                            buffer_length: 4,
-                            str_len_or_ind_ptr: std::ptr::null_mut(),
+                        crate::descriptor::DescriptorRecord {
+                            concise_type: crate::types::CDataType::SLong as i16,
+                            verbose_type: crate::types::CDataType::SLong as i16,
+                            data_ptr: std::ptr::null_mut(),
+                            octet_length: 4,
+                            indicator_ptr: std::ptr::null_mut(),
+                            ..Default::default()
                         },
                     );
                     handle.imp_param_desc.records.insert(
                         1,
-                        crate::handles::IpdRecord {
-                            sql_type: crate::types::SqlDataType::INTEGER,
-                            col_size: 10,
-                            decimal_digits: 0,
-                            input_output_type: crate::types::ParamType::Input,
+                        crate::descriptor::DescriptorRecord {
+                            concise_type: crate::types::SqlDataType::INTEGER.0,
+                            verbose_type: crate::types::SqlDataType::INTEGER.0,
+                            length: 10,
+                            scale: 0,
+                            parameter_type: crate::types::ParamType::Input,
+                            ..Default::default()
                         },
                     );
                 },
