@@ -17,6 +17,7 @@ use std::ffi::c_void;
 use std::marker::PhantomData;
 
 use crate::backend::Backend;
+use crate::descriptor::DescriptorRole;
 use crate::diagnostics::DiagnosticQueue;
 use crate::errors::OdbcError;
 use crate::handles::registry::{GroupLock, HandleKind, Registry, registry};
@@ -299,56 +300,86 @@ impl<'a> HandleScope<'a> {
         }
     }
 
+    /// Resolve a descriptor token to the statement that owns it and to which of
+    /// the four it is.
+    ///
+    /// This is how every descriptor is reached. Every other handle kind is
+    /// reached by casting the address the registry stored; a descriptor **must
+    /// not** be, and that is why [`Descriptor`] deliberately has no `HasKind`
+    /// impl. `HandleKind::Desc` is one kind covering four roles, so
+    /// [`Self::get`], which dispatches on the kind alone, would resolve any one
+    /// of a statement's four descriptors as any other and pass every check the
+    /// registry can make. Without the impl, that call does not compile.
+    ///
+    /// Asking the owning statement answers the question a cast could only
+    /// assume. `Slot::parent` records it at `alloc_statement` time, and
+    /// comparing the token against the statement's four fields identifies the
+    /// role exactly.
+    ///
+    /// Returning the *statement* rather than the descriptor is what makes the
+    /// IRD-as-view workable, and it is also the only form the borrow rule in
+    /// [`Self::stmt_with_parent`]'s comment permits. The caller reaches
+    /// whatever it needs off this single `&mut`: a record map for the ARD, APD
+    /// or IPD, or `stmt.statement`'s column metadata for the IRD. A
+    /// `stmt_with_desc` combinator handing back both at once would alias under
+    /// Stacked Borrows, because the four `Box<Descriptor>` fields *are*
+    /// reachable through the statement's `&mut`.
+    ///
+    /// [`OdbcError::InvalidHandle`] for a token that is stale, outside the held
+    /// group, not a descriptor, or somehow parentless — the same answer,
+    /// because none of them names a descriptor this scope may reach.
+    ///
+    /// [`Descriptor`]: crate::handles::Descriptor
+    pub fn descriptor_owner<B: Backend>(
+        &mut self,
+        token: *mut c_void,
+    ) -> Result<(&mut StatementHandle<B>, DescriptorRole), OdbcError> {
+        let parent = {
+            let held = self.group.as_ref().ok_or(OdbcError::InvalidHandle)?;
+            let (kind, _addr, parent) = registry()
+                .resolve_any_in_group(token, held)
+                .ok_or(OdbcError::InvalidHandle)?;
+            if kind != HandleKind::Desc {
+                return Err(OdbcError::InvalidHandle);
+            }
+            parent.ok_or(OdbcError::InvalidHandle)?
+        };
+        // A descriptor shares its statement's group, so this resolves under the
+        // lock already held.
+        let stmt: &mut StatementHandle<B> = self.get(parent)?;
+        let role = if stmt.app_row_desc.token() == token {
+            DescriptorRole::Ard
+        } else if stmt.app_param_desc.token() == token {
+            DescriptorRole::Apd
+        } else if stmt.imp_row_desc.token() == token {
+            DescriptorRole::Ird
+        } else if stmt.imp_param_desc.token() == token {
+            DescriptorRole::Ipd
+        } else {
+            return Err(OdbcError::InvalidHandle);
+        };
+        Ok((stmt, role))
+    }
+
     /// Borrow a descriptor's diagnostic queue, through the statement that owns
     /// it.
     ///
-    /// Every other handle kind is reached by casting the address the registry
-    /// stored. A descriptor **must not** be, and the reason outlives this
-    /// function: `HandleKind::Desc` is one kind covering four roles, so a cast
-    /// to any one descriptor type would be a guess about which role the token
-    /// names. Today all four are the same Rust type and the guess would be
-    /// right; the moment they differ — a role-specific record map is exactly
-    /// where this is going — it becomes type confusion the registry cannot
-    /// catch, because the kind check has already passed.
-    ///
-    /// Asking the owning statement answers the question the cast could only
-    /// assume. `Slot::parent` records it at `alloc_statement` time, and
-    /// comparing the token against the statement's four fields identifies the
-    /// role exactly. It also happens to be the only form the borrow rule in
-    /// [`Self::stmt_with_parent`]'s comment permits: the descriptor is reached
-    /// *through* the statement's own `&mut`, never alongside it.
-    ///
-    /// `None` for a token that is stale, outside the held group, not a
-    /// descriptor, or somehow parentless — the same answer, because none of
-    /// them names a queue this scope may write to.
+    /// `SQLGetDescField`, `SQLSetDescField` and `SQLSetDescRec` all say their
+    /// SQLSTATE "can be obtained by calling **SQLGetDiagRec** with a
+    /// *HandleType* of SQL_HANDLE_DESC", so each descriptor carries a queue of
+    /// its own. Which one is [`Self::descriptor_owner`]'s answer; this only
+    /// picks the field.
     pub fn descriptor_diagnostics<B: Backend>(
         &mut self,
         token: *mut c_void,
     ) -> Option<&mut DiagnosticQueue> {
-        let parent = {
-            let held = self.group.as_ref()?;
-            let (kind, _addr, parent) = registry().resolve_any_in_group(token, held)?;
-            if kind != HandleKind::Desc {
-                return None;
-            }
-            parent?
-        };
-        // A descriptor shares its statement's group, so this resolves under the
-        // lock already held.
-        let stmt: &mut StatementHandle<B> = self.get(parent).ok()?;
-        if stmt.app_row_desc.token() == token {
-            return Some(&mut stmt.app_row_desc.diagnostics);
-        }
-        if stmt.app_param_desc.token() == token {
-            return Some(&mut stmt.app_param_desc.diagnostics);
-        }
-        if stmt.imp_row_desc.token() == token {
-            return Some(&mut stmt.imp_row_desc.diagnostics);
-        }
-        if stmt.imp_param_desc.token() == token {
-            return Some(&mut stmt.imp_param_desc.diagnostics);
-        }
-        None
+        let (owner, role) = self.descriptor_owner::<B>(token).ok()?;
+        Some(match role {
+            DescriptorRole::Ard => &mut owner.app_row_desc.diagnostics,
+            DescriptorRole::Apd => &mut owner.app_param_desc.diagnostics,
+            DescriptorRole::Ird => &mut owner.imp_row_desc.diagnostics,
+            DescriptorRole::Ipd => &mut owner.imp_param_desc.diagnostics,
+        })
     }
 }
 
@@ -356,7 +387,7 @@ impl<'a> HandleScope<'a> {
 mod tests {
     use super::*;
     use crate::panic::panic_safe;
-    use crate::test_utils::{MockBackend, alloc_env_conn_stmt, cleanup_env_conn_stmt};
+    use crate::test_utils::{MockBackend, alloc_env_conn_stmt, cleanup_env_conn_stmt, with_handle};
     use crate::types::SqlReturn;
 
     /// The check that makes the whole scheme real: a token from a *different*
@@ -386,6 +417,62 @@ mod tests {
 
             cleanup_env_conn_stmt(env_a, conn_a, stmt_a);
             cleanup_env_conn_stmt(env_b, conn_b, stmt_b);
+        }
+    }
+
+    /// Each of a statement's four descriptors resolves to that statement and to
+    /// its own role. Getting the role from the token is what `HY091` and the
+    /// IRD's read-only rule are decided from, so a token resolving as the wrong
+    /// role would answer the wrong SQLSTATE for every field.
+    #[test]
+    fn each_descriptor_token_resolves_to_its_statement_and_role() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+
+            let tokens =
+                with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+                    [
+                        (handle.app_row_desc.token(), DescriptorRole::Ard),
+                        (handle.app_param_desc.token(), DescriptorRole::Apd),
+                        (handle.imp_row_desc.token(), DescriptorRole::Ird),
+                        (handle.imp_param_desc.token(), DescriptorRole::Ipd),
+                    ]
+                });
+
+            for (token, expected_role) in tokens {
+                let ret = panic_safe::<MockBackend, _>(token, |scope| {
+                    let (owner, role) = scope.descriptor_owner::<MockBackend>(token)?;
+                    assert_eq!(role, expected_role);
+                    // Every descriptor of one statement resolves to the same
+                    // owner, whichever token was used.
+                    assert_eq!(owner.app_row_desc.token(), tokens[0].0);
+                    Ok(SqlReturn::SUCCESS)
+                });
+                assert_eq!(ret, SqlReturn::SUCCESS, "{expected_role:?} did not resolve");
+            }
+
+            cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
+    /// A statement token is live and in the same group, so the group check
+    /// alone would admit it. It is not a descriptor.
+    #[test]
+    fn descriptor_owner_refuses_a_non_descriptor_token() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+
+            let ret = panic_safe::<MockBackend, _>(stmt, |scope| {
+                let result = scope.descriptor_owner::<MockBackend>(stmt);
+                assert!(
+                    matches!(result, Err(OdbcError::InvalidHandle)),
+                    "a statement token resolved as a descriptor"
+                );
+                Ok(SqlReturn::SUCCESS)
+            });
+            assert_eq!(ret, SqlReturn::SUCCESS);
+
+            cleanup_env_conn_stmt(env, conn, stmt);
         }
     }
 
