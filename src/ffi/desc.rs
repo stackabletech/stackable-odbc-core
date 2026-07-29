@@ -622,6 +622,182 @@ fn write_header_field<B: Backend>(
 /// other name.
 const SQL_DESC_ARRAY_SIZE_SUPPORTED: usize = 1;
 
+/// Generic implementation of SQLGetDescRecW.
+///
+/// Spec: <https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlgetdescrec-function>
+///
+/// Seven fixed record fields in one call, where [`sql_get_desc_field_w`] reads
+/// one named field. Two properties from the page shape the implementation:
+///
+/// - It **"does not retrieve the values for header fields"**. `SQL_DESC_COUNT`
+///   and the rest are `SQLGetDescField`'s alone, so a `record_number` here
+///   always addresses a record.
+/// - **Every output pointer is independently optional:** "an application can
+///   prevent the return of a field's setting by setting the argument that
+///   corresponds to the field to a null pointer." So each is null-checked on
+///   its own rather than as a group.
+///
+/// The `W` suffix is required by the project's rule that every string-bearing
+/// function is exported in its Wide form only; `Name` is that string.
+/// `SQLSetDescRec` takes none and keeps its unsuffixed spelling.
+///
+/// # Parameters
+///
+/// - `descriptor_handle`: Descriptor handle.
+/// - `record_number`: The descriptor record to read.
+/// - `name`: Buffer for `SQL_DESC_NAME`.
+/// - `buffer_length`: Length of `name` in bytes.
+/// - `string_length_ptr`: Receives the available byte count for `name`.
+/// - `type_ptr`: Receives `SQL_DESC_TYPE`.
+/// - `sub_type_ptr`: Receives `SQL_DESC_DATETIME_INTERVAL_CODE`, for a datetime
+///   or interval type.
+/// - `length_ptr`: Receives `SQL_DESC_OCTET_LENGTH`.
+/// - `precision_ptr`: Receives `SQL_DESC_PRECISION`.
+/// - `scale_ptr`: Receives `SQL_DESC_SCALE`.
+/// - `nullable_ptr`: Receives `SQL_DESC_NULLABLE`.
+///
+/// # Spec compliance
+///
+/// This is the narrowest diagnostics table of the four descriptor functions,
+/// and its own page says why: it reads seven fixed fields and takes no field
+/// identifier to be wrong about, so there is no `HY091`, `HY092`, `HY016` or
+/// `HY021` row at all.
+///
+/// - `01000` General warning — (not returned here; core raises no general warning)
+/// - `01004` String data, right truncated — returned when `SQL_DESC_NAME` does not fit `name`
+/// - `07009` Invalid descriptor index — returned for a negative `record_number` on an ARD or
+///   an APD, and for a record number outside the current result set on an IRD
+/// - `08S01` Communication link failure — (not returned here; this function performs no I/O)
+/// - `HY000` General error — returned only for an internal panic caught by `panic_safe`
+/// - `HY001` Memory allocation error — (not returned here; nothing is allocated)
+/// - `HY007` Associated statement is not prepared — returned for an IRD read before the
+///   statement has produced column metadata
+/// - `HY010` Function sequence error — **(DM)**; not returned here
+/// - `HY013` Memory management error — (not returned here)
+/// - `HY117` Connection is suspended — **(DM)**; not returned here
+/// - `HYT01` Connection timeout expired — (not returned here; this function performs no I/O)
+/// - `IM001` Driver does not support this function — **(DM)**; not returned here
+///
+/// Also from the Returns section: `SQL_NO_DATA` when `record_number` exceeds
+/// `SQL_DESC_COUNT`.
+///
+/// # Safety
+///
+/// `descriptor_handle` must be null or a token issued by one of the `alloc_*`
+/// functions in `handles`. Every output pointer must be null or point to
+/// writable memory of its own type; `name` must be null or point to
+/// `buffer_length` writable bytes.
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn sql_get_desc_rec_w<B: Backend>(
+    descriptor_handle: *mut c_void,
+    record_number: i16,
+    name: *mut u16,
+    buffer_length: i16,
+    string_length_ptr: *mut i16,
+    type_ptr: *mut i16,
+    sub_type_ptr: *mut i16,
+    length_ptr: *mut isize,
+    precision_ptr: *mut i16,
+    scale_ptr: *mut i16,
+    nullable_ptr: *mut i16,
+) -> SqlReturn {
+    tracing::debug!(
+        "SQLGetDescRecW(desc={:?}, rec={}, name={:?}, buf_len={})",
+        descriptor_handle,
+        record_number,
+        name,
+        buffer_length,
+    );
+    // SAFETY: `descriptor_handle` is null or a token, which `descriptor_owner`
+    // validates without dereferencing. Every output pointer is null-checked
+    // before its write, and written unaligned because row-wise binding may
+    // place any of them at an arbitrary offset.
+    let ret = unsafe {
+        panic_safe::<B, _>(descriptor_handle, |scope| {
+            let (stmt, role) = scope.descriptor_owner::<B>(descriptor_handle)?;
+            // Spec: clear diagnostics at the start of each ODBC call.
+            stmt.descriptor_mut(role).diagnostics.clear();
+
+            // The six numeric fields, each read through the same
+            // `get_record_field` `SQLGetDescField` uses — one mapping, two
+            // callers, so the two functions cannot report a record differently.
+            // `SQL_NO_DATA` from any one of them is `SQL_NO_DATA` for the call:
+            // they all address the same record.
+            let mut numeric = |field: Desc| -> Result<Option<isize>, OdbcError> {
+                Ok(
+                    match read_desc_field::<B>(stmt, role, record_number, field)? {
+                        Some(DescFieldValue::Numeric(n)) => Some(n),
+                        // A string where a number was expected cannot happen
+                        // for these six, and `None` is `SQL_NO_DATA`.
+                        Some(DescFieldValue::String(_)) | None => None,
+                    },
+                )
+            };
+
+            let Some(verbose_type) = numeric(Desc::Type)? else {
+                return Ok(SqlReturn::NO_DATA);
+            };
+            let sub_type = numeric(Desc::DatetimeIntervalCode)?.unwrap_or(0);
+            let octet_length = numeric(Desc::OctetLength)?.unwrap_or(0);
+            let precision = numeric(Desc::Precision)?.unwrap_or(0);
+            let scale = numeric(Desc::Scale)?.unwrap_or(0);
+            let nullable = numeric(Desc::Nullable)?
+                .unwrap_or(crate::types::Nullable::SqlNullableUnknown as isize);
+
+            write_small_int(type_ptr, verbose_type);
+            write_small_int(sub_type_ptr, sub_type);
+            write_small_int(precision_ptr, precision);
+            write_small_int(scale_ptr, scale);
+            write_small_int(nullable_ptr, nullable);
+            if !length_ptr.is_null() {
+                std::ptr::write_unaligned(length_ptr, octet_length);
+            }
+
+            // `SQL_DESC_NAME` is a character field, and its buffer is optional
+            // like every other output here.
+            let Some(DescFieldValue::String(field_name)) =
+                read_desc_field::<B>(stmt, role, record_number, Desc::Name)?
+            else {
+                return Ok(SqlReturn::SUCCESS);
+            };
+            let mut units: i16 = 0;
+            let ret = crate::utf16::note_truncation(
+                crate::utf16::write_utf16(&field_name, name, buffer_length / 2, &mut units),
+                &mut stmt.descriptor_mut(role).diagnostics,
+            );
+            if !string_length_ptr.is_null() {
+                std::ptr::write_unaligned(string_length_ptr, units.saturating_mul(2));
+            }
+            Ok(ret)
+        })
+    };
+    tracing::debug!("SQLGetDescRecW -> {:?}", ret);
+    ret
+}
+
+/// Write one of `SQLGetDescRecW`'s `SQLSMALLINT` outputs, if the application
+/// asked for it.
+///
+/// Saturating rather than truncating: a value too wide for the ABI's own type
+/// is not something the application can act on, and silently wrapping it would
+/// report a different field value than the descriptor holds.
+///
+/// # Safety
+///
+/// `ptr` must be null or point to a writable `i16`.
+unsafe fn write_small_int(ptr: *mut i16, value: isize) {
+    if ptr.is_null() {
+        return;
+    }
+    let narrowed = i16::try_from(value).unwrap_or_else(|_| {
+        tracing::warn!("SQLGetDescRecW: value {value} does not fit an SQLSMALLINT, saturating");
+        i16::MAX
+    });
+    // SAFETY: `ptr` is non-null and the caller guarantees it is writable;
+    // unaligned because row-wise binding may place it at any offset.
+    unsafe { std::ptr::write_unaligned(ptr, narrowed) };
+}
+
 /// Generic implementation of SQLSetDescRec.
 ///
 /// Spec: <https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlsetdescrec-function>
@@ -727,7 +903,7 @@ mod tests {
         alloc_env_conn_stmt, cleanup_env_conn_stmt, with_handle,
     };
     use crate::types::sql_state;
-    use odbc_sys::{CDataType, HandleType, ParamType, StatementAttribute};
+    use odbc_sys::{CDataType, HandleType, ParamType, SqlDataType, StatementAttribute};
 
     /// The ARD's token, as the application receives it: through
     /// `SQLGetStmtAttrW(SQL_ATTR_APP_ROW_DESC)`. Building one any other way
@@ -794,6 +970,23 @@ mod tests {
         };
         assert_eq!(ret, SqlReturn::SUCCESS, "SQLGetStmtAttrW(IMP_ROW_DESC)");
         assert!(!token.is_null(), "the IRD token must not be null");
+        token
+    }
+
+    /// The IPD's token, as the application receives it.
+    unsafe fn ipd_of(stmt: *mut c_void) -> *mut c_void {
+        let mut token: *mut c_void = std::ptr::null_mut();
+        let ret = unsafe {
+            sql_get_stmt_attr_w::<MockBackend>(
+                stmt,
+                StatementAttribute::ImpParamDesc as i32,
+                std::ptr::from_mut(&mut token).cast::<c_void>(),
+                0,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(ret, SqlReturn::SUCCESS, "SQLGetStmtAttrW(IMP_PARAM_DESC)");
+        assert!(!token.is_null(), "the IPD token must not be null");
         token
     }
 
@@ -1350,6 +1543,157 @@ mod tests {
             crate::test_utils::cleanup_connected_env_conn_stmt::<MockLongDataBackend>(
                 env, conn, stmt,
             );
+        }
+    }
+
+    /// The seven fields the spec lists, read in one call. Each output pointer
+    /// is independently optional: "an application can prevent the return of a
+    /// field's setting by setting the argument that corresponds to the field to
+    /// a null pointer."
+    #[test]
+    fn get_desc_rec_reads_the_seven_record_fields() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            let ipd = ipd_of(stmt);
+
+            let mut val: i32 = 0;
+            let ret = crate::ffi::params::sql_bind_parameter::<MockBackend>(
+                stmt,
+                1,
+                ParamType::Input as i16,
+                CDataType::SLong as i16,
+                SqlDataType::DECIMAL.0,
+                9,
+                2,
+                std::ptr::from_mut(&mut val).cast::<c_void>(),
+                4,
+                std::ptr::null_mut(),
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+
+            let mut name = [0u16; 32];
+            let mut name_len: i16 = -1;
+            let mut type_out: i16 = -1;
+            let mut sub_type: i16 = -1;
+            let mut length: isize = -1;
+            let mut precision: i16 = -1;
+            let mut scale: i16 = -1;
+            let mut nullable: i16 = -1;
+            let ret = sql_get_desc_rec_w::<MockBackend>(
+                ipd,
+                1,
+                name.as_mut_ptr(),
+                (name.len() * 2) as i16,
+                &mut name_len,
+                &mut type_out,
+                &mut sub_type,
+                &mut length,
+                &mut precision,
+                &mut scale,
+                &mut nullable,
+            );
+
+            assert_eq!(ret, SqlReturn::SUCCESS);
+            assert_eq!(type_out, SqlDataType::DECIMAL.0, "SQL_DESC_TYPE");
+            assert_eq!(
+                sub_type, 0,
+                "SQL_DESC_DATETIME_INTERVAL_CODE: not a datetime"
+            );
+            assert_eq!(precision, 9, "SQL_DESC_PRECISION, from ColumnSize");
+            assert_eq!(scale, 2, "SQL_DESC_SCALE, from DecimalDigits");
+            assert_eq!(
+                length, 0,
+                "SQL_DESC_OCTET_LENGTH: SQLBindParameter's BufferLength is the APD's, not the IPD's"
+            );
+            assert_eq!(
+                nullable,
+                crate::types::Nullable::SqlNullableUnknown as i16,
+                "SQL_DESC_NULLABLE is \"R, ND\" on an IPD core does not auto-populate"
+            );
+            assert_eq!(name_len, 0, "an unnamed parameter");
+
+            cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
+    /// Every output pointer is optional on its own: "an application can prevent
+    /// the return of a field's setting by setting the argument that corresponds
+    /// to the field to a null pointer." A group null-check would either write
+    /// through one of these or refuse to write any.
+    #[test]
+    fn get_desc_rec_writes_only_the_outputs_the_application_asked_for() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            let ipd = ipd_of(stmt);
+
+            let mut val: i32 = 0;
+            let ret = crate::ffi::params::sql_bind_parameter::<MockBackend>(
+                stmt,
+                1,
+                ParamType::Input as i16,
+                CDataType::SLong as i16,
+                SqlDataType::DECIMAL.0,
+                9,
+                2,
+                std::ptr::from_mut(&mut val).cast::<c_void>(),
+                4,
+                std::ptr::null_mut(),
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+
+            // Only `scale` is asked for; every other output stays untouched.
+            const SENTINEL: i16 = -99;
+            let mut scale: i16 = SENTINEL;
+            let mut untouched: i16 = SENTINEL;
+            let ret = sql_get_desc_rec_w::<MockBackend>(
+                ipd,
+                1,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut scale,
+                std::ptr::null_mut(),
+            );
+
+            assert_eq!(ret, SqlReturn::SUCCESS);
+            assert_eq!(scale, 2);
+            assert_eq!(untouched, SENTINEL, "a null output pointer was written to");
+            // Read it back so the compiler cannot fold the local away.
+            untouched = untouched.wrapping_add(0);
+            assert_eq!(untouched, SENTINEL);
+
+            cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
+    /// `SQL_NO_DATA` past the count, per the Returns section.
+    #[test]
+    fn get_desc_rec_past_the_count_returns_no_data() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            let ard = ard_of(stmt);
+
+            let ret = sql_get_desc_rec_w::<MockBackend>(
+                ard,
+                4,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            );
+
+            assert_eq!(ret, SqlReturn::NO_DATA);
+
+            cleanup_env_conn_stmt(env, conn, stmt);
         }
     }
 

@@ -860,6 +860,29 @@ macro_rules! forward_ffi {
             $crate::types::SqlReturn::ERROR
         }
 
+        #[allow(non_snake_case, clippy::missing_safety_doc, clippy::too_many_arguments)]
+        #[unsafe(no_mangle)]
+        pub unsafe extern "system" fn SQLGetDescRecW(
+            desc: *mut ::std::ffi::c_void,
+            rec: i16,
+            name: *mut u16,
+            buf_len: i16,
+            str_len: *mut i16,
+            type_ptr: *mut i16,
+            sub_type: *mut i16,
+            length: *mut isize,
+            precision: *mut i16,
+            scale: *mut i16,
+            nullable: *mut i16,
+        ) -> $crate::types::SqlReturn {
+            unsafe {
+                $crate::ffi::desc::sql_get_desc_rec_w::<$B>(
+                    desc, rec, name, buf_len, str_len, type_ptr, sub_type, length, precision,
+                    scale, nullable,
+                )
+            }
+        }
+
         #[allow(non_snake_case, clippy::missing_safety_doc)]
         #[unsafe(no_mangle)]
         pub unsafe extern "system" fn SQLGetDescFieldW(
