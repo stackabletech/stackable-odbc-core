@@ -96,6 +96,82 @@ fn substitute_stmt_attr<B: Backend>(
     SqlReturn::SUCCESS_WITH_INFO
 }
 
+/// Offer a "reduce load at the data source" attribute to the backend, falling
+/// back to the spec's `01S02` substitution when it cannot apply it.
+///
+/// Shared by `SQL_ATTR_QUERY_TIMEOUT`, `SQL_ATTR_MAX_ROWS` and
+/// `SQL_ATTR_MAX_LENGTH`, which the spec treats alike. All three exist to
+/// reduce work or traffic at the *data source* — the `MAX_ROWS` and
+/// `MAX_LENGTH` rows both say "this attribute is intended to reduce network
+/// traffic" in as many words — so core emulating any of them client-side would
+/// move the data anyway and discard it afterwards, achieving nothing the
+/// application asked for. The spec makes that explicit for both: "a driver
+/// should not emulate SQL_ATTR_MAX_ROWS behavior", and `MAX_LENGTH` "should be
+/// supported only when the data source (as opposed to the driver) ... can
+/// implement it".
+///
+/// So the only honest answers are "the data source is doing it" or "nobody is",
+/// and all three attributes sit on the spec's closed `01S02` list, which is how
+/// to say the second.
+///
+/// Returns `Some(value)` when the backend accepted — the caller stores it and
+/// may do extra bookkeeping — or `None` when the substitution was applied.
+/// The `01S02` substitution to fall back on, as one value.
+///
+/// Grouped rather than passed as five loose arguments so the call sites read as
+/// "this attribute, substituted to this" instead of a positional list where
+/// `requested` and `fallback` are both `usize` and swapping them compiles.
+struct Substitution<'a> {
+    attribute: i32,
+    name: &'a str,
+    requested: usize,
+    fallback: usize,
+    fallback_display: &'a str,
+}
+
+fn offer_to_data_source<B: Backend, T>(
+    stmt: &mut StatementHandle<B>,
+    connection: Option<&B::Connection>,
+    sub: Substitution<'_>,
+    apply: impl FnOnce(&B::Connection) -> Result<T, OdbcError>,
+) -> Result<(Option<T>, SqlReturn), OdbcError> {
+    let substitute = |stmt: &mut StatementHandle<B>| {
+        substitute_stmt_attr(
+            stmt,
+            sub.attribute,
+            sub.name,
+            sub.requested,
+            sub.fallback,
+            sub.fallback_display,
+        )
+    };
+    // No connection means nothing to ask. The Driver Manager's 08003 keeps a
+    // statement from existing on an unconnected connection in the first place,
+    // so this is core being defensive rather than a path an application reaches.
+    let Some(connection) = connection else {
+        return Ok((None, substitute(stmt)));
+    };
+    match apply(connection) {
+        Ok(value) => {
+            tracing::debug!(
+                "SQLSetStmtAttrW: {}={} applied by the data source",
+                sub.name,
+                sub.requested
+            );
+            stmt.attrs.insert(sub.attribute, sub.requested);
+            Ok((Some(value), SqlReturn::SUCCESS))
+        }
+        // The backend says it cannot do this at all: substitute and report.
+        Err(OdbcError::NotImplemented { .. }) => Ok((None, substitute(stmt))),
+        // A *real* failure is propagated instead of substituted. 01S02 tells an
+        // application "this driver capped your value", which is a different
+        // claim from "the connection is broken", and quietly reporting the
+        // first for the second sends it on to execute against a connection it
+        // has been told is fine.
+        Err(e) => Err(e),
+    }
+}
+
 /// Generic implementation of SQLSetStmtAttrW.
 ///
 /// Spec: <https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlsetstmtattr-function>
@@ -133,15 +209,18 @@ fn substitute_stmt_attr<B: Backend>(
 ///   single such value, the pointer-valued ones among them, are stored
 ///   verbatim.
 ///
-///   `SQL_ATTR_QUERY_TIMEOUT` is the one member of the list whose substitution
-///   is conditional: it is offered to [`Backend::set_query_timeout`] first, and
-///   substituted only when that reports `NotImplemented` (or there is no open
-///   connection to offer it to). A backend that accepts the timeout gets
-///   `SQL_SUCCESS` and the requested value stored.
-/// - 08S01 Communication link failure: not raised by core, but a
-///   [`Backend::set_query_timeout`] that fails while talking to the data source
-///   is reported with whatever SQLSTATE the backend's error mapping produced,
-///   and this is the one that mapping should produce for a broken link. Such a
+///   Three members of the list have a **conditional** substitution:
+///   `SQL_ATTR_QUERY_TIMEOUT`, `SQL_ATTR_MAX_ROWS` and `SQL_ATTR_MAX_LENGTH` are
+///   offered to [`Backend::set_query_timeout`], [`Backend::set_max_rows`] and
+///   [`Backend::set_max_length`] first, and substituted only when the backend
+///   reports `NotImplemented` (or there is no open connection to offer them
+///   to). A backend that accepts gets `SQL_SUCCESS` and the requested value
+///   stored. See `offer_to_data_source` for why all three go to the data source
+///   rather than being emulated here.
+/// - 08S01 Communication link failure: not raised by core, but any of the three
+///   data-source hooks above that fails while talking to the data source is
+///   reported with whatever SQLSTATE the backend's error mapping produced, and
+///   this is the one that mapping should produce for a broken link. Such a
 ///   failure is deliberately *not* converted into an `01S02` substitution.
 /// - 24000 Invalid cursor state: returned when setting `SQL_ATTR_CONCURRENCY`,
 ///   `SQL_ATTR_CURSOR_TYPE`, `SQL_ATTR_SIMULATE_CURSOR`, or
@@ -150,8 +229,8 @@ fn substitute_stmt_attr<B: Backend>(
 ///   `SQL_CB_CLOSE`, has no open cursor and is not rejected here (a prepared one
 ///   is rejected by the HY011 check below instead).
 /// - HY000 General error: returned for unexpected internal errors, and for a
-///   [`Backend::set_query_timeout`] failure whose own mapping produced no more
-///   specific state.
+///   failure in one of the three data-source hooks whose own mapping produced
+///   no more specific state.
 /// - HY001 Memory allocation error: not returned; Rust panics on allocation
 ///   failure, which is caught by `panic_safe` and converted to `SQL_ERROR`/HY000.
 /// - HY009 Invalid use of null pointer: not currently checked; the spec
@@ -186,10 +265,11 @@ fn substitute_stmt_attr<B: Backend>(
 ///   `SQL_ASYNC_ENABLE_ON`. These are the unsupported values that the spec's
 ///   `01S02` row does not cover, so there is no substitution to report instead.
 /// - HYT01 Connection timeout expired: not raised by core. Since
-///   `SQL_ATTR_QUERY_TIMEOUT` now reaches [`Backend::set_query_timeout`], this
-///   function *can* communicate with the data source, so a backend whose own
-///   connection timeout expires during that call may report it — but core
-///   neither imposes nor recognises a connection timeout of its own.
+///   `SQL_ATTR_QUERY_TIMEOUT`, `SQL_ATTR_MAX_ROWS` and `SQL_ATTR_MAX_LENGTH`
+///   now reach the backend, this function *can* communicate with the data
+///   source, so a backend whose own connection timeout expires during one of
+///   those calls may report it — but core neither imposes nor recognises a
+///   connection timeout of its own.
 /// - IM001 Driver does not support this function: (driver-manager-handled; not
 ///   returned here).
 ///
@@ -421,14 +501,19 @@ pub unsafe fn sql_set_stmt_attr_w<B: Backend>(
                 // them. SQL_ATTR_MAX_ROWS is on the spec's own 01S02
                 // substitution list, so say so instead.
                 Some(StatementAttribute::MaxRows) if int_val != SQL_MAX_ROWS_DEFAULT => {
-                    Ok(substitute_stmt_attr(
+                    offer_to_data_source::<B, _>(
                         stmt,
-                        attribute,
-                        "SQL_ATTR_MAX_ROWS",
-                        int_val,
-                        SQL_MAX_ROWS_DEFAULT,
-                        "0 (no limit)",
-                    ))
+                        conn.connection.as_ref(),
+                        Substitution {
+                            attribute,
+                            name: "SQL_ATTR_MAX_ROWS",
+                            requested: int_val,
+                            fallback: SQL_MAX_ROWS_DEFAULT,
+                            fallback_display: "0 (no limit)",
+                        },
+                        |c| B::set_max_rows(c, int_val).into_odbc(),
+                    )
+                    .map(|(_, ret)| ret)
                 }
 
                 // The counterpart of SQL_ATTR_MAX_ROWS, one column over: no
@@ -439,14 +524,19 @@ pub unsafe fn sql_set_stmt_attr_w<B: Backend>(
                 // and SQL_ATTR_MAX_LENGTH is on the spec's 01S02 list, which
                 // says how to report it.
                 Some(StatementAttribute::MaxLength) if int_val != SQL_MAX_LENGTH_DEFAULT => {
-                    Ok(substitute_stmt_attr(
+                    offer_to_data_source::<B, _>(
                         stmt,
-                        attribute,
-                        "SQL_ATTR_MAX_LENGTH",
-                        int_val,
-                        SQL_MAX_LENGTH_DEFAULT,
-                        "0 (all available data)",
-                    ))
+                        conn.connection.as_ref(),
+                        Substitution {
+                            attribute,
+                            name: "SQL_ATTR_MAX_LENGTH",
+                            requested: int_val,
+                            fallback: SQL_MAX_LENGTH_DEFAULT,
+                            fallback_display: "0 (all available data)",
+                        },
+                        |c| B::set_max_length(c, int_val).into_odbc(),
+                    )
+                    .map(|(_, ret)| ret)
                 }
 
                 // A keyset is a keyset-driven cursor's window, and core has no
@@ -492,47 +582,30 @@ pub unsafe fn sql_set_stmt_attr_w<B: Backend>(
                 // a `Result<usize, _>` there; deliberately not done, since it
                 // would put a value core never uses into the hook's contract.
                 Some(StatementAttribute::QueryTimeout) if int_val != SQL_QUERY_TIMEOUT_DEFAULT => {
-                    let substitute = |stmt: &mut StatementHandle<B>| {
-                        substitute_stmt_attr(
-                            stmt,
+                    let enforcer = offer_to_data_source::<B, _>(
+                        stmt,
+                        conn.connection.as_ref(),
+                        Substitution {
                             attribute,
-                            "SQL_ATTR_QUERY_TIMEOUT",
-                            int_val,
-                            SQL_QUERY_TIMEOUT_DEFAULT,
-                            "0 (no timeout)",
-                        )
+                            name: "SQL_ATTR_QUERY_TIMEOUT",
+                            requested: int_val,
+                            fallback: SQL_QUERY_TIMEOUT_DEFAULT,
+                            fallback_display: "0 (no timeout)",
+                        },
+                        |c| B::set_query_timeout(c, int_val).into_odbc(),
+                    )?;
+                    let (enforcer, ret) = enforcer;
+                    // The one member of the family with a core-side fallback:
+                    // a backend that cannot set a server-side deadline but can
+                    // be cancelled hands the deadline to core's timer. Recorded
+                    // only for `CoreCancels` — arming a timer for a deadline the
+                    // data source is already managing would give the statement
+                    // two independent cancellers racing the same query.
+                    stmt.core_query_timeout = match enforcer {
+                        Some(QueryTimeout::CoreCancels) => Some(int_val),
+                        Some(QueryTimeout::DataSource) | None => None,
                     };
-                    // No connection means nothing to ask. The Driver Manager's
-                    // 08003 keeps a statement from existing on an unconnected
-                    // connection in the first place, so this is core being
-                    // defensive rather than a path an application reaches.
-                    let Some(ref connection) = conn.connection else {
-                        return Ok(substitute(stmt));
-                    };
-                    match B::set_query_timeout(connection, int_val).into_odbc() {
-                        Ok(enforcer) => {
-                            tracing::debug!(
-                                "SQLSetStmtAttrW: SQL_ATTR_QUERY_TIMEOUT={}s enforced by {:?}",
-                                int_val,
-                                enforcer
-                            );
-                            // Recorded only for `CoreCancels`. Arming a core
-                            // timer for a deadline the data source is already
-                            // managing would give the statement two independent
-                            // cancellers racing the same query.
-                            stmt.core_query_timeout = match enforcer {
-                                QueryTimeout::CoreCancels => Some(int_val),
-                                QueryTimeout::DataSource => None,
-                            };
-                            stmt.attrs.insert(attribute, int_val);
-                            Ok(SqlReturn::SUCCESS)
-                        }
-                        Err(OdbcError::NotImplemented { .. }) => {
-                            stmt.core_query_timeout = None;
-                            Ok(substitute(stmt))
-                        }
-                        Err(e) => Err(e),
-                    }
+                    Ok(ret)
                 }
 
                 // `sql_fetch` retrieves and writes bound columns
@@ -1794,6 +1867,84 @@ mod tests {
             crate::test_utils::cleanup_connected_env_conn_stmt::<MockFailingQueryTimeoutBackend>(
                 env, conn, stmt,
             );
+        }
+    }
+
+    /// Set an attribute to `value` on backend `B` and report the return code,
+    /// the first diagnostic's SQLSTATE, and the value read back.
+    unsafe fn set_then_get_limit<B: Backend>(
+        attribute: StatementAttribute,
+        value: usize,
+    ) -> (SqlReturn, Option<String>, usize) {
+        unsafe {
+            let (env, conn, stmt) = crate::test_utils::alloc_connected_env_conn_stmt::<B>();
+            let set = sql_set_stmt_attr_w::<B>(
+                stmt,
+                attribute as i32,
+                std::ptr::without_provenance_mut::<c_void>(value),
+                0,
+            );
+            let state = crate::test_utils::with_handle::<B, StatementHandle<B>, _>(stmt, |h| {
+                h.diagnostics
+                    .get(0)
+                    .map(|r| r.sqlstate.as_str().to_string())
+            });
+            let mut val: usize = usize::MAX;
+            assert_eq!(
+                sql_get_stmt_attr_w::<B>(
+                    stmt,
+                    attribute as i32,
+                    std::ptr::from_mut(&mut val).cast(),
+                    0,
+                    std::ptr::null_mut(),
+                ),
+                SqlReturn::SUCCESS,
+            );
+            crate::test_utils::cleanup_connected_env_conn_stmt::<B>(env, conn, stmt);
+            (set, state, val)
+        }
+    }
+
+    #[test]
+    fn a_data_source_that_can_cap_a_result_set_gets_max_rows_and_max_length() {
+        // The spec confines both attributes to the data source: "a driver
+        // should not emulate SQL_ATTR_MAX_ROWS behavior", and SQL_ATTR_MAX_LENGTH
+        // "should be supported only when the data source (as opposed to the
+        // driver) ... can implement it". A backend that really can gets the
+        // value, and SQLGetStmtAttr reports what was asked for.
+        unsafe {
+            type B = crate::test_utils::MockLimitsBackend;
+            for (attribute, value) in [
+                (StatementAttribute::MaxRows, 10usize),
+                (StatementAttribute::MaxLength, 4096usize),
+            ] {
+                let (set, state, val) = set_then_get_limit::<B>(attribute, value);
+                assert_eq!(set, SqlReturn::SUCCESS, "{attribute:?} was accepted");
+                assert_eq!(state, None, "an accepted limit is not a substitution");
+                assert_eq!(val, value, "{attribute:?} must read back as requested");
+            }
+        }
+    }
+
+    #[test]
+    fn a_backend_that_cannot_cap_keeps_the_01s02_substitution_for_both_limits() {
+        // Every driver that predates these hooks is this backend, and core
+        // deliberately does not emulate either limit on its behalf: both exist
+        // to "reduce network traffic", which counting rows or bytes on the
+        // client after they have already crossed the wire cannot do. So the
+        // honest answer stays "no limit", reported via the spec's closed 01S02
+        // list.
+        unsafe {
+            type B = crate::test_utils::MockNoQueryTimeoutBackend;
+            for (attribute, value) in [
+                (StatementAttribute::MaxRows, 10usize),
+                (StatementAttribute::MaxLength, 4096usize),
+            ] {
+                let (set, state, val) = set_then_get_limit::<B>(attribute, value);
+                assert_eq!(set, SqlReturn::SUCCESS_WITH_INFO, "{attribute:?}");
+                assert_eq!(state.as_deref(), Some("01S02"), "{attribute:?}");
+                assert_eq!(val, 0, "{attribute:?} must read back as no limit");
+            }
         }
     }
 

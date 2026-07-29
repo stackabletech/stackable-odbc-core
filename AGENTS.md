@@ -349,6 +349,31 @@ core invents for these is wrong for some real driver, and wrong silently: the
 backend author never sees the question, and the application never sees anything
 but a confident answer.
 
+#### Attributes that reduce load at the data source are never emulated
+
+`SQL_ATTR_QUERY_TIMEOUT`, `SQL_ATTR_MAX_ROWS` and `SQL_ATTR_MAX_LENGTH` share
+one shape, in `offer_to_data_source` (`ffi/stmt_attr.rs`): offer the value to a
+defaulted `Backend` hook, store it if the backend accepts, substitute the
+spec's default with `01S02` if the hook is unimplemented, and propagate any
+*other* error as-is. Core emulates none of them, and the spec is explicit about
+why for two of the three — "a driver should not emulate SQL_ATTR_MAX_ROWS
+behavior", and `SQL_ATTR_MAX_LENGTH` "should be supported only when the data
+source (as opposed to the driver) ... can implement it". Each row states the
+purpose that makes emulation pointless: "this attribute is intended to reduce
+network traffic". Counting rows or bytes in the driver, after they have crossed
+the wire, achieves nothing the application asked for.
+
+`SQL_ATTR_QUERY_TIMEOUT` is the one with a core-side fallback, and it is
+opt-in rather than automatic: `Backend::set_query_timeout` returns a
+`QueryTimeout`, and only `CoreCancels` arms core's timer. Core cannot infer
+that — every statement-producing `Backend` method is synchronous and blocks the
+calling thread, so `Backend::cancel` is the only lever, and whether a backend
+wired it up is not observable from Rust.
+
+Before adding a fourth attribute of this kind, check the spec row for a stated
+*purpose*. If the purpose is to reduce work at the data source, the answer is a
+hook plus the `01S02` fallback, not an implementation in core.
+
 #### Deciding whether a new info type belongs here
 
 The test is one question: **is zero "unknown", or is zero an answer?**

@@ -56,6 +56,29 @@ Everything a driver has to change for the catalog rework, in one place.
 
 ### Added
 
+- `Backend::set_max_rows` and `Backend::set_max_length` let the data source
+  apply `SQL_ATTR_MAX_ROWS` and `SQL_ATTR_MAX_LENGTH`, which were substituted to
+  `0` with `01S02` for every driver. Both default to `NotImplemented`, keeping
+  that substitution unchanged, so no existing driver's behaviour changes.
+
+  **Core does not emulate either limit, deliberately.** The spec confines both
+  to the data source: "a driver should not emulate SQL_ATTR_MAX_ROWS behavior
+  for `SQLFetch` or `SQLFetchScroll` ... if it cannot guarantee that
+  SQL_ATTR_MAX_ROWS will be implemented properly", and `SQL_ATTR_MAX_LENGTH`
+  "should be supported only when the data source (as opposed to the driver) in a
+  multiple-tier driver can implement it" — with the further warning that "this
+  mechanism should not be used by applications to truncate data". Both rows say
+  "this attribute is intended to reduce network traffic", which counting rows or
+  bytes in the driver, after they have already crossed the wire, cannot achieve.
+  Implement these only where the data source can genuinely cap the result set or
+  the column.
+
+  With `set_query_timeout` these three now share one path, `offer_to_data_source`:
+  offer to the backend, store on acceptance, substitute with `01S02` on
+  `NotImplemented`, and propagate any other error as-is rather than
+  misreporting a broken connection as a capped value. The `01S02` list stays
+  closed at eight.
+
 - `ConnectParams::login_timeout` and `ConnectParams::connection_timeout` give
   `Backend::connect` the two timeouts it could not previously see.
   `SQL_ATTR_LOGIN_TIMEOUT` and `SQL_ATTR_CONNECTION_TIMEOUT` are set through

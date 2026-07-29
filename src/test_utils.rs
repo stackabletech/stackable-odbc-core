@@ -1564,6 +1564,19 @@ mock_applied_backend!(
     }
 );
 
+// A data source that can genuinely cap a result set and truncate wide columns
+// server-side, which is the only situation the spec sanctions either attribute
+// in.
+mock_applied_backend!(
+    MockLimitsBackend,
+    fn set_max_rows(_conn: &MockAppliedConnection, _rows: usize) -> Result<(), MockError> {
+        Ok(())
+    },
+    fn set_max_length(_conn: &MockAppliedConnection, _bytes: usize) -> Result<(), MockError> {
+        Ok(())
+    }
+);
+
 // A backend whose connection has been lost — what a pool must not be handed.
 mock_applied_backend!(
     MockDeadConnectionBackend,

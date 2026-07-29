@@ -215,6 +215,75 @@ pub trait Backend: Sized + Send + Sync + 'static {
         .into())
     }
 
+    /// Ask the data source to return at most `rows` rows from a result set.
+    ///
+    /// Called by `SQLSetStmtAttr(SQL_ATTR_MAX_ROWS)`. `rows` is the spec's
+    /// `SQLULEN` verbatim; it is never `0`, because `0` means "return all rows"
+    /// and core handles that without asking.
+    ///
+    /// **Core deliberately does not emulate this, and neither should a driver.**
+    /// The spec says so outright: "a driver should not emulate
+    /// SQL_ATTR_MAX_ROWS behavior for `SQLFetch` or `SQLFetchScroll` (if result
+    /// set size limitations cannot be implemented at the data source) if it
+    /// cannot guarantee that SQL_ATTR_MAX_ROWS will be implemented properly."
+    /// The reason is in the attribute's own purpose — "this attribute is
+    /// intended to reduce network traffic" — which counting rows on the client
+    /// and discarding the rest cannot achieve. Implement this only where the
+    /// data source can genuinely cap the result set (a `LIMIT`, a fetch size, a
+    /// server-side row cap).
+    ///
+    /// Note the spec's scope: it "applies to all result sets on the
+    /// *Statement*, including those returned by catalog functions", and
+    /// "conceptually, it is applied when the result set is created".
+    ///
+    /// Three answers, as for [`Backend::set_query_timeout`]:
+    ///
+    /// - `Ok(())` — the cap is in force. Core stores the value, so
+    ///   `SQLGetStmtAttr` reports back what the application asked for.
+    /// - `Err(NotImplemented)`, the default — core substitutes `0` and posts
+    ///   `01S02`, which the spec's closed `01S02` list names this attribute
+    ///   for, so the application learns it got no cap rather than believing in
+    ///   one that will never apply.
+    /// - Any other `Err` — a real failure, reported as-is rather than turned
+    ///   into a substitution.
+    fn set_max_rows(_conn: &Self::Connection, _rows: usize) -> Result<(), Self::Error> {
+        Err(OdbcError::NotImplemented {
+            feature: "SQL_ATTR_MAX_ROWS".into(),
+        }
+        .into())
+    }
+
+    /// Ask the data source to return at most `bytes` from a character or binary
+    /// column.
+    ///
+    /// Called by `SQLSetStmtAttr(SQL_ATTR_MAX_LENGTH)`. `bytes` is the spec's
+    /// `SQLULEN` verbatim; it is never `0`, which means "return all available
+    /// data".
+    ///
+    /// **Core deliberately does not emulate this either.** The spec restricts
+    /// it to the data source in as many words: "this attribute is intended to
+    /// reduce network traffic and should be supported only when the data source
+    /// (as opposed to the driver) in a multiple-tier driver can implement it",
+    /// and it warns applications off using it as a truncation mechanism at all
+    /// — "this mechanism should not be used by applications to truncate data;
+    /// to truncate data received, an application should specify the maximum
+    /// buffer length in the *BufferLength* argument in `SQLBindCol` or
+    /// `SQLGetData`". Truncating in core would move bytes over the wire and
+    /// then throw them away, which is the opposite of the point.
+    ///
+    /// Truncation performed by the data source under this attribute returns
+    /// `SQL_SUCCESS`, not `01004`: "if *ValuePtr* is less than the length of
+    /// the available data, `SQLFetch` or `SQLGetData` truncates the data and
+    /// returns SQL_SUCCESS."
+    ///
+    /// Same three answers as [`Backend::set_max_rows`].
+    fn set_max_length(_conn: &Self::Connection, _bytes: usize) -> Result<(), Self::Error> {
+        Err(OdbcError::NotImplemented {
+            feature: "SQL_ATTR_MAX_LENGTH".into(),
+        }
+        .into())
+    }
+
     /// Tell the data source whether this connection needs to support updates.
     ///
     /// Called by `SQLSetConnectAttr(SQL_ATTR_ACCESS_MODE)` with `true` for
