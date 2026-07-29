@@ -246,9 +246,12 @@ pub unsafe fn sql_more_results<B: Backend>(statement_handle: *mut c_void) -> Sql
 ///
 /// Spec: <https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlclosecursor-function>
 ///
-/// Closes the cursor associated with the statement. The statement remains
-/// allocated with its result set metadata intact, but the cursor position
-/// is reset.
+/// Closes the cursor associated with the statement: calls
+/// [`crate::backend::StatementBackend::close_cursor`] so the backend can
+/// release whatever the cursor holds, then discards the result set. The
+/// statement **handle** remains allocated and can be executed again — the
+/// prepared SQL survives in `prepared_sql`, so a later `SQLExecute` re-prepares
+/// — but the result set and its metadata do not survive the call.
 ///
 /// # Parameters
 ///
@@ -263,7 +266,13 @@ pub unsafe fn sql_more_results<B: Backend>(statement_handle: *mut c_void) -> Sql
 ///   statement handle (ODBC 3.x driver behaviour). A statement that is only prepared, or that
 ///   executed without producing a result set, has no cursor to close and gets this code, as does
 ///   one whose cursor `SQLEndTran` already closed under `SQL_CB_CLOSE`.
-/// - HY000 (general error): returned via `OdbcError::general` for unexpected failures.
+/// - HY000 (general error): returned via `OdbcError::general` for unexpected failures, and the
+///   home this table gives a failed `StatementBackend::close_cursor` when the driver's error
+///   mapping produced no more specific state. A backend that maps it to something else — a
+///   `08S01` link failure, say — has that propagated as-is: this table lists no `08S01` row, but
+///   substituting `HY000` for a state the driver already determined would be less true, not more
+///   compliant. Whatever the state, the result set is discarded either way, so the application is
+///   never left holding a cursor it cannot clear.
 /// - HY001 (memory allocation error): not applicable; Rust allocation panics are caught by
 ///   `panic_safe`.
 /// - HY010 (function sequence error): (driver-manager-handled; not returned here)
@@ -295,10 +304,31 @@ pub unsafe fn sql_close_cursor<B: Backend>(statement_handle: *mut c_void) -> Sql
                 ));
             }
 
-            // Discard the result set. After this the statement handle is in a
-            // clean state and SQLExecDirect / SQLExecute can be called again.
+            // Tell the backend before tearing the statement down. Core used to
+            // reach only `discard_result_set`, which drops the backend
+            // statement — so a backend needing to release a server-side cursor,
+            // cancel a pending fetch, or return a connection to a pool got a
+            // `Drop` and no way to report a failure.
+            // `StatementBackend::close_cursor` is fallible precisely because
+            // that teardown is a round trip that can fail.
+            let close_err = stmt
+                .statement
+                .as_mut()
+                .and_then(|statement| statement.close_cursor().err());
+
+            // Discarded even when the close failed, and deliberately so: the
+            // application would otherwise be left holding a cursor it has no way
+            // to clear, since every retry would call the same failing backend.
+            // The failure is still reported — `SQLEndTran`'s "recorded and
+            // carried, not swallowed" shape. After this the statement handle is
+            // in a clean state and SQLExecDirect / SQLExecute can be called
+            // again.
             stmt.discard_result_set();
-            Ok(SqlReturn::SUCCESS)
+
+            match close_err {
+                Some(e) => Err(e),
+                None => Ok(SqlReturn::SUCCESS),
+            }
         })
     };
     tracing::debug!("SQLCloseCursor -> {:?}", ret);
@@ -885,7 +915,10 @@ pub unsafe fn sql_set_pos<B: Backend>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::{MockBackend, alloc_env_conn_stmt, cleanup_env_conn_stmt, with_handle};
+    use crate::test_utils::{
+        MockBackend, MockFailingCloseBackend, alloc_env_conn_stmt, cleanup_env_conn_stmt,
+        with_handle,
+    };
     use odbc_sys::BulkOperation;
 
     #[test]
@@ -1757,6 +1790,113 @@ mod tests {
                 );
             });
             cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // F2: SQLCloseCursor tells the backend its cursor is closing
+    // -----------------------------------------------------------------------
+
+    /// Env + connection + statement with a cursor open, for an arbitrary
+    /// backend.
+    unsafe fn cursor_open_stmt_for<B: Backend>() -> (*mut c_void, *mut c_void, *mut c_void) {
+        unsafe {
+            let (env, conn, stmt) = crate::test_utils::alloc_connected_env_conn_stmt::<B>();
+            let sql: Vec<u16> = "SELECT 1".encode_utf16().collect();
+            assert_eq!(
+                crate::ffi::execute::sql_exec_direct_w::<B>(
+                    stmt,
+                    sql.as_ptr(),
+                    i32::try_from(sql.len()).expect("SQL fits in i32"),
+                ),
+                SqlReturn::SUCCESS,
+                "precondition: a cursor is open, so SQLCloseCursor has something to close",
+            );
+            (env, conn, stmt)
+        }
+    }
+
+    /// `SQLCloseCursor` reached only `discard_result_set`, so a backend needing
+    /// to release a server-side cursor, cancel a pending fetch, or return a
+    /// connection to a pool never heard about the most obvious place an
+    /// application closes a cursor — it got a `Drop`, where a failure cannot be
+    /// reported at all. `StatementBackend::close_cursor` is fallible precisely
+    /// because that teardown is a round trip that can fail.
+    #[test]
+    fn close_cursor_calls_the_backend_and_reports_its_failure() {
+        unsafe {
+            let (env, conn, stmt) = cursor_open_stmt_for::<MockFailingCloseBackend>();
+
+            assert_eq!(
+                sql_close_cursor::<MockFailingCloseBackend>(stmt),
+                SqlReturn::ERROR,
+                "a cursor whose teardown failed must not be reported as closed cleanly",
+            );
+            let state = with_handle::<
+                MockFailingCloseBackend,
+                StatementHandle<MockFailingCloseBackend>,
+                _,
+            >(stmt, |h| {
+                h.diagnostics
+                    .get(0)
+                    .expect("a diagnostic record")
+                    .sqlstate
+                    .as_str()
+                    .to_owned()
+            });
+            assert_eq!(
+                state, "08S01",
+                "the backend's own SQLSTATE, not a state core invented",
+            );
+
+            crate::test_utils::cleanup_connected_env_conn_stmt::<MockFailingCloseBackend>(
+                env, conn, stmt,
+            );
+        }
+    }
+
+    /// The result set is discarded **even when `close_cursor` failed**.
+    ///
+    /// Leaving it in place would hand the application a cursor it has no way to
+    /// clear: the second `SQLCloseCursor` would call the failing backend again
+    /// and fail again, for ever. `24000` here proves the first call did discard
+    /// it. This mirrors `SQLEndTran`'s existing "recorded and carried, not
+    /// swallowed" shape.
+    #[test]
+    fn close_cursor_discards_the_result_set_even_when_the_backend_fails() {
+        unsafe {
+            let (env, conn, stmt) = cursor_open_stmt_for::<MockFailingCloseBackend>();
+
+            assert_eq!(
+                sql_close_cursor::<MockFailingCloseBackend>(stmt),
+                SqlReturn::ERROR,
+                "precondition: the backend's close_cursor failed",
+            );
+            assert_eq!(
+                sql_close_cursor::<MockFailingCloseBackend>(stmt),
+                SqlReturn::ERROR,
+                "a second close still errors, but for a different reason",
+            );
+            let state = with_handle::<
+                MockFailingCloseBackend,
+                StatementHandle<MockFailingCloseBackend>,
+                _,
+            >(stmt, |h| {
+                h.diagnostics
+                    .get(0)
+                    .expect("a diagnostic record")
+                    .sqlstate
+                    .as_str()
+                    .to_owned()
+            });
+            assert_eq!(
+                state, "24000",
+                "no cursor is left open, so the failed close did discard the result set",
+            );
+
+            crate::test_utils::cleanup_connected_env_conn_stmt::<MockFailingCloseBackend>(
+                env, conn, stmt,
+            );
         }
     }
 }

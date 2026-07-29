@@ -1,6 +1,6 @@
 //! Handle lifecycle entry points: `SQLAllocHandle`, `SQLFreeHandle`, `SQLFreeStmt`.
 
-use crate::backend::Backend;
+use crate::backend::{Backend, StatementBackend};
 use crate::errors::OdbcError;
 use crate::handles::{
     ConnectionHandle, StatementHandle, alloc_connection, alloc_environment, alloc_statement,
@@ -431,8 +431,33 @@ pub unsafe fn sql_free_stmt<B: Backend>(statement_handle: *mut c_void, option: u
             );
 
             match opt {
-                // Discard the result set so the handle is ready for a new statement.
-                FreeStmtOption::Close => stmt.discard_result_set(),
+                // Discard the result set so the handle is ready for a new
+                // statement, telling the backend first — the spec makes this
+                // option equivalent to `SQLCloseCursor` bar the `24000`, so it
+                // owes `StatementBackend::close_cursor` the same call. See
+                // `sql_close_cursor` for why the discard happens even on
+                // failure.
+                //
+                // Gated on `cursor_open`, not on `statement.is_some()`: a
+                // prepared-but-unexecuted statement (S2/S3) holds a backend
+                // statement and no cursor, and the spec says this option "has no
+                // effect for the application" when no cursor is open. Asking a
+                // backend to close a cursor that was never opened is exactly
+                // what that sentence rules out. `sql_close_cursor` needs no such
+                // gate; its `24000` guard has already established one is open.
+                FreeStmtOption::Close => {
+                    let close_err = if stmt.cursor_open {
+                        stmt.statement
+                            .as_mut()
+                            .and_then(|statement| statement.close_cursor().err())
+                    } else {
+                        None
+                    };
+                    stmt.discard_result_set();
+                    if let Some(e) = close_err {
+                        return Err(e);
+                    }
+                }
                 FreeStmtOption::Unbind => stmt.bindings.clear(),
                 FreeStmtOption::ResetParams => stmt.param_bindings.clear(),
             }
@@ -447,7 +472,7 @@ pub unsafe fn sql_free_stmt<B: Backend>(statement_handle: *mut c_void, option: u
 mod tests {
     use super::*;
     use crate::errors::OdbcError;
-    use crate::test_utils::{MockBackend, with_handle};
+    use crate::test_utils::{MockBackend, MockFailingCloseBackend, with_handle};
     use odbc_sys::FreeStmtOption;
 
     use crate::types::SQL_DROP;
@@ -907,6 +932,94 @@ mod tests {
             );
 
             crate::test_utils::cleanup_env_conn_stmt(env, conn, std::ptr::null_mut());
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // F2: SQLFreeStmt(SQL_CLOSE) is equivalent to SQLCloseCursor
+    // -----------------------------------------------------------------------
+
+    /// The spec makes the two the same call bar the `24000`: "Calling
+    /// **SQLFreeStmt** with the SQL_CLOSE option is equivalent to calling
+    /// **SQLCloseCursor**, except that **SQLFreeStmt** with SQL_CLOSE does not
+    /// affect the application if no cursor is open." So whatever `SQLCloseCursor`
+    /// does about `StatementBackend::close_cursor`, this must do too.
+    #[test]
+    fn free_stmt_close_calls_the_backend_and_reports_its_failure() {
+        unsafe {
+            let (env, conn, stmt) =
+                crate::test_utils::alloc_connected_env_conn_stmt::<MockFailingCloseBackend>();
+            let sql: Vec<u16> = "SELECT 1".encode_utf16().collect();
+            assert_eq!(
+                crate::ffi::execute::sql_exec_direct_w::<MockFailingCloseBackend>(
+                    stmt,
+                    sql.as_ptr(),
+                    i32::try_from(sql.len()).expect("SQL fits in i32"),
+                ),
+                SqlReturn::SUCCESS,
+                "precondition: a cursor is open",
+            );
+
+            assert_eq!(
+                sql_free_stmt::<MockFailingCloseBackend>(stmt, FreeStmtOption::Close as u16),
+                SqlReturn::ERROR,
+                "a cursor whose teardown failed must not be reported as closed cleanly",
+            );
+            let state = with_handle::<
+                MockFailingCloseBackend,
+                StatementHandle<MockFailingCloseBackend>,
+                _,
+            >(stmt, |h| {
+                h.diagnostics
+                    .get(0)
+                    .expect("a diagnostic record")
+                    .sqlstate
+                    .as_str()
+                    .to_owned()
+            });
+            assert_eq!(state, "08S01", "the backend's own SQLSTATE");
+
+            crate::test_utils::cleanup_connected_env_conn_stmt::<MockFailingCloseBackend>(
+                env, conn, stmt,
+            );
+        }
+    }
+
+    /// The `cursor_open` gate, which nothing else pins.
+    ///
+    /// A prepared-but-unexecuted statement (ODBC state S2/S3) holds a backend
+    /// statement but has no cursor, and the spec says SQL_CLOSE "has no effect
+    /// for the application" when no cursor is open. Calling `close_cursor` there
+    /// would drive the backend to tear down a cursor that was never opened —
+    /// against this mock, turning a call the spec says succeeds into an `08S01`.
+    ///
+    /// `SQLCloseCursor` needs no such gate: its `24000` guard has already
+    /// established that a cursor is open by the time it reaches the backend.
+    #[test]
+    fn free_stmt_close_does_not_call_the_backend_without_an_open_cursor() {
+        unsafe {
+            let (env, conn, stmt) =
+                crate::test_utils::alloc_connected_env_conn_stmt::<MockFailingCloseBackend>();
+            let sql: Vec<u16> = "SELECT 1".encode_utf16().collect();
+            assert_eq!(
+                crate::ffi::execute::sql_prepare_w::<MockFailingCloseBackend>(
+                    stmt,
+                    sql.as_ptr(),
+                    i32::try_from(sql.len()).expect("SQL fits in i32"),
+                ),
+                SqlReturn::SUCCESS,
+                "precondition: prepared, so a backend statement exists but no cursor does",
+            );
+
+            assert_eq!(
+                sql_free_stmt::<MockFailingCloseBackend>(stmt, FreeStmtOption::Close as u16),
+                SqlReturn::SUCCESS,
+                "with no cursor open this option has no effect, so the backend is never asked",
+            );
+
+            crate::test_utils::cleanup_connected_env_conn_stmt::<MockFailingCloseBackend>(
+                env, conn, stmt,
+            );
         }
     }
 }

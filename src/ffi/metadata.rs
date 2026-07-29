@@ -8,6 +8,7 @@ use std::borrow::Cow;
 use std::ffi::c_void;
 
 use crate::backend::{Backend, StatementBackend};
+use crate::cancel::reclassify_cancelled_opt;
 use crate::errors::{IntoOdbc, OdbcError};
 use crate::handles::{StatementData, StatementHandle};
 use crate::panic::panic_safe;
@@ -1427,17 +1428,22 @@ pub unsafe fn sql_special_columns_w<B: Backend>(
 ///   too small (returns `SQL_SUCCESS_WITH_INFO`).
 /// - 07005: Prepared statement not a cursor-specification — returned if no result set is open.
 /// - 07009: Invalid descriptor index — returned if `column_number` is 0 (bookmarks not
-///   supported) or greater than the number of columns.
-/// - 08S01: Communication link failure; not applicable (no backend query at describe time).
-/// - HY000: General error; returned for any unexpected internal error.
+///   supported) or greater than the number of columns. The spec puts `(DM)` on the bookmark
+///   clause only, leaving the out-of-range clause to the driver, and core checks it itself
+///   against `StatementBackend::column_count` **before** calling `describe_col`. That ordering
+///   is what lets every other SQLSTATE below be real: this state is now returned only for the
+///   case its message describes.
+/// - 08S01: Communication link failure; **returned by this driver**, propagated unchanged when
+///   `StatementBackend::describe_col` fails and the driver's error mapping classified it that
+///   way. Until core owned the range check, every such failure was overwritten with `07009`.
+/// - HY000: General error; returned for any unexpected internal error, and propagated from
+///   `describe_col` when the backend's mapping produced no more specific state.
 /// - HY001: Memory allocation error; returned if allocation fails.
-/// - HY008: Operation canceled; not returned here, despite reaching a fallible backend call.
-///   `StatementBackend::describe_col` is reached through a `map_err` that replaces *any* error
-///   with `07009` and a "column out of range" message, so a cancellation is indistinguishable
-///   from a bad column number by the time core sees it. Reclassifying would be a no-op without
-///   first deciding what a non-range failure should report, which is `SQLDescribeCol`'s
-///   question rather than cancellation's. The asynchronous clause is inapplicable: core never
-///   returns `SQL_STILL_EXECUTING`.
+/// - HY008: Operation canceled. The asynchronous clause is inapplicable — core never returns
+///   `SQL_STILL_EXECUTING` — but the second clause, `SQLCancel` called on the statement "from a
+///   different thread in a multithread application", **is returned by this driver**: the row
+///   carries no `(DM)` marker, and a `describe_col` failure whose token reports signalled is
+///   reclassified `HY008` in place of the backend's own SQLSTATE.
 /// - HY010: Function sequence error (DM) (driver-manager-handled; not returned here).
 /// - HY013: Memory management error; returned if underlying allocation fails.
 /// - HY090: Invalid string or buffer length (DM) (driver-manager-handled; not returned by this
@@ -1478,6 +1484,16 @@ pub unsafe fn sql_describe_col_w<B: Backend>(
             let stmt = scope.get::<StatementHandle<B>>(statement_handle)?;
             stmt.diagnostics.clear();
 
+            // This describes a result set an earlier execution produced, so it
+            // observes *that* execution's token rather than minting one.
+            // Resolved off the registry, which needs no borrow of `stmt`, and
+            // taken here so it precedes the borrow below.
+            let cancel_token = crate::handles::current_cancel_token(statement_handle);
+            let cancel = cancel_token
+                .as_ref()
+                .map(crate::handles::cancel_as::<B>)
+                .transpose()?;
+
             // Spec 07005: No result set.
             let Some(ref statement_data) = stmt.statement else {
                 return Err(OdbcError::general(
@@ -1495,17 +1511,37 @@ pub unsafe fn sql_describe_col_w<B: Backend>(
                 ));
             }
 
-            // Spec 07009: Column number out of range.
-            let desc = statement_data.describe_col(column_number).map_err(|_| {
-                OdbcError::general(
+            // Spec 07009: Column number out of range. Core's own check, not the
+            // backend's: the spec's `(DM)` marker covers only this row's
+            // bookmark clause, leaving "greater than the number of columns in
+            // the result set" to the driver, and core already knows the count.
+            //
+            // Doing it here is what lets the backend's error survive below. The
+            // previous shape was `describe_col(...).map_err(|_| 07009)`, which
+            // discarded the backend's error entirely and told the application
+            // its column number was wrong whatever had actually failed — a
+            // communication failure, a cancellation, anything.
+            let column_count = statement_data.column_count();
+            if column_number > u16::try_from(column_count).unwrap_or(0) {
+                return Err(OdbcError::general(
                     format!(
-                        "Column number {} out of range (have {} columns)",
-                        column_number,
-                        statement_data.column_count()
+                        "Column number {column_number} out of range (have {column_count} columns)"
                     ),
                     SqlState::invalid_descriptor_index(),
-                )
-            })?;
+                ));
+            }
+
+            // Anything from here is a real failure, reported as the backend's
+            // central error mapping classified it — `08S01` for a link failure,
+            // `HY000` otherwise, both of which this function's diagnostics table
+            // lists. `HY008` wins over either when the token says the statement
+            // was cancelled; `_opt` because this reads a cursor an earlier
+            // execution opened rather than minting a token, and `None` there
+            // means no backend call has run yet.
+            let desc = reclassify_cancelled_opt::<B, _, _>(
+                statement_data.describe_col(column_number),
+                cancel,
+            )?;
 
             // Write data_type_ptr if pointer is non-null.
             //
@@ -1590,16 +1626,23 @@ pub unsafe fn sql_describe_col_w<B: Backend>(
 ///   and `field_identifier` is not `SQL_DESC_COUNT`.
 /// - 07009: Invalid descriptor index — spec marks the `column_number == 0` sub-case (DM); this
 ///   driver also checks it defensively since bookmarks are not supported. Returned by the driver
-///   when `column_number` is greater than the number of result set columns (not DM-annotated).
-/// - HY000: General error; returned for any unexpected internal error.
+///   when `column_number` is greater than the number of result set columns (not DM-annotated),
+///   which core checks against `StatementBackend::column_count` **before** calling
+///   `describe_col`, so this state is returned only for the case its message describes.
+/// - 08S01: Communication link failure — **absent from this function's diagnostics table**, yet
+///   reachable and not filtered out. The page states that when called after `SQLPrepare` and
+///   before `SQLExecute` this function "can return any SQLSTATE that can be returned by
+///   SQLPrepare or SQLExecute", both of which list `08S01`. A `describe_col` failure the
+///   driver's error mapping classified that way is therefore propagated unchanged, which is far
+///   more use to an application than the `07009` it used to be overwritten with.
+/// - HY000: General error; returned for any unexpected internal error, and propagated from
+///   `describe_col` when the backend's mapping produced no more specific state.
 /// - HY001: Memory allocation error; returned if allocation fails.
-/// - HY008: Operation canceled; not returned here, despite reaching a fallible backend call.
-///   `StatementBackend::describe_col` is reached through a `map_err` that replaces *any* error
-///   with `07009` and a "column out of range" message, so a cancellation is indistinguishable
-///   from a bad column number by the time core sees it. Reclassifying would be a no-op without
-///   first deciding what a non-range failure should report, which is `SQLDescribeCol`'s
-///   question rather than cancellation's. The asynchronous clause is inapplicable: core never
-///   returns `SQL_STILL_EXECUTING`.
+/// - HY008: Operation canceled. The asynchronous clause is inapplicable — core never returns
+///   `SQL_STILL_EXECUTING` — but the second clause, `SQLCancel` called on the statement "from a
+///   different thread in a multithread application", **is returned by this driver**: the row
+///   carries no `(DM)` marker, and a `describe_col` failure whose token reports signalled is
+///   reclassified `HY008` in place of the backend's own SQLSTATE.
 /// - HY010: Function sequence error (DM) (driver-manager-handled; not returned here).
 /// - HY013: Memory management error; returned if underlying allocation fails.
 /// - HY090: Invalid string or buffer length (DM) (driver-manager-handled; not returned here).
@@ -1636,6 +1679,15 @@ pub unsafe fn sql_col_attribute_w<B: Backend>(
         panic_safe::<B, _>(statement_handle, |scope| {
             let stmt = scope.get::<StatementHandle<B>>(statement_handle)?;
             stmt.diagnostics.clear();
+
+            // As in `sql_describe_col_w`: this describes a result set an earlier
+            // execution produced, so it observes that execution's token, taken
+            // off the registry before any borrow of `stmt.statement`.
+            let cancel_token = crate::handles::current_cancel_token(statement_handle);
+            let cancel = cancel_token
+                .as_ref()
+                .map(crate::handles::cancel_as::<B>)
+                .transpose()?;
 
             tracing::trace!(
                 "SQLColAttributeW(stmt={:?}, col={}, field_identifier={})",
@@ -1693,15 +1745,27 @@ pub unsafe fn sql_col_attribute_w<B: Backend>(
                 ));
             }
 
-            let desc = statement_data.describe_col(column_number).map_err(|_| {
-                OdbcError::general(
+            // Spec 07009, core's own check — see `sql_describe_col_w`, which
+            // carries the same pair of comments and the reasoning behind them.
+            if column_number > u16::try_from(column_count).unwrap_or(0) {
+                return Err(OdbcError::general(
                     format!(
-                        "Column number {} out of range (have {} columns)",
-                        column_number, column_count
+                        "Column number {column_number} out of range (have {column_count} columns)"
                     ),
                     SqlState::invalid_descriptor_index(),
-                )
-            })?;
+                ));
+            }
+
+            // The backend's own SQLSTATE from here, or `HY008` if the statement
+            // was cancelled. This function's diagnostics table has no `08S01`
+            // row, but its page states it "can return any SQLSTATE that can be
+            // returned by SQLPrepare or SQLExecute" when called between the two,
+            // so a link failure passing through is legal — and far more use to
+            // an application than "column number out of range".
+            let desc = reclassify_cancelled_opt::<B, _, _>(
+                statement_data.describe_col(column_number),
+                cancel,
+            )?;
 
             let attr = get_column_attribute(&desc, column_count, field)?;
 
@@ -2560,7 +2624,8 @@ mod tests {
     use crate::handles::ConnectionHandle;
     use crate::test_utils::{
         MockBackend, MockCancelAwareBackend, MockCatalogArgsBackend, MockCatalogBackend,
-        MockConnection, MockNoCatalogBackend, alloc_env_conn_stmt, with_handle,
+        MockConnection, MockFailingDescribeBackend, MockNoCatalogBackend, alloc_env_conn_stmt,
+        with_handle,
     };
     use crate::types::{
         CDataType, ColumnsResultCol, Desc, ForeignKeysResultCol, Nullable, PrimaryKeysResultCol,
@@ -5078,6 +5143,262 @@ mod tests {
             assert_eq!(col_count, 7);
 
             cleanup(env, conn, stmt);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // F1: a describe failure is the backend's error, not "column out of range"
+    // -----------------------------------------------------------------------
+
+    /// Env + connection + statement with a cursor open, for an arbitrary
+    /// backend, so a describe reaches the backend at all.
+    unsafe fn described_stmt_for<B: Backend>() -> (*mut c_void, *mut c_void, *mut c_void) {
+        unsafe {
+            let (env, conn, stmt) = crate::test_utils::alloc_connected_env_conn_stmt::<B>();
+            let sql: Vec<u16> = "SELECT 1".encode_utf16().collect();
+            assert_eq!(
+                crate::ffi::execute::sql_exec_direct_w::<B>(
+                    stmt,
+                    sql.as_ptr(),
+                    i32::try_from(sql.len()).expect("SQL fits in i32"),
+                ),
+                SqlReturn::SUCCESS,
+                "precondition: a cursor is open, so describe_col is reachable",
+            );
+            (env, conn, stmt)
+        }
+    }
+
+    /// Read the first diagnostic's SQLSTATE off a statement handle.
+    fn first_sqlstate<B: Backend>(stmt: *mut c_void) -> String {
+        with_handle::<B, StatementHandle<B>, _>(stmt, |h| {
+            h.diagnostics
+                .get(0)
+                .expect("a diagnostic record")
+                .sqlstate
+                .as_str()
+                .to_owned()
+        })
+    }
+
+    /// The defect: `map_err(|_| ...)` threw the backend's error away and told
+    /// the application the column number was out of range, whatever had
+    /// actually gone wrong — a link failure, a cancellation, anything.
+    ///
+    /// Column 1 of a two-column result set, so the range check core now does
+    /// first cannot be what produced the answer.
+    #[test]
+    fn describe_col_reports_the_backends_error_not_07009() {
+        unsafe {
+            let (env, conn, stmt) = described_stmt_for::<MockFailingDescribeBackend>();
+
+            let mut data_type: i16 = 0;
+            assert_eq!(
+                sql_describe_col_w::<MockFailingDescribeBackend>(
+                    stmt,
+                    1,
+                    std::ptr::null_mut(),
+                    0,
+                    std::ptr::null_mut(),
+                    &mut data_type,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                ),
+                SqlReturn::ERROR,
+            );
+            assert_eq!(
+                first_sqlstate::<MockFailingDescribeBackend>(stmt),
+                "08S01",
+                "a link failure must not be reported as a bad column number",
+            );
+
+            crate::test_utils::cleanup_connected_env_conn_stmt::<MockFailingDescribeBackend>(
+                env, conn, stmt,
+            );
+        }
+    }
+
+    /// The other half of the same claim: `07009` survives for the case its
+    /// message actually describes. Run against the *same* mock as the test
+    /// above, so the pair proves core tells the two apart rather than having
+    /// swapped one blanket answer for another.
+    #[test]
+    fn describe_col_still_reports_07009_for_a_column_past_the_end() {
+        unsafe {
+            let (env, conn, stmt) = described_stmt_for::<MockFailingDescribeBackend>();
+
+            let mut data_type: i16 = 0;
+            assert_eq!(
+                sql_describe_col_w::<MockFailingDescribeBackend>(
+                    stmt,
+                    3, // the mock reports 2 columns
+                    std::ptr::null_mut(),
+                    0,
+                    std::ptr::null_mut(),
+                    &mut data_type,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                ),
+                SqlReturn::ERROR,
+            );
+            assert_eq!(
+                first_sqlstate::<MockFailingDescribeBackend>(stmt),
+                "07009",
+                "a column past the end is the one case 07009 is for",
+            );
+
+            crate::test_utils::cleanup_connected_env_conn_stmt::<MockFailingDescribeBackend>(
+                env, conn, stmt,
+            );
+        }
+    }
+
+    /// `HY008` reaching `SQLDescribeColW` at all is what M4 could not do: the
+    /// blanket `map_err` overwrote the SQLSTATE unconditionally, so
+    /// reclassifying a cancelled call was a no-op. `SQLCancel` from this thread
+    /// signals the execution's token; the failing describe then reports the
+    /// cancellation rather than the link failure that was its symptom.
+    #[test]
+    fn describe_col_reports_hy008_when_the_statement_was_cancelled() {
+        unsafe {
+            let (env, conn, stmt) = described_stmt_for::<MockFailingDescribeBackend>();
+
+            assert_eq!(
+                crate::ffi::cursor::sql_cancel::<MockFailingDescribeBackend>(stmt),
+                SqlReturn::SUCCESS,
+                "precondition: the execution's cancel token is signalled",
+            );
+
+            let mut data_type: i16 = 0;
+            assert_eq!(
+                sql_describe_col_w::<MockFailingDescribeBackend>(
+                    stmt,
+                    1,
+                    std::ptr::null_mut(),
+                    0,
+                    std::ptr::null_mut(),
+                    &mut data_type,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                ),
+                SqlReturn::ERROR,
+            );
+            assert_eq!(
+                first_sqlstate::<MockFailingDescribeBackend>(stmt),
+                "HY008",
+                "a cancelled describe reports the cancellation, not its symptom",
+            );
+
+            crate::test_utils::cleanup_connected_env_conn_stmt::<MockFailingDescribeBackend>(
+                env, conn, stmt,
+            );
+        }
+    }
+
+    /// `SQLColAttributeW` carries the identical defect at its own call site.
+    ///
+    /// Its diagnostics table has no `08S01` row, but its page states that after
+    /// `SQLPrepare` and before `SQLExecute` it "can return any SQLSTATE that can
+    /// be returned by SQLPrepare or SQLExecute", so a backend's `08S01` passing
+    /// through is legal — and far more useful than `07009`.
+    #[test]
+    fn col_attribute_reports_the_backends_error_not_07009() {
+        unsafe {
+            let (env, conn, stmt) = described_stmt_for::<MockFailingDescribeBackend>();
+
+            let mut numeric: isize = 0;
+            assert_eq!(
+                sql_col_attribute_w::<MockFailingDescribeBackend>(
+                    stmt,
+                    1,
+                    Desc::ConciseType as u16,
+                    std::ptr::null_mut(),
+                    0,
+                    std::ptr::null_mut(),
+                    &mut numeric,
+                ),
+                SqlReturn::ERROR,
+            );
+            assert_eq!(
+                first_sqlstate::<MockFailingDescribeBackend>(stmt),
+                "08S01",
+                "a link failure must not be reported as a bad column number",
+            );
+
+            crate::test_utils::cleanup_connected_env_conn_stmt::<MockFailingDescribeBackend>(
+                env, conn, stmt,
+            );
+        }
+    }
+
+    /// The `SQLColAttributeW` half of the range-check pair.
+    #[test]
+    fn col_attribute_still_reports_07009_for_a_column_past_the_end() {
+        unsafe {
+            let (env, conn, stmt) = described_stmt_for::<MockFailingDescribeBackend>();
+
+            let mut numeric: isize = 0;
+            assert_eq!(
+                sql_col_attribute_w::<MockFailingDescribeBackend>(
+                    stmt,
+                    3, // the mock reports 2 columns
+                    Desc::ConciseType as u16,
+                    std::ptr::null_mut(),
+                    0,
+                    std::ptr::null_mut(),
+                    &mut numeric,
+                ),
+                SqlReturn::ERROR,
+            );
+            assert_eq!(
+                first_sqlstate::<MockFailingDescribeBackend>(stmt),
+                "07009",
+                "a column past the end is the one case 07009 is for",
+            );
+
+            crate::test_utils::cleanup_connected_env_conn_stmt::<MockFailingDescribeBackend>(
+                env, conn, stmt,
+            );
+        }
+    }
+
+    /// The `SQLColAttributeW` half of the cancellation claim.
+    #[test]
+    fn col_attribute_reports_hy008_when_the_statement_was_cancelled() {
+        unsafe {
+            let (env, conn, stmt) = described_stmt_for::<MockFailingDescribeBackend>();
+
+            assert_eq!(
+                crate::ffi::cursor::sql_cancel::<MockFailingDescribeBackend>(stmt),
+                SqlReturn::SUCCESS,
+                "precondition: the execution's cancel token is signalled",
+            );
+
+            let mut numeric: isize = 0;
+            assert_eq!(
+                sql_col_attribute_w::<MockFailingDescribeBackend>(
+                    stmt,
+                    1,
+                    Desc::ConciseType as u16,
+                    std::ptr::null_mut(),
+                    0,
+                    std::ptr::null_mut(),
+                    &mut numeric,
+                ),
+                SqlReturn::ERROR,
+            );
+            assert_eq!(
+                first_sqlstate::<MockFailingDescribeBackend>(stmt),
+                "HY008",
+                "a cancelled describe reports the cancellation, not its symptom",
+            );
+
+            crate::test_utils::cleanup_connected_env_conn_stmt::<MockFailingDescribeBackend>(
+                env, conn, stmt,
+            );
         }
     }
 }

@@ -1605,6 +1605,16 @@ pub trait StatementBackend: Send + Sync {
     /// `ColumnDescriptor` and its two `String`s on every call. `SQLColAttribute`
     /// calls this once per column per attribute, so an application walking the
     /// metadata of a wide result set was paying for a clone each time.
+    ///
+    /// **Core range-checks `col` against [`StatementBackend::column_count`]
+    /// before calling**, so an out-of-range column never reaches here and an
+    /// error returned from this method is understood as a genuine failure. Its
+    /// SQLSTATE is what the application sees — `08S01` for a link failure,
+    /// `HY008` if the statement's cancel token reports signalled, `HY000`
+    /// otherwise — so route it through the driver's central error-mapping
+    /// function rather than hand-building an `OdbcError` here. Core used to
+    /// overwrite every error from this method with `07009` "column number out
+    /// of range", which is why this contract is worth stating.
     fn describe_col(
         &self,
         _col: u16,
@@ -1629,30 +1639,35 @@ pub trait StatementBackend: Send + Sync {
         None
     }
 
-    /// Closes the cursor and discards any pending results.
-    ///
-    /// Called by `SQLEndTran` for a backend that declares
-    /// [`crate::types::CursorBehavior::Close`] from
-    /// [`Backend::cursor_commit_behavior`] / [`Backend::cursor_rollback_behavior`].
-    /// That is its only caller: `SQLCloseCursor` and `SQLFreeStmt(SQL_CLOSE)`
-    /// discard the whole backend statement instead, so there is nothing left
-    /// for this method to close.
-    /// The statement handle remains valid and may be re-executed.
-    ///
-    /// The default is a no-op, which is why a backend declaring `Close`
-    /// **must** override it: `SQLEndTran` deliberately keeps the backend
-    /// statement alive under `SQL_CB_CLOSE` (the transition table leaves a
-    /// prepared-but-unexecuted statement unchanged), so this method is the only
-    /// thing that actually closes the cursor.
     /// Closes the open cursor, discarding any unread rows, and leaves the
-    /// statement prepared.
+    /// statement handle valid and re-executable.
+    ///
+    /// Three callers, all of which mean "this cursor is closing now":
+    ///
+    /// - `SQLCloseCursor`, the most obvious place an application closes one.
+    /// - `SQLFreeStmt(SQL_CLOSE)`, which the spec makes equivalent to it bar
+    ///   the `24000`. Both then discard the backend statement, so a failure
+    ///   here is reported and the discard happens anyway — the application must
+    ///   not be left holding a cursor it cannot clear.
+    /// - `SQLEndTran`, for a backend declaring
+    ///   [`crate::types::CursorBehavior::Close`] from
+    ///   [`Backend::cursor_commit_behavior`] /
+    ///   [`Backend::cursor_rollback_behavior`].
+    ///
+    /// **The statement is dropped after this returns** in the first two cases,
+    /// so an implementation must be safe to follow with `Drop`. `SQLEndTran`
+    /// is the exception and keeps it alive: footnote \[2\] of the transition
+    /// table leaves a prepared-but-unexecuted statement unchanged under
+    /// `SQL_CB_CLOSE`, which is why a backend declaring `Close` **must**
+    /// override this — there, this method is the only thing that closes the
+    /// cursor at all.
     ///
     /// Fallible because for a networked data source this is a round trip that
     /// can fail: it is where a driver tells the server to drop a partially-read
-    /// result set. Under [`crate::types::CursorBehavior::Close`] it is the
-    /// *only* thing that closes the cursor during `SQLEndTran`, so a failure
-    /// here means the application's `SQL_CB_CLOSE` contract was not honoured and
-    /// must not be reported as success.
+    /// result set. That is also why core calls it rather than relying on
+    /// `Drop`, which cannot report anything and may run without the runtime an
+    /// async-bridged driver needs. The SQLSTATE the application sees is
+    /// whatever the driver's central error mapping produced.
     ///
     /// The default is `Ok(())`, which is correct only for a backend whose
     /// cursors need no teardown. See [`Backend::cursor_commit_behavior`].

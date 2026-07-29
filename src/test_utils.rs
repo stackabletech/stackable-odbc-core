@@ -3823,3 +3823,148 @@ impl Backend for MockFetchTimeoutBackend {
 
     minimal_capability_decls!();
 }
+
+// ---------------------------------------------------------------------------
+// A backend whose describe_col fails, for SQLDescribeCol / SQLColAttribute
+// ---------------------------------------------------------------------------
+
+/// A statement whose `describe_col` fails with a real, specific SQLSTATE.
+///
+/// `type Error = OdbcError`, and that is the whole point rather than a
+/// convenience. `MockError` converts to `OdbcError::NotImplemented` by design,
+/// so a mock built on it sends core down its *unimplemented* branch instead of
+/// its "this genuinely failed" branch — a test written against one would assert
+/// nothing about whether the backend's SQLSTATE survives.
+///
+/// `column_count` is **2, and that is load-bearing**: core range-checks the
+/// column number before calling this method, so a test asking about column 1 or
+/// 2 reaches the backend while one asking about column 3 does not. A mock
+/// reporting 0 columns would short-circuit every call to `07009` and make the
+/// whole group pass vacuously, against the old code as readily as the new.
+pub struct MockFailingDescribeStatement;
+
+impl StatementBackend for MockFailingDescribeStatement {
+    type Error = OdbcError;
+
+    fn column_count(&self) -> i16 {
+        2
+    }
+
+    fn describe_col(
+        &self,
+        _col: u16,
+    ) -> Result<Cow<'_, crate::types::ColumnDescriptor>, OdbcError> {
+        Err(OdbcError::general(
+            "mock describe_col failure",
+            crate::types::SqlState::communication_link_failure(),
+        ))
+    }
+}
+
+/// Hands out statements that cannot be described.
+///
+/// Exists so a test can prove `SQLDescribeColW` and `SQLColAttributeW` report
+/// the backend's own failure rather than overwriting it with `07009` "column
+/// number out of range" — which is what both did before, for every failure
+/// whatever its cause.
+pub struct MockFailingDescribeBackend;
+
+impl Backend for MockFailingDescribeBackend {
+    type Connection = MockConnection;
+    type Statement = MockFailingDescribeStatement;
+    type Error = OdbcError;
+    type CancelToken = MockCancelToken;
+
+    fn connect(_: &ConnectParams) -> Result<MockConnection, OdbcError> {
+        Ok(MockConnection)
+    }
+    fn disconnect(_: &mut MockConnection) -> Result<(), OdbcError> {
+        Ok(())
+    }
+    fn cancel_token(_conn: &Self::Connection) -> Self::CancelToken {
+        MockCancelToken::default()
+    }
+    fn cancel(token: &Self::CancelToken) -> Result<(), Self::Error> {
+        token
+            .cancelled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+    fn is_cancelled(token: &Self::CancelToken) -> bool {
+        token.cancelled.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    fn exec_direct(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: &str,
+    ) -> Result<MockFailingDescribeStatement, OdbcError> {
+        Ok(MockFailingDescribeStatement)
+    }
+    fn prepare(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: &str,
+    ) -> Result<MockFailingDescribeStatement, OdbcError> {
+        Ok(MockFailingDescribeStatement)
+    }
+    fn execute(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: &mut MockFailingDescribeStatement,
+        _: &[crate::types::ColumnValue],
+    ) -> Result<crate::types::ExecuteOutcome, OdbcError> {
+        Ok(crate::types::ExecuteOutcome::default())
+    }
+    fn get_info(_: &MockConnection, _: crate::types::InfoType) -> Result<InfoValue, OdbcError> {
+        Err(OdbcError::NotImplemented {
+            feature: "get_info".into(),
+        })
+    }
+    fn get_functions() -> Cow<'static, [crate::function_id::FunctionId]> {
+        Cow::Borrowed(&[])
+    }
+    fn get_type_info(_conn: &Self::Connection) -> Cow<'static, [TypeInfoRow]> {
+        Cow::Borrowed(&[])
+    }
+    fn tables(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: &[String],
+    ) -> Result<Vec<TableRow>, OdbcError> {
+        Ok(Vec::new())
+    }
+    fn columns(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+    ) -> Result<Vec<ColumnRow>, OdbcError> {
+        Ok(Vec::new())
+    }
+
+    fn supports_catalogs(_conn: &Self::Connection) -> bool {
+        false
+    }
+    fn supports_schemas(_conn: &Self::Connection) -> bool {
+        false
+    }
+    fn alter_table_support(_conn: &Self::Connection) -> u32 {
+        0
+    }
+    fn outer_join_capabilities(_conn: &Self::Connection) -> u32 {
+        0
+    }
+    fn default_txn_isolation(_conn: &Self::Connection) -> u32 {
+        0
+    }
+    fn txn_isolation_options(_conn: &Self::Connection) -> u32 {
+        0
+    }
+
+    minimal_capability_decls!();
+}

@@ -444,6 +444,32 @@ Everything a driver has to change for the catalog rework, in one place.
 
 ### Changed
 
+- **`StatementBackend::close_cursor` is now called by `SQLCloseCursor` and
+  `SQLFreeStmt(SQL_CLOSE)`, not only by `SQLEndTran`.** Both previously reached
+  only `discard_result_set`, which drops the backend statement — so a backend
+  needing to release a server-side cursor, cancel a pending fetch, or return a
+  connection to a pool never heard about the most obvious place an application
+  closes a cursor, and got a `Drop` in which a failure cannot be reported and
+  an async-bridged driver may have no runtime. `close_cursor` is fallible
+  precisely because that teardown is a round trip that can fail.
+
+  A failure is now reported with the backend's own SQLSTATE, and the result set
+  is discarded **anyway** — otherwise every retry would call the same failing
+  backend and the application could never clear the cursor. This mirrors
+  `SQLEndTran`'s existing "recorded and carried, not swallowed" handling.
+
+  `SQLFreeStmt(SQL_CLOSE)` calls it only when a cursor is actually open. A
+  prepared-but-unexecuted statement (S2/S3) holds a backend statement and no
+  cursor, and the spec says the option "has no effect for the application" when
+  no cursor is open. `SQLCloseCursor` needs no such check — its `24000` guard
+  has already established one is open.
+
+  **Not a compile break.** The trait method is defaulted to `Ok(())`, so a
+  driver that never overrode it is unaffected; one that did now sees it called
+  in two more places, which is what the trait's own description promises. An
+  implementation must be safe to follow with `Drop`, since core still drops the
+  statement afterwards.
+
 - **`SQL_DATABASE_NAME` is the current catalog, not the empty string.** The spec
   makes it a second name for one value — "in ODBC 3.x, the value returned for
   this InfoType can also be returned by calling SQLGetConnectAttr with an
@@ -1007,6 +1033,27 @@ Everything a driver has to change for the catalog rework, in one place.
   compared against. Use `HeaderDiagnosticIdentifier::MessageText as i16`.
 
 ### Fixed
+
+- **`SQLDescribeColW` and `SQLColAttributeW` no longer report every describe
+  failure as `07009` "column number out of range".** Both wrapped
+  `StatementBackend::describe_col` in a `map_err(|_| ...)` that discarded the
+  backend's error outright and substituted `07009` with a "column number N out
+  of range" message — so a communication failure, a cancellation, or any other
+  genuine error reached the application as a bad column number. Core now does
+  the range check itself against `StatementBackend::column_count` before
+  calling, which the spec permits: the `(DM)` marker on the `07009` row covers
+  only its bookmark clause, leaving "greater than the number of columns in the
+  result set" to the driver. With the range case handled first, the backend's
+  own SQLSTATE propagates unchanged — `08S01` for a link failure, `HY000`
+  otherwise — and `07009` is returned only for the case its message describes.
+  `SQLColAttribute`'s table lists no `08S01` row, but its page states it "can
+  return any SQLSTATE that can be returned by SQLPrepare or SQLExecute" when
+  called between the two, so one passing through is legal and is not filtered.
+
+  This also unblocks `HY008` on both functions, which the `HY008` work could
+  not reach: reclassifying a cancelled call was a no-op while the SQLSTATE was
+  being overwritten unconditionally. A `describe_col` failure whose cancel
+  token reports signalled is now reported as `HY008`.
 
 - **`SQL_ATTR_QUERY_TIMEOUT` now bounds `SQLFetch`, not only the
   statement-producing calls.** Core armed its timer at `SQLExecDirect`,
