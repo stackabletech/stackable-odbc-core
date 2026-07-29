@@ -1,4 +1,9 @@
+<!-- markdownlint-disable-file MD041 -->
 <!--
+MD041 wants a top-level heading first. This file is not a document: its
+content is pasted into a pull request body, where GitHub supplies the title,
+so an H1 here would only duplicate it. The rule stays on everywhere else.
+
 Delete any section that does not apply. The checklist is a reminder, not a
 gate — CI enforces what it can, and the rest is what a reviewer would
 otherwise have to ask for.
