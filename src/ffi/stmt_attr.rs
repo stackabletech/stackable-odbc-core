@@ -82,15 +82,38 @@ fn substitute_stmt_attr<B: Backend>(
     substituted: usize,
     substituted_display: &str,
 ) -> SqlReturn {
+    let store = stmt.attr_store_mut(statement_attribute_from_raw(attribute));
+    store.insert(attribute, substituted);
+    substitution_warning(
+        &mut stmt.diagnostics,
+        attr_name,
+        requested,
+        substituted_display,
+    )
+}
+
+/// The diagnostic half of [`substitute_stmt_attr`], against an explicit queue.
+///
+/// Split out because `SQLSetDescField` performs the same substitution on the
+/// same stored value through the other door — `SQL_DESC_ARRAY_SIZE` *is*
+/// `SQL_ATTR_ROW_ARRAY_SIZE` — but posts to the *descriptor's* queue rather
+/// than the statement's, since that is the handle the application named. A
+/// door that accepts what the other refuses is the disagreement this whole
+/// milestone exists to remove, so the two share the substitution rather than
+/// restating it.
+pub(crate) fn substitution_warning(
+    diagnostics: &mut crate::diagnostics::DiagnosticQueue,
+    attr_name: &str,
+    requested: usize,
+    substituted_display: &str,
+) -> SqlReturn {
     tracing::warn!(
-        "SQLSetStmtAttrW: {}={} not supported, substituting {} (01S02)",
+        "{}={} not supported, substituting {} (01S02)",
         attr_name,
         requested,
         substituted_display
     );
-    stmt.attr_store_mut(statement_attribute_from_raw(attribute))
-        .insert(attribute, substituted);
-    stmt.diagnostics.push(&OdbcError::general(
+    diagnostics.push(&OdbcError::general(
         format!("{attr_name} {requested} is not supported; substituted {substituted_display}"),
         SqlState::option_value_changed(),
     ));

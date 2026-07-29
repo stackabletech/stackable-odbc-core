@@ -10,14 +10,6 @@
 //! whether an explicitly allocated application descriptor is an APD or ARD
 //! until execute time", so its records cannot be typed by role.
 
-// The field tables and the record accessors below are written against the
-// spec's tables rather than against a caller, and their callers are the four
-// `SQLxxxDesc` entry points, which land after them. Until those arrive nothing
-// outside this module's own tests reads them. The allow comes off with the last
-// of the four; if it is still here once they are all in, something is genuinely
-// unreachable.
-#![allow(dead_code)]
-
 use std::ffi::c_void;
 
 use odbc_sys::{CDataType, Desc, ParamType, SqlDataType, StatementAttribute};

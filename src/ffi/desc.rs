@@ -45,8 +45,8 @@ use odbc_sys::Desc;
 
 use crate::backend::{Backend, StatementBackend};
 use crate::descriptor::{
-    DescFieldValue, DescriptorRole, FieldAccess, field_access, get_record_field, header_attribute,
-    header_default,
+    DescFieldValue, DescriptorRole, FieldAccess, consistency_check, field_access, get_record_field,
+    header_attribute, header_default, set_record_field,
 };
 use crate::errors::OdbcError;
 use crate::handles::StatementHandle;
@@ -358,60 +358,62 @@ fn read_ird_field<B: Backend>(
 ///
 /// Spec: <https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlsetdescfield-function>
 ///
-/// Descriptors are not implemented, so this reports `HYC00` on the descriptor
-/// handle. See the [module docs](self) for why that code and not one from the
-/// table below.
+/// The write counterpart of [`sql_get_desc_field_w`], routed the same three
+/// ways — except that the IRD is not writable at all beyond the two header
+/// fields the spec's `HY016` row names, because it is a computed view and has
+/// nothing to write into.
 ///
 /// # Parameters
 ///
 /// - `descriptor_handle`: Descriptor handle.
-/// - `record_number`: The descriptor record to write to.
+/// - `record_number`: The descriptor record to write to. Ignored for a header field.
 /// - `field_identifier`: The `SQL_DESC_*` field to write.
-/// - `value_ptr`: The value to write. Never dereferenced.
-/// - `buffer_length`: Length of `value_ptr` in bytes, or an `SQL_IS_*` marker.
+/// - `value_ptr`: The value to write, either as an integer or as a pointer, per the field.
+/// - `buffer_length`: Length of `value_ptr` in bytes for a character field, or an
+///   `SQL_IS_*` marker.
 ///
 /// # Spec compliance
 ///
 /// Diagnostics from the ODBC spec Diagnostics table:
 ///
-/// - `01000` General warning — (not returned here; nothing succeeds with info)
-/// - `01S02` Option value changed — (not returned here; no value is accepted, so none is
-///   substituted)
-/// - `07009` Invalid descriptor index — **(DM)** on the `SQL_DESC_COUNT` clause; the
-///   remaining clauses are the driver's, but no record is reachable to index into, so
-///   `record_number` is never validated
+/// - `01000` General warning — (not returned here; core raises no general warning)
+/// - `01S02` Option value changed — returned for `SQL_DESC_ARRAY_SIZE` above 1, which core
+///   substitutes back to 1. It is the same value and the same substitution
+///   `SQLSetStmtAttr(SQL_ATTR_ROW_ARRAY_SIZE)` applies, through the other door
+/// - `07009` Invalid descriptor index — returned for a negative `record_number` on an ARD or
+///   an APD. The `(DM)` markers on this row precede the `SQL_DESC_COUNT` and
+///   implicitly-allocated-APD clauses only; read them clause by clause
 /// - `08S01` Communication link failure — (not returned here; this function performs no I/O)
-/// - `22001` String data, right truncated — (not returned here; `SQL_DESC_NAME` is never
-///   written)
+/// - `22001` String data, right truncated — (not returned here; `SQL_DESC_NAME` is stored as
+///   given, and core imposes no length limit of its own on it)
 /// - `HY000` General error — returned only for an internal panic caught by `panic_safe`
 /// - `HY001` Memory allocation error — (not returned here; nothing is allocated)
 /// - `HY010` Function sequence error — **(DM)** on all four of its clauses; not returned here
 /// - `HY013` Memory management error — (not returned here)
-/// - `HY016` Cannot modify an implementation row descriptor — (not returned here; the IRD is
-///   deliberately unbacked, so every descriptor gets the same unimplemented answer and
-///   singling the IRD out would assert a distinction core does not yet make)
-/// - `HY021` Inconsistent descriptor information — (not returned here; no consistency check
-///   runs, because no field is stored to be inconsistent with another)
+/// - `HY016` Cannot modify an implementation row descriptor — returned for any IRD write
+///   other than `SQL_DESC_ARRAY_STATUS_PTR` and `SQL_DESC_ROWS_PROCESSED_PTR`, which the
+///   row exempts by name
+/// - `HY021` Inconsistent descriptor information — returned when setting
+///   `SQL_DESC_DATA_PTR` leaves the record failing the spec's consistency check
 /// - `HY090` Invalid string or buffer length — **(DM)** on both of its clauses; not returned
 ///   here
-/// - `HY091` Invalid descriptor field identifier — (not returned here; `field_identifier` is
-///   not validated, because the unimplemented-feature answer is the same for every field)
-/// - `HY092` Invalid attribute/option identifier — (not returned here; no value is inspected)
+/// - `HY091` Invalid descriptor field identifier — returned for an unrecognised
+///   `field_identifier`, for one that is not defined on this descriptor's role, and for one
+///   that is defined but read-only there
+/// - `HY092` Invalid attribute/option identifier — returned when the value is not valid for
+///   the field: a numeric handed to `SQL_DESC_NAME`, a value too wide for the field, or
+///   `SQL_NAMED` written to `SQL_DESC_UNNAMED`, which the row names explicitly
 /// - `HY105` Invalid parameter type — **(DM)**; not returned here
 /// - `HY117` Connection is suspended — **(DM)**; not returned here
 /// - `HYT01` Connection timeout expired — (not returned here; this function performs no I/O)
-/// - `IM001` Driver does not support this function — **(DM)**; the Driver Manager returns it
-///   from the `SQLGetFunctions` answer, which reports this function unsupported
-///
-/// Not in the table, but what this function returns:
-///
-/// - `HYC00` Optional feature not implemented — descriptors are not implemented. See the
-///   [module docs](self).
+/// - `IM001` Driver does not support this function — **(DM)**; not returned here
 ///
 /// # Safety
 ///
 /// `descriptor_handle` must be null or a token issued by one of the `alloc_*`
-/// functions in `handles`. `value_ptr` is never dereferenced.
+/// functions in `handles`. `value_ptr` is dereferenced only for a character
+/// field, where it must point to `buffer_length` readable bytes; for every
+/// other field it is the value itself and is never read through.
 pub unsafe fn sql_set_desc_field_w<B: Backend>(
     descriptor_handle: *mut c_void,
     record_number: i16,
@@ -419,7 +421,7 @@ pub unsafe fn sql_set_desc_field_w<B: Backend>(
     value_ptr: *mut c_void,
     buffer_length: i32,
 ) -> SqlReturn {
-    tracing::debug!(
+    tracing::trace!(
         "SQLSetDescFieldW(desc={:?}, rec={}, field={}, value_ptr={:?}, buf_len={})",
         descriptor_handle,
         record_number,
@@ -427,15 +429,198 @@ pub unsafe fn sql_set_desc_field_w<B: Backend>(
         value_ptr,
         buffer_length,
     );
+    // SAFETY: `descriptor_handle` is null or a token, which `descriptor_owner`
+    // validates without dereferencing. `value_ptr` is read through only for a
+    // character field, where the caller guarantees `buffer_length` readable
+    // bytes.
     let ret = unsafe {
-        not_implemented::<B>(
-            descriptor_handle,
-            "SQLSetDescField: descriptors are not implemented",
-        )
+        panic_safe::<B, _>(descriptor_handle, |scope| {
+            let (stmt, role) = scope.descriptor_owner::<B>(descriptor_handle)?;
+            // Spec: clear diagnostics at the start of each ODBC call — before
+            // the field parse, so an unrecognised identifier reports `HY091`
+            // onto an empty queue rather than behind the previous call's
+            // records.
+            stmt.descriptor_mut(role).diagnostics.clear();
+
+            let field = field_from_raw(field_identifier)?;
+            tracing::debug!(
+                "SQLSetDescFieldW(desc={:?}, role={:?}, rec={}, field={:?})",
+                descriptor_handle,
+                role,
+                record_number,
+                field,
+            );
+
+            write_desc_field(stmt, role, record_number, field, value_ptr, buffer_length)
+        })
     };
     tracing::debug!("SQLSetDescFieldW -> {:?}", ret);
     ret
 }
+
+/// The body of [`sql_set_desc_field_w`], once the handle and field are known.
+///
+/// # Safety
+///
+/// As [`sql_set_desc_field_w`]: `value_ptr` must point to `buffer_length`
+/// readable bytes when `field` is a character field.
+unsafe fn write_desc_field<B: Backend>(
+    stmt: &mut StatementHandle<B>,
+    role: DescriptorRole,
+    record_number: i16,
+    field: Desc,
+    value_ptr: *mut c_void,
+    buffer_length: i32,
+) -> Result<SqlReturn, OdbcError> {
+    // Spec 07009, as in the read direction.
+    if record_number < 0 && matches!(role, DescriptorRole::Ard | DescriptorRole::Apd) {
+        return Err(OdbcError::general(
+            format!("Record number {record_number} is negative"),
+            SqlState::invalid_descriptor_index(),
+        ));
+    }
+
+    // Spec HY016: "The DescriptorHandle argument was associated with an IRD,
+    // and the FieldIdentifier argument was not SQL_DESC_ARRAY_STATUS_PTR or
+    // SQL_DESC_ROWS_PROCESSED_PTR." Checked before HY091 because it is the
+    // more specific answer: the field may be perfectly well defined on an IRD
+    // and still not writable there.
+    if role == DescriptorRole::Ird
+        && !matches!(field, Desc::ArrayStatusPtr | Desc::RowsProcessedPtr)
+    {
+        return Err(OdbcError::general(
+            format!("Descriptor field {field:?} cannot be written on an IRD"),
+            SqlState::cannot_modify_ird(),
+        ));
+    }
+
+    match field_access(role, field) {
+        FieldAccess::ReadWrite => {}
+        FieldAccess::ReadOnly | FieldAccess::Undefined => {
+            return Err(OdbcError::general(
+                format!("Descriptor field {field:?} is not writable on {role:?}"),
+                SqlState::invalid_descriptor_field_identifier(),
+            ));
+        }
+    }
+
+    // A header field: `RecNumber` is ignored, and the value goes to the same
+    // storage `SQLSetStmtAttr` writes.
+    if field == Desc::Count {
+        return Ok(truncate_records(stmt, role, value_ptr as usize));
+    }
+    if field == Desc::AllocType {
+        // Read-only on every role, so `field_access` has already refused it.
+        // Unreachable, and cheaper to state than to leave as a silent fall
+        // through into the record path.
+        return Err(OdbcError::general(
+            "SQL_DESC_ALLOC_TYPE is read-only",
+            SqlState::invalid_descriptor_field_identifier(),
+        ));
+    }
+    if let Some(attr) = header_attribute(role, field) {
+        return Ok(write_header_field(
+            stmt,
+            role,
+            field,
+            attr,
+            value_ptr as usize,
+        ));
+    }
+
+    // A record field. `or_default` is what makes a record exist as soon as any
+    // one field is set, which is the whole reason boundness moved to the data
+    // pointer.
+    let record_number = u16::try_from(record_number).unwrap_or(0);
+    let value = if field == Desc::Name {
+        // SAFETY: forwarded from this function's contract.
+        DescFieldValue::String(unsafe {
+            crate::utf16::utf16_to_string(value_ptr.cast::<u16>(), buffer_length / 2)?
+        })
+    } else {
+        DescFieldValue::Numeric(value_ptr as isize)
+    };
+
+    let record = stmt
+        .descriptor_mut(role)
+        .records
+        .entry(record_number)
+        .or_default();
+    set_record_field(record, role, field, value)?;
+
+    // Spec: the consistency check runs "when SQLSetDescField is called to set
+    // the SQL_DESC_DATA_PTR field". Not on every field, because a record is
+    // built one field at a time and would be inconsistent for most of that.
+    //
+    // A failure leaves the record as it is: "If a call to SQLSetDescRec fails,
+    // the contents of the descriptor record identified by the RecNumber
+    // argument are undefined", so no rollback is owed — only a report before
+    // anything reads it.
+    if field == Desc::DataPtr {
+        consistency_check(record, role)?;
+    }
+    Ok(SqlReturn::SUCCESS)
+}
+
+/// `SQL_DESC_COUNT`, which is a write to the record *map* rather than to a
+/// stored field.
+///
+/// The spec: "the driver deallocates the descriptor records for all records
+/// whose number is greater than the value in SQL_DESC_COUNT". Deriving the
+/// count from the map on read is what makes the two agree; discarding here is
+/// what keeps them agreeing after a write.
+fn truncate_records<B: Backend>(
+    stmt: &mut StatementHandle<B>,
+    role: DescriptorRole,
+    count: usize,
+) -> SqlReturn {
+    let count = u16::try_from(count).unwrap_or(u16::MAX);
+    stmt.descriptor_mut(role)
+        .records
+        .retain(|&number, _| number <= count);
+    SqlReturn::SUCCESS
+}
+
+/// A header field write, with the one value core cannot honour substituted.
+///
+/// `SQL_DESC_ARRAY_SIZE` is `SQL_ATTR_ROW_ARRAY_SIZE` on the ARD and
+/// `SQL_ATTR_PARAMSET_SIZE` on the APD, and `SQLSetStmtAttr` substitutes any
+/// value but 1 with `01S02` because core rejects a multi-row rowset. The same
+/// value reached through the descriptor gets the same answer, or the two views
+/// disagree — which is the defect this milestone exists to remove. The
+/// warning lands on the *descriptor's* queue, since that is the handle the
+/// application named.
+fn write_header_field<B: Backend>(
+    stmt: &mut StatementHandle<B>,
+    role: DescriptorRole,
+    field: Desc,
+    attr: odbc_sys::StatementAttribute,
+    value: usize,
+) -> SqlReturn {
+    let substituted = field == Desc::ArraySize && value != SQL_DESC_ARRAY_SIZE_SUPPORTED;
+    let stored = if substituted {
+        SQL_DESC_ARRAY_SIZE_SUPPORTED
+    } else {
+        value
+    };
+    stmt.attr_store_mut(Some(attr)).insert(attr as i32, stored);
+    if substituted {
+        return crate::ffi::stmt_attr::substitution_warning(
+            &mut stmt.descriptor_mut(role).diagnostics,
+            "SQL_DESC_ARRAY_SIZE",
+            value,
+            "1",
+        );
+    }
+    SqlReturn::SUCCESS
+}
+
+/// The only `SQL_DESC_ARRAY_SIZE` core can honour.
+///
+/// A rowset larger than one row would need block cursors, which
+/// `SQLSetStmtAttrW` already refuses for the same reason under the attribute's
+/// other name.
+const SQL_DESC_ARRAY_SIZE_SUPPORTED: usize = 1;
 
 /// Generic implementation of SQLSetDescRec.
 ///
@@ -538,11 +723,11 @@ mod tests {
     use crate::ffi::stmt_attr::sql_get_stmt_attr_w;
     use crate::handles::StatementHandle;
     use crate::test_utils::{
-        MockBackend, MockRecordingBackend, MockTypeInfoBackend, alloc_env_conn_stmt,
-        cleanup_env_conn_stmt, with_handle,
+        MockBackend, MockLongDataBackend, MockRecordingBackend, MockTypeInfoBackend,
+        alloc_env_conn_stmt, cleanup_env_conn_stmt, with_handle,
     };
     use crate::types::sql_state;
-    use odbc_sys::{CDataType, HandleType, StatementAttribute};
+    use odbc_sys::{CDataType, HandleType, ParamType, StatementAttribute};
 
     /// The ARD's token, as the application receives it: through
     /// `SQLGetStmtAttrW(SQL_ATTR_APP_ROW_DESC)`. Building one any other way
@@ -926,30 +1111,6 @@ mod tests {
     }
 
     #[test]
-    fn set_desc_field_reports_hyc00_and_posts_a_diagnostic() {
-        unsafe {
-            let (env, conn, stmt) = alloc_env_conn_stmt();
-            let ard = ard_of(stmt);
-
-            let ret = sql_set_desc_field_w::<MockBackend>(
-                ard,
-                1,
-                odbc_sys::Desc::ConciseType as i16,
-                std::ptr::null_mut(),
-                0,
-            );
-
-            assert_eq!(ret, SqlReturn::ERROR);
-            assert_eq!(
-                first_sqlstate(ard),
-                sql_state::OPTIONAL_FEATURE_NOT_IMPLEMENTED
-            );
-
-            cleanup_env_conn_stmt(env, conn, stmt);
-        }
-    }
-
-    #[test]
     fn set_desc_rec_reports_hyc00_and_posts_a_diagnostic() {
         unsafe {
             let (env, conn, stmt) = alloc_env_conn_stmt();
@@ -978,6 +1139,220 @@ mod tests {
         }
     }
 
+    /// The spec's `HY016` row: a write to the IRD is refused unless the field
+    /// is `SQL_DESC_ARRAY_STATUS_PTR` or `SQL_DESC_ROWS_PROCESSED_PTR`, which
+    /// it names as the exceptions.
+    #[test]
+    fn writing_the_ird_reports_hy016() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            let ird = ird_of(stmt);
+
+            let ret = sql_set_desc_field_w::<MockBackend>(
+                ird,
+                1,
+                Desc::ConciseType as i16,
+                std::ptr::without_provenance_mut(CDataType::SLong as usize),
+                0,
+            );
+
+            assert_eq!(ret, SqlReturn::ERROR);
+            assert_eq!(first_sqlstate(ird), sql_state::CANNOT_MODIFY_IRD);
+
+            cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
+    /// The two the `HY016` row exempts by name.
+    #[test]
+    fn the_two_exempt_ird_header_fields_are_writable() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            let ird = ird_of(stmt);
+
+            for field in [Desc::ArrayStatusPtr, Desc::RowsProcessedPtr] {
+                let ret = sql_set_desc_field_w::<MockBackend>(
+                    ird,
+                    0,
+                    field as i16,
+                    std::ptr::null_mut(),
+                    0,
+                );
+                assert_eq!(ret, SqlReturn::SUCCESS, "{field:?} is exempt from HY016");
+            }
+
+            cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
+    /// `SQL_DESC_ARRAY_SIZE` is the ARD header field `SQL_ATTR_ROW_ARRAY_SIZE`
+    /// aliases. Core substitutes any value but 1 with `01S02` through
+    /// `SQLSetStmtAttr`, and must do the same here — the two are one value, and
+    /// a door that accepts what the other refuses is the disagreement this
+    /// milestone exists to remove.
+    #[test]
+    fn an_oversized_array_size_is_substituted_through_the_descriptor_too() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            let ard = ard_of(stmt);
+
+            let ret = sql_set_desc_field_w::<MockBackend>(
+                ard,
+                0,
+                Desc::ArraySize as i16,
+                std::ptr::without_provenance_mut(10usize),
+                0,
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS_WITH_INFO);
+            assert_eq!(first_sqlstate(ard), sql_state::OPTION_VALUE_CHANGED);
+
+            // And both views report the substituted value.
+            let mut via_desc: isize = 0;
+            let ret = sql_get_desc_field_w::<MockBackend>(
+                ard,
+                0,
+                Desc::ArraySize as i16,
+                std::ptr::from_mut(&mut via_desc).cast::<c_void>(),
+                0,
+                std::ptr::null_mut(),
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+            assert_eq!(via_desc, 1);
+
+            let mut via_attr: usize = 0;
+            let ret = crate::ffi::stmt_attr::sql_get_stmt_attr_w::<MockBackend>(
+                stmt,
+                StatementAttribute::RowArraySize as i32,
+                std::ptr::from_mut(&mut via_attr).cast::<c_void>(),
+                0,
+                std::ptr::null_mut(),
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+            assert_eq!(via_attr, 1, "the two views of one value disagree");
+
+            cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
+    /// Setting `SQL_DESC_COUNT` lower discards the records above it. Leaving
+    /// them would make the count and the map disagree, which is what deriving
+    /// the count from the map exists to prevent.
+    #[test]
+    fn lowering_desc_count_discards_the_higher_records() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            let ard = ard_of(stmt);
+
+            for column in 1..=3i16 {
+                let ret = sql_set_desc_field_w::<MockBackend>(
+                    ard,
+                    column,
+                    Desc::ConciseType as i16,
+                    std::ptr::without_provenance_mut(CDataType::SLong as usize),
+                    0,
+                );
+                assert_eq!(ret, SqlReturn::SUCCESS);
+            }
+
+            let ret = sql_set_desc_field_w::<MockBackend>(
+                ard,
+                0,
+                Desc::Count as i16,
+                std::ptr::without_provenance_mut(1usize),
+                0,
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+                assert!(handle.app_row_desc.records.contains_key(&1));
+                assert!(!handle.app_row_desc.records.contains_key(&2));
+                assert!(!handle.app_row_desc.records.contains_key(&3));
+            });
+
+            cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
+    /// The payoff of the whole milestone: a binding built entirely through the
+    /// descriptor *is* a binding. If this passes, `SQLBindCol` and
+    /// `SQLSetDescField` really are two doors onto one state rather than two
+    /// states that happen to agree.
+    ///
+    /// Column 2 of `MockLongDataBackend`'s row is the fixed-width 4242, so the
+    /// value itself is asserted and not merely the indicator — an indicator
+    /// alone would pass for a column that was bound but never written into.
+    #[test]
+    fn a_binding_built_through_the_descriptor_receives_fetched_data() {
+        unsafe {
+            let (env, conn, stmt) =
+                crate::test_utils::alloc_connected_env_conn_stmt::<MockLongDataBackend>();
+
+            let mut ard: *mut c_void = std::ptr::null_mut();
+            let ret = sql_get_stmt_attr_w::<MockLongDataBackend>(
+                stmt,
+                StatementAttribute::AppRowDesc as i32,
+                std::ptr::from_mut(&mut ard).cast::<c_void>(),
+                0,
+                std::ptr::null_mut(),
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+
+            let mut buf: i32 = 0;
+            let mut indicator: isize = 0;
+
+            for (field, value) in [
+                (Desc::ConciseType, CDataType::SLong as usize),
+                (Desc::OctetLength, std::mem::size_of::<i32>()),
+            ] {
+                let ret = sql_set_desc_field_w::<MockLongDataBackend>(
+                    ard,
+                    2,
+                    field as i16,
+                    std::ptr::without_provenance_mut(value),
+                    0,
+                );
+                assert_eq!(ret, SqlReturn::SUCCESS, "{field:?}");
+            }
+            let ret = sql_set_desc_field_w::<MockLongDataBackend>(
+                ard,
+                2,
+                Desc::IndicatorPtr as i16,
+                std::ptr::from_mut(&mut indicator).cast::<c_void>(),
+                0,
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+            // DATA_PTR last: it is what runs the consistency check.
+            let ret = sql_set_desc_field_w::<MockLongDataBackend>(
+                ard,
+                2,
+                Desc::DataPtr as i16,
+                std::ptr::from_mut(&mut buf).cast::<c_void>(),
+                0,
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+
+            let sql: Vec<u16> = "SELECT a, b, c FROM t".encode_utf16().collect();
+            let ret = crate::ffi::execute::sql_exec_direct_w::<MockLongDataBackend>(
+                stmt,
+                sql.as_ptr(),
+                i32::try_from(sql.len()).expect("short"),
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+            let ret = crate::ffi::fetch::sql_fetch::<MockLongDataBackend>(stmt);
+            assert_eq!(ret, SqlReturn::SUCCESS);
+
+            assert_eq!(
+                buf, 4242,
+                "SQLFetch did not write through a descriptor-built binding"
+            );
+            assert_eq!(indicator, std::mem::size_of::<i32>() as isize);
+
+            crate::test_utils::cleanup_connected_env_conn_stmt::<MockLongDataBackend>(
+                env, conn, stmt,
+            );
+        }
+    }
+
     /// Each descriptor owns its queue. Posting to whichever descriptor the
     /// token names is the whole reason the lookup goes through the statement
     /// rather than casting the address the registry stored, so a diagnostic
@@ -1001,17 +1376,21 @@ mod tests {
             let ard = ard_of(stmt);
             assert_ne!(ard, apd, "the ARD and APD must have distinct tokens");
 
-            let _ = sql_set_desc_field_w::<MockBackend>(
+            // `SQL_DESC_PARAMETER_TYPE` is the IPD's alone, so this is `HY091`
+            // on the APD. Any failing call would do; what the test watches is
+            // *where* the record lands.
+            let ret = sql_set_desc_field_w::<MockBackend>(
                 apd,
                 1,
-                odbc_sys::Desc::ConciseType as i16,
-                std::ptr::null_mut(),
+                Desc::ParameterType as i16,
+                std::ptr::without_provenance_mut(ParamType::Input as usize),
                 0,
             );
+            assert_eq!(ret, SqlReturn::ERROR);
 
             assert_eq!(
                 first_sqlstate(apd),
-                sql_state::OPTIONAL_FEATURE_NOT_IMPLEMENTED
+                sql_state::INVALID_DESCRIPTOR_FIELD_IDENTIFIER
             );
 
             // The ARD was never called, so its queue must still be empty.
