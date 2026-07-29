@@ -179,6 +179,42 @@ pub trait Backend: Sized + Send + Sync + 'static {
         info_type: crate::types::InfoType,
     ) -> Result<InfoValue, Self::Error>;
 
+    /// The catalog the session is currently using, if the data source has a
+    /// current catalog at all.
+    ///
+    /// Read by `SQLGetConnectAttr(SQL_ATTR_CURRENT_CATALOG)` and, because the
+    /// spec makes them one value, by `SQLGetInfo(SQL_DATABASE_NAME)`. An
+    /// application's own `SQLSetConnectAttr` value takes precedence, since that
+    /// is what it asked for; this answers when it has set nothing.
+    ///
+    /// Defaults to `None`, meaning "this data source has no current catalog to
+    /// report" — the empty string, which is what both readers then produce.
+    ///
+    /// A backend that returns `Some` should also implement
+    /// [`Backend::set_current_catalog`], or an application can read the catalog
+    /// and not change it.
+    fn current_catalog(_conn: &Self::Connection) -> Option<Cow<'static, str>> {
+        None
+    }
+
+    /// Switch the session to `catalog`.
+    ///
+    /// Called by `SQLSetConnectAttr(SQL_ATTR_CURRENT_CATALOG)`. The spec's
+    /// example is a driver sending `USE database`; for a single-tier driver it
+    /// may be changing a directory.
+    ///
+    /// The default reports `HYC00`, which is the honest answer for a backend
+    /// that cannot switch catalogs: storing the value and returning
+    /// `SQL_SUCCESS` would tell an application its unqualified names now
+    /// resolve somewhere they do not. Core stores the value only once this
+    /// returns `Ok`.
+    fn set_current_catalog(_conn: &Self::Connection, _catalog: &str) -> Result<(), Self::Error> {
+        Err(OdbcError::NotImplemented {
+            feature: "SQL_ATTR_CURRENT_CATALOG".into(),
+        }
+        .into())
+    }
+
     /// Return driver-level info that does not require an active connection.
     ///
     /// The Windows Driver Manager calls `SQLGetInfoW` for types like

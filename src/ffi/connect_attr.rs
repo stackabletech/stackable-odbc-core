@@ -1,5 +1,6 @@
 //! Generic implementations of SQLSetConnectAttrW and SQLGetConnectAttrW.
 
+use std::borrow::Cow;
 use std::ffi::c_void;
 
 use odbc_sys::ConnectionAttribute;
@@ -44,7 +45,26 @@ pub(crate) fn apply_pending_connect_attrs<B: Backend>(
     handle: &mut ConnectionHandle<B>,
 ) -> Result<(), OdbcError> {
     apply_pending_autocommit::<B>(handle)?;
-    apply_pending_txn_isolation::<B>(handle)
+    apply_pending_txn_isolation::<B>(handle)?;
+    apply_pending_current_catalog::<B>(handle)
+}
+
+/// Apply a `SQL_ATTR_CURRENT_CATALOG` value that was set before the connection
+/// was open. See [`apply_pending_connect_attrs`].
+fn apply_pending_current_catalog<B: Backend>(
+    handle: &mut ConnectionHandle<B>,
+) -> Result<(), OdbcError> {
+    let Some(catalog) = handle
+        .attr_strings
+        .get(&ConnectionAttribute::CURRENT_CATALOG.0)
+        .cloned()
+    else {
+        return Ok(());
+    };
+    let Some(connection) = handle.connection.as_ref() else {
+        return Ok(());
+    };
+    B::set_current_catalog(connection, &catalog).into_odbc()
 }
 
 /// Apply a `SQL_ATTR_AUTOCOMMIT` value that was set before the connection was
@@ -382,7 +402,12 @@ pub unsafe fn sql_set_connect_attr_w<B: Backend>(
                     Ok(SqlReturn::SUCCESS)
                 }
 
-                // String-valued: SQL_ATTR_CURRENT_CATALOG — decode UTF-16.
+                // String-valued: SQL_ATTR_CURRENT_CATALOG — decode UTF-16, then
+                // ask the backend to switch. Storing without switching would
+                // tell an application its unqualified names now resolve
+                // somewhere they do not; a backend that cannot switch reports
+                // HYC00 from the default `set_current_catalog`, and nothing is
+                // stored.
                 _ if attr == ConnectionAttribute::CURRENT_CATALOG => {
                     if value_ptr.is_null() {
                         conn.attr_strings.remove(&attribute);
@@ -400,6 +425,14 @@ pub unsafe fn sql_set_connect_attr_w<B: Backend>(
                             string_length / 2
                         };
                         let s = utf16_to_string(value_ptr as *const u16, len_code_units)?;
+                        // Applied here when connected; a value set before the
+                        // connection exists is stored and applied by
+                        // `apply_pending_current_catalog` at connect, since the
+                        // spec lists this attribute as settable either side of
+                        // one.
+                        if let Some(connection) = conn.connection.as_ref() {
+                            B::set_current_catalog(connection, &s).into_odbc()?;
+                        }
                         conn.attr_strings.insert(attribute, s);
                     }
                     Ok(SqlReturn::SUCCESS)
@@ -652,12 +685,22 @@ pub unsafe fn sql_get_connect_attr_w<B: Backend>(
                     Ok(SqlReturn::SUCCESS)
                 }
 
-                // SQL_ATTR_CURRENT_CATALOG: return stored string or empty.
+                // SQL_ATTR_CURRENT_CATALOG: what the application set, else what
+                // the session is actually using. Without the second half this
+                // attribute is write-only — it answers "" while
+                // `SQLGetInfo(SQL_DATABASE_NAME)`, which the spec makes the same
+                // value, answers the real catalog.
                 _ if attr == ConnectionAttribute::CURRENT_CATALOG => {
                     let s = conn
                         .attr_strings
                         .get(&attribute)
                         .cloned()
+                        .or_else(|| {
+                            conn.connection
+                                .as_ref()
+                                .and_then(|c| B::current_catalog(c))
+                                .map(Cow::into_owned)
+                        })
                         .unwrap_or_default();
                     // write_utf16 takes buf_len and len_ptr as i16 (SQLSMALLINT),
                     // but GetConnectAttrW uses i32 (SQLINTEGER). Validate the
@@ -702,7 +745,7 @@ mod tests {
     use super::*;
     use crate::ffi::handle::{sql_alloc_handle, sql_free_handle};
     use crate::test_utils::{
-        MockBackend, MockConnection, MockIsolationBackend, MockIsolationConnection,
+        MockAltBackend, MockBackend, MockConnection, MockIsolationBackend, MockIsolationConnection,
         MockUnappliedIsolationBackend, with_handle,
     };
     use odbc_sys::HandleType;
@@ -929,6 +972,50 @@ mod tests {
                 });
                 cleanup(env, conn);
             }
+        }
+    }
+
+    /// `SQL_ATTR_CURRENT_CATALOG` and `SQL_DATABASE_NAME` are one value under
+    /// two names, so they must read the same two sources in the same order:
+    /// what the application set, else what the session is actually using. With
+    /// only the first, the attribute is write-only — it answers `""` while the
+    /// info type answers the real catalog.
+    #[test]
+    fn current_catalog_falls_back_to_the_session_catalog() {
+        unsafe {
+            let (env, conn) = alloc_env_conn_for::<MockAltBackend>();
+            assert_eq!(driver_connect::<MockAltBackend>(conn), SqlReturn::SUCCESS);
+
+            let mut buf = [0u16; 64];
+            let mut len: i32 = 0;
+            assert_eq!(
+                sql_get_connect_attr_w::<MockAltBackend>(
+                    conn,
+                    ConnectionAttribute::CURRENT_CATALOG.0,
+                    buf.as_mut_ptr().cast(),
+                    (buf.len() * 2) as i32,
+                    &mut len,
+                ),
+                SqlReturn::SUCCESS
+            );
+            let attr = String::from_utf16_lossy(&buf[..(len / 2) as usize]);
+            assert_eq!(
+                attr, "alt_catalog",
+                "the attribute must report the session catalog when the \
+                 application has set none"
+            );
+
+            // The same value under its other name.
+            let (_, info) = crate::conformance::observe_string_value::<MockAltBackend>(
+                conn,
+                crate::types::SQL_DATABASE_NAME,
+            );
+            assert_eq!(
+                info, attr,
+                "SQL_DATABASE_NAME and SQL_ATTR_CURRENT_CATALOG disagree"
+            );
+
+            cleanup_for::<MockAltBackend>(env, conn);
         }
     }
 

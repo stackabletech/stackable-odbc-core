@@ -18,9 +18,9 @@ use crate::utf16::utf16_to_string;
 /// See [`crate::ffi::params::report_params_processed`].
 unsafe fn report_param_set<B: Backend>(stmt: &StatementHandle<B>, succeeded: bool) {
     let status = if succeeded {
-        crate::ffi::params::SQL_PARAM_SUCCESS
+        crate::types::SQL_PARAM_SUCCESS
     } else {
-        crate::ffi::params::SQL_PARAM_ERROR
+        crate::types::SQL_PARAM_ERROR
     };
     // SAFETY: the caller's contract, forwarded.
     unsafe { crate::ffi::params::report_params_processed(stmt, status) };
@@ -1171,7 +1171,7 @@ mod tests {
             );
             assert_eq!(
                 status,
-                crate::ffi::params::SQL_PARAM_SUCCESS,
+                crate::types::SQL_PARAM_SUCCESS,
                 "SQL_ATTR_PARAM_STATUS_PTR was not written"
             );
 
@@ -1218,7 +1218,7 @@ mod tests {
             );
 
             assert_eq!(processed, 1);
-            assert_eq!(status, crate::ffi::params::SQL_PARAM_ERROR);
+            assert_eq!(status, crate::types::SQL_PARAM_ERROR);
 
             cleanup_env_conn_stmt_for::<MockBackend>(env, conn, stmt);
         }

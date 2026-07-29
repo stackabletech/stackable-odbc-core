@@ -359,10 +359,21 @@ pub unsafe fn sql_get_info_w<B: Backend>(
             // `SQL_ATTR_CURRENT_CATALOG`, which the spec makes the same value
             // as `SQL_DATABASE_NAME`. Read before the dispatch below, which
             // borrows the handle's diagnostics mutably.
+            // What the application set, else what the session is actually
+            // using — the same two sources, in the same order, that
+            // `SQLGetConnectAttr(SQL_ATTR_CURRENT_CATALOG)` reads. The spec
+            // makes these one value, so they must not consult different things.
             let current_catalog = handle
                 .attr_strings
                 .get(&odbc_sys::ConnectionAttribute::CURRENT_CATALOG.0)
-                .cloned();
+                .cloned()
+                .or_else(|| {
+                    handle
+                        .connection
+                        .as_ref()
+                        .and_then(|c| B::current_catalog(c))
+                        .map(std::borrow::Cow::into_owned)
+                });
             let current_catalog = current_catalog.as_deref();
             let info = match handle.connection.as_ref() {
                 Some(conn) => match info_type_id {

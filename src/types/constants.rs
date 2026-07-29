@@ -199,6 +199,24 @@ pub const SQL_NC_START: u16 = 0x0002;
 /// the `ASC` / `DESC` keywords.
 pub const SQL_NC_END: u16 = 0x0004;
 
+/// The `SQL_PARAM_*` values a driver writes into the array
+/// `SQL_ATTR_PARAM_STATUS_PTR` points at, one per parameter set an execution
+/// processed. Absent from `odbc-sys`, and public here because a driver
+/// asserting what its own executions wrote needs to name them.
+///
+/// `SQL_PARAM_SUCCESS` — the set was processed without a diagnostic.
+pub const SQL_PARAM_SUCCESS: u16 = 0;
+/// `SQL_PARAM_DIAG_UNAVAILABLE` — the set produced a diagnostic the driver
+/// cannot attribute to it individually.
+pub const SQL_PARAM_DIAG_UNAVAILABLE: u16 = 1;
+/// `SQL_PARAM_ERROR` — the set's execution failed.
+pub const SQL_PARAM_ERROR: u16 = 5;
+/// `SQL_PARAM_SUCCESS_WITH_INFO` — processed, with a diagnostic raised for it.
+pub const SQL_PARAM_SUCCESS_WITH_INFO: u16 = 6;
+/// `SQL_PARAM_UNUSED` — not processed, because an earlier set's failure ended
+/// the execution.
+pub const SQL_PARAM_UNUSED: u16 = 7;
+
 /// `SQL_UNSPECIFIED` — it is unspecified whether cursors make visible the
 /// changes another cursor made to a result set; they "may make visible none,
 /// some, or all such changes". The spec's default for the

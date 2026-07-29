@@ -56,6 +56,24 @@ Everything a driver has to change for the catalog rework, in one place.
 
 ### Added
 
+- `Backend::current_catalog` and `Backend::set_current_catalog`, both defaulted,
+  make `SQL_ATTR_CURRENT_CATALOG` more than a handle-local string.
+  `SQLGetConnectAttr` and `SQLGetInfo(SQL_DATABASE_NAME)` — one value under two
+  names, per the spec — now read the same two sources in the same order: what
+  the application set, else what the session is actually using. Without the
+  second source the attribute was write-only, answering `""` while the info type
+  answered the real catalog. `SQLSetConnectAttr` asks the backend to switch and
+  stores the value only if that succeeds; the default reports `HYC00`, because
+  storing a catalog the session never switched to tells an application its
+  unqualified names resolve somewhere they do not. A value set before connecting
+  is applied at connect, like autocommit and isolation.
+
+- `SQL_PARAM_SUCCESS`, `SQL_PARAM_ERROR`, `SQL_PARAM_SUCCESS_WITH_INFO`,
+  `SQL_PARAM_UNUSED` and `SQL_PARAM_DIAG_UNAVAILABLE` are public in
+  `types`. `odbc-sys` does not define them, and a driver asserting what its own
+  executions wrote into `SQL_ATTR_PARAM_STATUS_PTR` needs to name them rather
+  than declare local copies.
+
 - `conformance::info_group_inconsistencies` checks the `SQLGetInfo` groups whose
   members constrain each other, and returns one message per violation. Core
   cannot police a backend's `get_info` at runtime — that method runs first and

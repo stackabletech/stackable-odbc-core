@@ -14,8 +14,8 @@ use crate::{
     panic::panic_safe,
     types::{
         ColumnValue, ParamDescriptor, SQL_DATA_AT_EXEC, SQL_DEFAULT_PARAM_SIZE,
-        SQL_LEN_DATA_AT_EXEC_OFFSET, SQL_NTS, SQL_NULL_DATA, SqlReturn, SqlState, ULen,
-        c_data_type_from_raw, param_type_from_raw,
+        SQL_LEN_DATA_AT_EXEC_OFFSET, SQL_NTS, SQL_NULL_DATA, SQL_PARAM_ERROR, SQL_PARAM_SUCCESS,
+        SqlReturn, SqlState, ULen, c_data_type_from_raw, param_type_from_raw,
     },
     utf16::utf16_to_string,
 };
@@ -855,13 +855,6 @@ pub(crate) unsafe fn collect_params(
 /// # Safety
 /// Every output binding's `value_ptr` / `str_len_or_ind_ptr` must point to a
 /// valid writable buffer, as guaranteed by the `SQLBindParameter` contract.
-/// `SQL_PARAM_SUCCESS` — the parameter-status value for a set the data source
-/// processed without a diagnostic.
-pub(crate) const SQL_PARAM_SUCCESS: u16 = 0;
-/// `SQL_PARAM_ERROR` — the parameter-status value for a set whose execution
-/// failed.
-pub(crate) const SQL_PARAM_ERROR: u16 = 5;
-
 /// Write one processed parameter set through `SQL_ATTR_PARAMS_PROCESSED_PTR`
 /// and `status` into the first element of `SQL_ATTR_PARAM_STATUS_PTR`, when the
 /// application set either.

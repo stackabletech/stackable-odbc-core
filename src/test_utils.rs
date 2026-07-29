@@ -468,6 +468,11 @@ impl Backend for MockBackend {
     fn quoted_identifier_case(_conn: &Self::Connection) -> u16 {
         crate::types::SQL_IC_SENSITIVE
     }
+    // Switching succeeds; `current_catalog` stays at its `None` default, so the
+    // getter's application-set branch is what these tests exercise.
+    fn set_current_catalog(_conn: &Self::Connection, _catalog: &str) -> Result<(), MockError> {
+        Ok(())
+    }
     // Non-`SQL_TC_NONE`, as `txn_isolation_options` above declares a level.
     fn txn_capable(_conn: &Self::Connection) -> u16 {
         crate::types::SQL_TC_ALL as u16
@@ -944,6 +949,15 @@ impl Backend for MockAltBackend {
     }
     fn quoted_identifier_case(_conn: &Self::Connection) -> u16 {
         crate::types::SQL_IC_LOWER
+    }
+    // Reports a session catalog, so the getter's fallback branch — and
+    // `SQL_DATABASE_NAME`, which reads the same two sources — have something to
+    // find when the application has set nothing.
+    fn current_catalog(_conn: &Self::Connection) -> Option<Cow<'static, str>> {
+        Some(Cow::Borrowed("alt_catalog"))
+    }
+    fn set_current_catalog(_conn: &Self::Connection, _catalog: &str) -> Result<(), MockError> {
+        Ok(())
     }
     fn txn_capable(_conn: &Self::Connection) -> u16 {
         crate::types::SQL_TC_DML as u16
