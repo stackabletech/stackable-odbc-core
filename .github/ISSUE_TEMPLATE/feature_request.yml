@@ -1,0 +1,62 @@
+name: Feature request
+description: An ODBC function, attribute or info type that core does not implement yet, or a change to the Backend trait.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Most additions here are driven by the ODBC spec rather than invented:
+        a function that is stubbed, an attribute that is accepted and ignored,
+        an info type answered with a default. Saying which one it is, and
+        quoting the spec, usually settles the design.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What is missing
+      description: What you need core to do that it does not do today.
+    validations:
+      required: true
+
+  - type: textarea
+    id: use-case
+    attributes:
+      label: What it unblocks
+      description: >
+        The application or driver that needs it, and what it does instead
+        today. A concrete blocked case is the strongest argument.
+    validations:
+      required: true
+
+  - type: input
+    id: spec-reference
+    attributes:
+      label: Spec reference
+      description: >
+        The relevant page on Microsoft Learn, if there is one. For an info
+        type or attribute, quote its description — the stated *purpose* often
+        decides the design, and has more than once here.
+      placeholder: "https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlgetinfo-function"
+
+  - type: dropdown
+    id: layer
+    attributes:
+      label: Which side should own it
+      description: >
+        Core holds no database-specific code. A capability only the data source
+        can answer belongs on a `Backend` method, so the compiler asks the
+        driver author rather than core guessing — a value core invents is wrong
+        for some real driver, and wrong silently.
+      options:
+        - Core owns it entirely (same answer for every driver)
+        - A new or changed Backend trait method (each driver answers)
+        - Not sure
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: breaking
+    attributes:
+      label: Compatibility
+      options:
+        - label: This would change an existing public API or trait method (a breaking change for driver crates)

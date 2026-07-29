@@ -56,6 +56,27 @@ Everything a driver has to change for the catalog rework, in one place.
 
 ### Added
 
+- **A guard test that the set of group-lock acquisition sites is closed**
+  (`the_set_of_group_lock_acquisition_sites_is_closed`, `handles/registry.rs`).
+  Obtaining a group from the registry is the only way to reach one that is not
+  already held, so the production call sites of `group_of` / `group_of_kind`
+  are the complete set of places the lock discipline can be broken. The test
+  scans the source tree and fails on a site that is not in its documented list.
+
+  This guards the failure mode a loom model structurally cannot catch: a model
+  proves things about the code it calls, and says nothing about a *new* nesting
+  site added somewhere it does not reach. Not hypothetical —
+  `env_before_connection_cannot_deadlock` passed for its whole life while
+  proving a property of its own test code.
+
+- **Issue and pull-request templates** (`.github/ISSUE_TEMPLATE/`,
+  `.github/pull_request_template.md`). The bug form asks for the ODBC call
+  sequence, the SQLSTATE and the Driver Manager, because a defect here is
+  almost always a specific function under a specific prior state. The PR
+  template asks for the spec basis, including whether a SQLSTATE's row carries
+  a `(DM)` marker and what an attribute's stated purpose is — both have caused
+  rework.
+
 - **`SqlState::invalid_catalog_name()` and `INVALID_CATALOG_NAME` (`3D000`).**
   `SQLSetConnectAttr`'s `3D000` row carries no `(DM)` marker, so it is the
   driver's to return — but core had no name for it, so a driver told to report
@@ -461,6 +482,12 @@ Everything a driver has to change for the catalog rework, in one place.
   tables, while the identical sentence in the other two is not.
 
 ### Changed
+
+- **The `package` CI job pins its actions and drops its credentials.** It was
+  the last job using floating tags (`actions/checkout@v5`,
+  `Swatinem/rust-cache@v2`) and the only checkout without
+  `persist-credentials: false`. Every action in the workflow is now pinned to a
+  commit SHA.
 
 - **The loom models build again, and one of them now proves something.** The
   models had stopped compiling entirely: `query_timer.rs` imported `Condvar`,

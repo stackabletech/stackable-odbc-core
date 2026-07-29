@@ -581,6 +581,125 @@ mod tests {
         assert!(reg.cancel_of(stmt).is_none(), "the slot itself is gone");
     }
 
+    /// Every production call site that obtains a [`GroupLock`] from the
+    /// registry, and what it does with the one it gets.
+    ///
+    /// Obtaining a group from the registry is the **only** way to reach one
+    /// that is not already held: `GroupLock::new` creates a fresh group for a
+    /// handle being allocated, and `HandleScope` can only relock what it
+    /// already has. So this list is the complete set of places the crate can
+    /// take a group lock, which makes it the complete set of places the lock
+    /// discipline can be broken.
+    ///
+    /// Counts rather than line numbers, because a line number is stale the
+    /// moment anything above it moves.
+    const GROUP_ACQUISITION_SITES: &[(&str, usize, &str)] = &[
+        (
+            "src/panic.rs",
+            1,
+            "panic_safe locks the target handle's group. The entry lock for \
+             every FFI function except SQLCancel; acquires exactly one group \
+             and nests nothing.",
+        ),
+        (
+            "src/ffi/cursor.rs",
+            1,
+            "sql_cancel, and it try_locks rather than locking: taking the \
+             group unconditionally would make cancelling a query wait for the \
+             query it was asked to cancel. Cannot deadlock, because it never \
+             blocks.",
+        ),
+        (
+            "src/handles/mod.rs",
+            2,
+            "both group_of_kind, and neither locks. alloc_connection checks \
+             the parent environment is live; alloc_statement takes the \
+             connection's group to *share* with the new statement, which is \
+             what puts a statement and its parent in one group.",
+        ),
+        (
+            "src/handles/scope.rs",
+            2,
+            "holds_in compares a token's group against the held one without \
+             locking, and with_child_group_in is the crate's one nested \
+             acquisition — environment then connection, SQLEndTran's path. \
+             Modelled by env_before_connection_cannot_deadlock.",
+        ),
+    ];
+
+    /// The list above is complete: no other module acquires a group lock.
+    ///
+    /// This guards the failure mode a loom model structurally cannot catch. A
+    /// model proves things about the code it calls; it says nothing about a
+    /// *new* nesting site added somewhere it does not reach, which would sit
+    /// green next to a second, unmodelled lock order. That is not hypothetical
+    /// — `env_before_connection_cannot_deadlock` spent its whole life passing
+    /// while proving a property of its own test code, and no amount of running
+    /// it would have said so.
+    ///
+    /// A failure here is not necessarily a bug. It means someone added a place
+    /// that can take a group lock, and the question to answer is whether it
+    /// nests a second one: if it does, it needs a loom model and an entry in
+    /// the ordering rule in AGENTS.md; if it does not, it needs a line in the
+    /// list above saying so.
+    ///
+    /// Not run under Miri: it reads the source tree, which is slow under
+    /// interpretation and contains no `unsafe` for Miri to check.
+    #[test]
+    #[cfg_attr(miri, ignore = "reads the source tree; no unsafe to check")]
+    fn the_set_of_group_lock_acquisition_sites_is_closed() {
+        // Test code is excluded: the models and unit tests take group locks
+        // freely and legitimately, and it is production nesting the rule is
+        // about. Every file in the crate puts its unit tests behind this exact
+        // two-line sequence, so it is a reliable cut.
+        const TEST_MODULE: &str = "#[cfg(test)]\nmod tests {";
+
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut found: Vec<(String, usize)> = Vec::new();
+        let mut stack = vec![root.clone()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("src is readable") {
+                let path = entry.expect("readable entry").path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().is_none_or(|e| e != "rs") {
+                    continue;
+                }
+                let source = std::fs::read_to_string(&path).expect("readable source");
+                let production = source.split(TEST_MODULE).next().unwrap_or(&source);
+                let count = production.matches(".group_of(").count()
+                    + production.matches(".group_of_kind(").count();
+                if count > 0 {
+                    let rel = path
+                        .strip_prefix(root.parent().expect("src has a parent"))
+                        .expect("under the crate root")
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    found.push((rel, count));
+                }
+            }
+        }
+        found.sort();
+
+        let mut expected: Vec<(String, usize)> = GROUP_ACQUISITION_SITES
+            .iter()
+            .map(|(file, count, _)| ((*file).to_owned(), *count))
+            .collect();
+        expected.sort();
+
+        assert_eq!(
+            found, expected,
+            "the set of production group-lock acquisition sites changed.\n\
+             A new or moved site is not automatically wrong, but it has to be \
+             accounted for: if it nests a second group, it needs a loom model \
+             and an entry in the lock-ordering rule in AGENTS.md; if it does \
+             not, add it to GROUP_ACQUISITION_SITES with the reason. See that \
+             list's doc comment.",
+        );
+    }
+
     /// A stale token is rejected without the address ever being read.
     #[test]
     fn a_freed_token_never_resolves_again() {

@@ -1,0 +1,11 @@
+# A security policy is deliberately not linked here yet: this repository has no
+# SECURITY.md, and the disclosure route is still being settled. Add a contact
+# link for it once it is.
+blank_issues_enabled: true
+contact_links:
+  - name: Question or discussion
+    url: https://github.com/orgs/stackabletech/discussions
+    about: For usage questions and anything that is not yet a specific defect.
+  - name: Community chat
+    url: https://discord.gg/7kZ3BNnCAF
+    about: Stackable's Discord, for a faster back-and-forth.

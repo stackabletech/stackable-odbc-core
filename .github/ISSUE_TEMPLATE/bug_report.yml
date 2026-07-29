@@ -1,0 +1,106 @@
+name: Bug report
+description: Something in stackable-odbc-core behaves differently from the ODBC spec, or from its own documentation.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        `stackable-odbc-core` is a **library**, not a loadable ODBC driver — it
+        is the database-independent half. A concrete driver crate implements
+        the `Backend` and `StatementBackend` traits and exports the C ABI.
+
+        If the wrong behaviour is in how a particular data source is queried,
+        it probably belongs in that driver's repository. If you are not sure
+        which side it falls on, file it here and say so.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What the driver did, and what you expected instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: call-sequence
+    attributes:
+      label: ODBC call sequence
+      description: >
+        The calls that lead to it, in order, with the arguments that matter.
+        Most bugs in this crate are about a specific function under a specific
+        prior state, so the sequence is usually more useful than a stack trace.
+      placeholder: |
+        SQLAllocHandle(SQL_HANDLE_STMT, ...)
+        SQLExecDirectW(stmt, L"SELECT ...", SQL_NTS)   -> SQL_SUCCESS
+        SQLFetch(stmt)                                 -> SQL_ERROR, expected SQL_SUCCESS
+    validations:
+      required: true
+
+  - type: input
+    id: sqlstate
+    attributes:
+      label: SQLSTATE and message
+      description: >
+        From `SQLGetDiagRecW`, if the call returned `SQL_ERROR` or
+        `SQL_SUCCESS_WITH_INFO`. A wrong SQLSTATE is itself a bug worth
+        reporting, even when the call otherwise does the right thing.
+      placeholder: "07009 — Column number 3 out of range (have 5 columns)"
+
+  - type: input
+    id: spec-reference
+    attributes:
+      label: Spec reference
+      description: >
+        Link to the function's page on Microsoft Learn, and quote the row or
+        sentence you think is not being honoured. Optional, but it is what
+        makes a report immediately actionable — and pay attention to whether
+        the row carries a `(DM)` marker, which means the Driver Manager owes
+        it rather than the driver.
+      placeholder: "https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlfetch-function"
+
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: The `stackable-odbc-core` version, or the commit if building from source.
+    validations:
+      required: true
+
+  - type: input
+    id: driver
+    attributes:
+      label: Driver crate
+      description: Which driver is built on core here, and at what version.
+
+  - type: dropdown
+    id: driver-manager
+    attributes:
+      label: Driver Manager
+      description: >
+        The Windows Driver Manager is considerably stricter than unixODBC, and
+        several behaviours differ between them.
+      options:
+        - unixODBC
+        - Windows Driver Manager
+        - None (calling the exported entry points directly)
+        - Other / not sure
+    validations:
+      required: true
+
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      description: OS and architecture, and the application if one is involved.
+      placeholder: "Ubuntu 24.04 x86_64, pyodbc 5.1 / isql"
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Driver log
+      description: >
+        Set `ODBC_LOG_LEVEL=trace` and `ODBC_LOG_FILE=/path/to/log`, reproduce,
+        and attach the relevant part. **Check it before posting** — a
+        connection string may appear in it. Passwords are redacted, but other
+        connection parameters are not.
+      render: text
