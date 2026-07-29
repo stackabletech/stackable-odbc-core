@@ -10,9 +10,17 @@
 //! whether an explicitly allocated application descriptor is an APD or ARD
 //! until execute time", so its records cannot be typed by role.
 
+// The field tables and the record accessors below are written against the
+// spec's tables rather than against a caller, and their callers are the four
+// `SQLxxxDesc` entry points, which land after them. Until those arrive nothing
+// outside this module's own tests reads them. The allow comes off with the last
+// of the four; if it is still here once they are all in, something is genuinely
+// unreachable.
+#![allow(dead_code)]
+
 use std::ffi::c_void;
 
-use odbc_sys::{CDataType, ParamType, SqlDataType};
+use odbc_sys::{CDataType, Desc, ParamType, SqlDataType};
 
 use crate::errors::OdbcError;
 use crate::types::{SqlState, ULen, c_data_type_from_raw};
@@ -45,13 +53,6 @@ pub enum DescriptorRole {
 /// one before it is set is that the value is undefined, not that the read
 /// fails, so any value is conforming. The `Default` impl uses the spec's stated
 /// defaults where it gives one and a zero otherwise.
-// Six of these fields — the datetime/interval pair, `precision`,
-// `num_prec_radix`, `name` and `unnamed` — have no reader until
-// `SQLGetDescField` and the consistency check land. They are declared now
-// because the field set is the spec's, not a subset of what today's callers
-// happen to want, and a record built by `SQLSetDescField` can carry any of
-// them. The allow comes off with the last of those readers.
-#[allow(dead_code)]
 #[derive(Debug)]
 pub struct DescriptorRecord {
     /// `SQL_DESC_CONCISE_TYPE`. A C type on an ARD or APD, a SQL type on an
@@ -156,6 +157,353 @@ impl DescriptorRecord {
     }
 }
 
+/// Whether a field is readable, writable or undefined for a descriptor role.
+///
+/// Transcribed cell by cell from `SQLSetDescField`'s "Initialization of
+/// Descriptor Fields" tables, and deliberately not derived from anything: it is
+/// a matrix the spec states, and the only way to check it is to read it against
+/// that page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FieldAccess {
+    /// Readable and writable.
+    ReadWrite,
+    /// Readable; a write is `HY091`.
+    ReadOnly,
+    /// Not defined for this role; both directions are `HY091`.
+    Undefined,
+}
+
+/// How `field` may be accessed on a descriptor of this `role`.
+///
+/// One arm per row of the spec's two initialization tables, in the order they
+/// give them: the header fields, then the record fields, then the IRD's
+/// read-only set. Reviewing this function means reading it against that page
+/// cell by cell — nothing about it is inferable from the rest of the crate.
+///
+/// This is the sole authority on `HY091`. It covers the header fields as well
+/// as the record ones, because the caller decides *where* a field is stored and
+/// this decides whether it may be touched at all.
+pub fn field_access(role: DescriptorRole, field: Desc) -> FieldAccess {
+    use DescriptorRole::{Apd, Ard, Ipd, Ird};
+    use FieldAccess::{ReadOnly, ReadWrite, Undefined};
+
+    match field {
+        // ------------------------------------------------------------------
+        // Header fields
+        // ------------------------------------------------------------------
+
+        // R on all four. `SQL_DESC_ALLOC_AUTO` for every descriptor core has,
+        // since all four are implicitly allocated; D4 makes the value vary.
+        Desc::AllocType => ReadOnly,
+        Desc::ArraySize => match role {
+            Ard | Apd => ReadWrite,
+            Ird | Ipd => Undefined,
+        },
+        Desc::ArrayStatusPtr => match role {
+            Ard | Apd | Ird | Ipd => ReadWrite,
+        },
+        Desc::BindOffsetPtr | Desc::BindType => match role {
+            Ard | Apd => ReadWrite,
+            Ird | Ipd => Undefined,
+        },
+        // Writing it lower deletes the higher-numbered records; the IRD's is
+        // the column count, which the application does not get to choose.
+        Desc::Count => match role {
+            Ard | Apd | Ipd => ReadWrite,
+            Ird => ReadOnly,
+        },
+        Desc::RowsProcessedPtr => match role {
+            Ird | Ipd => ReadWrite,
+            Ard | Apd => Undefined,
+        },
+
+        // ------------------------------------------------------------------
+        // Record fields
+        // ------------------------------------------------------------------
+        Desc::ConciseType
+        | Desc::Type
+        | Desc::OctetLength
+        | Desc::Length
+        | Desc::Precision
+        | Desc::Scale
+        | Desc::DatetimeIntervalCode
+        | Desc::DatetimeIntervalPrecision
+        | Desc::NumPrecRadix => match role {
+            Ard | Apd | Ipd => ReadWrite,
+            Ird => ReadOnly,
+        },
+        Desc::IndicatorPtr | Desc::OctetLengthPtr => match role {
+            Ard | Apd => ReadWrite,
+            Ird | Ipd => Undefined,
+        },
+        // The IPD's is the documented oddity. The initialization table marks it
+        // "Unused", but `SQLSetDescField`'s own prose overrides that for the
+        // write direction: "The SQL_DESC_DATA_PTR field of the IPD can be set
+        // to force a consistency check", and "the value ... is not actually
+        // stored and cannot be retrieved". So a write is legal and discarded
+        // (see [`set_record_field`]), and a read gets back the null that was
+        // never overwritten — which is conforming, since the spec only says a
+        // read is not *required* to return what was set.
+        Desc::DataPtr => match role {
+            Ard | Apd | Ipd => ReadWrite,
+            Ird => Undefined,
+        },
+        Desc::ParameterType => match role {
+            Ipd => ReadWrite,
+            Ard | Apd | Ird => Undefined,
+        },
+        Desc::Name | Desc::Unnamed => match role {
+            Ipd => ReadWrite,
+            Ird => ReadOnly,
+            Ard | Apd => Undefined,
+        },
+        Desc::Nullable | Desc::RowVer => match role {
+            Ird | Ipd => ReadOnly,
+            Ard | Apd => Undefined,
+        },
+
+        // ------------------------------------------------------------------
+        // The IRD's read-only set: result metadata, which only the IRD has.
+        // ------------------------------------------------------------------
+
+        // The last five of these are footnote [1]'s: `SQL_DESC_CASE_SENSITIVE`,
+        // `SQL_DESC_FIXED_PREC_SCALE`, `SQL_DESC_LOCAL_TYPE_NAME`,
+        // `SQL_DESC_TYPE_NAME` and `SQL_DESC_UNSIGNED` "are defined only when
+        // the IPD is automatically populated by the driver. If not, they are
+        // undefined." Core answers `SQL_ATTR_AUTO_IPD` with `SQL_FALSE` and
+        // refuses `SQL_ATTR_ENABLE_AUTO_IPD = SQL_TRUE`, so its IPD is not
+        // auto-populated and they land here with the rest rather than in the
+        // row above. That is a consequence of an answer core already gives.
+        Desc::AutoUniqueValue
+        | Desc::BaseColumnName
+        | Desc::BaseTableName
+        | Desc::CatalogName
+        | Desc::DisplaySize
+        | Desc::Label
+        | Desc::LiteralPrefix
+        | Desc::LiteralSuffix
+        | Desc::SchemaName
+        | Desc::Searchable
+        | Desc::TableName
+        | Desc::Updatable
+        | Desc::CaseSensitive
+        | Desc::FixedPrecScale
+        | Desc::LocalTypeName
+        | Desc::TypeName
+        | Desc::Unsigned => match role {
+            Ird => ReadOnly,
+            Ard | Apd | Ipd => Undefined,
+        },
+
+        // `SQL_DESC_MAXIMUM_SCALE` and `SQL_DESC_MINIMUM_SCALE` appear in
+        // `sqlext.h`, and therefore in `odbc-sys`, but in neither of
+        // `SQLSetDescField`'s tables — they describe a *type*, which is
+        // `SQLGetTypeInfo`'s subject, not a descriptor record's.
+        //
+        // The catch-all beside them exists only for the identifiers `odbc-sys`
+        // adds behind its `odbc_version_4` feature, which a driver can turn on
+        // through feature unification. Every ODBC 3.x identifier is named
+        // above, so nothing else reaches it.
+        _ => Undefined,
+    }
+}
+
+/// One descriptor field's value, in the two shapes the ABI has.
+///
+/// Deliberately the same shape as [`ColAttrValue`], because `SQLGetDescField`
+/// marshals both through one code path: the IRD's values arrive as
+/// `ColAttrValue` from the view and every other role's as this.
+///
+/// [`ColAttrValue`]: crate::types::col_attr::ColAttrValue
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DescFieldValue {
+    /// A numeric field, including the pointer-valued ones.
+    Numeric(isize),
+    /// A character field.
+    String(String),
+}
+
+/// Read `field` out of a record.
+///
+/// Only the fields a [`DescriptorRecord`] actually stores are answered here.
+/// The two families that are not are the caller's to route before it gets this
+/// far, and both return `HY091` rather than a wrong value if it does not:
+///
+/// - **The header fields**, which live on the descriptor rather than on any
+///   record.
+/// - **The IRD's read-only metadata**, which is computed from the result set's
+///   `ColumnDescriptor` and never stored — that is the whole point of the IRD
+///   being a view.
+pub fn get_record_field(
+    record: &DescriptorRecord,
+    role: DescriptorRole,
+    field: Desc,
+) -> Result<DescFieldValue, OdbcError> {
+    if field_access(role, field) == FieldAccess::Undefined {
+        return Err(undefined_field(role, field));
+    }
+
+    let numeric = match field {
+        Desc::ConciseType => isize::from(record.concise_type),
+        Desc::Type => isize::from(record.verbose_type),
+        Desc::DatetimeIntervalCode => isize::from(record.datetime_interval_code),
+        Desc::DatetimeIntervalPrecision => record.datetime_interval_precision as isize,
+        Desc::Length => record.length as isize,
+        Desc::OctetLength => record.octet_length,
+        Desc::Precision => isize::from(record.precision),
+        Desc::Scale => isize::from(record.scale),
+        Desc::NumPrecRadix => record.num_prec_radix as isize,
+        Desc::DataPtr => record.data_ptr as isize,
+        Desc::IndicatorPtr => record.indicator_ptr as isize,
+        Desc::OctetLengthPtr => record.octet_length_ptr as isize,
+        Desc::ParameterType => record.parameter_type as isize,
+        Desc::Unnamed => record.unnamed,
+        Desc::Name => return Ok(DescFieldValue::String(record.name.clone())),
+        // Both are "R, ND" on the IPD: defined only once the driver has
+        // populated it, which core never does. The values below are the spec's
+        // own "not known" answers rather than invented ones.
+        Desc::Nullable => crate::types::Nullable::SqlNullableUnknown as isize,
+        Desc::RowVer => crate::types::SQL_FALSE as isize,
+        _ => return Err(undefined_field(role, field)),
+    };
+    Ok(DescFieldValue::Numeric(numeric))
+}
+
+/// Write `field` into a record.
+///
+/// `HY091` if the role does not define the field or defines it read-only;
+/// `HY092` if the value is of the wrong shape for it. Routing is as
+/// [`get_record_field`] describes.
+pub fn set_record_field(
+    record: &mut DescriptorRecord,
+    role: DescriptorRole,
+    field: Desc,
+    value: DescFieldValue,
+) -> Result<(), OdbcError> {
+    match field_access(role, field) {
+        FieldAccess::ReadWrite => {}
+        FieldAccess::ReadOnly | FieldAccess::Undefined => return Err(undefined_field(role, field)),
+    }
+
+    // The one string-valued record field. Taken first so every arm below can
+    // assume a number.
+    if field == Desc::Name {
+        return match value {
+            DescFieldValue::String(name) => {
+                record.name = name;
+                Ok(())
+            }
+            DescFieldValue::Numeric(_) => Err(wrong_value(field)),
+        };
+    }
+
+    let DescFieldValue::Numeric(n) = value else {
+        return Err(wrong_value(field));
+    };
+
+    match field {
+        // Setting the concise type sets the verbose type and the
+        // datetime/interval code with it — the spec makes them one act, and
+        // `col_attr::verbose_type` is the existing mapping between the two.
+        // Restating it here is how the descriptor view and `SQLColAttribute`
+        // come to disagree about the same column.
+        Desc::ConciseType => {
+            let concise = narrow_i16(n, field)?;
+            record.concise_type = concise;
+            record.verbose_type = crate::types::col_attr::verbose_type(SqlDataType(concise));
+            record.datetime_interval_code = if record.verbose_type == concise {
+                0
+            } else {
+                concise
+            };
+        }
+        // The other direction. For a non-datetime type the two are equal, so
+        // the concise type follows; for `SQL_DATETIME` or `SQL_INTERVAL` the
+        // concise type is only determined once
+        // `SQL_DESC_DATETIME_INTERVAL_CODE` is also set, so it is left alone.
+        Desc::Type => {
+            let verbose = narrow_i16(n, field)?;
+            record.verbose_type = verbose;
+            if crate::types::col_attr::verbose_type(SqlDataType(verbose)) == verbose {
+                record.concise_type = verbose;
+                record.datetime_interval_code = 0;
+            }
+        }
+        Desc::DatetimeIntervalCode => record.datetime_interval_code = narrow_i16(n, field)?,
+        Desc::DatetimeIntervalPrecision => {
+            record.datetime_interval_precision = narrow_i32(n, field)?;
+        }
+        Desc::Length => {
+            record.length = ULen::try_from(n).map_err(|_| wrong_value(field))?;
+        }
+        Desc::OctetLength => record.octet_length = n,
+        Desc::Precision => record.precision = narrow_i16(n, field)?,
+        Desc::Scale => record.scale = narrow_i16(n, field)?,
+        Desc::NumPrecRadix => record.num_prec_radix = narrow_i32(n, field)?,
+        // The IPD's is set to force the consistency check and deliberately not
+        // stored — see [`field_access`]. The check itself is the caller's, at
+        // all four of the sites the spec names.
+        Desc::DataPtr => {
+            if role != DescriptorRole::Ipd {
+                record.data_ptr = n as *mut c_void;
+            }
+        }
+        Desc::IndicatorPtr => record.indicator_ptr = n as *mut isize,
+        Desc::OctetLengthPtr => record.octet_length_ptr = n as *mut isize,
+        Desc::ParameterType => {
+            record.parameter_type = crate::types::param_type_from_raw(narrow_i16(n, field)?)
+                .ok_or_else(|| {
+                    OdbcError::general(
+                        format!("Invalid SQL_DESC_PARAMETER_TYPE value: {n}"),
+                        SqlState::invalid_attribute_option_identifier(),
+                    )
+                })?;
+        }
+        // `SQLSetDescField`'s `HY092` row names this case on its own: "The
+        // FieldIdentifier argument was SQL_DESC_UNNAMED, and ValuePtr was
+        // SQL_NAMED." Only `SQL_UNNAMED` may be written; a name is what makes a
+        // record named, not this field.
+        Desc::Unnamed => {
+            if n != crate::types::SQL_UNNAMED {
+                return Err(wrong_value(field));
+            }
+            record.unnamed = n;
+        }
+        _ => return Err(undefined_field(role, field)),
+    }
+    Ok(())
+}
+
+/// `HY091` — the field is not defined for this role, or is read-only on it.
+fn undefined_field(role: DescriptorRole, field: Desc) -> OdbcError {
+    OdbcError::general(
+        format!("Descriptor field {field:?} is not writable on {role:?}"),
+        SqlState::invalid_descriptor_field_identifier(),
+    )
+}
+
+/// `HY092` — "the value in *ValuePtr was not valid for the FieldIdentifier
+/// argument".
+fn wrong_value(field: Desc) -> OdbcError {
+    OdbcError::general(
+        format!("Invalid value for descriptor field {field:?}"),
+        SqlState::invalid_attribute_option_identifier(),
+    )
+}
+
+/// An `isize` from the ABI narrowed to the field's own width.
+///
+/// A value that does not fit was never a legal setting for the field, so it is
+/// `HY092` rather than a silent truncation.
+fn narrow_i16(value: isize, field: Desc) -> Result<i16, OdbcError> {
+    i16::try_from(value).map_err(|_| wrong_value(field))
+}
+
+/// [`narrow_i16`], for the two `SQLINTEGER` fields.
+fn narrow_i32(value: isize, field: Desc) -> Result<i32, OdbcError> {
+    i32::try_from(value).map_err(|_| wrong_value(field))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -251,6 +599,220 @@ mod tests {
         assert_eq!(
             err.sqlstate().as_str(),
             crate::types::sql_state::INVALID_APPLICATION_BUFFER_TYPE
+        );
+    }
+
+    /// The spec's initialization table is a matrix, not a list: the same
+    /// identifier is read/write on one descriptor, read-only on another and
+    /// undefined on a third. `HY091` is decided from this, so a wrong cell is a
+    /// wrong SQLSTATE.
+    #[test]
+    fn field_access_follows_the_specs_initialization_table() {
+        use DescriptorRole::{Apd, Ard, Ipd, Ird};
+
+        // SQL_DESC_DATA_PTR: R/W on the application descriptors, undefined on
+        // the implementation ones.
+        assert_eq!(field_access(Ard, Desc::DataPtr), FieldAccess::ReadWrite);
+        assert_eq!(field_access(Apd, Desc::DataPtr), FieldAccess::ReadWrite);
+        assert_eq!(field_access(Ird, Desc::DataPtr), FieldAccess::Undefined);
+
+        // SQL_DESC_PARAMETER_TYPE: the IPD's alone.
+        assert_eq!(
+            field_access(Ipd, Desc::ParameterType),
+            FieldAccess::ReadWrite
+        );
+        assert_eq!(
+            field_access(Ard, Desc::ParameterType),
+            FieldAccess::Undefined
+        );
+
+        // SQL_DESC_NAME: read-only on the IRD, writable on the IPD, undefined
+        // on the application descriptors.
+        assert_eq!(field_access(Ird, Desc::Name), FieldAccess::ReadOnly);
+        assert_eq!(field_access(Ipd, Desc::Name), FieldAccess::ReadWrite);
+        assert_eq!(field_access(Ard, Desc::Name), FieldAccess::Undefined);
+
+        // The IRD's record fields are read-only across the board.
+        assert_eq!(field_access(Ird, Desc::Nullable), FieldAccess::ReadOnly);
+        assert_eq!(field_access(Ird, Desc::TypeName), FieldAccess::ReadOnly);
+    }
+
+    /// The whole matrix, in the shape the spec prints it: one row per field,
+    /// four columns for ARD, APD, IRD and IPD.
+    ///
+    /// [`field_access`] is a `match` whose arms group fields that share a row,
+    /// which is compact but is *not* the shape of the page it was transcribed
+    /// from. This is, so a reviewer can read the two side by side. A cell that
+    /// disagrees is a wrong SQLSTATE for that field on that descriptor.
+    #[test]
+    fn every_cell_of_the_initialization_table_is_transcribed() {
+        use DescriptorRole::{Apd, Ard, Ipd, Ird};
+        use FieldAccess::{ReadOnly as R, ReadWrite as RW, Undefined as U};
+
+        // (field, [ARD, APD, IRD, IPD])
+        let table: &[(Desc, [FieldAccess; 4])] = &[
+            // Header fields.
+            (Desc::AllocType, [R, R, R, R]),
+            (Desc::ArraySize, [RW, RW, U, U]),
+            (Desc::ArrayStatusPtr, [RW, RW, RW, RW]),
+            (Desc::BindOffsetPtr, [RW, RW, U, U]),
+            (Desc::BindType, [RW, RW, U, U]),
+            (Desc::Count, [RW, RW, R, RW]),
+            (Desc::RowsProcessedPtr, [U, U, RW, RW]),
+            // Record fields.
+            (Desc::ConciseType, [RW, RW, R, RW]),
+            (Desc::Type, [RW, RW, R, RW]),
+            // The IPD's is writable only as a consistency-check trigger; see
+            // `field_access`'s note on the arm.
+            (Desc::DataPtr, [RW, RW, U, RW]),
+            (Desc::IndicatorPtr, [RW, RW, U, U]),
+            (Desc::OctetLengthPtr, [RW, RW, U, U]),
+            (Desc::OctetLength, [RW, RW, R, RW]),
+            (Desc::Length, [RW, RW, R, RW]),
+            (Desc::Precision, [RW, RW, R, RW]),
+            (Desc::Scale, [RW, RW, R, RW]),
+            (Desc::DatetimeIntervalCode, [RW, RW, R, RW]),
+            (Desc::DatetimeIntervalPrecision, [RW, RW, R, RW]),
+            (Desc::NumPrecRadix, [RW, RW, R, RW]),
+            (Desc::ParameterType, [U, U, U, RW]),
+            (Desc::Name, [U, U, R, RW]),
+            (Desc::Unnamed, [U, U, R, RW]),
+            (Desc::Nullable, [U, U, R, R]),
+            (Desc::RowVer, [U, U, R, R]),
+            // The IRD's read-only metadata. The last five are footnote [1]'s,
+            // undefined on the IPD because core does not auto-populate it.
+            (Desc::AutoUniqueValue, [U, U, R, U]),
+            (Desc::BaseColumnName, [U, U, R, U]),
+            (Desc::BaseTableName, [U, U, R, U]),
+            (Desc::CatalogName, [U, U, R, U]),
+            (Desc::DisplaySize, [U, U, R, U]),
+            (Desc::Label, [U, U, R, U]),
+            (Desc::LiteralPrefix, [U, U, R, U]),
+            (Desc::LiteralSuffix, [U, U, R, U]),
+            (Desc::SchemaName, [U, U, R, U]),
+            (Desc::Searchable, [U, U, R, U]),
+            (Desc::TableName, [U, U, R, U]),
+            (Desc::Updatable, [U, U, R, U]),
+            (Desc::CaseSensitive, [U, U, R, U]),
+            (Desc::FixedPrecScale, [U, U, R, U]),
+            (Desc::LocalTypeName, [U, U, R, U]),
+            (Desc::TypeName, [U, U, R, U]),
+            (Desc::Unsigned, [U, U, R, U]),
+            // In `sqlext.h` and so in `odbc-sys`, but in neither of the spec's
+            // tables: they describe a type, not a descriptor record.
+            (Desc::MaximumScale, [U, U, U, U]),
+            (Desc::MinimumScale, [U, U, U, U]),
+        ];
+
+        for (field, expected) in table {
+            for (role, expected) in [Ard, Apd, Ird, Ipd].into_iter().zip(expected) {
+                assert_eq!(
+                    field_access(role, *field),
+                    *expected,
+                    "{field:?} on the {role:?}"
+                );
+            }
+        }
+    }
+
+    /// Footnote [1] of the initialization table: these five "are defined only
+    /// when the IPD is automatically populated by the driver. If not, they are
+    /// undefined. If an application attempts to set these fields, SQLSTATE
+    /// HY091 ... will be returned."
+    ///
+    /// Core reports `SQL_ATTR_AUTO_IPD` as `SQL_FALSE` and refuses
+    /// `SQL_ATTR_ENABLE_AUTO_IPD = SQL_TRUE` with `HYC00`, so its IPD is not
+    /// automatically populated and the footnote applies. This is a consequence
+    /// of an answer core already gives, not a choice.
+    #[test]
+    fn the_auto_populated_ipd_fields_are_undefined_because_core_does_not_populate_it() {
+        for field in [
+            Desc::CaseSensitive,
+            Desc::FixedPrecScale,
+            Desc::LocalTypeName,
+            Desc::TypeName,
+            Desc::Unsigned,
+        ] {
+            assert_eq!(
+                field_access(DescriptorRole::Ipd, field),
+                FieldAccess::Undefined,
+                "{field:?} is defined on the IPD only when the driver auto-populates it"
+            );
+        }
+    }
+
+    /// Round-trip: what `SQLSetDescField` writes, `SQLGetDescField` reads back.
+    #[test]
+    fn a_written_field_reads_back() {
+        let mut record = DescriptorRecord::default();
+
+        set_record_field(
+            &mut record,
+            DescriptorRole::Ard,
+            Desc::ConciseType,
+            DescFieldValue::Numeric(CDataType::SBigInt as isize),
+        )
+        .expect("SQL_DESC_CONCISE_TYPE is writable on an ARD");
+
+        assert_eq!(
+            get_record_field(&record, DescriptorRole::Ard, Desc::ConciseType)
+                .expect("and readable"),
+            DescFieldValue::Numeric(CDataType::SBigInt as isize)
+        );
+        assert_eq!(record.concise_type, CDataType::SBigInt as i16);
+    }
+
+    /// A write to a field this role does not define is `HY091`, and so is a
+    /// write to a read-only one. The spec's `HY091` row names both: "The
+    /// FieldIdentifier argument was invalid for the DescriptorHandle argument.
+    /// The FieldIdentifier argument was a read-only, ODBC-defined field."
+    #[test]
+    fn setting_an_undefined_or_read_only_field_reports_hy091() {
+        let mut record = DescriptorRecord::default();
+
+        let err = set_record_field(
+            &mut record,
+            DescriptorRole::Ard,
+            Desc::ParameterType,
+            DescFieldValue::Numeric(ParamType::Input as isize),
+        )
+        .expect_err("SQL_DESC_PARAMETER_TYPE is undefined on an ARD");
+        assert_eq!(
+            err.sqlstate().as_str(),
+            crate::types::sql_state::INVALID_DESCRIPTOR_FIELD_IDENTIFIER
+        );
+
+        let err = set_record_field(
+            &mut record,
+            DescriptorRole::Ird,
+            Desc::Nullable,
+            DescFieldValue::Numeric(0),
+        )
+        .expect_err("SQL_DESC_NULLABLE is read-only on an IRD");
+        assert_eq!(
+            err.sqlstate().as_str(),
+            crate::types::sql_state::INVALID_DESCRIPTOR_FIELD_IDENTIFIER
+        );
+    }
+
+    /// A numeric value handed to a string field, or the reverse, is `HY092`
+    /// ("the value in *ValuePtr was not valid for the FieldIdentifier
+    /// argument") rather than a silent coercion.
+    #[test]
+    fn a_value_of_the_wrong_shape_reports_hy092() {
+        let mut record = DescriptorRecord::default();
+
+        let err = set_record_field(
+            &mut record,
+            DescriptorRole::Ipd,
+            Desc::Name,
+            DescFieldValue::Numeric(7),
+        )
+        .expect_err("SQL_DESC_NAME is a string field");
+
+        assert_eq!(
+            err.sqlstate().as_str(),
+            crate::types::sql_state::INVALID_ATTRIBUTE_OPTION_IDENTIFIER
         );
     }
 }

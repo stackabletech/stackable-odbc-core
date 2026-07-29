@@ -120,7 +120,7 @@ pub fn get_column_attribute(
 ///
 /// Equal to the concise type for everything except the datetime and interval
 /// families, which the spec collapses to [`SQL_DATETIME`] and [`SQL_INTERVAL`].
-fn verbose_type(sql_type: SqlDataType) -> i16 {
+pub(crate) fn verbose_type(sql_type: SqlDataType) -> i16 {
     use crate::types::{SQL_DATETIME, SQL_INTERVAL};
     match sql_type.0 {
         // SQL_TYPE_DATE (91) through SQL_TYPE_TIMESTAMP_WITH_TIMEZONE (95).
