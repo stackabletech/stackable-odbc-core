@@ -297,6 +297,33 @@ Everything a driver has to change for the catalog rework, in one place.
 
 ### Changed
 
+- **Breaking:** ten new **required** `Backend` methods, each stating something
+  about the data source that core was previously deciding on its behalf.
+  `quoted_identifier_case` (`SQL_QUOTED_IDENTIFIER_CASE`, the counterpart of the
+  already-required `identifier_case`, and independent of it); `txn_capable`
+  (`SQL_TXN_CAPABLE`, which had no arm anywhere and so reported `SQL_TC_NONE` —
+  "transactions not supported" — even for a backend declaring an isolation
+  level and implementing `end_tran`); `integrity` (`SQL_INTEGRITY`, a property
+  of the data source's DDL, not of the driver); `multiple_active_txn`
+  (`SQL_MULTIPLE_ACTIVE_TXN`, where the old `"N"` understated any driver with
+  independent connections); `special_characters` (`SQL_SPECIAL_CHARACTERS`,
+  where an empty list is an answer applications act on when deciding what to
+  quote, as with `keywords`); `accessible_procedures`
+  (`SQL_ACCESSIBLE_PROCEDURES`, the counterpart of `accessible_tables`); and the
+  identity four, `driver_name`, `driver_version`, `dbms_name` and
+  `dbms_version`, which previously answered with the empty string.
+
+  A test pins `txn_capable` against `txn_isolation_options`: `SQL_TC_NONE` if
+  and only if the isolation bitmask is `0`.
+
+  `driver_name` and `driver_version` take no connection, so core now answers the
+  whole group the Windows Driver Manager asks for before `SQLDriverConnectW` —
+  `SQL_DRIVER_NAME`, `SQL_DRIVER_VER`, `SQL_DRIVER_ODBC_VER`,
+  `SQL_ASYNC_DBC_FUNCTIONS` and `SQL_MAX_CONCURRENT_ACTIVITIES`. Overriding
+  `Backend::get_info_pre_connect` for those is no longer necessary; it stops
+  being a checklist item a driver can forget and becomes two declarations the
+  compiler asks for.
+
 - **Breaking:** the ten catalog row types — `TableRow`, `ColumnRow`,
   `PrimaryKeyRow`, `ForeignKeyRow`, `StatisticsRow`, `SpecialColumnRow`,
   `ProcedureRow`, `ProcedureColumnRow`, `ColumnPrivilegeRow` and

@@ -1624,7 +1624,9 @@ mod tests {
     const STRING_SHAPED_WITHOUT_INFOTYPE_VARIANT: &[(u16, &str, &str)] = &[
         (crate::types::SQL_ROW_UPDATES,         "N",         "SQL_ROW_UPDATES"),
         (crate::types::SQL_PROCEDURES,          "N",         "SQL_PROCEDURES"),
-        (crate::types::SQL_MULTIPLE_ACTIVE_TXN, "N",         "SQL_MULTIPLE_ACTIVE_TXN"),
+        // Backend-stated: `MockBackend::multiple_active_txn` declares `true`,
+        // so this also proves the hook reaches the string-shaped path.
+        (crate::types::SQL_MULTIPLE_ACTIVE_TXN, "Y",         "SQL_MULTIPLE_ACTIVE_TXN"),
         // Consistent with SQL_PROCEDURES = "N": no procedures, so no vendor
         // term for one. Same rule as the catalog/schema term group.
         (crate::types::SQL_PROCEDURE_TERM,      "",          "SQL_PROCEDURE_TERM"),

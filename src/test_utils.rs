@@ -273,6 +273,43 @@ macro_rules! minimal_capability_decls {
         fn search_pattern_escape(_conn: &Self::Connection) -> Cow<'static, str> {
             Cow::Borrowed($search_pattern_escape)
         }
+        // No "minimal" value exists, for the same reason as identifier_case:
+        // 0 is not a legal SQL_QUOTED_IDENTIFIER_CASE. SQL_IC_SENSITIVE is the
+        // answer that transforms nothing.
+        fn quoted_identifier_case(_conn: &Self::Connection) -> u16 {
+            crate::types::SQL_IC_SENSITIVE
+        }
+        // Consistent with the isolation options a minimal mock declares.
+        fn txn_capable(_conn: &Self::Connection) -> u16 {
+            crate::types::SQL_TC_NONE as u16
+        }
+        fn integrity(_conn: &Self::Connection) -> bool {
+            false
+        }
+        fn multiple_active_txn(_conn: &Self::Connection) -> bool {
+            false
+        }
+        fn special_characters(_conn: &Self::Connection) -> Cow<'static, str> {
+            Cow::Borrowed("")
+        }
+        fn accessible_procedures(_conn: &Self::Connection) -> bool {
+            false
+        }
+        // Identity has no minimal value — the empty string is what these
+        // methods exist to stop a driver reporting — so the mocks state
+        // something recognisable instead.
+        fn driver_name() -> Cow<'static, str> {
+            Cow::Borrowed("Mock ODBC Driver")
+        }
+        fn driver_version() -> Cow<'static, str> {
+            Cow::Borrowed("00.00.0000")
+        }
+        fn dbms_name(_conn: &Self::Connection) -> Cow<'static, str> {
+            Cow::Borrowed("MockDB")
+        }
+        fn dbms_version(_conn: &Self::Connection) -> Cow<'static, str> {
+            Cow::Borrowed("00.00.0000")
+        }
     };
 }
 
@@ -424,6 +461,40 @@ impl Backend for MockBackend {
     }
     fn identifier_case(_conn: &Self::Connection) -> u16 {
         crate::types::SQL_IC_UPPER
+    }
+    // Deliberately not the same as `identifier_case` above: the two are
+    // independent facts about the system catalog, and a mock that repeated one
+    // could not tell a core that confused them apart from one that did not.
+    fn quoted_identifier_case(_conn: &Self::Connection) -> u16 {
+        crate::types::SQL_IC_SENSITIVE
+    }
+    // Non-`SQL_TC_NONE`, as `txn_isolation_options` above declares a level.
+    fn txn_capable(_conn: &Self::Connection) -> u16 {
+        crate::types::SQL_TC_ALL as u16
+    }
+    fn integrity(_conn: &Self::Connection) -> bool {
+        true
+    }
+    fn multiple_active_txn(_conn: &Self::Connection) -> bool {
+        true
+    }
+    fn special_characters(_conn: &Self::Connection) -> Cow<'static, str> {
+        Cow::Borrowed("$#")
+    }
+    fn accessible_procedures(_conn: &Self::Connection) -> bool {
+        true
+    }
+    fn driver_name() -> Cow<'static, str> {
+        Cow::Borrowed("Mock ODBC Driver")
+    }
+    fn driver_version() -> Cow<'static, str> {
+        Cow::Borrowed("01.00.0000")
+    }
+    fn dbms_name(_conn: &Self::Connection) -> Cow<'static, str> {
+        Cow::Borrowed("MockDB")
+    }
+    fn dbms_version(_conn: &Self::Connection) -> Cow<'static, str> {
+        Cow::Borrowed("01.02.0003")
     }
     fn correlation_name(_conn: &Self::Connection) -> u16 {
         crate::types::SQL_CN_ANY // was SQL_CN_NONE (0)
@@ -870,6 +941,36 @@ impl Backend for MockAltBackend {
     }
     fn identifier_case(_conn: &Self::Connection) -> u16 {
         crate::types::SQL_IC_MIXED
+    }
+    fn quoted_identifier_case(_conn: &Self::Connection) -> u16 {
+        crate::types::SQL_IC_LOWER
+    }
+    fn txn_capable(_conn: &Self::Connection) -> u16 {
+        crate::types::SQL_TC_DML as u16
+    }
+    fn integrity(_conn: &Self::Connection) -> bool {
+        false
+    }
+    fn multiple_active_txn(_conn: &Self::Connection) -> bool {
+        false
+    }
+    fn special_characters(_conn: &Self::Connection) -> Cow<'static, str> {
+        Cow::Borrowed("@")
+    }
+    fn accessible_procedures(_conn: &Self::Connection) -> bool {
+        false
+    }
+    fn driver_name() -> Cow<'static, str> {
+        Cow::Borrowed("Alt ODBC Driver")
+    }
+    fn driver_version() -> Cow<'static, str> {
+        Cow::Borrowed("09.08.0007")
+    }
+    fn dbms_name(_conn: &Self::Connection) -> Cow<'static, str> {
+        Cow::Borrowed("AltDB")
+    }
+    fn dbms_version(_conn: &Self::Connection) -> Cow<'static, str> {
+        Cow::Borrowed("09.09.9999")
     }
     fn null_collation(_conn: &Self::Connection) -> u16 {
         crate::types::SQL_NC_LOW

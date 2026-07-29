@@ -182,9 +182,21 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// Return driver-level info that does not require an active connection.
     ///
     /// The Windows Driver Manager calls `SQLGetInfoW` for types like
-    /// `SQL_DRIVER_ODBC_VER` *before* the connection is established.
-    /// Backends should override this to handle those pre-connect info types.
-    /// The default returns `NotImplemented`.
+    /// `SQL_DRIVER_ODBC_VER` *before* the connection is established, and reads
+    /// the answer to decide whether the driver is ODBC 3.x — a wrong or missing
+    /// one costs the connection its 3.x features.
+    ///
+    /// **Overriding this is no longer needed for that group.** `NotImplemented`
+    /// falls through to [`default_get_info`], which answers `SQL_DRIVER_NAME`
+    /// and `SQL_DRIVER_VER` from [`Backend::driver_name`] and
+    /// [`Backend::driver_version`], and `SQL_DRIVER_ODBC_VER`,
+    /// `SQL_ASYNC_DBC_FUNCTIONS` and `SQL_MAX_CONCURRENT_ACTIVITIES` from what
+    /// core knows about itself. Those are the five the Driver Manager needs,
+    /// and they are required declarations now rather than a checklist item.
+    ///
+    /// Override it for a *further* info type a backend can answer before
+    /// connecting, which is rare: most of `SQLGetInfo` describes the data
+    /// source, and there is no data source yet.
     fn get_info_pre_connect(_info_type: crate::types::InfoType) -> Result<InfoValue, Self::Error> {
         Err(OdbcError::NotImplemented {
             feature: "get_info_pre_connect".into(),
@@ -948,9 +960,115 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// is a different assertion about how the data source folds identifiers,
     /// and an application uses it to decide how to quote generated SQL.
     ///
-    /// Distinct from `SQL_QUOTED_IDENTIFIER_CASE`, which describes *quoted*
-    /// identifiers and which [`common_get_info_raw`] answers.
+    /// Distinct from [`Backend::quoted_identifier_case`], which describes
+    /// *quoted* identifiers.
     fn identifier_case(conn: &Self::Connection) -> u16;
+
+    /// How the data source treats *quoted* identifiers —
+    /// `SQL_QUOTED_IDENTIFIER_CASE` (93), one of the
+    /// [`SQL_IC_*`](crate::types::SQL_IC_UPPER) values.
+    ///
+    /// The counterpart of [`Backend::identifier_case`] and required for the
+    /// same reason: `0` is not one of the four legal values, so there is no
+    /// understated answer to fall back on. Every choice is a different
+    /// assertion about what the system catalog stores, and the two are
+    /// genuinely independent — a data source that upper-cases unquoted
+    /// identifiers commonly stores quoted ones verbatim.
+    ///
+    /// Not derivable from `identifier_case`: in the MySQL family the answer
+    /// depends on server configuration rather than on the unquoted rule.
+    fn quoted_identifier_case(conn: &Self::Connection) -> u16;
+
+    /// The `SQL_TXN_CAPABLE` (46) level: what the data source allows inside a
+    /// transaction, as one of the [`SQL_TC_*`](crate::types::SQL_TC_ALL)
+    /// values.
+    ///
+    /// Required because `0` is
+    /// [`SQL_TC_NONE`](crate::types::SQL_TC_NONE), "transactions not
+    /// supported" — the strongest possible denial, and the one a shape-aware
+    /// default would make on a backend's behalf. A backend that declares an
+    /// isolation level in [`Backend::txn_isolation_options`] and implements
+    /// [`Backend::end_tran`] would then be reported as having no transactions
+    /// at all, which is the self-contradiction the constrained-info-type rule
+    /// in AGENTS.md exists to prevent. A test pins the pair: `SQL_TC_NONE` if
+    /// and only if `txn_isolation_options` is `0`.
+    ///
+    /// Return `u16`, not `u32`: the info type is `SQLUSMALLINT`, and the
+    /// `SQL_TC_*` constants are typed `u32` for use in bitmask expressions.
+    fn txn_capable(conn: &Self::Connection) -> u16;
+
+    /// Whether the data source supports the Integrity Enhancement Facility —
+    /// `SQL_INTEGRITY` (73), reported as `"Y"` or `"N"`.
+    ///
+    /// The IEF is referential-integrity DDL: `FOREIGN KEY`, `CHECK` and the
+    /// rest. The spec's wording is "`"Y"` if **the data source** supports the
+    /// Integrity Enhancement Facility", so this is a statement about the data
+    /// source and not about the driver — which is why core cannot answer it
+    /// from anything it knows about itself.
+    fn integrity(conn: &Self::Connection) -> bool;
+
+    /// Whether more than one transaction can be active at a time —
+    /// `SQL_MULTIPLE_ACTIVE_TXN` (37), reported as `"Y"` or `"N"`.
+    ///
+    /// The spec: "`"Y"` if the driver supports more than one active
+    /// transaction at the same time, `"N"` if only one transaction can be
+    /// active at any time." A driver whose connections are independent answers
+    /// `"Y"`, and `"N"` is a real restriction an application plans around, so
+    /// neither is a safe default.
+    fn multiple_active_txn(conn: &Self::Connection) -> bool;
+
+    /// The characters other than `a`–`z`, `A`–`Z`, `0`–`9` and `_` that may
+    /// appear in an identifier without delimiting it —
+    /// `SQL_SPECIAL_CHARACTERS` (94).
+    ///
+    /// Required for the same reason as [`Backend::keywords`]: an empty list is
+    /// an answer, not an absence. An application reads this to decide when an
+    /// identifier must be quoted, so `""` asserts that nothing beyond the
+    /// alphanumerics and underscore is legal unquoted — a claim about the data
+    /// source that core has no way to make.
+    fn special_characters(conn: &Self::Connection) -> Cow<'static, str>;
+
+    /// Whether the connected user can execute every procedure `SQLProcedures`
+    /// returns — `SQL_ACCESSIBLE_PROCEDURES` (20), reported as `"Y"` or `"N"`.
+    ///
+    /// The counterpart of [`Backend::accessible_tables`], and required for the
+    /// same reason: `"Y"` is a guarantee about the connected principal's
+    /// privileges that only the backend can make.
+    fn accessible_procedures(conn: &Self::Connection) -> bool;
+
+    /// The driver's own name — `SQL_DRIVER_NAME` (6).
+    ///
+    /// Takes no connection: the Windows Driver Manager asks for driver
+    /// identity *before* `SQLDriverConnectW`, and an answer that needed a
+    /// connection could not be given then.
+    ///
+    /// Required because core has no name to give and the empty string is not a
+    /// usable one. With this and [`Backend::driver_version`] declared, core
+    /// answers the whole pre-connect identity group itself, so a driver no
+    /// longer has to remember to override
+    /// [`Backend::get_info_pre_connect`] for the Driver Manager's benefit.
+    fn driver_name() -> Cow<'static, str>;
+
+    /// The driver's own version — `SQL_DRIVER_VER` (7), in the spec's
+    /// `##.##.####` form, which [`crate::types::format_odbc_version`] produces.
+    ///
+    /// Takes no connection, for the reason given on [`Backend::driver_name`].
+    fn driver_version() -> Cow<'static, str>;
+
+    /// The name of the DBMS this connection reached — `SQL_DBMS_NAME` (17).
+    ///
+    /// Required because only the backend knows what it connected to, and the
+    /// empty string a shape-aware default would produce is what tools display
+    /// and log when they identify a data source.
+    fn dbms_name(conn: &Self::Connection) -> Cow<'static, str>;
+
+    /// The version of the DBMS this connection reached — `SQL_DBMS_VER` (18),
+    /// in the spec's `##.##.####` form followed by any vendor-defined suffix.
+    ///
+    /// Per-connection rather than per-driver: it is the server's version, not
+    /// the driver's, and a backend that gates capabilities on it already has
+    /// the value (see [`crate::types::format_odbc_version`]).
+    fn dbms_version(conn: &Self::Connection) -> Cow<'static, str>;
 
     /// The `SQL_CORRELATION_NAME` (74) support level — one of the
     /// [`SQL_CN_*`](crate::types::SQL_CN_ANY) values.
@@ -1420,9 +1538,29 @@ pub fn default_get_info<B: Backend>(
             }
             .into(),
         )),
-        InfoType::AccessibleProcedures => Some(InfoValue::String("N".into())),
-        InfoType::Integrity => Some(InfoValue::String("N".into())),
-        InfoType::SpecialCharacters => Some(InfoValue::String(String::new())),
+        InfoType::AccessibleProcedures => Some(InfoValue::String(
+            if B::accessible_procedures(conn?) {
+                "Y"
+            } else {
+                "N"
+            }
+            .into(),
+        )),
+        InfoType::Integrity => Some(InfoValue::String(
+            if B::integrity(conn?) { "Y" } else { "N" }.into(),
+        )),
+        InfoType::SpecialCharacters => Some(InfoValue::String(B::special_characters(conn?).into())),
+        // Identity. `SQL_DRIVER_NAME` and `SQL_DRIVER_VER` describe the driver
+        // rather than the data source, so they answer without a connection —
+        // which is what the Windows Driver Manager asks for before one exists.
+        InfoType::DriverName => Some(InfoValue::String(B::driver_name().into())),
+        InfoType::DriverVer => Some(InfoValue::String(B::driver_version().into())),
+        InfoType::DbmsName => Some(InfoValue::String(B::dbms_name(conn?).into())),
+        InfoType::DbmsVer => Some(InfoValue::String(B::dbms_version(conn?).into())),
+        // Zero here is `SQL_TC_NONE`, "transactions not supported", which
+        // contradicts any backend declaring an isolation level. See
+        // `Backend::txn_capable`.
+        InfoType::TransactionCapable => Some(InfoValue::U16(B::txn_capable(conn?))),
         InfoType::XopenCliYear => Some(InfoValue::String("1995".into())),
         InfoType::CollationSeq => Some(InfoValue::String(String::new())),
         InfoType::DescribeParameter => Some(InfoValue::String("Y".into())),
@@ -1628,9 +1766,9 @@ pub fn common_get_info_raw<B: Backend>(
     info_type: u16,
 ) -> Option<InfoValue> {
     use crate::types::{
-        InfoValue, SQL_CURSOR_ROLLBACK_BEHAVIOR, SQL_DATABASE_NAME, SQL_FILE_USAGE,
-        SQL_IC_SENSITIVE, SQL_KEYWORDS, SQL_MULTIPLE_ACTIVE_TXN, SQL_PROCEDURE_TERM,
-        SQL_PROCEDURES, SQL_QUOTED_IDENTIFIER_CASE, SQL_ROW_UPDATES, SQL_TABLE_TERM,
+        InfoValue, SQL_CURSOR_ROLLBACK_BEHAVIOR, SQL_DATABASE_NAME, SQL_FILE_USAGE, SQL_KEYWORDS,
+        SQL_MULTIPLE_ACTIVE_TXN, SQL_PROCEDURE_TERM, SQL_PROCEDURES, SQL_QUOTED_IDENTIFIER_CASE,
+        SQL_ROW_UPDATES, SQL_TABLE_TERM,
     };
     match info_type {
         SQL_FILE_USAGE => Some(InfoValue::U16(0)),
@@ -1638,7 +1776,9 @@ pub fn common_get_info_raw<B: Backend>(
         SQL_CURSOR_ROLLBACK_BEHAVIOR => {
             Some(InfoValue::U16(B::cursor_rollback_behavior().as_u16()))
         }
-        SQL_QUOTED_IDENTIFIER_CASE => Some(InfoValue::U16(SQL_IC_SENSITIVE)),
+        // The quoted counterpart of `SQL_IDENTIFIER_CASE`, and like it a
+        // four-valued statement about the system catalog with no legal zero.
+        SQL_QUOTED_IDENTIFIER_CASE => Some(InfoValue::U16(B::quoted_identifier_case(conn?))),
         // Both are spec-defined "Y"/"N" character strings with no
         // `odbc_sys::InfoType` variant, so this raw path is the only place
         // they can be answered. Without these arms they reach the
@@ -1650,9 +1790,16 @@ pub fn common_get_info_raw<B: Backend>(
         // backend that has either answers it before delegating here.
         SQL_ROW_UPDATES => Some(InfoValue::String("N".into())),
         SQL_PROCEDURES => Some(InfoValue::String("N".into())),
-        // Core opens no transaction of its own, so it certainly cannot hold
-        // two open at once. A backend that can answers before delegating.
-        SQL_MULTIPLE_ACTIVE_TXN => Some(InfoValue::String("N".into())),
+        // Whether two transactions can be live at once is a property of the
+        // driver's connections, which only the backend knows.
+        SQL_MULTIPLE_ACTIVE_TXN => Some(InfoValue::String(
+            if B::multiple_active_txn(conn?) {
+                "Y"
+            } else {
+                "N"
+            }
+            .into(),
+        )),
         // The data source's own reserved words, minus everything ODBC already
         // reserves — the subtraction the spec defines for this info type,
         // applied once here rather than in each backend. The list itself is a
@@ -1686,7 +1833,8 @@ mod tests {
         SQL_FN_TSI_YEAR, SQL_GB_GROUP_BY_EQUALS_SELECT, SQL_INSENSITIVE, SQL_MAX_CURSOR_NAME_LEN,
         SQL_NC_END, SQL_NNC_NON_NULL, SQL_OIC_CORE, SQL_OJ_LEFT, SQL_OJ_NESTED, SQL_SC_SQL92_ENTRY,
         SQL_SO_FORWARD_ONLY, SQL_SQ_COMPARISON, SQL_SQ_CORRELATED_SUBQUERIES, SQL_SQ_EXISTS,
-        SQL_SQ_IN, SQL_SQ_QUANTIFIED, SQL_TXN_SERIALIZABLE, SQL_U_UNION, SQL_U_UNION_ALL,
+        SQL_SQ_IN, SQL_SQ_QUANTIFIED, SQL_TC_ALL, SQL_TXN_SERIALIZABLE, SQL_U_UNION,
+        SQL_U_UNION_ALL,
     };
 
     enum Expected {
@@ -1714,9 +1862,16 @@ mod tests {
         // Core cannot make that promise for a backend, and it depends on the
         // connected principal, so the mock declares the honest "N".
         (InfoType::AccessibleTables,              Expected::Str("N")),
-        (InfoType::AccessibleProcedures,          Expected::Str("N")),
-        (InfoType::Integrity,                     Expected::Str("N")),
-        (InfoType::SpecialCharacters,             Expected::Str("")),
+        // Backend-stated capabilities; MockBackend declares each of these.
+        (InfoType::AccessibleProcedures,          Expected::Str("Y")),
+        (InfoType::Integrity,                     Expected::Str("Y")),
+        (InfoType::SpecialCharacters,             Expected::Str("$#")),
+        // Identity. The two driver-level ones answer without a connection,
+        // which is what the Windows Driver Manager asks for before one exists.
+        (InfoType::DriverName,                    Expected::Str("Mock ODBC Driver")),
+        (InfoType::DriverVer,                     Expected::Str("01.00.0000")),
+        (InfoType::DbmsName,                      Expected::Str("MockDB")),
+        (InfoType::DbmsVer,                       Expected::Str("01.02.0003")),
         (InfoType::XopenCliYear,                  Expected::Str("1995")),
         (InfoType::CollationSeq,                  Expected::Str("")),
         (InfoType::DescribeParameter,             Expected::Str("Y")),
@@ -1729,6 +1884,8 @@ mod tests {
         (InfoType::ExpressionsInOrderBy,          Expected::Str("Y")),
         // --- U16 values ---
         // Enum values where 0 is a real answer, so they come from the backend.
+        // Non-`SQL_TC_NONE`, as MockBackend declares an isolation level.
+        (InfoType::TransactionCapable,            Expected::U16(SQL_TC_ALL as u16)),
         (InfoType::GroupBy,                       Expected::U16(SQL_GB_GROUP_BY_EQUALS_SELECT)),
         (InfoType::NullCollation,                 Expected::U16(SQL_NC_END)),
         (InfoType::CorrelationName,               Expected::U16(SQL_CN_ANY)),
@@ -2350,19 +2507,7 @@ mod tests {
             InfoType::UserName,
             "carried in the connection string, not known here",
         ),
-        (
-            InfoType::SpecialCharacters,
-            "empty understates; a backend with any overrides",
-        ),
         (InfoType::CollationSeq, "unknown, and the spec allows empty"),
-        (
-            InfoType::AccessibleProcedures,
-            "core exports no procedure support of its own",
-        ),
-        (
-            InfoType::Integrity,
-            "core implements no integrity-enhancement grammar",
-        ),
     ];
 
     /// Info types with no arm in [`default_get_info`], where reaching the
@@ -2385,13 +2530,8 @@ mod tests {
     #[rustfmt::skip]
     const SHAPE_DEFAULT_IS_THE_ANSWER: &[(InfoType, &str)] = &[
         // --- Driver and data source identity ---
-        (InfoType::DriverName,                 "only the driver knows its own name"),
-        (InfoType::DriverVer,                  "only the driver knows its own version"),
-        (InfoType::DbmsName,                   "only the backend knows what it connected to"),
-        (InfoType::DbmsVer,                    "only the backend knows what it connected to"),
 
         // --- Claims about the data source, understated rather than invented ---
-        (InfoType::TransactionCapable,         "whether DDL is transactional is a data source fact"),
         (InfoType::SqlFileUsage,               "whether the driver is single-tier and file-based is a driver fact"),
         (InfoType::SqlQuotedIdentifierCase,    "answered by common_get_info_raw for backends that delegate to it"),
 
@@ -2554,14 +2694,6 @@ mod tests {
     #[rustfmt::skip]
     const RAW_PATH_GAPS: &[(u16, &str)] = &[
         (
-            crate::types::SQL_QUOTED_IDENTIFIER_CASE,
-            "how the catalog stores quoted identifiers is a data source fact, and SQL_IC_SENSITIVE is one of four possible answers; needs a Backend method, the counterpart of the required `identifier_case`",
-        ),
-        (
-            crate::types::SQL_MULTIPLE_ACTIVE_TXN,
-            "whether more than one transaction can be active at a time is a data source fact; \"N\" understates a driver whose connections are independent; needs a Backend method",
-        ),
-        (
             crate::types::SQL_DATABASE_NAME,
             "the spec equates this with SQLGetConnectAttr(SQL_ATTR_CURRENT_CATALOG), which the connection already stores; derive it from there rather than answering the empty string",
         ),
@@ -2623,6 +2755,72 @@ mod tests {
         );
     }
 
+    /// `SQL_TXN_CAPABLE` and `SQL_TXN_ISOLATION_OPTION` constrain each other:
+    /// `SQL_TC_NONE` says the data source has no transactions, and a non-zero
+    /// isolation bitmask says it has at least one level to run them at. A
+    /// backend that declares both is making one claim, and this is the pairing
+    /// the AGENTS.md "info types that constrain each other" rule is about.
+    ///
+    /// Asserted over both classification mocks, which between them cover the
+    /// two combinations that matter: `SQL_TC_ALL` with `SQL_TXN_SERIALIZABLE`
+    /// and `SQL_TC_DML` with `SQL_TXN_READ_UNCOMMITTED`.
+    #[test]
+    fn txn_capable_and_the_isolation_options_agree_about_transactions() {
+        use crate::test_utils::MockAltBackend;
+
+        fn check<B: Backend>(conn: &B::Connection, name: &str) {
+            let capable = B::txn_capable(conn);
+            let options = B::txn_isolation_options(conn);
+            assert_eq!(
+                capable == crate::types::SQL_TC_NONE as u16,
+                options == 0,
+                "{name} reports SQL_TXN_CAPABLE = {capable} and \
+                 SQL_TXN_ISOLATION_OPTION = {options:#x}; a data source with no \
+                 transactions has no isolation levels, and one with levels is \
+                 not SQL_TC_NONE"
+            );
+        }
+
+        check::<MockBackend>(&MockConnection, "MockBackend");
+        check::<MockAltBackend>(&MockConnection, "MockAltBackend");
+    }
+
+    /// The Windows Driver Manager queries driver identity *before*
+    /// `SQLDriverConnectW`, so these answers cannot depend on a connection.
+    /// With [`Backend::driver_name`] and [`Backend::driver_version`] declared,
+    /// core answers them itself and a driver needs no
+    /// [`Backend::get_info_pre_connect`] override to satisfy the Driver
+    /// Manager.
+    #[test]
+    fn driver_identity_answers_without_a_connection() {
+        assert_eq!(
+            default_get_info::<MockBackend>(None, InfoType::DriverName),
+            Some(InfoValue::String("Mock ODBC Driver".into())),
+        );
+        assert_eq!(
+            default_get_info::<MockBackend>(None, InfoType::DriverVer),
+            Some(InfoValue::String("01.00.0000".into())),
+        );
+        // The rest of the group the Windows DM asks for, for the same reason.
+        assert_eq!(
+            default_get_info::<MockBackend>(None, InfoType::DriverOdbcVer),
+            Some(InfoValue::String(SQL_DRIVER_ODBC_VER_STRING.into())),
+        );
+        assert_eq!(
+            default_get_info::<MockBackend>(None, InfoType::AsyncDbcFunctions),
+            Some(InfoValue::U32(0)),
+        );
+        assert_eq!(
+            default_get_info::<MockBackend>(None, InfoType::MaxConcurrentActivities),
+            Some(InfoValue::U16(0)),
+        );
+        // The data-source half of identity is not answerable without one.
+        assert_eq!(
+            default_get_info::<MockBackend>(None, InfoType::DbmsName),
+            None,
+        );
+    }
+
     /// The classification above is only as strong as the two mocks differing.
     /// A hook added to `MockBackend` and copied verbatim into `MockAltBackend`
     /// would silently turn a backend-derived info type into a "core fact"
@@ -2670,6 +2868,22 @@ mod tests {
             data_source_read_only,
             search_pattern_escape,
             keywords,
+            quoted_identifier_case,
+            txn_capable,
+            integrity,
+            multiple_active_txn,
+            special_characters,
+            accessible_procedures,
+            dbms_name,
+            dbms_version,
+        );
+        // Asserted separately for the same reason as the cursor-behaviour pair
+        // below: driver identity answers before a connection exists, because
+        // that is when the Windows Driver Manager asks for it.
+        assert_ne!(MockBackend::driver_name(), MockAltBackend::driver_name());
+        assert_ne!(
+            MockBackend::driver_version(),
+            MockAltBackend::driver_version(),
         );
         // Asserted separately: these three do not take a connection, because
         // `SQLGetInfo` has to answer the two cursor-behaviour info types before

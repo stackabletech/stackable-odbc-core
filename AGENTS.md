@@ -318,6 +318,14 @@ These deliberately are not:
 | `non_nullable_columns` | `SQL_NON_NULLABLE_COLUMNS` (`0` = `SQL_NNC_NULL`) |
 | `expressions_in_order_by` | `SQL_EXPRESSIONS_IN_ORDERBY` |
 | `identifier_case` | `SQL_IDENTIFIER_CASE` (`SQL_IC_*`); `0` is not a legal value |
+| `quoted_identifier_case` | `SQL_QUOTED_IDENTIFIER_CASE` (`SQL_IC_*`); independent of the unquoted rule |
+| `txn_capable` | `SQL_TXN_CAPABLE` (`SQL_TC_*`); `0` = `SQL_TC_NONE`, contradicting any declared isolation level |
+| `integrity` | `SQL_INTEGRITY` — whether the *data source* has the Integrity Enhancement Facility |
+| `multiple_active_txn` | `SQL_MULTIPLE_ACTIVE_TXN` — whether two transactions can be live at once |
+| `special_characters` | `SQL_SPECIAL_CHARACTERS`; an empty list is an answer, as with `keywords` |
+| `accessible_procedures` | `SQL_ACCESSIBLE_PROCEDURES`, the counterpart of `accessible_tables` |
+| `driver_name` / `driver_version` | `SQL_DRIVER_NAME` / `SQL_DRIVER_VER`; answered before a connection exists |
+| `dbms_name` / `dbms_version` | `SQL_DBMS_NAME` / `SQL_DBMS_VER` — what this connection reached |
 | `sql_conformance` | `SQL_SQL_CONFORMANCE` (`SQL_SC_*`) |
 | `timedate_add_intervals` | `SQL_TIMEDATE_ADD_INTERVALS` (`SQL_FN_TSI_*`) |
 | `timedate_diff_intervals` | `SQL_TIMEDATE_DIFF_INTERVALS` (`SQL_FN_TSI_*`) |
@@ -423,12 +431,16 @@ The Windows DM is much stricter than unixODBC. These items are **required** for
 a driver to work on Windows — omitting any one can cause silent crashes,
 `IM001` errors, or blocked `SQLGetData` calls:
 
-- **`get_info_pre_connect`**: Override this in your `Backend` impl. The Windows DM
-  queries `SQL_DRIVER_ODBC_VER` (77) *before* `SQLDriverConnectW`. If it gets
-  `SQL_ERROR`, the DM treats the driver as ODBC 2.x and blocks 3.x features
-  like `SQL_C_SBIGINT`. At minimum, return `DriverOdbcVer`, `DriverName`,
-  `DriverVer`, `AsyncDbcFunctions`, and `MaxConcurrentActivities`. Delegate to
-  the same handler as the connected path so the two never drift.
+- **The pre-connect info group is core's job now, not a checklist item.** The
+  Windows DM queries `SQL_DRIVER_ODBC_VER` (77) *before* `SQLDriverConnectW`,
+  and on `SQL_ERROR` treats the driver as ODBC 2.x and blocks 3.x features like
+  `SQL_C_SBIGINT`. Core answers the whole group without a connection —
+  `SQL_DRIVER_NAME` and `SQL_DRIVER_VER` from the required `Backend::driver_name`
+  and `Backend::driver_version`, and `SQL_DRIVER_ODBC_VER`,
+  `SQL_ASYNC_DBC_FUNCTIONS` and `SQL_MAX_CONCURRENT_ACTIVITIES` from facts about
+  itself. Declaring the two hooks is all a driver does; overriding
+  `get_info_pre_connect` is only for a *further* info type it can answer before
+  connecting, which is rare.
 
 - **`get_functions`**: List **every** exported FFI function, not just
   query-related ones. The Windows DM uses the 3.x bitmap (`func_id=999`) to
