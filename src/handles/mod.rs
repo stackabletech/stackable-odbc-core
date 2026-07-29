@@ -450,6 +450,12 @@ pub(crate) struct ParamRecords<'a> {
 impl<'a> ParamRecords<'a> {
     /// Both halves of parameter `number`, or `None` if it is not bound.
     ///
+    /// "Not bound" covers two shapes: no record at all, and a record whose
+    /// `SQL_DESC_DATA_PTR` is null. The second exists because
+    /// `SQLSetDescField` can create a record by setting any single field, so
+    /// the spec's own test — a null data pointer is the unbind — is the only
+    /// one left.
+    ///
     /// `Err` is reserved for the one case that is neither: a parameter present
     /// in one descriptor and absent from the other. `SQLBindParameter` writes
     /// and removes both under the same key, so that state is unreachable — but
@@ -458,6 +464,10 @@ impl<'a> ParamRecords<'a> {
     /// application pointers.
     pub(crate) fn get(&self, number: u16) -> Result<Option<ParamRecord<'a>>, OdbcError> {
         match (self.apd.get(&number), self.ipd.get(&number)) {
+            // A record with a null SQL_DESC_DATA_PTR exists but is not a
+            // binding. `SQLSetDescField` can create one by setting any single
+            // field, so presence in the map stopped answering this question.
+            (Some(apd), Some(_)) if !apd.is_bound() => Ok(None),
             (Some(apd), Some(ipd)) => Ok(Some(ParamRecord { apd, ipd })),
             (None, None) => Ok(None),
             (apd, _) => Err(OdbcError::general(

@@ -2655,6 +2655,79 @@ mod tests {
         assert_eq!(err.sqlstate().as_str(), "07002");
     }
 
+    /// `collect_params` reports 07002 for a marker with no binding. A record
+    /// with a null `SQL_DESC_DATA_PTR` is not a binding, so it must report the
+    /// same thing rather than reading through the null pointer.
+    #[test]
+    fn collect_params_treats_a_null_data_pointer_as_unbound() {
+        let mut records = BoundParams::new();
+        records.insert(1, unbound_record());
+
+        let err = unsafe { collect_params(records.records(), 1) }
+            .expect_err("a record with a null data pointer was read as a binding");
+
+        assert_eq!(err.sqlstate().as_str(), "07002");
+    }
+
+    /// The data-at-execution route walks the same range and must agree, or it
+    /// becomes a second way past the check.
+    #[test]
+    fn find_data_at_exec_params_treats_a_null_data_pointer_as_unbound() {
+        let mut records = BoundParams::new();
+        records.insert(1, unbound_record());
+
+        let err = unsafe { find_data_at_exec_params(records.records(), 1) }
+            .expect_err("a record with a null data pointer was read as a binding");
+
+        assert_eq!(err.sqlstate().as_str(), "07002");
+    }
+
+    /// The output direction: a backend must not write through a record the
+    /// application never gave a buffer for.
+    ///
+    /// The indicator is what makes this observable. `write_column_value`
+    /// declines to write through a null target pointer but writes the length
+    /// indicator unconditionally, so a record wrongly treated as a binding
+    /// reports a length for a value it did not store.
+    #[test]
+    fn write_output_params_skips_a_null_data_pointer() {
+        // Sentinel: no ODBC length is negative, so any write is visible.
+        let mut indicator: isize = -99;
+        let mut records = BoundParams::new();
+        records.insert(
+            1,
+            BoundParam {
+                input_output_type: ParamType::Output,
+                str_len_or_ind_ptr: std::ptr::from_mut(&mut indicator),
+                ..unbound_record()
+            },
+        );
+        let outputs = [crate::types::OutputParam::new(1, ColumnValue::I32(42))];
+
+        unsafe { write_output_params(records.records(), &outputs) }
+            .expect("writing an output value through a null data pointer");
+
+        assert_eq!(
+            indicator, -99,
+            "an output value was written through a record that is not a binding"
+        );
+    }
+
+    /// A record that exists but is not a binding: every field set as
+    /// `SQLBindParameter` would set it, except the data pointer.
+    fn unbound_record() -> BoundParam {
+        BoundParam {
+            input_output_type: ParamType::Input,
+            c_type: CDataType::SLong,
+            sql_type: SqlDataType::INTEGER,
+            col_size: 10,
+            decimal_digits: 0,
+            value_ptr: std::ptr::null_mut(),
+            buffer_length: 4,
+            str_len_or_ind_ptr: std::ptr::null_mut(),
+        }
+    }
+
     /// The unsound case, and the reason this is a fix rather than a tidy-up.
     ///
     /// An output-only `SQL_C_CHAR` buffer with no indicator is read as a

@@ -270,6 +270,10 @@ pub unsafe fn sql_fetch<B: Backend>(statement_handle: *mut c_void) -> SqlReturn 
                         .app_row_desc
                         .records
                         .iter()
+                        // A record exists as soon as any one field is set, so
+                        // presence no longer means bound; the spec makes a null
+                        // `SQL_DESC_DATA_PTR` the unbind.
+                        .filter(|(_, record)| record.is_bound())
                         .map(|(&col, b)| {
                             Ok((
                                 col,
@@ -1196,6 +1200,58 @@ mod tests {
             assert_eq!(sql_fetch::<MockLongDataBackend>(stmt), SqlReturn::SUCCESS);
             assert_eq!(sql_fetch::<MockLongDataBackend>(stmt), SqlReturn::NO_DATA);
             assert_eq!(rows_fetched, 0, "rows-fetched not zeroed at end of cursor");
+
+            cleanup_long_data(env, conn, stmt);
+        }
+    }
+
+    /// A record that exists with a null `SQL_DESC_DATA_PTR` is not a binding,
+    /// and `SQLFetch` must pass over it entirely.
+    ///
+    /// The visible half of getting this wrong is the *indicator*, not the value
+    /// buffer: `write_column_value` declines to write through a null target
+    /// pointer, but it writes the length indicator unconditionally. So a record
+    /// treated as a binding stamps a length into the application's indicator
+    /// for a column it never bound — and, one layer up, `SQLFetch` calls
+    /// `SQLGetData` on that column for nothing.
+    ///
+    /// Driven on `MockLongDataBackend` rather than `MockBackend`: the record is
+    /// inserted for column 2, which really does carry a value, so a `SQLFetch`
+    /// that treated the record as a binding would have something to write.
+    #[test]
+    fn fetch_skips_a_record_whose_data_pointer_is_null() {
+        unsafe {
+            let (env, conn, stmt) = long_data_stmt_no_fetch();
+
+            // Sentinel: no ODBC length is negative, so any write is visible.
+            let mut indicator: isize = -99;
+            let indicator_ptr = std::ptr::from_mut(&mut indicator);
+
+            // Inserted directly: no public call creates a record with a null
+            // data pointer until `SQLSetDescField` lands, and this test is what
+            // makes that arrival safe.
+            with_handle::<MockLongDataBackend, StatementHandle<MockLongDataBackend>, _>(
+                stmt,
+                |handle| {
+                    handle.app_row_desc.records.insert(
+                        2,
+                        crate::descriptor::DescriptorRecord {
+                            concise_type: CDataType::SLong as i16,
+                            verbose_type: CDataType::SLong as i16,
+                            octet_length: 4,
+                            indicator_ptr,
+                            ..Default::default()
+                        },
+                    );
+                },
+            );
+
+            assert_eq!(sql_fetch::<MockLongDataBackend>(stmt), SqlReturn::SUCCESS);
+            assert_eq!(
+                std::ptr::read(indicator_ptr),
+                -99,
+                "SQLFetch wrote through a record that is not a binding"
+            );
 
             cleanup_long_data(env, conn, stmt);
         }

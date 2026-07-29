@@ -151,9 +151,6 @@ impl DescriptorRecord {
     /// field, so the spec's own answer is the only one left — a null
     /// `SQL_DESC_DATA_PTR` means unbound, and setting it to null is how
     /// `SQLSetDescRec` unbinds a column.
-    // Its callers are the boundness sites that still test `contains_key`; the
-    // allow comes off when they move over.
-    #[allow(dead_code)]
     pub fn is_bound(&self) -> bool {
         !self.data_ptr.is_null()
     }
