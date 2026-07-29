@@ -370,6 +370,25 @@ that — every statement-producing `Backend` method is synchronous and blocks th
 calling thread, so `Backend::cancel` is the only lever, and whether a backend
 wired it up is not observable from Rust.
 
+**The timer is armed at `SQLFetch` too, not only at the statement-producing
+calls**, and the reason generalises to any driver whose data source streams.
+`SQL_ATTR_QUERY_TIMEOUT` bounds *returning the result set*, and a data source is
+free to answer with column metadata long before it has computed a row — Trino
+does. Measured against a live coordinator under a two-second deadline, the
+`SQLExecDirect` returned `SQL_SUCCESS` in 0.1 s and the following `SQLFetch`
+took 24.6 s, so an execute-only timer expired on nothing and bounded nothing.
+`SQLFetch` and `SQLFetchScroll` both carry `HYT00` with **no `(DM)` marker**,
+naming this attribute directly.
+
+`SQLGetData` is the boundary, and it is drawn by the spec rather than by
+convenience: its diagnostics table carries `HYT01` and **no `HYT00` row at
+all**, so it is deliberately unarmed. The bound-column reads that run *inside*
+`SQLFetch` are a different thing and do fall under that call's deadline.
+`SQLFetchScroll` needs no site of its own — every orientation but
+`SQL_FETCH_NEXT` is rejected with `HY106`, and that one delegates to
+`sql_fetch`. Before arming a further site, check the function's own table for
+an `HYT00` row.
+
 Before adding a fourth attribute of this kind, check the spec row for a stated
 *purpose*. If the purpose is to reduce work at the data source, the answer is a
 hook plus the `01S02` fallback, not an implementation in core.

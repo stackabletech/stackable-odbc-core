@@ -3648,3 +3648,178 @@ impl Backend for MockBlockingBackend {
 
     minimal_capability_decls!();
 }
+
+// ---------------------------------------------------------------------------
+// A backend whose *fetch* blocks, for core's query timer at SQLFetch
+// ---------------------------------------------------------------------------
+
+/// The statement [`MockFetchTimeoutBackend`] produces: its `fetch` blocks until
+/// its cancel token is signalled.
+///
+/// This is the shape the query timer exists for, moved one call later than
+/// [`MockCoreCancelsTimeoutBackend`] puts it. That backend blocks in
+/// `exec_direct`, which proves core arms a deadline at a statement-producing
+/// call; it cannot prove anything about `SQLFetch`, because its statement
+/// returns from `fetch` immediately. A data source that answers with column
+/// metadata before computing a row — the case this exists for — inverts those
+/// two costs entirely.
+///
+/// The token is held by `Arc` rather than borrowed: `exec_direct` receives the
+/// token core minted for that execution and the statement must observe *that*
+/// one later, from a call that no longer has it in hand. `Arc<MockCancelToken>`
+/// is therefore the `CancelToken` type here, which is also the aliasing shape
+/// AGENTS.md requires of a token that must survive a concurrent free.
+pub struct MockFetchTimeoutStatement {
+    token: std::sync::Arc<MockCancelToken>,
+}
+
+impl StatementBackend for MockFetchTimeoutStatement {
+    type Error = MockError;
+
+    fn column_count(&self) -> i16 {
+        1
+    }
+
+    /// Blocks until cancelled, then fails — a runaway fetch.
+    ///
+    /// The wait is **bounded**, for the reason
+    /// [`MockCoreCancelsTimeoutBackend`]'s `exec_direct` records: if core stops
+    /// arming its timer here, nothing signals this token, and an unbounded wait
+    /// would turn the test that catches the regression into a hung CI job
+    /// instead of a failed assertion. The bound is far above any deadline a
+    /// test sets, so it cannot mask a real timeout.
+    fn fetch(&mut self) -> Result<crate::types::FetchResult, Self::Error> {
+        // Counted rather than clock-measured: `Instant::now` is disallowed
+        // crate-wide, and a bound this loose needs no real clock.
+        const STEP_MS: u64 = 5;
+        const MAX_STEPS: u32 = 6_000; // ~30s, far above any test deadline
+        let mut steps = 0;
+        while !self
+            .token
+            .cancelled
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            steps += 1;
+            assert!(
+                steps < MAX_STEPS,
+                "nothing cancelled this fetch — core almost certainly stopped \
+                 arming its query timer at SQLFetch",
+            );
+            std::thread::sleep(std::time::Duration::from_millis(STEP_MS));
+        }
+        Err(MockError)
+    }
+}
+
+/// Delegates `SQL_ATTR_QUERY_TIMEOUT` to core and then blocks in `fetch`.
+pub struct MockFetchTimeoutBackend;
+
+impl Backend for MockFetchTimeoutBackend {
+    type Connection = MockConnection;
+    type Statement = MockFetchTimeoutStatement;
+    type Error = MockError;
+    type CancelToken = std::sync::Arc<MockCancelToken>;
+
+    fn connect(_: &ConnectParams) -> Result<MockConnection, MockError> {
+        Ok(MockConnection)
+    }
+    fn disconnect(_: &mut MockConnection) -> Result<(), MockError> {
+        Ok(())
+    }
+    fn cancel_token(_conn: &Self::Connection) -> Self::CancelToken {
+        std::sync::Arc::new(MockCancelToken::default())
+    }
+    fn cancel(token: &Self::CancelToken) -> Result<(), Self::Error> {
+        token
+            .cancelled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+    fn is_cancelled(token: &Self::CancelToken) -> bool {
+        token.cancelled.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    /// Hands the deadline to core, which is what arms the timer at all.
+    fn set_query_timeout(
+        _conn: &Self::Connection,
+        _seconds: usize,
+    ) -> Result<crate::types::QueryTimeout, MockError> {
+        Ok(crate::types::QueryTimeout::CoreCancels)
+    }
+    /// Returns at once — the whole point. The wait is all in `fetch`.
+    fn exec_direct(
+        _: &MockConnection,
+        cancel: &Self::CancelToken,
+        _: &str,
+    ) -> Result<MockFetchTimeoutStatement, MockError> {
+        Ok(MockFetchTimeoutStatement {
+            token: std::sync::Arc::clone(cancel),
+        })
+    }
+    fn prepare(
+        _: &MockConnection,
+        cancel: &Self::CancelToken,
+        _: &str,
+    ) -> Result<MockFetchTimeoutStatement, MockError> {
+        Ok(MockFetchTimeoutStatement {
+            token: std::sync::Arc::clone(cancel),
+        })
+    }
+    fn execute(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: &mut MockFetchTimeoutStatement,
+        _: &[crate::types::ColumnValue],
+    ) -> Result<crate::types::ExecuteOutcome, MockError> {
+        Ok(crate::types::ExecuteOutcome::default())
+    }
+    fn get_info(_: &MockConnection, _: crate::types::InfoType) -> Result<InfoValue, MockError> {
+        Err(MockError)
+    }
+    fn get_functions() -> Cow<'static, [crate::function_id::FunctionId]> {
+        Cow::Borrowed(&[])
+    }
+    fn get_type_info(_conn: &Self::Connection) -> Cow<'static, [TypeInfoRow]> {
+        Cow::Borrowed(&[])
+    }
+    fn tables(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: &[String],
+    ) -> Result<Vec<TableRow>, MockError> {
+        Ok(Vec::new())
+    }
+    fn columns(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+    ) -> Result<Vec<ColumnRow>, MockError> {
+        Ok(Vec::new())
+    }
+
+    fn supports_catalogs(_conn: &Self::Connection) -> bool {
+        false
+    }
+    fn supports_schemas(_conn: &Self::Connection) -> bool {
+        false
+    }
+    fn alter_table_support(_conn: &Self::Connection) -> u32 {
+        0
+    }
+    fn outer_join_capabilities(_conn: &Self::Connection) -> u32 {
+        0
+    }
+    fn default_txn_isolation(_conn: &Self::Connection) -> u32 {
+        0
+    }
+    fn txn_isolation_options(_conn: &Self::Connection) -> u32 {
+        0
+    }
+
+    minimal_capability_decls!();
+}

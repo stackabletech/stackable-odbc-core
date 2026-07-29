@@ -197,6 +197,25 @@ impl QueryTimer {
         ))
     }
 
+    /// [`Self::check`] for a caller that may not have a token.
+    ///
+    /// The cursor-consuming entry points read their token off the registry
+    /// rather than minting one, so they hold an `Option` — see
+    /// [`crate::cancel::reclassify_cancelled_opt`], whose `None` case this
+    /// shares. The timeout pass still runs: `None` means no *cancellation* can
+    /// be attributed, not that no deadline was armed, and a timer armed on this
+    /// call is the one thing that could have signalled a token that was never
+    /// minted.
+    pub(crate) fn check_opt<B: Backend, T, E: Into<OdbcError>>(
+        &self,
+        result: Result<T, E>,
+        cancel: Option<&B::CancelToken>,
+    ) -> Result<T, OdbcError> {
+        self.reclassify(crate::cancel::reclassify_cancelled_opt::<B, _, _>(
+            result, cancel,
+        ))
+    }
+
     pub(crate) fn reclassify<T>(&self, result: Result<T, OdbcError>) -> Result<T, OdbcError> {
         match result {
             Ok(value) => Ok(value),

@@ -150,7 +150,14 @@ unsafe fn report_rows_fetched_only<B: Backend>(stmt: &StatementHandle<B>, count:
 /// - HY117 (connection suspended): driver-manager-handled; not returned here.
 /// - HYC00 (optional feature not implemented): returned via `write_column_value` when an
 ///   unsupported type conversion is requested.
-/// - HYT00 (timeout expired): not implemented; query timeouts are not supported.
+/// - HYT00 (timeout expired): **returned by this driver**. The row carries no `(DM)` marker and
+///   names `SQL_ATTR_QUERY_TIMEOUT` directly, and the spec's "Errors and Warnings on the Entire
+///   Function" section gives `HYT00` as its example of a whole-function error. For a backend
+///   answering [`crate::types::QueryTimeout::CoreCancels`], core arms a deadline over this call
+///   and relabels the resulting failure `HYT00`; for a backend answering `DataSource`, the data
+///   source's own timeout error is propagated. Armed here and not only at the
+///   statement-producing calls because a data source may return column metadata long before it
+///   computes a row, which puts the whole wait on the fetch.
 /// - HYT01 (connection timeout expired): not implemented.
 /// - IM001 (driver does not support this function): driver-manager-handled; not returned here.
 /// - IM017, IM018: driver-manager-handled; not returned here.
@@ -181,6 +188,29 @@ pub unsafe fn sql_fetch<B: Backend>(statement_handle: *mut c_void) -> SqlReturn 
                 .as_ref()
                 .map(crate::handles::cancel_as::<B>)
                 .transpose()?;
+
+            // Core-enforced deadline, if the backend asked core to own one.
+            //
+            // Armed here and not only at the statement-producing calls because
+            // `SQL_ATTR_QUERY_TIMEOUT` is a deadline on *returning the result
+            // set*, and a data source is free to answer with column metadata
+            // long before it has computed a row. Against such a source every
+            // execute finishes in milliseconds and the whole wait lands on
+            // `SQLFetch` — measured at 0.1s for the execute and 24.6s for the
+            // following fetch, under a 2-second deadline. `SQLFetch`'s
+            // diagnostics table carries `HYT00` with no `(DM)` marker for
+            // exactly this attribute, so the site is the driver's to arm.
+            //
+            // Disarmed by `Drop` at the end of this scope, so a fetch that
+            // returns promptly leaves no thread behind. `None` for the token
+            // means no backend call has run on this statement yet, which is
+            // also the case where there is nothing for a timer to cancel.
+            let timer = match cancel_token.as_ref() {
+                Some(token) => {
+                    crate::query_timer::QueryTimer::arm::<B>(stmt.core_query_timeout, token)
+                }
+                None => crate::query_timer::QueryTimer::disarmed(),
+            };
 
             // `SQL_ATTR_ROW_BIND_OFFSET_PTR` points at an `SQLULEN` the
             // application may change between fetches; the spec has the driver
@@ -223,7 +253,7 @@ pub unsafe fn sql_fetch<B: Backend>(statement_handle: *mut c_void) -> SqlReturn 
             // through cannot leave a stale position behind.
             stmt.get_data_cursor = None;
 
-            match reclassify_cancelled_opt::<B, _, _>(statement.fetch(), cancel)? {
+            match timer.check_opt::<B, _, _>(statement.fetch(), cancel)? {
                 FetchResult::Row => {
                     // Populate bound columns.
                     // Collect binding info first to avoid borrowing stmt mutably
@@ -256,10 +286,12 @@ pub unsafe fn sql_fetch<B: Backend>(statement_handle: *mut c_void) -> SqlReturn 
                     let mut truncated = false;
                     if let Some(ref mut statement) = stmt.statement {
                         for (col, c_type, target_ptr, buf_len, ind_ptr) in &binding_info {
-                            let value = reclassify_cancelled_opt::<B, _, _>(
-                                statement.get_data(*col, *c_type),
-                                cancel,
-                            )?;
+                            // Under the same deadline as the `fetch` above: these
+                            // reads are part of `SQLFetch`'s own execution, so
+                            // they fall under `SQLFetch`'s `HYT00` even though
+                            // `SQLGetData` called directly has no such row.
+                            let value = timer
+                                .check_opt::<B, _, _>(statement.get_data(*col, *c_type), cancel)?;
                             // Spec 22002: if data is NULL and no indicator variable was supplied, return error.
                             if matches!(*value, ColumnValue::Null) && ind_ptr.is_null() {
                                 return Err(OdbcError::general(
@@ -372,7 +404,10 @@ pub unsafe fn sql_fetch<B: Backend>(statement_handle: *mut c_void) -> SqlReturn 
 /// - HY111 (invalid bookmark value): not applicable; bookmarks are not supported.
 /// - HY117 (connection suspended): driver-manager-handled; not returned here.
 /// - HYC00 (optional feature not implemented): delegated to `sql_fetch` for `SQL_FETCH_NEXT`.
-/// - HYT00 (timeout expired): not implemented.
+/// - HYT00 (timeout expired): **returned by this driver**, via the same delegation. The row
+///   carries no `(DM)` marker here either, and `SQL_FETCH_NEXT` is the only orientation that
+///   reaches the backend at all — every other one is rejected with `HY106` above — so arming
+///   the deadline in `sql_fetch` covers this function completely.
 /// - HYT01 (connection timeout expired): not implemented.
 /// - IM001 (driver does not support this function): driver-manager-handled.
 /// - IM017, IM018: driver-manager-handled; not returned here.
@@ -533,6 +568,12 @@ pub unsafe fn sql_fetch_scroll<B: Backend>(
 /// - HYC00 (optional feature not implemented): not returned by `write_column_value`; its
 ///   unsupported-conversion paths return 07006 (see above).
 /// - HYT01 (connection timeout expired): not implemented.
+/// - HYT00 is **absent from this function's diagnostics table** — deliberately, and not an
+///   oversight in this list. `SQLFetch` and `SQLFetchScroll` both carry it; `SQLGetData` carries
+///   only `HYT01`. So core arms no `SQL_ATTR_QUERY_TIMEOUT` deadline here, and a driver must not
+///   add one: the query timeout governs returning the result set, which has already happened by
+///   the time this function is reachable. The bound-column reads that run *inside* `SQLFetch` are
+///   a different matter and do fall under that call's deadline.
 /// - IM001 (driver does not support this function): driver-manager-handled.
 /// - IM017, IM018: driver-manager-handled; not returned here.
 ///
@@ -687,8 +728,8 @@ mod tests {
     use super::*;
     use crate::ffi::handle::{sql_alloc_handle, sql_free_handle};
     use crate::test_utils::{
-        LONG_BYTES, LONG_TEXT, MockBackend, MockCancelAwareBackend, MockLongDataBackend,
-        alloc_env_conn_stmt, cleanup_env_conn_stmt, with_handle,
+        LONG_BYTES, LONG_TEXT, MockBackend, MockCancelAwareBackend, MockFetchTimeoutBackend,
+        MockLongDataBackend, alloc_env_conn_stmt, cleanup_env_conn_stmt, with_handle,
     };
     use crate::types::CDataType;
     use odbc_sys::HandleType;
@@ -1429,6 +1470,80 @@ mod tests {
             );
             assert_eq!(ret, SqlReturn::ERROR);
             cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
+    /// The Trino case: a data source that answers with column metadata long
+    /// before it computes a row, so `SQLExecDirect` is fast and the whole wait
+    /// lands on `SQLFetch`.
+    ///
+    /// `execute.rs`'s `an_execution_that_overruns_its_query_timeout_reports_hyt00`
+    /// is the sibling of this test and cannot stand in for it: it blocks in
+    /// `exec_direct`, so it keeps passing with `SQLFetch` entirely unarmed —
+    /// which is exactly the state this driver shipped in. Measured against a
+    /// live coordinator under a 2-second deadline, the execute returned
+    /// `SQL_SUCCESS` in 0.1s and the fetch in 24.6s.
+    ///
+    /// Not run under Miri: a real one-second deadline and a spin-until-cancelled
+    /// fetch, which Miri would stretch unpredictably for no memory-safety gain.
+    #[test]
+    #[cfg_attr(miri, ignore = "wall-clock deadline; no unsafe to check")]
+    fn a_fetch_that_overruns_its_query_timeout_reports_hyt00() {
+        unsafe {
+            let (env, conn, stmt) =
+                crate::test_utils::alloc_connected_env_conn_stmt::<MockFetchTimeoutBackend>();
+
+            // The mock answers `CoreCancels`, so this records a one-second
+            // deadline for core's timer rather than handing it to the source.
+            assert_eq!(
+                crate::ffi::stmt_attr::sql_set_stmt_attr_w::<MockFetchTimeoutBackend>(
+                    stmt,
+                    odbc_sys::StatementAttribute::QueryTimeout as i32,
+                    // An integer-valued attribute, not a pointer; the ODBC ABI
+                    // passes it through a pointer-typed parameter.
+                    std::ptr::without_provenance_mut::<c_void>(1),
+                    0,
+                ),
+                SqlReturn::SUCCESS,
+                "the mock delegates the deadline to core rather than refusing it",
+            );
+
+            // Returns at once, as Trino's does: metadata is known, no row is.
+            let sql: Vec<u16> = "SELECT 1".encode_utf16().collect();
+            assert_eq!(
+                crate::ffi::execute::sql_exec_direct_w::<MockFetchTimeoutBackend>(
+                    stmt,
+                    sql.as_ptr(),
+                    i32::try_from(sql.len()).expect("SQL fits in i32"),
+                ),
+                SqlReturn::SUCCESS,
+                "precondition: the execute beats the deadline, so only the fetch can time out",
+            );
+
+            assert_eq!(
+                sql_fetch::<MockFetchTimeoutBackend>(stmt),
+                SqlReturn::ERROR,
+                "a fetch cancelled by its deadline must not report success",
+            );
+
+            let state = with_handle::<
+                MockFetchTimeoutBackend,
+                StatementHandle<MockFetchTimeoutBackend>,
+                _,
+            >(stmt, |h| {
+                h.diagnostics
+                    .get(0)
+                    .expect("a diagnostic record")
+                    .sqlstate
+                    .as_str()
+                    .to_owned()
+            });
+            assert_eq!(
+                state, "HYT00",
+                "an expired deadline is a timeout, not the HY008 a SQLCancel would give",
+            );
+
+            cleanup_stmt_for::<MockFetchTimeoutBackend>(env, conn, stmt);
         }
     }
 }

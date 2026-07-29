@@ -1008,6 +1008,25 @@ Everything a driver has to change for the catalog rework, in one place.
 
 ### Fixed
 
+- **`SQL_ATTR_QUERY_TIMEOUT` now bounds `SQLFetch`, not only the
+  statement-producing calls.** Core armed its timer at `SQLExecDirect`,
+  `SQLPrepare`, `SQLExecute`, `SQLParamData` and the ten catalog functions, and
+  nowhere on the cursor-consuming path — so against a data source that returns
+  column metadata before it computes anything, the deadline bounded the one call
+  that was already fast and left the slow one unbounded. Measured against a live
+  Trino coordinator with no Driver Manager involved, under a two-second
+  deadline: `SQLExecDirect` on `SELECT count(*) FROM tpcds.sf10.store_sales`
+  returned `SQL_SUCCESS` in 0.1 s, and the following `SQLFetch` returned
+  `SQL_SUCCESS` after 24.6 s. `SQLFetch`'s diagnostics table carries `HYT00`
+  with no `(DM)` marker and names this attribute directly, and its "Errors and
+  Warnings on the Entire Function" section gives `HYT00` as its example, so the
+  site was the driver's to arm. A backend answering `QueryTimeout::CoreCancels`
+  now gets a deadline over the fetch and its bound-column reads, relabelled
+  `HYT00` on expiry. `SQLFetchScroll` is covered by the same change, since
+  `SQL_FETCH_NEXT` delegates to `SQLFetch` and every other orientation is
+  rejected with `HY106` before reaching the backend. `SQLGetData` is deliberately
+  **not** armed: its diagnostics table carries `HYT01` and no `HYT00` row.
+
 - **`SQLSetConnectAttr(SQL_ATTR_TXN_ISOLATION)` now returns `HY011` when a
   transaction is open.** The spec states this three times — the `HY011` row
   ("the *Attribute* argument was SQL_ATTR_TXN_ISOLATION, and a transaction was
