@@ -47,7 +47,29 @@ pub(crate) fn apply_pending_connect_attrs<B: Backend>(
 ) -> Result<(), OdbcError> {
     apply_pending_autocommit::<B>(handle)?;
     apply_pending_txn_isolation::<B>(handle)?;
+    apply_pending_access_mode::<B>(handle)?;
     apply_pending_current_catalog::<B>(handle)
+}
+
+/// Apply a `SQL_ATTR_ACCESS_MODE` value that was set before the connection was
+/// open. See [`apply_pending_connect_attrs`].
+///
+/// The spec's attribute table marks this one "Either", with footnote [1]:
+/// "SQL_ATTR_ACCESS_MODE and SQL_ATTR_CURRENT_CATALOG can be set before or
+/// after connecting, depending on the driver. However, interoperable
+/// applications set them before connecting because some drivers do not support
+/// changing these after connecting." Setting it before is therefore the
+/// *recommended* usage, which makes this the path that matters most.
+fn apply_pending_access_mode<B: Backend>(
+    handle: &mut ConnectionHandle<B>,
+) -> Result<(), OdbcError> {
+    let Some(&val) = handle.attrs.get(&ConnectionAttribute::ACCESS_MODE.0) else {
+        return Ok(());
+    };
+    let Some(connection) = handle.connection.as_ref() else {
+        return Ok(());
+    };
+    B::set_access_mode(connection, val == SQL_MODE_READ_ONLY).into_odbc()
 }
 
 /// Apply a `SQL_ATTR_CURRENT_CATALOG` value that was set before the connection
@@ -268,9 +290,14 @@ fn connection_has_result_set_pending<B: Backend>(
 ///   DM/tool compatibility (a warning is logged instead). Note the distinction
 ///   this row draws between an unsupported *attribute* and an unsupported
 ///   *value* — an isolation level the data source cannot run at is HY024
-///   above, not HYC00.
-/// - HYT01 Connection timeout expired: not returned; this function does not wait
-///   on the data source.
+///   above, not HYC00. A backend may also produce this from
+///   [`Backend::set_current_catalog`] or [`Backend::set_access_mode`]; note
+///   that the latter defaults to accepting, because the spec makes read-only a
+///   hint the driver "is not required to" enforce.
+/// - HYT01 Connection timeout expired: not returned by core, but a backend hook
+///   this function calls — `set_autocommit`, `set_txn_isolation`,
+///   `set_access_mode` or `set_current_catalog` — may reach the data source and
+///   report it.
 /// - IM001 Driver does not support this function: (driver-manager-handled; not
 ///   returned here).
 /// - IM009 Unable to load translation DLL: not applicable; translation DLLs are
@@ -334,6 +361,15 @@ pub unsafe fn sql_set_connect_attr_w<B: Backend>(
                             ),
                             SqlState::invalid_attribute_value(),
                         ));
+                    }
+                    // Applied here when connected; deferred to
+                    // `apply_pending_access_mode` at connect otherwise, since
+                    // the spec lists this attribute as settable either side of
+                    // one. Stored only once the backend accepted it, so
+                    // `SQLGetConnectAttr` cannot report a mode the data source
+                    // refused.
+                    if let Some(connection) = conn.connection.as_ref() {
+                        B::set_access_mode(connection, val == SQL_MODE_READ_ONLY).into_odbc()?;
                     }
                     conn.attrs.insert(attribute, val);
                     Ok(SqlReturn::SUCCESS)
@@ -936,6 +972,137 @@ mod tests {
             assert_eq!(ret, SqlReturn::SUCCESS);
             assert_eq!(val, SQL_AUTOCOMMIT_ON as u32);
             cleanup(env, conn);
+        }
+    }
+
+    /// Read back the access mode a backend actually had applied to it.
+    fn applied_access_mode<B: Backend<Connection = crate::test_utils::MockAppliedConnection>>(
+        conn: *mut c_void,
+    ) -> Option<bool> {
+        with_handle::<B, ConnectionHandle<B>, _>(conn, |c| {
+            c.connection
+                .as_ref()
+                .expect("connected")
+                .access_mode
+                .lock()
+                .ok()
+                .and_then(|slot| *slot)
+        })
+    }
+
+    #[test]
+    fn setting_access_mode_reaches_the_backend() {
+        // The attribute was validated and stored but never applied, so a data
+        // source with a real read-only session mode never entered it.
+        unsafe {
+            type B = crate::test_utils::MockAccessModeBackend;
+            let (env, conn, stmt) = crate::test_utils::alloc_connected_env_conn_stmt::<B>();
+
+            assert_eq!(
+                applied_access_mode::<B>(conn),
+                None,
+                "nothing has set the access mode yet",
+            );
+
+            let ret = sql_set_connect_attr_w::<B>(
+                conn,
+                ConnectionAttribute::ACCESS_MODE.0,
+                std::ptr::without_provenance_mut::<c_void>(SQL_MODE_READ_ONLY),
+                0,
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+            assert_eq!(
+                applied_access_mode::<B>(conn),
+                Some(true),
+                "Backend::set_access_mode was never called",
+            );
+
+            crate::test_utils::cleanup_connected_env_conn_stmt::<B>(env, conn, stmt);
+        }
+    }
+
+    #[test]
+    fn an_access_mode_set_before_connecting_is_applied_at_connect() {
+        // The spec's footnote [1] calls setting this before connecting the
+        // interoperable choice - "some drivers do not support changing these
+        // after connecting" - so this is the path that matters most, and it
+        // runs through `apply_pending_access_mode` rather than the set arm.
+        unsafe {
+            type B = crate::test_utils::MockAccessModeBackend;
+            let mut env: *mut c_void = std::ptr::null_mut();
+            let _ = sql_alloc_handle::<B>(HandleType::Env as i16, std::ptr::null_mut(), &mut env);
+            let mut conn: *mut c_void = std::ptr::null_mut();
+            let _ = sql_alloc_handle::<B>(HandleType::Dbc as i16, env, &mut conn);
+
+            assert_eq!(
+                sql_set_connect_attr_w::<B>(
+                    conn,
+                    ConnectionAttribute::ACCESS_MODE.0,
+                    std::ptr::without_provenance_mut::<c_void>(SQL_MODE_READ_ONLY),
+                    0,
+                ),
+                SqlReturn::SUCCESS,
+                "the spec lists this attribute as settable before connecting",
+            );
+
+            let wide: Vec<u16> = "Host=localhost".encode_utf16().collect();
+            assert_eq!(
+                crate::ffi::connect::sql_driver_connect_w::<B>(
+                    conn,
+                    std::ptr::null_mut(),
+                    wide.as_ptr(),
+                    wide.len() as i16,
+                    std::ptr::null_mut(),
+                    0,
+                    std::ptr::null_mut(),
+                    0,
+                ),
+                SqlReturn::SUCCESS,
+            );
+
+            assert_eq!(
+                applied_access_mode::<B>(conn),
+                Some(true),
+                "a mode set before connecting must be applied once the connection exists",
+            );
+
+            let _ = crate::ffi::connect::sql_disconnect::<B>(conn);
+            let _ = sql_free_handle::<B>(HandleType::Dbc as i16, conn);
+            let _ = sql_free_handle::<B>(HandleType::Env as i16, env);
+        }
+    }
+
+    #[test]
+    fn a_backend_that_refuses_an_access_mode_keeps_it_out_of_the_stored_attributes() {
+        // Storing a mode the data source refused would let SQLGetConnectAttr
+        // report a read-only connection that is nothing of the kind.
+        unsafe {
+            type B = crate::test_utils::MockRefusingAccessModeBackend;
+            let (env, conn, stmt) = crate::test_utils::alloc_connected_env_conn_stmt::<B>();
+
+            let ret = sql_set_connect_attr_w::<B>(
+                conn,
+                ConnectionAttribute::ACCESS_MODE.0,
+                std::ptr::without_provenance_mut::<c_void>(SQL_MODE_READ_ONLY),
+                0,
+            );
+            assert_eq!(ret, SqlReturn::ERROR);
+
+            let mut val: u32 = 99;
+            let get = sql_get_connect_attr_w::<B>(
+                conn,
+                ConnectionAttribute::ACCESS_MODE.0,
+                &mut val as *mut u32 as *mut c_void,
+                0,
+                std::ptr::null_mut(),
+            );
+            assert_eq!(get, SqlReturn::SUCCESS);
+            assert_eq!(
+                val, SQL_MODE_READ_WRITE as u32,
+                "a refused read-only mode must not be reported back as in force",
+            );
+
+            crate::test_utils::cleanup_connected_env_conn_stmt::<B>(env, conn, stmt);
         }
     }
 

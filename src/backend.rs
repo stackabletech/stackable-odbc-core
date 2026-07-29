@@ -215,6 +215,39 @@ pub trait Backend: Sized + Send + Sync + 'static {
         .into())
     }
 
+    /// Tell the data source whether this connection needs to support updates.
+    ///
+    /// Called by `SQLSetConnectAttr(SQL_ATTR_ACCESS_MODE)` with `true` for
+    /// `SQL_MODE_READ_ONLY` and `false` for `SQL_MODE_READ_WRITE` (the
+    /// default). A value set before connecting is applied at connect, since the
+    /// spec lists this attribute as settable either side of one.
+    ///
+    /// **The default is `Ok(())` — accepting and ignoring — and that is
+    /// spec-compliant here**, which is what makes this hook different from
+    /// [`Backend::set_current_catalog`] and [`Backend::set_autocommit`], whose
+    /// defaults refuse. The spec says so directly: read-only "is used by the
+    /// driver or data source as an indicator that the connection is not
+    /// required to support SQL statements that cause updates to occur ... **the
+    /// driver is not required to prevent such statements from being submitted
+    /// to the data source**", and "the behavior of the driver and data source
+    /// when asked to process SQL statements that are not read-only during a
+    /// read-only connection is implementation-defined".
+    ///
+    /// So this is a *hint*, not a guarantee, and an application must not treat
+    /// `SQL_MODE_READ_ONLY` as a safety interlock. Storing it without telling
+    /// the data source therefore misleads nobody about correctness — it only
+    /// forgoes the optimisation the spec offers: "this mode can be used to
+    /// optimize locking strategies, transaction management, or other areas as
+    /// appropriate to the driver or data source."
+    ///
+    /// Override it where the data source has a real read-only session mode
+    /// worth entering. Returning an error is reasonable for a backend that
+    /// cannot enter one *and* judges that silently ignoring the request would
+    /// mislead its users; core reports whatever SQLSTATE the error maps to.
+    fn set_access_mode(_conn: &Self::Connection, _read_only: bool) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
     /// Whether the connection to the data source has been lost.
     ///
     /// Read by `SQLGetConnectAttr(SQL_ATTR_CONNECTION_DEAD)`, which the spec

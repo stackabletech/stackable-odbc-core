@@ -1296,6 +1296,11 @@ mock_isolation_backend!(
 /// an `SQLULEN`.
 pub struct MockAppliedConnection {
     pub query_timeout: std::sync::atomic::AtomicUsize,
+    /// `Some(read_only)` once `set_access_mode` has been called, `None` before.
+    /// The tri-state matters: `Some(false)` ("core applied read/write") and
+    /// `None` ("core never called the hook") are exactly what an access-mode
+    /// test has to tell apart, and a plain `bool` collapses them.
+    pub access_mode: crate::sync::Mutex<Option<bool>>,
 }
 
 /// Generates a `Backend` whose only interesting behaviour is the extra items
@@ -1330,6 +1335,7 @@ macro_rules! mock_applied_backend {
             fn connect(_: &ConnectParams) -> Result<MockAppliedConnection, $err> {
                 Ok(MockAppliedConnection {
                     query_timeout: std::sync::atomic::AtomicUsize::new(0),
+                    access_mode: crate::sync::Mutex::new(None),
                 })
             }
             fn disconnect(_: &mut MockAppliedConnection) -> Result<(), $err> {
@@ -1524,6 +1530,32 @@ mock_applied_backend!(
 // a test pairing it with `MockDeadConnectionBackend` below sees the answer move
 // with the backend rather than with the test.
 mock_applied_backend!(MockNoQueryTimeoutBackend);
+
+// Records the access mode core applied, so a test can tell "core called the
+// hook" from "core stored the attribute and told the application it worked".
+mock_applied_backend!(
+    MockAccessModeBackend,
+    fn set_access_mode(conn: &MockAppliedConnection, read_only: bool) -> Result<(), MockError> {
+        if let Ok(mut slot) = conn.access_mode.lock() {
+            *slot = Some(read_only);
+        }
+        Ok(())
+    }
+);
+
+// A data source with no read-only session mode that judges silently ignoring
+// the request to be worse than refusing it. Pins that core propagates the
+// refusal and stores nothing, rather than reporting success for a mode the
+// data source never entered.
+mock_applied_backend!(
+    error = OdbcError,
+    MockRefusingAccessModeBackend,
+    fn set_access_mode(_conn: &MockAppliedConnection, _read_only: bool) -> Result<(), OdbcError> {
+        Err(OdbcError::NotImplemented {
+            feature: "SQL_ATTR_ACCESS_MODE".into(),
+        })
+    }
+);
 
 // A backend whose connection has been lost — what a pool must not be handed.
 mock_applied_backend!(

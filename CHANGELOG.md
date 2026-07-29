@@ -56,6 +56,25 @@ Everything a driver has to change for the catalog rework, in one place.
 
 ### Added
 
+- `Backend::set_access_mode` carries `SQL_ATTR_ACCESS_MODE` to the data source.
+  The attribute was validated and stored but never applied, so a data source
+  with a real read-only session mode never entered it and the optimisation the
+  spec offers — "this mode can be used to optimize locking strategies,
+  transaction management, or other areas" — was unavailable to every driver. A
+  value set before connecting is applied at connect, which the spec's footnote
+  [1] calls the interoperable choice.
+
+  **The default is `Ok(())` — accept and ignore — not a refusal**, which is
+  where this hook differs from `set_current_catalog` and `set_autocommit`. The
+  spec permits it outright: read-only "is used by the driver or data source as
+  an indicator that the connection is not required to support SQL statements
+  that cause updates to occur ... the driver is not required to prevent such
+  statements from being submitted to the data source". So it is a hint, not a
+  safety interlock, and ignoring it misleads nobody about correctness. Core
+  stores the value only once the hook returns `Ok`, so a backend that does
+  refuse cannot have `SQLGetConnectAttr` report a read-only connection that is
+  nothing of the kind.
+
 - `Backend::connection_dead`, defaulted to `false`, backs
   `SQLGetConnectAttr(SQL_ATTR_CONNECTION_DEAD)`, which was hardcoded
   `SQL_CD_FALSE`. That is the attribute a connection pool reads before handing a
