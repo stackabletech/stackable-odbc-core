@@ -519,6 +519,32 @@ pub unsafe fn sql_get_connect_attr_w<B: Backend>(
                 }
             };
 
+            // The two connection attributes the spec declares `SQLULEN` rather
+            // than `SQLUINTEGER`: `SQL_ATTR_ASYNC_ENABLE` ("A SQLULEN value
+            // that specifies whether a function called with a statement on the
+            // specified connection is executed asynchronously") and
+            // `SQL_ATTR_ODBC_CURSORS` ("An SQLULEN value specifying how the
+            // Driver Manager uses the ODBC cursor library"). Every other
+            // integer-valued connection attribute really is `SQLUINTEGER`, so
+            // this is a two-attribute exception rather than the blanket rule
+            // that applies to statement attributes — where *no* non-pointer
+            // attribute is `SQLUINTEGER`.
+            //
+            // SAFETY: as `write_u32` above, but the buffer is SQLULEN-wide.
+            let write_ulen = |v: usize| {
+                if !value_ptr.is_null() {
+                    // SAFETY: non-null checked above; caller guarantees writable SQLULEN
+                    std::ptr::write_unaligned(value_ptr as *mut usize, v);
+                }
+                if !string_length_ptr.is_null() {
+                    // SAFETY: non-null checked above; caller guarantees writable i32
+                    std::ptr::write_unaligned(
+                        string_length_ptr,
+                        std::mem::size_of::<usize>() as i32,
+                    );
+                }
+            };
+
             match attr {
                 _ if attr == ConnectionAttribute::ACCESS_MODE => {
                     let v = conn
@@ -579,7 +605,7 @@ pub unsafe fn sql_get_connect_attr_w<B: Backend>(
                         .get(&attribute)
                         .copied()
                         .unwrap_or(SQL_CUR_USE_DRIVER);
-                    write_u32(v as u32);
+                    write_ulen(v);
                     Ok(SqlReturn::SUCCESS)
                 }
                 _ if attr == ConnectionAttribute::PACKET_SIZE => {
@@ -611,7 +637,7 @@ pub unsafe fn sql_get_connect_attr_w<B: Backend>(
                         .get(&attribute)
                         .copied()
                         .unwrap_or(SQL_ASYNC_ENABLE_OFF);
-                    write_u32(v as u32);
+                    write_ulen(v);
                     Ok(SqlReturn::SUCCESS)
                 }
                 _ if attr == ConnectionAttribute::TRANSLATE_OPTION => {
@@ -906,6 +932,48 @@ mod tests {
         }
     }
 
+    /// `SQL_ATTR_ASYNC_ENABLE` and `SQL_ATTR_ODBC_CURSORS` are the two
+    /// connection attributes the spec declares `SQLULEN` — "A SQLULEN value
+    /// that specifies whether a function called with a statement on the
+    /// specified connection is executed asynchronously" and "An SQLULEN value
+    /// specifying how the Driver Manager uses the ODBC cursor library". Every
+    /// other integer-valued connection attribute is `SQLUINTEGER`, which is why
+    /// this is a two-attribute exception here and a blanket rule for statement
+    /// attributes.
+    #[test]
+    fn the_two_sqlulen_connection_attributes_are_written_at_full_width() {
+        for (attribute, name, expected) in [
+            (
+                ConnectionAttribute::ODBC_CURSORS.0,
+                "SQL_ATTR_ODBC_CURSORS",
+                SQL_CUR_USE_DRIVER,
+            ),
+            (
+                ConnectionAttribute::ASYNC_ENABLE.0,
+                "SQL_ATTR_ASYNC_ENABLE",
+                SQL_ASYNC_ENABLE_OFF,
+            ),
+        ] {
+            unsafe {
+                let (env, conn) = alloc_env_conn();
+                let mut value: usize = usize::MAX;
+                let ret = sql_get_connect_attr_w::<MockBackend>(
+                    conn,
+                    attribute,
+                    std::ptr::from_mut(&mut value).cast(),
+                    0,
+                    std::ptr::null_mut(),
+                );
+                assert_eq!(ret, SqlReturn::SUCCESS);
+                assert_eq!(
+                    value, expected,
+                    "{name}: the high half of the SQLULEN buffer kept its poison"
+                );
+                cleanup(env, conn);
+            }
+        }
+    }
+
     /// An attribute `SQLSetConnectAttr` stores is one `SQLGetConnectAttr` can
     /// report: the spec makes the getter the way an application reads back what
     /// it set, so a stored value that answers HY092 would be unreachable.
@@ -969,7 +1037,12 @@ mod tests {
                     SqlReturn::SUCCESS,
                     "{name} was not accepted"
                 );
-                let mut out: u32 = u32::MAX;
+                // An SQLULEN buffer, zeroed: two of these attributes are
+                // SQLULEN and the rest SQLUINTEGER, and the spec tells
+                // applications to "use a buffer of SQLULEN and initialize the
+                // value to 0" precisely so one buffer serves both. A `u32`
+                // here would be overflowed by the SQLULEN pair.
+                let mut out: usize = 0;
                 assert_eq!(
                     sql_get_connect_attr_w::<MockBackend>(
                         conn,
@@ -981,7 +1054,7 @@ mod tests {
                     SqlReturn::SUCCESS,
                     "{name} was stored but cannot be read back"
                 );
-                assert_eq!(out as usize, *value, "{name} read back a different value");
+                assert_eq!(out, *value, "{name} read back a different value");
                 cleanup(env, conn);
             }
         }

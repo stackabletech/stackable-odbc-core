@@ -878,6 +878,22 @@ Everything a driver has to change for the catalog rework, in one place.
 
 ### Fixed
 
+- **`SQLGetStmtAttr` wrote four bytes where the spec declares `SQLULEN`.** Every
+  non-pointer attribute on the `SQLSetStmtAttr` page is declared "An SQLULEN
+  value" — not one is `SQLUINTEGER` — and `BufferLength` is ignored for them, so
+  the application's buffer is `SQLULEN`-wide and the driver must fill it.
+  `SQLGetStmtAttr`'s own Comments describe the alternative as a defect to work
+  around: "if the value is a SQLULEN value, some drivers may only write the
+  lower 32-bit or 16-bit of a buffer and leave the higher-order bit unchanged.
+  Therefore, applications should use a buffer of SQLULEN and initialize the
+  value to 0 before calling this function." An application that did not zero its
+  buffer read `SQL_ATTR_MAX_ROWS` as `0xFFFFFFFF00000000` — an enormous row
+  limit — where the driver meant "no limit". All twenty integer-valued reads now
+  write a full `SQLULEN`; the pointer-valued ones already did. On the connection
+  side only `SQL_ATTR_ASYNC_ENABLE` and `SQL_ATTR_ODBC_CURSORS` are `SQLULEN`
+  and were widened; every other connection attribute really is `SQLUINTEGER` and
+  is unchanged.
+
 - **`SQLSetStmtAttr` now answers for every value it cannot honour.** Core drives
   one forward-only, read-only cursor over one parameter set, and the spec gives
   two ways to say so. The `01S02` row names the eight attributes a driver may

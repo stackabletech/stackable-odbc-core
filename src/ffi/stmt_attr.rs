@@ -616,19 +616,39 @@ pub unsafe fn sql_get_stmt_attr_w<B: Backend>(
             let stmt = scope.get::<StatementHandle<B>>(statement_handle)?;
             stmt.diagnostics.clear();
 
-            // Helper: write a u32 to value_ptr and report size.
+            // Helper: write an SQLULEN to value_ptr and report its size.
+            //
+            // `SQLULEN`, not `SQLUINTEGER`: every non-pointer attribute on the
+            // `SQLSetStmtAttr` page is declared "An SQLULEN value", and
+            // `BufferLength` is ignored for them, so the application's buffer
+            // is SQLULEN-wide (8 bytes on LP64) and it is the driver's job to
+            // fill it. `SQLGetStmtAttr`'s Comments describe the alternative as
+            // a defect to be worked around — "some drivers may only write the
+            // lower 32-bit or 16-bit of a buffer and leave the higher-order bit
+            // unchanged. Therefore, applications should use a buffer of SQLULEN
+            // and initialize the value to 0 before calling this function" — and
+            // an application that does not zero its buffer reads a `MAX_ROWS`
+            // of `0xFFFFFFFF00000000` where the driver means "no limit".
+            //
+            // This is the one place the statement attributes differ from the
+            // connection ones, where all but `SQL_ATTR_ASYNC_ENABLE` and
+            // `SQL_ATTR_ODBC_CURSORS` really are `SQLUINTEGER`.
+            //
             // SAFETY: value_ptr is non-null (checked); caller guarantees it points to
-            // writable memory for at least a u32. string_length_ptr likewise. Alignment is
-            // not guaranteed (row-wise binding may place the buffer at an arbitrary offset),
-            // so use unaligned writes.
-            let write_u32 = |v: u32| {
+            // writable memory for at least an SQLULEN. string_length_ptr likewise.
+            // Alignment is not guaranteed (row-wise binding may place the buffer at an
+            // arbitrary offset), so use unaligned writes.
+            let write_ulen = |v: usize| {
                 if !value_ptr.is_null() {
-                    // SAFETY: non-null checked above; caller guarantees writable u32
-                    std::ptr::write_unaligned(value_ptr as *mut u32, v);
+                    // SAFETY: non-null checked above; caller guarantees writable SQLULEN
+                    std::ptr::write_unaligned(value_ptr as *mut usize, v);
                 }
                 if !string_length_ptr.is_null() {
                     // SAFETY: non-null checked above; caller guarantees writable i32
-                    std::ptr::write_unaligned(string_length_ptr, std::mem::size_of::<u32>() as i32);
+                    std::ptr::write_unaligned(
+                        string_length_ptr,
+                        std::mem::size_of::<usize>() as i32,
+                    );
                 }
             };
 
@@ -653,76 +673,76 @@ pub unsafe fn sql_get_stmt_attr_w<B: Backend>(
 
             match attr {
                 Some(StatementAttribute::QueryTimeout) => {
-                    write_u32(stmt.attrs.get(&attribute).copied().unwrap_or(0) as u32);
+                    write_ulen(stmt.attrs.get(&attribute).copied().unwrap_or(0));
                     Ok(SqlReturn::SUCCESS)
                 }
                 Some(StatementAttribute::MaxRows) => {
-                    write_u32(stmt.attrs.get(&attribute).copied().unwrap_or(0) as u32);
+                    write_ulen(stmt.attrs.get(&attribute).copied().unwrap_or(0));
                     Ok(SqlReturn::SUCCESS)
                 }
                 Some(StatementAttribute::MaxLength) => {
-                    write_u32(stmt.attrs.get(&attribute).copied().unwrap_or(0) as u32);
+                    write_ulen(stmt.attrs.get(&attribute).copied().unwrap_or(0));
                     Ok(SqlReturn::SUCCESS)
                 }
                 Some(StatementAttribute::NoScan) => {
-                    write_u32(
+                    write_ulen(
                         stmt.attrs
                             .get(&attribute)
                             .copied()
-                            .unwrap_or(SQL_NOSCAN_OFF) as u32,
+                            .unwrap_or(SQL_NOSCAN_OFF),
                     );
                     Ok(SqlReturn::SUCCESS)
                 }
                 Some(StatementAttribute::RowBindType) => {
-                    write_u32(
+                    write_ulen(
                         stmt.attrs
                             .get(&attribute)
                             .copied()
-                            .unwrap_or(SQL_BIND_BY_COLUMN) as u32,
+                            .unwrap_or(SQL_BIND_BY_COLUMN),
                     );
                     Ok(SqlReturn::SUCCESS)
                 }
                 Some(StatementAttribute::CursorType) => {
-                    write_u32(
+                    write_ulen(
                         stmt.attrs
                             .get(&attribute)
                             .copied()
-                            .unwrap_or(SQL_CURSOR_FORWARD_ONLY) as u32,
+                            .unwrap_or(SQL_CURSOR_FORWARD_ONLY),
                     );
                     Ok(SqlReturn::SUCCESS)
                 }
                 Some(StatementAttribute::Concurrency) => {
-                    write_u32(
+                    write_ulen(
                         stmt.attrs
                             .get(&attribute)
                             .copied()
-                            .unwrap_or(SQL_CONCUR_READ_ONLY) as u32,
+                            .unwrap_or(SQL_CONCUR_READ_ONLY),
                     );
                     Ok(SqlReturn::SUCCESS)
                 }
                 Some(StatementAttribute::RetrieveData) => {
-                    write_u32(stmt.attrs.get(&attribute).copied().unwrap_or(SQL_RD_ON) as u32);
+                    write_ulen(stmt.attrs.get(&attribute).copied().unwrap_or(SQL_RD_ON));
                     Ok(SqlReturn::SUCCESS)
                 }
                 Some(StatementAttribute::UseBookmarks) => {
-                    write_u32(stmt.attrs.get(&attribute).copied().unwrap_or(SQL_UB_OFF) as u32);
+                    write_ulen(stmt.attrs.get(&attribute).copied().unwrap_or(SQL_UB_OFF));
                     Ok(SqlReturn::SUCCESS)
                 }
                 Some(StatementAttribute::RowArraySize) => {
-                    write_u32(
+                    write_ulen(
                         stmt.attrs
                             .get(&attribute)
                             .copied()
-                            .unwrap_or(SQL_ROW_ARRAY_SIZE_DEFAULT) as u32,
+                            .unwrap_or(SQL_ROW_ARRAY_SIZE_DEFAULT),
                     );
                     Ok(SqlReturn::SUCCESS)
                 }
                 Some(StatementAttribute::ParamsetSize) => {
-                    write_u32(
+                    write_ulen(
                         stmt.attrs
                             .get(&attribute)
                             .copied()
-                            .unwrap_or(SQL_PARAMSET_SIZE_DEFAULT) as u32,
+                            .unwrap_or(SQL_PARAMSET_SIZE_DEFAULT),
                     );
                     Ok(SqlReturn::SUCCESS)
                 }
@@ -735,46 +755,46 @@ pub unsafe fn sql_get_stmt_attr_w<B: Backend>(
                         ));
                     }
                     let v = stmt.attrs.get(&attribute).copied().unwrap_or(0);
-                    write_u32(v as u32);
+                    write_ulen(v);
                     Ok(SqlReturn::SUCCESS)
                 }
                 Some(StatementAttribute::EnableAutoIpd) => {
-                    write_u32(SQL_FALSE); // not supported
+                    write_ulen(SQL_FALSE as usize); // not supported
                     Ok(SqlReturn::SUCCESS)
                 }
                 Some(StatementAttribute::AsyncEnable) => {
-                    write_u32(stmt.attrs.get(&attribute).copied().unwrap_or(0) as u32);
+                    write_ulen(stmt.attrs.get(&attribute).copied().unwrap_or(0));
                     Ok(SqlReturn::SUCCESS)
                 }
                 Some(StatementAttribute::MetadataId) => {
-                    write_u32(
+                    write_ulen(
                         stmt.attrs
                             .get(&attribute)
                             .copied()
-                            .unwrap_or(SQL_FALSE as usize) as u32,
+                            .unwrap_or(SQL_FALSE as usize),
                     );
                     Ok(SqlReturn::SUCCESS)
                 }
                 Some(StatementAttribute::CursorScrollable) => {
-                    write_u32(
+                    write_ulen(
                         stmt.attrs
                             .get(&attribute)
                             .copied()
-                            .unwrap_or(SQL_NONSCROLLABLE) as u32,
+                            .unwrap_or(SQL_NONSCROLLABLE),
                     );
                     Ok(SqlReturn::SUCCESS)
                 }
                 Some(StatementAttribute::CursorSensitivity) => {
-                    write_u32(
+                    write_ulen(
                         stmt.attrs
                             .get(&attribute)
                             .copied()
-                            .unwrap_or(usize::from(SQL_UNSPECIFIED)) as u32,
+                            .unwrap_or(usize::from(SQL_UNSPECIFIED)),
                     );
                     Ok(SqlReturn::SUCCESS)
                 }
                 Some(StatementAttribute::SimulateCursor) => {
-                    write_u32(stmt.attrs.get(&attribute).copied().unwrap_or(0) as u32);
+                    write_ulen(stmt.attrs.get(&attribute).copied().unwrap_or(0));
                     Ok(SqlReturn::SUCCESS)
                 }
 
@@ -819,20 +839,20 @@ pub unsafe fn sql_get_stmt_attr_w<B: Backend>(
                 // set, so refusing one here would leave a value it accepted
                 // unreadable.
                 Some(StatementAttribute::KeysetSize) => {
-                    write_u32(
+                    write_ulen(
                         stmt.attrs
                             .get(&attribute)
                             .copied()
-                            .unwrap_or(SQL_KEYSET_SIZE_DEFAULT) as u32,
+                            .unwrap_or(SQL_KEYSET_SIZE_DEFAULT),
                     );
                     Ok(SqlReturn::SUCCESS)
                 }
                 Some(StatementAttribute::ParamBindType) => {
-                    write_u32(
+                    write_ulen(
                         stmt.attrs
                             .get(&attribute)
                             .copied()
-                            .unwrap_or(SQL_BIND_BY_COLUMN) as u32,
+                            .unwrap_or(SQL_BIND_BY_COLUMN),
                     );
                     Ok(SqlReturn::SUCCESS)
                 }
@@ -875,19 +895,19 @@ mod tests {
         unsafe {
             let (env, conn, stmt) = alloc_env_conn_stmt();
 
-            let mut value: u32 = 0;
+            let mut value: usize = 0;
             let mut str_len: i32 = 0;
             let ret = sql_get_stmt_attr_w::<MockBackend>(
                 stmt,
                 StatementAttribute::CursorSensitivity as i32,
-                &mut value as *mut u32 as *mut c_void,
+                std::ptr::from_mut(&mut value).cast(),
                 0,
                 &mut str_len,
             );
             assert_eq!(ret, SqlReturn::SUCCESS);
             assert_eq!(
                 value,
-                u32::from(SQL_UNSPECIFIED),
+                usize::from(SQL_UNSPECIFIED),
                 "SQLGetStmtAttr reported a different cursor sensitivity than SQLGetInfo"
             );
 
@@ -926,7 +946,7 @@ mod tests {
             });
 
             // SQLGetStmtAttr must report the substituted value, per 01S02.
-            let mut out: u32 = 0;
+            let mut out: usize = 0;
             assert_eq!(
                 sql_get_stmt_attr_w::<MockBackend>(
                     stmt,
@@ -991,7 +1011,7 @@ mod tests {
             });
 
             // SQLGetStmtAttr must report the substituted value, per 01S02.
-            let mut out: u32 = 0;
+            let mut out: usize = 0;
             assert_eq!(
                 sql_get_stmt_attr_w::<MockBackend>(
                     stmt,
@@ -1078,16 +1098,16 @@ mod tests {
             );
             assert_eq!(ret, SqlReturn::SUCCESS);
 
-            let mut val: u32 = 99;
+            let mut val: usize = 99;
             let ret = sql_get_stmt_attr_w::<MockBackend>(
                 stmt,
                 StatementAttribute::CursorType as i32,
-                &mut val as *mut u32 as *mut c_void,
+                std::ptr::from_mut(&mut val).cast(),
                 0,
                 std::ptr::null_mut(),
             );
             assert_eq!(ret, SqlReturn::SUCCESS);
-            assert_eq!(val, SQL_CURSOR_FORWARD_ONLY as u32);
+            assert_eq!(val, SQL_CURSOR_FORWARD_ONLY);
 
             cleanup_env_conn_stmt(env, conn, stmt);
         }
@@ -1120,17 +1140,17 @@ mod tests {
                 );
             });
 
-            let mut val: u32 = 99;
+            let mut val: usize = 99;
             let ret = sql_get_stmt_attr_w::<MockBackend>(
                 stmt,
                 StatementAttribute::CursorType as i32,
-                &mut val as *mut u32 as *mut c_void,
+                std::ptr::from_mut(&mut val).cast(),
                 0,
                 std::ptr::null_mut(),
             );
             assert_eq!(ret, SqlReturn::SUCCESS);
             assert_eq!(
-                val as usize, SQL_CURSOR_FORWARD_ONLY,
+                val, SQL_CURSOR_FORWARD_ONLY,
                 "SQLGetStmtAttr must report the substituted value"
             );
             cleanup_env_conn_stmt(env, conn, stmt);
@@ -1203,7 +1223,7 @@ mod tests {
                     );
                 });
 
-                let mut out: u32 = 99;
+                let mut out: usize = 99;
                 assert_eq!(
                     sql_get_stmt_attr_w::<MockBackend>(
                         stmt,
@@ -1215,7 +1235,7 @@ mod tests {
                     SqlReturn::SUCCESS
                 );
                 assert_eq!(
-                    out as usize, *used,
+                    out, *used,
                     "{name}: SQLGetStmtAttr must report the value the driver uses"
                 );
 
@@ -1283,6 +1303,68 @@ mod tests {
                         "{name} posted the wrong SQLSTATE"
                     );
                 });
+
+                cleanup_env_conn_stmt(env, conn, stmt);
+            }
+        }
+    }
+
+    /// Spec, `SQLGetStmtAttr` Comments: "A call to **SQLGetStmtAttr** returns
+    /// in \**ValuePtr* the value of the statement attribute specified in
+    /// *Attribute*. That value can either be a SQLULEN value or a
+    /// null-terminated character string. If the value is a SQLULEN value, some
+    /// drivers may only write the lower 32-bit or 16-bit of a buffer and leave
+    /// the higher-order bit unchanged."
+    ///
+    /// The spec is describing a defect and telling applications to work around
+    /// it; a driver's job is not to be one of those drivers. Every non-pointer
+    /// attribute on the `SQLSetStmtAttr` page is declared `SQLULEN` — not one
+    /// is `SQLUINTEGER`, unlike the connection attributes — and `BufferLength`
+    /// is ignored for them, so the application's buffer is `SQLULEN`-wide and a
+    /// four-byte write leaves the top half holding whatever was there.
+    ///
+    /// The buffer is poisoned with ones so a short write is visible: an
+    /// application reading `SQL_ATTR_MAX_ROWS` would see a vast row limit where
+    /// the driver means "no limit".
+    #[test]
+    fn integer_attributes_are_written_at_full_sqlulen_width() {
+        // One representative per default: 0, and a non-zero enum value.
+        let cases: &[(StatementAttribute, &str, usize)] = &[
+            (StatementAttribute::MaxRows, "SQL_ATTR_MAX_ROWS", 0),
+            (
+                StatementAttribute::QueryTimeout,
+                "SQL_ATTR_QUERY_TIMEOUT",
+                0,
+            ),
+            (
+                StatementAttribute::CursorType,
+                "SQL_ATTR_CURSOR_TYPE",
+                SQL_CURSOR_FORWARD_ONLY,
+            ),
+            (
+                StatementAttribute::RowArraySize,
+                "SQL_ATTR_ROW_ARRAY_SIZE",
+                SQL_ROW_ARRAY_SIZE_DEFAULT,
+            ),
+        ];
+        for (attribute, name, expected) in cases {
+            unsafe {
+                let (env, conn, stmt) = alloc_env_conn_stmt();
+
+                let mut value: usize = usize::MAX;
+                let ret = sql_get_stmt_attr_w::<MockBackend>(
+                    stmt,
+                    *attribute as i32,
+                    std::ptr::from_mut(&mut value).cast(),
+                    0,
+                    std::ptr::null_mut(),
+                );
+                assert_eq!(ret, SqlReturn::SUCCESS);
+                assert_eq!(
+                    value, *expected,
+                    "{name}: the high half of the SQLULEN buffer kept its poison, \
+                     so only part of the value was written"
+                );
 
                 cleanup_env_conn_stmt(env, conn, stmt);
             }
@@ -1359,11 +1441,11 @@ mod tests {
     fn get_cursor_type_default_is_forward_only() {
         unsafe {
             let (env, conn, stmt) = alloc_env_conn_stmt();
-            let mut val: u32 = 99;
+            let mut val: usize = 99;
             let ret = sql_get_stmt_attr_w::<MockBackend>(
                 stmt,
                 StatementAttribute::CursorType as i32,
-                &mut val as *mut u32 as *mut c_void,
+                std::ptr::from_mut(&mut val).cast(),
                 0,
                 std::ptr::null_mut(),
             );
@@ -1397,17 +1479,17 @@ mod tests {
                 );
             });
 
-            let mut val: u32 = 99;
+            let mut val: usize = 99;
             let ret = sql_get_stmt_attr_w::<MockBackend>(
                 stmt,
                 StatementAttribute::CursorScrollable as i32,
-                &mut val as *mut u32 as *mut c_void,
+                std::ptr::from_mut(&mut val).cast(),
                 0,
                 std::ptr::null_mut(),
             );
             assert_eq!(ret, SqlReturn::SUCCESS);
             assert_eq!(
-                val as usize, SQL_NONSCROLLABLE,
+                val, SQL_NONSCROLLABLE,
                 "SQLGetStmtAttr must report the substituted value"
             );
             cleanup_env_conn_stmt(env, conn, stmt);
@@ -1444,11 +1526,11 @@ mod tests {
                 );
             });
 
-            let mut val: u32 = 99;
+            let mut val: usize = 99;
             let ret = sql_get_stmt_attr_w::<MockBackend>(
                 stmt,
                 StatementAttribute::QueryTimeout as i32,
-                &mut val as *mut u32 as *mut c_void,
+                std::ptr::from_mut(&mut val).cast(),
                 0,
                 std::ptr::null_mut(),
             );
@@ -1488,11 +1570,11 @@ mod tests {
                 );
             });
 
-            let mut val: u32 = 99;
+            let mut val: usize = 99;
             let ret = sql_get_stmt_attr_w::<MockBackend>(
                 stmt,
                 StatementAttribute::MaxRows as i32,
-                &mut val as *mut u32 as *mut c_void,
+                std::ptr::from_mut(&mut val).cast(),
                 0,
                 std::ptr::null_mut(),
             );
@@ -1586,12 +1668,12 @@ mod tests {
     fn get_stmt_attr_unsupported_returns_error() {
         unsafe {
             let (env, conn, stmt) = alloc_env_conn_stmt();
-            let mut val: u32 = 0;
+            let mut val: usize = 0;
             // Use a known-unsupported attribute to cover the error branch
             let ret = sql_get_stmt_attr_w::<MockBackend>(
                 stmt,
                 9999,
-                &mut val as *mut u32 as *mut c_void,
+                std::ptr::from_mut(&mut val).cast(),
                 0,
                 std::ptr::null_mut(),
             );
