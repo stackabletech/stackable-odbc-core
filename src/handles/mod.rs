@@ -718,6 +718,24 @@ impl<B: Backend> StatementHandle<B> {
         }
     }
 
+    /// One of this statement's four descriptors, by role.
+    ///
+    /// The counterpart of [`HandleScope::descriptor_owner`], which answers the
+    /// role: that resolves a token to this statement, and this turns the role
+    /// back into the field. One place rather than a four-armed `match` at every
+    /// descriptor entry point.
+    ///
+    /// [`HandleScope::descriptor_owner`]:
+    ///     crate::handles::scope::HandleScope::descriptor_owner
+    pub(crate) fn descriptor_mut(&mut self, role: DescriptorRole) -> &mut Descriptor {
+        match role {
+            DescriptorRole::Ard => &mut self.app_row_desc,
+            DescriptorRole::Apd => &mut self.app_param_desc,
+            DescriptorRole::Ird => &mut self.imp_row_desc,
+            DescriptorRole::Ipd => &mut self.imp_param_desc,
+        }
+    }
+
     /// The two parameter descriptors' records, borrowed together.
     ///
     /// One call site rather than four field paths, so a reader cannot pair the

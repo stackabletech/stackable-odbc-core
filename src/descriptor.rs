@@ -20,7 +20,7 @@
 
 use std::ffi::c_void;
 
-use odbc_sys::{CDataType, Desc, ParamType, SqlDataType};
+use odbc_sys::{CDataType, Desc, ParamType, SqlDataType, StatementAttribute};
 
 use crate::errors::OdbcError;
 use crate::types::{SqlState, ULen, c_data_type_from_raw};
@@ -476,6 +476,62 @@ pub fn field_access(role: DescriptorRole, field: Desc) -> FieldAccess {
         // through feature unification. Every ODBC 3.x identifier is named
         // above, so nothing else reaches it.
         _ => Undefined,
+    }
+}
+
+/// The statement attribute a descriptor **header** field aliases on this role,
+/// or `None` if the field is not stored as one.
+///
+/// `SQLSetStmtAttr`'s mapping table read in the other direction.
+/// [`HeaderOwner::of`] answers "which descriptor does this statement attribute
+/// live on"; this answers "which statement attribute is this header field of
+/// this descriptor". They must name the same storage, or the two doors onto one
+/// value disagree — which is the defect this whole milestone exists to remove.
+///
+/// The two header fields with no entry are the ones core computes rather than
+/// stores: `SQL_DESC_COUNT` is derived from the record map, and
+/// `SQL_DESC_ALLOC_TYPE` is [`SQL_DESC_ALLOC_AUTO`] for every descriptor core
+/// owns.
+///
+/// The IRD and IPD rows are the four pairs D2 deliberately left on the
+/// statement rather than re-homing onto a descriptor header; `attr_store`
+/// routes them there, so a caller of this needs to know nothing about the
+/// split.
+///
+/// [`HeaderOwner::of`]: crate::handles::HeaderOwner::of
+/// [`SQL_DESC_ALLOC_AUTO`]: crate::types::SQL_DESC_ALLOC_AUTO
+pub fn header_attribute(role: DescriptorRole, field: Desc) -> Option<StatementAttribute> {
+    use DescriptorRole::{Apd, Ard, Ipd, Ird};
+    use StatementAttribute as A;
+
+    match (field, role) {
+        (Desc::ArraySize, Ard) => Some(A::RowArraySize),
+        (Desc::ArraySize, Apd) => Some(A::ParamsetSize),
+        (Desc::BindType, Ard) => Some(A::RowBindType),
+        (Desc::BindType, Apd) => Some(A::ParamBindType),
+        (Desc::BindOffsetPtr, Ard) => Some(A::RowBindOffsetPtr),
+        (Desc::BindOffsetPtr, Apd) => Some(A::ParamBindOffsetPtr),
+        // `odbc-sys` spells `SQL_ATTR_PARAM_OPERATION_PTR`
+        // `ParamOpterationPtr` — transposed letters, upstream.
+        (Desc::ArrayStatusPtr, Ard) => Some(A::RowOperationPtr),
+        (Desc::ArrayStatusPtr, Apd) => Some(A::ParamOpterationPtr),
+        (Desc::ArrayStatusPtr, Ird) => Some(A::RowStatusPtr),
+        (Desc::ArrayStatusPtr, Ipd) => Some(A::ParamStatusPtr),
+        (Desc::RowsProcessedPtr, Ird) => Some(A::RowsFetchedPtr),
+        (Desc::RowsProcessedPtr, Ipd) => Some(A::ParamsProcessedPtr),
+        _ => None,
+    }
+}
+
+/// What a header field reads as before anything has set it.
+///
+/// The "Default" column of the spec's header table: `1` for
+/// `SQL_DESC_ARRAY_SIZE`, `SQL_BIND_BY_COLUMN` for `SQL_DESC_BIND_TYPE` and a
+/// null pointer for the rest — all of which are `0` except the first.
+pub fn header_default(field: Desc) -> usize {
+    match field {
+        Desc::ArraySize => 1,
+        _ => 0,
     }
 }
 

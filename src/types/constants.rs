@@ -111,6 +111,15 @@ pub const SQL_CODE_TIME: i16 = 2;
 /// `SQL_CODE_TIMESTAMP` — `SQL_DATETIME_SUB` subtype for `SQL_TYPE_TIMESTAMP` (93).
 pub const SQL_CODE_TIMESTAMP: i16 = 3;
 
+/// `SQL_DESC_ALLOC_AUTO` — the `SQL_DESC_ALLOC_TYPE` of a descriptor the driver
+/// allocated automatically with its statement.
+///
+/// The value for all four of a statement's descriptors. Its counterpart
+/// `SQL_DESC_ALLOC_USER` belongs to a descriptor an application allocated with
+/// `SQLAllocHandle(SQL_HANDLE_DESC)`, which core refuses, so no descriptor it
+/// owns can carry it.
+pub const SQL_DESC_ALLOC_AUTO: isize = 1;
+
 /// `SQL_CASCADE` — referential action: propagate the change to dependent rows.
 /// Used in `UPDATE_RULE` / `DELETE_RULE` columns of `SQLForeignKeys`.
 pub const SQL_CASCADE: i16 = 0;
