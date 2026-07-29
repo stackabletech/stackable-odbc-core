@@ -14,12 +14,18 @@
 //!    bitmap is what makes the Windows Driver Manager block `SQLGetData`
 //!    with `HYC00` (see `AGENTS.md`'s Windows Driver Manager compatibility
 //!    checklist).
+//! 3. **Info types that constrain each other agree** — see
+//!    [`info_group_inconsistencies`]. Several `SQLGetInfo` answers are
+//!    statements about one fact under different names, and core cannot police
+//!    a backend's [`crate::backend::Backend::get_info`] at runtime because that
+//!    method is entitled to answer anything. Stating the invariants here lets
+//!    each driver's suite catch a group it overrode only half of.
 //!
-//! This module supplies the three pieces every such test needs: the
-//! *derived* (not hand-copied) list of every `InfoType` the FFI boundary can
-//! produce, the list of genuine `SQL_CONVERT_*` codes, and a way to observe
-//! which [`crate::types::InfoValueKind`] `sql_get_info_w` actually wrote
-//! without bypassing that function.
+//! This module supplies the pieces every such test needs: the *derived* (not
+//! hand-copied) list of every `InfoType` the FFI boundary can produce, the list
+//! of genuine `SQL_CONVERT_*` codes, ways to observe which
+//! [`crate::types::InfoValueKind`] and which value `sql_get_info_w` actually
+//! wrote without bypassing that function, and the group-consistency check.
 //!
 //! No backend-specific references belong here or in any of its callers in
 //! this crate — this module is shared, driver-agnostic infrastructure.
@@ -163,6 +169,199 @@ pub unsafe fn observe_u32_value<B: Backend>(
     (ret, value)
 }
 
+/// Reads a character-shaped info type through the real `sql_get_info_w::<B>`
+/// entry point.
+///
+/// # Safety
+///
+/// Same contract as [`observe_info_value_kind`].
+pub unsafe fn observe_string_value<B: Backend>(
+    connection_handle: *mut c_void,
+    info_type: u16,
+) -> (SqlReturn, String) {
+    let mut buf = [0u16; 256];
+    let mut string_length: i16 = 0;
+    // SAFETY: forwarded from the caller's own safety contract.
+    let ret = unsafe {
+        sql_get_info_w::<B>(
+            connection_handle,
+            info_type,
+            buf.as_mut_ptr() as *mut c_void,
+            (buf.len() * 2) as i16,
+            &mut string_length,
+        )
+    };
+    let units = usize::try_from(string_length / 2)
+        .unwrap_or(0)
+        .min(buf.len());
+    (ret, String::from_utf16_lossy(&buf[..units]))
+}
+
+/// Reads a `SQLUSMALLINT`-shaped info type through the real
+/// `sql_get_info_w::<B>` entry point.
+///
+/// Separate from [`observe_u32_value`] because the driver writes exactly two
+/// bytes for these, and reading four would leave the upper half as whatever
+/// the caller's buffer held.
+///
+/// # Safety
+///
+/// Same contract as [`observe_info_value_kind`].
+pub unsafe fn observe_u16_value<B: Backend>(
+    connection_handle: *mut c_void,
+    info_type: u16,
+) -> (SqlReturn, u16) {
+    let mut value: u16 = 0;
+    let mut string_length: i16 = 0;
+    // SAFETY: forwarded from the caller's own safety contract.
+    let ret = unsafe {
+        sql_get_info_w::<B>(
+            connection_handle,
+            info_type,
+            &mut value as *mut u16 as *mut c_void,
+            2,
+            &mut string_length,
+        )
+    };
+    (ret, value)
+}
+
+/// Checks the `SQLGetInfo` groups whose members constrain each other, and
+/// returns one message per violation — empty when the driver is consistent.
+///
+/// # Why this is here rather than in core's own tests
+///
+/// Core cannot police a backend's [`Backend::get_info`] at runtime: that
+/// method runs *first* and is entitled to answer anything. What core can do is
+/// state the invariants once, in the shared harness every driver's test suite
+/// already runs against its real backend, so a driver that overrides one member
+/// of a group and forgets its neighbours fails its own tests.
+///
+/// This matters most for the vendor-terminology group, which has no `Backend`
+/// hooks by design: a driver whose vendor says "database" states it by
+/// answering `SQL_CATALOG_TERM` in `get_info`, and nothing but this check
+/// notices if `SQL_CATALOG_NAME` still says `"N"`.
+///
+/// # The invariants, and why two of them are one-directional
+///
+/// - `SQL_CATALOG_NAME = "Y"` if and only if `SQL_CATALOG_TERM` and
+///   `SQL_CATALOG_NAME_SEPARATOR` are both non-empty. The spec defines the
+///   latter two in terms of the former: "an empty string is returned if
+///   catalogs are not supported by the data source. To determine whether
+///   catalogs are supported, an application calls **SQLGetInfo** with the
+///   SQL_CATALOG_NAME information type."
+/// - Catalogs unsupported implies `SQL_CATALOG_USAGE` and
+///   `SQL_CATALOG_LOCATION` are `0`: there is nothing for a catalog to be used
+///   in, or located relative to.
+/// - An empty `SQL_SCHEMA_TERM` implies `SQL_SCHEMA_USAGE = 0`, but **not** the
+///   converse. There is no `SQL_SCHEMA_NAME` info type to pair the term with —
+///   the `SQL_SCHEMA_TERM` page names one, but no such code exists in
+///   `sqlext.h` — so the term is itself the only support signal, and a data
+///   source may have schemas that appear in no statement this bitmask
+///   enumerates.
+/// - `SQL_PROCEDURES = "Y"` implies a non-empty `SQL_PROCEDURE_TERM`, and
+///   **not** the converse. The spec makes `SQL_PROCEDURES` a conjunction —
+///   "the data source supports procedures **and** the driver supports the ODBC
+///   procedure invocation syntax" — so a data source with procedures reports
+///   `"N"` on a driver without `{call}`, while still having a vendor term for
+///   them.
+/// - `SQL_TXN_CAPABLE = SQL_TC_NONE` if and only if
+///   `SQL_TXN_ISOLATION_OPTION = 0`, and `SQL_TC_NONE` implies
+///   `SQL_DEFAULT_TXN_ISOLATION = 0`. A data source with no transactions has no
+///   isolation levels to run them at.
+///
+/// # Safety
+///
+/// Same contract as [`observe_info_value_kind`].
+pub unsafe fn info_group_inconsistencies<B: Backend>(
+    connection_handle: *mut c_void,
+) -> Vec<String> {
+    use crate::types::{SQL_PROCEDURE_TERM, SQL_PROCEDURES, SQL_TC_NONE};
+
+    // SAFETY: each read forwards this function's own safety contract.
+    let string_of = |t: u16| unsafe { observe_string_value::<B>(connection_handle, t).1 };
+    let u16_of = |t: u16| unsafe { observe_u16_value::<B>(connection_handle, t).1 };
+    let u32_of = |t: u32| unsafe { observe_u32_value::<B>(connection_handle, t as u16).1 };
+
+    let mut violations = Vec::new();
+    let mut require = |holds: bool, message: String| {
+        if !holds {
+            violations.push(message);
+        }
+    };
+
+    let catalogs = string_of(InfoType::CatalogName as u16) == "Y";
+    let catalog_term = string_of(InfoType::CatalogTerm as u16);
+    let separator = string_of(InfoType::CatalogNameSeparator as u16);
+    let has_term = !catalog_term.is_empty();
+    let has_separator = !separator.is_empty();
+    require(
+        catalogs == has_term,
+        format!(
+            "SQL_CATALOG_NAME says {}, but SQL_CATALOG_TERM is {catalog_term:?}",
+            if catalogs { "\"Y\"" } else { "\"N\"" }
+        ),
+    );
+    require(
+        catalogs == has_separator,
+        format!(
+            "SQL_CATALOG_NAME says {}, but SQL_CATALOG_NAME_SEPARATOR is {separator:?}",
+            if catalogs { "\"Y\"" } else { "\"N\"" }
+        ),
+    );
+    if !catalogs {
+        let usage = u32_of(InfoType::CatalogUsage as u32);
+        let location = u16_of(InfoType::CatalogLocation as u16);
+        require(
+            usage == 0,
+            format!("catalogs are unsupported, but SQL_CATALOG_USAGE is {usage:#x}"),
+        );
+        require(
+            location == 0,
+            format!("catalogs are unsupported, but SQL_CATALOG_LOCATION is {location}"),
+        );
+    }
+
+    if string_of(InfoType::SchemaTerm as u16).is_empty() {
+        let usage = u32_of(InfoType::SchemaUsage as u32);
+        require(
+            usage == 0,
+            format!("SQL_SCHEMA_TERM is empty, but SQL_SCHEMA_USAGE is {usage:#x}"),
+        );
+    }
+
+    if string_of(SQL_PROCEDURES) == "Y" {
+        let term = string_of(SQL_PROCEDURE_TERM);
+        require(
+            !term.is_empty(),
+            "SQL_PROCEDURES says \"Y\", but SQL_PROCEDURE_TERM is empty".to_string(),
+        );
+    }
+
+    let txn_capable = u16_of(InfoType::TransactionCapable as u16);
+    let options = u32_of(InfoType::TransactionIsolationProtocol as u32);
+    require(
+        (txn_capable == SQL_TC_NONE as u16) == (options == 0),
+        format!(
+            "SQL_TXN_CAPABLE is {txn_capable} and SQL_TXN_ISOLATION_OPTION is \
+             {options:#x}; a data source with no transactions has no isolation \
+             levels, and one with levels is not SQL_TC_NONE"
+        ),
+    );
+    if txn_capable == SQL_TC_NONE as u16 {
+        let default = u32_of(InfoType::DefaultTxnIsolation as u32);
+        require(
+            default == 0,
+            format!(
+                "SQL_TXN_CAPABLE is SQL_TC_NONE, but SQL_DEFAULT_TXN_ISOLATION \
+                 is {default:#x}"
+            ),
+        );
+    }
+
+    violations
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -275,6 +474,53 @@ mod tests {
                     expected_kind(info_type)
                 );
             }
+
+            cleanup(env, conn);
+        }
+    }
+
+    /// Core plus a backend that answers no info type of its own must already
+    /// satisfy every group invariant — otherwise the defaults core supplies
+    /// contradict each other, and a driver inherits the contradiction before it
+    /// has written a line of `get_info`.
+    #[test]
+    fn cores_own_answers_are_group_consistent() {
+        unsafe {
+            let (env, conn) = alloc_env_and_conn();
+            assert_eq!(connect(conn), SqlReturn::SUCCESS);
+
+            // Every invariant above is an implication or a biconditional
+            // between two reads, so a reader that returned `""` and `0` for
+            // everything would satisfy all of them. These four assertions are
+            // what stops the check passing vacuously: they pin real values on
+            // both sides of the two groups this mock exercises.
+            assert_eq!(
+                observe_string_value::<MockBackend>(conn, InfoType::CatalogName as u16).1,
+                "Y"
+            );
+            assert_eq!(
+                observe_string_value::<MockBackend>(conn, InfoType::CatalogTerm as u16).1,
+                "catalog"
+            );
+            assert_eq!(
+                observe_u16_value::<MockBackend>(conn, InfoType::TransactionCapable as u16).1,
+                crate::types::SQL_TC_ALL as u16
+            );
+            assert_ne!(
+                observe_u32_value::<MockBackend>(
+                    conn,
+                    InfoType::TransactionIsolationProtocol as u16
+                )
+                .1,
+                0
+            );
+
+            let violations = info_group_inconsistencies::<MockBackend>(conn);
+            assert!(
+                violations.is_empty(),
+                "core's own SQLGetInfo answers contradict each other:\n  {}",
+                violations.join("\n  ")
+            );
 
             cleanup(env, conn);
         }

@@ -56,6 +56,23 @@ Everything a driver has to change for the catalog rework, in one place.
 
 ### Added
 
+- `conformance::info_group_inconsistencies` checks the `SQLGetInfo` groups whose
+  members constrain each other, and returns one message per violation. Core
+  cannot police a backend's `get_info` at runtime — that method runs first and
+  is entitled to answer anything — so the invariants live in the shared harness
+  each driver's suite already runs against its real backend: a driver that
+  answers `SQL_CATALOG_TERM` but leaves `SQL_CATALOG_NAME` saying `"N"` fails
+  its own tests. This is what makes the vendor-terminology group safe without
+  `Backend` hooks. Two of the invariants are deliberately one-directional:
+  `SQL_PROCEDURES = "Y"` implies a non-empty `SQL_PROCEDURE_TERM` but not the
+  converse (the info type is a conjunction that includes driver `{call}`
+  support), and an empty `SQL_SCHEMA_TERM` implies `SQL_SCHEMA_USAGE = 0` but
+  not the converse (the `SQL_SCHEMA_TERM` page names an `SQL_SCHEMA_NAME` info
+  type that does not exist in `sqlext.h`, so the term is its own support
+  signal). `conformance::observe_string_value` and
+  `conformance::observe_u16_value` join `observe_u32_value` for reading the
+  other two value shapes through the real entry point.
+
 - `SQLFetch`, `SQLFetchScroll` and `SQLGetData` now return `HY008` on a
   cross-thread cancel. These consume a cursor an earlier execution opened, so
   they read the token *that* execution minted rather than minting one.
