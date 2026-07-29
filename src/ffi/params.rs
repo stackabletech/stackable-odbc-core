@@ -50,8 +50,13 @@ use crate::{
 /// Diagnostics from the ODBC spec Diagnostics table:
 ///
 /// - `01000` General warning — (driver-manager-handled; not returned here)
-/// - `07006` Restricted data type attribute violation — detected at execute time by the data
-///   source; the binding is stored without validating type compatibility at bind time
+/// - `07006` Restricted data type attribute violation — returned here when `value_type` is
+///   `SQL_C_BINARY` and `parameter_type` is a target core cannot convert it to: the
+///   `DECIMAL`/`NUMERIC` and character rows of the "C to SQL: Binary" table, whose byte
+///   layout or encoding ODBC leaves unspecified (`crate::binary_convert`). That pairing is
+///   fixed at bind and needs no backend metadata, so it is refused before the query runs.
+///   Every other incompatibility is still detected at execute time by the data source, the
+///   binding being stored without validating it here.
 /// - `07009` Invalid descriptor index — returned when `parameter_number == 0` (bookmark
 ///   parameters are not supported)
 /// - `HY000` General error — returned for unexpected failures
@@ -154,6 +159,17 @@ pub unsafe fn sql_bind_parameter<B: Backend>(
             if parameter_value_ptr.is_null() && str_len_or_ind_ptr.is_null() {
                 stmt.param_bindings.remove(&parameter_number);
             } else {
+                // "C to SQL: Binary" — core converts SQL_C_BINARY only to the
+                // targets whose byte layout ODBC defines. Refused here rather
+                // than at execute time because the pairing is fixed at bind,
+                // needs no backend metadata and never depends on the data: the
+                // application fails before running its query, and the
+                // SQLPutData path is covered by this one check.
+                if c_data_type == odbc_sys::CDataType::Binary
+                    && !crate::binary_convert::binary_target_is_supported(sql_type)
+                {
+                    return Err(crate::binary_convert::unsupported_target(sql_type));
+                }
                 stmt.param_bindings.insert(
                     parameter_number,
                     ParameterBinding {
@@ -651,18 +667,17 @@ pub(crate) unsafe fn read_param_value(
             };
             match byte_len {
                 Some(n) => {
-                    // "C to SQL: Binary", the binary row. The table's other
-                    // three rows need a binary-to-SQL conversion that does not
-                    // exist yet, so a non-binary target is not size-checked
-                    // here — see `param_convert::text_to_sql_type`'s
-                    // "Not done here" note.
-                    if crate::param_convert::is_binary_sql_type(binding.sql_type) {
-                        crate::param_convert::check_declared_binary_size(n, binding.col_size)?;
-                    }
                     // SAFETY: value_ptr is non-null (guarded above) and the caller guarantees
                     // it points to at least `n` valid bytes as indicated by str_len_or_ind_ptr.
                     let bytes = unsafe { std::slice::from_raw_parts(ptr, n) };
-                    ColumnValue::Bytes(bytes.to_vec())
+                    // The whole "C to SQL: Binary" table, including its binary
+                    // row's declared-size check. `SQLBindParameter` has already
+                    // refused any target this cannot convert.
+                    return crate::binary_convert::binary_to_sql_type(
+                        bytes,
+                        binding.sql_type,
+                        binding.col_size,
+                    );
                 }
                 None => {
                     tracing::warn!(
@@ -976,12 +991,9 @@ fn dae_buffer_to_value(
     use odbc_sys::CDataType;
     let text = match c_type {
         Some(CDataType::Binary) => {
-            // The same "C to SQL: Binary" row `read_param_value` applies, and
-            // the same carve-out for a non-binary target.
-            if crate::param_convert::is_binary_sql_type(sql_type) {
-                crate::param_convert::check_declared_binary_size(buffer.len(), col_size)?;
-            }
-            return Ok(ColumnValue::Bytes(buffer.to_vec()));
+            // The same table `read_param_value` applies, for the same reason:
+            // `SQLPutData` is only a different way to hand over one parameter.
+            return crate::binary_convert::binary_to_sql_type(buffer, sql_type, col_size);
         }
         Some(CDataType::WChar) => {
             let units: Vec<u16> = buffer
@@ -1602,6 +1614,100 @@ mod tests {
                 0,
                 &mut val as *mut i32 as *mut c_void,
                 4,
+                std::ptr::null_mut(),
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+            cleanup(env, conn, stmt);
+        }
+    }
+
+    /// Core converts SQL_C_BINARY only to the targets whose byte layout ODBC
+    /// defines. The pairing is fixed at bind and needs no backend metadata, so
+    /// the refusal is here rather than at execute time.
+    #[test]
+    fn bind_parameter_refuses_binary_to_decimal_with_07006() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            let mut val: i64 = 0;
+            let ret = sql_bind_parameter::<MockBackend>(
+                stmt,
+                1,
+                ParamType::Input as i16,
+                CDataType::Binary as i16,
+                SqlDataType::DECIMAL.0,
+                19,
+                2,
+                &mut val as *mut i64 as *mut c_void,
+                8,
+                std::ptr::null_mut(),
+            );
+            assert_eq!(ret, SqlReturn::ERROR);
+            cleanup(env, conn, stmt);
+        }
+    }
+
+    #[test]
+    fn bind_parameter_refuses_binary_to_a_character_type_with_07006() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            let mut val: i64 = 0;
+            let ret = sql_bind_parameter::<MockBackend>(
+                stmt,
+                1,
+                ParamType::Input as i16,
+                CDataType::Binary as i16,
+                SqlDataType::VARCHAR.0,
+                10,
+                0,
+                &mut val as *mut i64 as *mut c_void,
+                8,
+                std::ptr::null_mut(),
+            );
+            assert_eq!(ret, SqlReturn::ERROR);
+            cleanup(env, conn, stmt);
+        }
+    }
+
+    #[test]
+    fn bind_parameter_accepts_binary_to_integer() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            let mut val: i32 = 0;
+            let ret = sql_bind_parameter::<MockBackend>(
+                stmt,
+                1,
+                ParamType::Input as i16,
+                CDataType::Binary as i16,
+                SqlDataType::INTEGER.0,
+                0,
+                0,
+                &mut val as *mut i32 as *mut c_void,
+                4,
+                std::ptr::null_mut(),
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+            cleanup(env, conn, stmt);
+        }
+    }
+
+    /// The refusal is about the pairing, not about SQL_C_BINARY: a character C
+    /// type bound to the same DECIMAL target is still accepted, because
+    /// `param_convert` converts it.
+    #[test]
+    fn bind_parameter_still_accepts_char_to_decimal() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            let mut val: i64 = 0;
+            let ret = sql_bind_parameter::<MockBackend>(
+                stmt,
+                1,
+                ParamType::Input as i16,
+                CDataType::Char as i16,
+                SqlDataType::DECIMAL.0,
+                19,
+                2,
+                &mut val as *mut i64 as *mut c_void,
+                8,
                 std::ptr::null_mut(),
             );
             assert_eq!(ret, SqlReturn::SUCCESS);
@@ -2990,28 +3096,70 @@ mod tests {
         assert_eq!(err.sqlstate().as_str(), "22001");
     }
 
-    /// The deferral, pinned: `SQL_C_BINARY` has no conversion to a non-binary
-    /// SQL type, so its `ColumnSize` is not a byte length and is not tested
-    /// against. Deleting this check is part of implementing that conversion,
-    /// not a tidy-up.
+    /// Was `read_param_value_binary_ignores_the_declared_size_for_a_non_binary_target`,
+    /// which pinned the deferral this change closes: a non-binary target used
+    /// to skip the size check and pass raw bytes through. It now converts, so
+    /// what is worth pinning is that `ColumnSize` is not consulted for a
+    /// non-binary target — its width comes from the SQL type, not the
+    /// application's declaration.
     #[test]
-    fn read_param_value_binary_ignores_the_declared_size_for_a_non_binary_target() {
-        let bytes: [u8; 5] = [0xDE, 0xAD, 0x00, 0xBE, 0xEF];
+    fn read_param_value_binary_takes_its_width_from_the_sql_type_not_column_size() {
+        let bytes = 1_i32.to_ne_bytes();
+        let mut indicator: isize = 4;
+        let binding = ParameterBinding {
+            input_output_type: odbc_sys::ParamType::Input,
+            c_type: odbc_sys::CDataType::Binary,
+            sql_type: SqlDataType::INTEGER,
+            col_size: 1,
+            decimal_digits: 0,
+            value_ptr: bytes.as_ptr() as *mut c_void,
+            buffer_length: 4,
+            str_len_or_ind_ptr: &mut indicator,
+        };
+        assert_eq!(
+            unsafe { read_param_value(&binding) }.expect("ColumnSize is irrelevant here"),
+            ColumnValue::I32(1)
+        );
+    }
+
+    /// The defect this module's new sibling exists to fix: a SQL_C_BINARY
+    /// parameter declared SQL_INTEGER used to reach the backend as raw bytes.
+    #[test]
+    fn read_param_value_binary_converts_to_the_declared_integer_type() {
+        let bytes = (-123_456_i32).to_ne_bytes();
+        let mut indicator: isize = 4;
+        let binding = ParameterBinding {
+            input_output_type: odbc_sys::ParamType::Input,
+            c_type: odbc_sys::CDataType::Binary,
+            sql_type: SqlDataType::INTEGER,
+            col_size: 0,
+            decimal_digits: 0,
+            value_ptr: bytes.as_ptr() as *mut c_void,
+            buffer_length: 4,
+            str_len_or_ind_ptr: &mut indicator,
+        };
+        assert_eq!(
+            unsafe { read_param_value(&binding) }.expect("four bytes fit an INTEGER"),
+            ColumnValue::I32(-123_456)
+        );
+    }
+
+    #[test]
+    fn read_param_value_binary_at_the_wrong_width_is_22003() {
+        let bytes: [u8; 5] = [0; 5];
         let mut indicator: isize = 5;
         let binding = ParameterBinding {
             input_output_type: odbc_sys::ParamType::Input,
             c_type: odbc_sys::CDataType::Binary,
             sql_type: SqlDataType::INTEGER,
-            col_size: 4,
+            col_size: 0,
             decimal_digits: 0,
             value_ptr: bytes.as_ptr() as *mut c_void,
             buffer_length: 5,
             str_len_or_ind_ptr: &mut indicator,
         };
-        assert_eq!(
-            unsafe { read_param_value(&binding) }.expect("not size-checked"),
-            ColumnValue::Bytes(vec![0xDE, 0xAD, 0x00, 0xBE, 0xEF])
-        );
+        let err = unsafe { read_param_value(&binding) }.expect_err("five bytes are not an INTEGER");
+        assert_eq!(err.sqlstate().as_str(), "22003");
     }
 
     #[test]
@@ -3045,6 +3193,25 @@ mod tests {
         )
         .expect_err("three bytes exceed VARBINARY(2)");
         assert_eq!(err.sqlstate().as_str(), "22001");
+    }
+
+    /// `SQLPutData` is only a different way to hand over the same parameter, so
+    /// it must not be a way to reach the backend with the declared type
+    /// discarded.
+    #[test]
+    fn dae_buffer_binary_converts_to_the_declared_integer_type() {
+        let buf = 7_i32.to_ne_bytes();
+        assert_eq!(
+            dae_buffer_to_value(
+                Some(odbc_sys::CDataType::Binary),
+                SqlDataType::INTEGER,
+                0,
+                0,
+                &buf
+            )
+            .expect("four bytes fit an INTEGER"),
+            ColumnValue::I32(7)
+        );
     }
 
     #[test]

@@ -204,7 +204,7 @@ pub(crate) fn text_to_sql_type(
         return to_bit(text);
     }
 
-    if is_binary_sql_type(sql_type) {
+    if crate::binary_convert::is_binary_sql_type(sql_type) {
         return to_binary(text, col_size);
     }
 
@@ -457,14 +457,6 @@ fn check_declared_char_size(measured: usize, col_size: ULen) -> Result<(), OdbcE
         return Err(oversized(measured, "characters", col_size));
     }
     Ok(())
-}
-
-/// Whether the declared SQL type is one of the three binary types, whose
-/// `ColumnSize` is a byte length.
-pub(crate) fn is_binary_sql_type(sql_type: SqlDataType) -> bool {
-    sql_type == SqlDataType::EXT_BINARY
-        || sql_type == SqlDataType::EXT_VAR_BINARY
-        || sql_type == SqlDataType::EXT_LONG_VAR_BINARY
 }
 
 /// Apply the declared `ColumnSize` to a binary target.
