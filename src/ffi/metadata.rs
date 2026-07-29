@@ -8,7 +8,6 @@ use std::borrow::Cow;
 use std::ffi::c_void;
 
 use crate::backend::{Backend, StatementBackend};
-use crate::cancel::reclassify_cancelled;
 use crate::errors::{IntoOdbc, OdbcError};
 use crate::handles::{StatementData, StatementHandle};
 use crate::panic::panic_safe;
@@ -313,6 +312,11 @@ pub unsafe fn sql_tables_w<B: Backend>(
             // later call on the same statement (see `mint_cancel_token`).
             let cancel_token = crate::handles::mint_cancel_token::<B>(statement_handle, connection);
             let cancel = crate::handles::cancel_as::<B>(&cancel_token)?;
+            // Core-enforced deadline, if the backend asked core to own one.
+            // Disarmed by `Drop` the moment this scope ends, so a fast call
+            // leaves no thread behind.
+            let timer =
+                crate::query_timer::QueryTimer::arm::<B>(stmt.core_query_timeout, &cancel_token);
 
             // Enumeration detection runs on the *raw* arguments, before any
             // normalisation: a normalised `"%"` would no longer be the
@@ -402,7 +406,7 @@ pub unsafe fn sql_tables_w<B: Backend>(
                 table.as_deref(),
                 &table_types,
             );
-            let rows = reclassify_cancelled::<B, _, _>(rows, cancel)?;
+            let rows = timer.check::<B, _, _>(rows, cancel)?;
 
             let mut values: Vec<Vec<ColumnValue>> = rows.iter().map(TableRow::to_values).collect();
             crate::catalog_sort::sort_rows(
@@ -530,6 +534,11 @@ pub unsafe fn sql_columns_w<B: Backend>(
             // later call on the same statement (see `mint_cancel_token`).
             let cancel_token = crate::handles::mint_cancel_token::<B>(statement_handle, connection);
             let cancel = crate::handles::cancel_as::<B>(&cancel_token)?;
+            // Core-enforced deadline, if the backend asked core to own one.
+            // Disarmed by `Drop` the moment this scope ends, so a fast call
+            // leaves no thread behind.
+            let timer =
+                crate::query_timer::QueryTimer::arm::<B>(stmt.core_query_timeout, &cancel_token);
 
             // Spec HY009 (not (DM)): METADATA_ID plus a null CatalogName on a
             // data source that has catalogs.
@@ -556,7 +565,7 @@ pub unsafe fn sql_columns_w<B: Backend>(
                 table.as_deref(),
                 column.as_deref(),
             );
-            let rows = reclassify_cancelled::<B, _, _>(rows, cancel)?;
+            let rows = timer.check::<B, _, _>(rows, cancel)?;
 
             let mut values: Vec<Vec<ColumnValue>> = rows.iter().map(ColumnRow::to_values).collect();
             // Spec: ordered by TABLE_CAT, TABLE_SCHEM, TABLE_NAME,
@@ -684,6 +693,11 @@ pub unsafe fn sql_primary_keys_w<B: Backend>(
             // later call on the same statement (see `mint_cancel_token`).
             let cancel_token = crate::handles::mint_cancel_token::<B>(statement_handle, connection);
             let cancel = crate::handles::cancel_as::<B>(&cancel_token)?;
+            // Core-enforced deadline, if the backend asked core to own one.
+            // Disarmed by `Drop` the moment this scope ends, so a fast call
+            // leaves no thread behind.
+            let timer =
+                crate::query_timer::QueryTimer::arm::<B>(stmt.core_query_timeout, &cancel_token);
 
             // Spec HY009 (not (DM)): METADATA_ID plus a null CatalogName on a
             // data source that has catalogs. The neighbouring "TableName was a
@@ -708,7 +722,7 @@ pub unsafe fn sql_primary_keys_w<B: Backend>(
                 schema.as_deref(),
                 table.as_deref(),
             );
-            let rows = reclassify_cancelled::<B, _, _>(rows, cancel)?;
+            let rows = timer.check::<B, _, _>(rows, cancel)?;
 
             let mut values: Vec<Vec<ColumnValue>> =
                 rows.iter().map(PrimaryKeyRow::to_values).collect();
@@ -861,6 +875,11 @@ pub unsafe fn sql_foreign_keys_w<B: Backend>(
             // later call on the same statement (see `mint_cancel_token`).
             let cancel_token = crate::handles::mint_cancel_token::<B>(statement_handle, connection);
             let cancel = crate::handles::cancel_as::<B>(&cancel_token)?;
+            // Core-enforced deadline, if the backend asked core to own one.
+            // Disarmed by `Drop` the moment this scope ends, so a fast call
+            // leaves no thread behind.
+            let timer =
+                crate::query_timer::QueryTimer::arm::<B>(stmt.core_query_timeout, &cancel_token);
 
             // Spec HY009 (not (DM)): METADATA_ID plus a null catalog argument
             // on a data source that has catalogs — and this function has two
@@ -899,7 +918,7 @@ pub unsafe fn sql_foreign_keys_w<B: Backend>(
                 fk_schema.as_deref(),
                 fk_table.as_deref(),
             );
-            let rows = reclassify_cancelled::<B, _, _>(rows, cancel)?;
+            let rows = timer.check::<B, _, _>(rows, cancel)?;
 
             let mut values: Vec<Vec<ColumnValue>> =
                 rows.iter().map(ForeignKeyRow::to_values).collect();
@@ -1066,6 +1085,11 @@ pub unsafe fn sql_statistics_w<B: Backend>(
             // later call on the same statement (see `mint_cancel_token`).
             let cancel_token = crate::handles::mint_cancel_token::<B>(statement_handle, connection);
             let cancel = crate::handles::cancel_as::<B>(&cancel_token)?;
+            // Core-enforced deadline, if the backend asked core to own one.
+            // Disarmed by `Drop` the moment this scope ends, so a fast call
+            // leaves no thread behind.
+            let timer =
+                crate::query_timer::QueryTimer::arm::<B>(stmt.core_query_timeout, &cancel_token);
 
             match B::statistics(
                 connection,
@@ -1107,7 +1131,7 @@ pub unsafe fn sql_statistics_w<B: Backend>(
                 // not a failure at all — it is how a backend says it exposes no such
                 // metadata, and the spec's answer to that is an empty result set,
                 // not `HY008`.
-                Err(e) => reclassify_cancelled::<B, _, _>(Err(e), cancel),
+                Err(e) => timer.check::<B, _, _>(Err(e), cancel),
             }
         })
     };
@@ -1292,6 +1316,11 @@ pub unsafe fn sql_special_columns_w<B: Backend>(
             // later call on the same statement (see `mint_cancel_token`).
             let cancel_token = crate::handles::mint_cancel_token::<B>(statement_handle, connection);
             let cancel = crate::handles::cancel_as::<B>(&cancel_token)?;
+            // Core-enforced deadline, if the backend asked core to own one.
+            // Disarmed by `Drop` the moment this scope ends, so a fast call
+            // leaves no thread behind.
+            let timer =
+                crate::query_timer::QueryTimer::arm::<B>(stmt.core_query_timeout, &cancel_token);
 
             match B::special_columns(
                 connection,
@@ -1327,7 +1356,7 @@ pub unsafe fn sql_special_columns_w<B: Backend>(
                 // not a failure at all — it is how a backend says it exposes no such
                 // metadata, and the spec's answer to that is an empty result set,
                 // not `HY008`.
-                Err(e) => reclassify_cancelled::<B, _, _>(Err(e), cancel),
+                Err(e) => timer.check::<B, _, _>(Err(e), cancel),
             }
         })
     };
@@ -1838,6 +1867,11 @@ pub unsafe fn sql_procedures_w<B: Backend>(
             // later call on the same statement (see `mint_cancel_token`).
             let cancel_token = crate::handles::mint_cancel_token::<B>(statement_handle, connection);
             let cancel = crate::handles::cancel_as::<B>(&cancel_token)?;
+            // Core-enforced deadline, if the backend asked core to own one.
+            // Disarmed by `Drop` the moment this scope ends, so a fast call
+            // leaves no thread behind.
+            let timer =
+                crate::query_timer::QueryTimer::arm::<B>(stmt.core_query_timeout, &cancel_token);
 
             // All three arguments are identifiers under METADATA_ID; this
             // family has no `TableType`-style exemption.
@@ -1852,7 +1886,7 @@ pub unsafe fn sql_procedures_w<B: Backend>(
                 schema.as_deref(),
                 proc.as_deref(),
             );
-            let rows = reclassify_cancelled::<B, _, _>(rows, cancel)?;
+            let rows = timer.check::<B, _, _>(rows, cancel)?;
 
             let mut values: Vec<Vec<ColumnValue>> =
                 rows.iter().map(ProcedureRow::to_values).collect();
@@ -2037,6 +2071,11 @@ pub unsafe fn sql_procedure_columns_w<B: Backend>(
 
             let cancel_token = crate::handles::mint_cancel_token::<B>(statement_handle, connection);
             let cancel = crate::handles::cancel_as::<B>(&cancel_token)?;
+            // Core-enforced deadline, if the backend asked core to own one.
+            // Disarmed by `Drop` the moment this scope ends, so a fast call
+            // leaves no thread behind.
+            let timer =
+                crate::query_timer::QueryTimer::arm::<B>(stmt.core_query_timeout, &cancel_token);
 
             // All four arguments are identifiers under METADATA_ID.
             let catalog = normalise_catalog_arg::<B>(connection, catalog, metadata_id);
@@ -2052,7 +2091,7 @@ pub unsafe fn sql_procedure_columns_w<B: Backend>(
                 proc.as_deref(),
                 column.as_deref(),
             );
-            let rows = reclassify_cancelled::<B, _, _>(rows, cancel)?;
+            let rows = timer.check::<B, _, _>(rows, cancel)?;
 
             let mut values: Vec<Vec<ColumnValue>> =
                 rows.iter().map(ProcedureColumnRow::to_values).collect();
@@ -2229,6 +2268,11 @@ pub unsafe fn sql_column_privileges_w<B: Backend>(
 
             let cancel_token = crate::handles::mint_cancel_token::<B>(statement_handle, connection);
             let cancel = crate::handles::cancel_as::<B>(&cancel_token)?;
+            // Core-enforced deadline, if the backend asked core to own one.
+            // Disarmed by `Drop` the moment this scope ends, so a fast call
+            // leaves no thread behind.
+            let timer =
+                crate::query_timer::QueryTimer::arm::<B>(stmt.core_query_timeout, &cancel_token);
 
             // All four arguments are identifiers under METADATA_ID.
             let catalog = normalise_catalog_arg::<B>(connection, catalog, metadata_id);
@@ -2244,7 +2288,7 @@ pub unsafe fn sql_column_privileges_w<B: Backend>(
                 table.as_deref(),
                 column.as_deref(),
             );
-            let rows = reclassify_cancelled::<B, _, _>(rows, cancel)?;
+            let rows = timer.check::<B, _, _>(rows, cancel)?;
 
             let mut values: Vec<Vec<ColumnValue>> =
                 rows.iter().map(ColumnPrivilegeRow::to_values).collect();
@@ -2410,6 +2454,11 @@ pub unsafe fn sql_table_privileges_w<B: Backend>(
 
             let cancel_token = crate::handles::mint_cancel_token::<B>(statement_handle, connection);
             let cancel = crate::handles::cancel_as::<B>(&cancel_token)?;
+            // Core-enforced deadline, if the backend asked core to own one.
+            // Disarmed by `Drop` the moment this scope ends, so a fast call
+            // leaves no thread behind.
+            let timer =
+                crate::query_timer::QueryTimer::arm::<B>(stmt.core_query_timeout, &cancel_token);
 
             // All three arguments are identifiers under METADATA_ID.
             let catalog = normalise_catalog_arg::<B>(connection, catalog, metadata_id);
@@ -2423,7 +2472,7 @@ pub unsafe fn sql_table_privileges_w<B: Backend>(
                 schema.as_deref(),
                 table.as_deref(),
             );
-            let rows = reclassify_cancelled::<B, _, _>(rows, cancel)?;
+            let rows = timer.check::<B, _, _>(rows, cancel)?;
 
             let mut values: Vec<Vec<ColumnValue>> =
                 rows.iter().map(TablePrivilegeRow::to_values).collect();

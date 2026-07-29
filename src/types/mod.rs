@@ -161,6 +161,9 @@ pub use redacted::Redacted;
 mod cursor_behavior;
 pub use cursor_behavior::CursorBehavior;
 
+mod query_timeout;
+pub use query_timeout::QueryTimeout;
+
 pub mod col_attr;
 
 pub mod sql_state;

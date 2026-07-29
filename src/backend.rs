@@ -228,16 +228,22 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// abandoning it, and it needs no [`Backend::cancel`] implementation.
     /// Implement this in preference to relying on core's timer.
     ///
-    /// Three answers, and the difference is load-bearing:
+    /// Four answers, and the difference is load-bearing:
     ///
-    /// - `Ok(())` — the deadline is in force. Core stores the value, so
+    /// - [`Ok(DataSource)`](crate::types::QueryTimeout::DataSource) — the data source enforces the
+    ///   deadline itself. Core arms no timer and stores the value, so
     ///   `SQLGetStmtAttr` reports back what the application asked for.
-    /// - `Err(NotImplemented)`, the default — this backend cannot set a
-    ///   server-side deadline. Core substitutes `0` and posts `01S02`, which is
-    ///   the spec's own answer for `SQL_ATTR_QUERY_TIMEOUT` ("the statement
-    ///   attributes that can be changed are: ... SQL_ATTR_QUERY_TIMEOUT"), so
-    ///   `SQLGetStmtAttr` reports `0` and the application learns it got no
-    ///   timeout rather than believing in one that will never fire.
+    /// - [`Ok(CoreCancels)`](crate::types::QueryTimeout::CoreCancels) — the backend cannot set a
+    ///   server-side deadline but *can* be cancelled, so core arms a timer that
+    ///   calls [`Backend::cancel`] when the deadline passes. Returning this
+    ///   asserts that `cancel` really cancels; see
+    ///   [`QueryTimeout::CoreCancels`](crate::types::QueryTimeout::CoreCancels).
+    /// - `Err(NotImplemented)`, the default — this backend can do neither. Core
+    ///   substitutes `0` and posts `01S02`, which is the spec's own answer for
+    ///   `SQL_ATTR_QUERY_TIMEOUT` ("the statement attributes that can be changed
+    ///   are: ... SQL_ATTR_QUERY_TIMEOUT"), so `SQLGetStmtAttr` reports `0` and
+    ///   the application learns it got no timeout rather than believing in one
+    ///   that will never fire.
     /// - Any other `Err` — a real failure talking to the data source, reported
     ///   as-is. It is *not* turned into a substitution: an application told
     ///   `01S02` concludes "this driver caps my timeout", which is a different
@@ -247,7 +253,7 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// timeout exceeds the maximum timeout in the data source or is smaller
     /// than the minimum timeout, `SQLSetStmtAttr` substitutes that value and
     /// returns SQLSTATE 01S02". A backend that clamps should therefore *not*
-    /// return an error: return `Ok(())` and core stores what was asked for.
+    /// return an error: return `Ok` and core stores what was asked for.
     /// Reporting the clamped value instead needs core to know it, which this
     /// signature does not carry — see the note on the `SQL_ATTR_QUERY_TIMEOUT`
     /// arm in `ffi/stmt_attr.rs`.
@@ -259,7 +265,10 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// nine statement-producing methods, which would break every existing
     /// driver. A backend that can scope a deadline per statement should carry
     /// the value on its own connection state and apply it at execution time.
-    fn set_query_timeout(_conn: &Self::Connection, _seconds: usize) -> Result<(), Self::Error> {
+    fn set_query_timeout(
+        _conn: &Self::Connection,
+        _seconds: usize,
+    ) -> Result<crate::types::QueryTimeout, Self::Error> {
         Err(OdbcError::NotImplemented {
             feature: "SQL_ATTR_QUERY_TIMEOUT".into(),
         }

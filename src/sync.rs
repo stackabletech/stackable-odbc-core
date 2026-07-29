@@ -19,10 +19,10 @@
 //! those tests out of a build they were never meant to run under.
 
 #[cfg(all(loom, test))]
-pub(crate) use loom::sync::{Arc, Mutex, MutexGuard, RwLock};
+pub(crate) use loom::sync::{Arc, Condvar, Mutex, MutexGuard, RwLock};
 
 #[cfg(not(all(loom, test)))]
-pub(crate) use std::sync::{Arc, Mutex, MutexGuard, RwLock};
+pub(crate) use std::sync::{Arc, Condvar, Mutex, MutexGuard, RwLock};
 
 // Not lock-cfg-dependent: loom's `Mutex`/`RwLock` reuse `std::sync::TryLockError`
 // verbatim rather than defining their own (confirmed in loom 0.7.2's own

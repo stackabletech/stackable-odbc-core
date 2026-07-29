@@ -3,7 +3,6 @@
 use std::ffi::c_void;
 
 use crate::backend::{Backend, StatementBackend};
-use crate::cancel::reclassify_cancelled;
 use crate::errors::OdbcError;
 use crate::handles::StatementHandle;
 use crate::panic::panic_safe;
@@ -234,6 +233,11 @@ pub unsafe fn sql_exec_direct_w<B: Backend>(
             // symptom the backend's client library happened to see.
             let cancel_token = crate::handles::mint_cancel_token::<B>(statement_handle, connection);
             let cancel = crate::handles::cancel_as::<B>(&cancel_token)?;
+            // Core-enforced deadline, if the backend asked core to own one.
+            // Disarmed by `Drop` the moment this scope ends, so a fast call
+            // leaves no thread behind.
+            let timer =
+                crate::query_timer::QueryTimer::arm::<B>(stmt.core_query_timeout, &cancel_token);
 
             // `Backend::exec_direct` takes no parameters, so a parameterised
             // statement must go through prepare + execute, which binds them.
@@ -243,8 +247,8 @@ pub unsafe fn sql_exec_direct_w<B: Backend>(
                 // SAFETY: caller guarantees all bound buffer pointers remain valid.
                 let params = crate::ffi::params::collect_params(&stmt.param_bindings, param_count)?;
                 let mut prepared =
-                    reclassify_cancelled::<B, _, _>(B::prepare(connection, cancel, &sql), cancel)?;
-                let executed = reclassify_cancelled::<B, _, _>(
+                    timer.check::<B, _, _>(B::prepare(connection, cancel, &sql), cancel)?;
+                let executed = timer.check::<B, _, _>(
                     B::execute(connection, cancel, &mut prepared, &params),
                     cancel,
                 );
@@ -263,10 +267,8 @@ pub unsafe fn sql_exec_direct_w<B: Backend>(
                 )?;
                 prepared
             } else {
-                let executed = reclassify_cancelled::<B, _, _>(
-                    B::exec_direct(connection, cancel, &sql),
-                    cancel,
-                );
+                let executed =
+                    timer.check::<B, _, _>(B::exec_direct(connection, cancel, &sql), cancel);
                 // SAFETY: as above.
                 report_param_set(stmt, executed.is_ok());
                 executed?
@@ -424,10 +426,14 @@ pub unsafe fn sql_prepare_w<B: Backend>(
             // symptom the backend's client library happened to see.
             let cancel_token = crate::handles::mint_cancel_token::<B>(statement_handle, connection);
             let cancel = crate::handles::cancel_as::<B>(&cancel_token)?;
+            // Core-enforced deadline, if the backend asked core to own one.
+            // Disarmed by `Drop` the moment this scope ends, so a fast call
+            // leaves no thread behind.
+            let timer =
+                crate::query_timer::QueryTimer::arm::<B>(stmt.core_query_timeout, &cancel_token);
 
             // Ask backend to validate and prepare the statement.
-            let prepared =
-                reclassify_cancelled::<B, _, _>(B::prepare(connection, cancel, &sql), cancel)?;
+            let prepared = timer.check::<B, _, _>(B::prepare(connection, cancel, &sql), cancel)?;
 
             // Prepared, not executed (S2/S3): no cursor is open, and a
             // re-prepare closes any cursor the previous execution left open.
@@ -609,6 +615,11 @@ pub unsafe fn sql_execute<B: Backend>(statement_handle: *mut c_void) -> SqlRetur
             // symptom the backend's client library happened to see.
             let cancel_token = crate::handles::mint_cancel_token::<B>(statement_handle, connection);
             let cancel = crate::handles::cancel_as::<B>(&cancel_token)?;
+            // Core-enforced deadline, if the backend asked core to own one.
+            // Disarmed by `Drop` the moment this scope ends, so a fast call
+            // leaves no thread behind.
+            let timer =
+                crate::query_timer::QueryTimer::arm::<B>(stmt.core_query_timeout, &cancel_token);
 
             // `SQLFreeStmt(SQL_CLOSE)` clears `stmt.statement` (discards the result set)
             // but the prepared SQL survives in `stmt.prepared_sql`. Per ODBC spec, calling
@@ -621,7 +632,7 @@ pub unsafe fn sql_execute<B: Backend>(statement_handle: *mut c_void) -> SqlRetur
                     )
                 })?;
                 let prepared =
-                    reclassify_cancelled::<B, _, _>(B::prepare(connection, cancel, sql), cancel)?;
+                    timer.check::<B, _, _>(B::prepare(connection, cancel, sql), cancel)?;
                 stmt.set_prepared_statement(crate::handles::StatementData::Backend(prepared));
             }
 
@@ -633,12 +644,10 @@ pub unsafe fn sql_execute<B: Backend>(statement_handle: *mut c_void) -> SqlRetur
             })?;
 
             let executed = match stmt_data {
-                crate::handles::StatementData::Backend(backend_stmt) => {
-                    reclassify_cancelled::<B, _, _>(
-                        B::execute(connection, cancel, backend_stmt, &params),
-                        cancel,
-                    )
-                }
+                crate::handles::StatementData::Backend(backend_stmt) => timer.check::<B, _, _>(
+                    B::execute(connection, cancel, backend_stmt, &params),
+                    cancel,
+                ),
                 crate::handles::StatementData::Synthetic(_) => {
                     return Err(OdbcError::general(
                         "Cannot re-execute a synthetic statement",
@@ -680,7 +689,7 @@ mod tests {
     use crate::handles::StatementHandle;
     use crate::test_utils::{
         MockBackend, MockBlockingBackend, MockCancelAwareBackend, MockConnection,
-        MockRecordingBackend, alloc_env_conn_stmt, with_handle,
+        MockCoreCancelsTimeoutBackend, MockRecordingBackend, alloc_env_conn_stmt, with_handle,
     };
     use odbc_sys::HandleType;
 
@@ -1542,6 +1551,74 @@ mod tests {
             );
 
             cleanup_env_conn_stmt_for::<MockCancelAwareBackend>(env, conn, stmt);
+        }
+    }
+
+    /// The link every other query-timeout test leaves untested: that core
+    /// actually *arms* its timer at a statement-producing call site.
+    ///
+    /// `SQLSetStmtAttr` recording `core_query_timeout` and `QueryTimer`
+    /// cancelling on expiry are covered separately, and both would keep passing
+    /// if the `QueryTimer::arm` line were deleted from this function. Only an
+    /// execution that overruns its deadline proves the two are joined up.
+    ///
+    /// Not run under Miri: it turns on a real one-second deadline and a
+    /// spin-until-cancelled backend, so Miri's slowdown would stretch it
+    /// unpredictably for no memory-safety gain.
+    #[test]
+    #[cfg_attr(miri, ignore = "wall-clock deadline; no unsafe to check")]
+    fn an_execution_that_overruns_its_query_timeout_reports_hyt00() {
+        unsafe {
+            let (env, conn, stmt) =
+                crate::test_utils::alloc_connected_env_conn_stmt::<MockCoreCancelsTimeoutBackend>();
+
+            // The backend delegates enforcement to core, so this records a
+            // one-second deadline for the timer to act on.
+            assert_eq!(
+                crate::ffi::stmt_attr::sql_set_stmt_attr_w::<MockCoreCancelsTimeoutBackend>(
+                    stmt,
+                    odbc_sys::StatementAttribute::QueryTimeout as i32,
+                    // An integer-valued attribute, not a pointer; the ODBC
+                    // ABI passes it through a pointer-typed parameter.
+                    std::ptr::without_provenance_mut::<c_void>(1),
+                    0,
+                ),
+                SqlReturn::SUCCESS,
+                "the mock delegates the deadline to core rather than refusing it",
+            );
+
+            // `MockAppliedConnection::exec_direct` spins on this text until its
+            // token is cancelled, standing in for a runaway query.
+            let wide: Vec<u16> = "BLOCK".encode_utf16().collect();
+            let ret = sql_exec_direct_w::<MockCoreCancelsTimeoutBackend>(
+                stmt,
+                wide.as_ptr(),
+                wide.len() as i32,
+            );
+            assert_eq!(
+                ret,
+                SqlReturn::ERROR,
+                "a query cancelled by its deadline must not report success",
+            );
+
+            let state = with_handle::<
+                MockCoreCancelsTimeoutBackend,
+                StatementHandle<MockCoreCancelsTimeoutBackend>,
+                _,
+            >(stmt, |h| {
+                h.diagnostics
+                    .get(0)
+                    .expect("a diagnostic record")
+                    .sqlstate
+                    .as_str()
+                    .to_owned()
+            });
+            assert_eq!(
+                state, "HYT00",
+                "an expired deadline is a timeout, not the HY008 a SQLCancel would give",
+            );
+
+            cleanup_env_conn_stmt_for::<MockCoreCancelsTimeoutBackend>(env, conn, stmt);
         }
     }
 }

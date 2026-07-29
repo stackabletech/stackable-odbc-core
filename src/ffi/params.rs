@@ -8,7 +8,7 @@ use odbc_sys::SqlDataType;
 
 use crate::{
     backend::{Backend, StatementBackend},
-    cancel::{reclassify_cancelled, reclassify_cancelled_opt},
+    cancel::reclassify_cancelled_opt,
     errors::OdbcError,
     handles::{ParameterBinding, StatementHandle},
     panic::panic_safe,
@@ -1336,11 +1336,16 @@ pub unsafe fn sql_param_data<B: Backend>(
             // symptom the backend's client library happened to see.
             let cancel_token = crate::handles::mint_cancel_token::<B>(statement_handle, connection);
             let cancel = crate::handles::cancel_as::<B>(&cancel_token)?;
+            // Core-enforced deadline, if the backend asked core to own one.
+            // Disarmed by `Drop` the moment this scope ends, so a fast call
+            // leaves no thread behind.
+            let timer =
+                crate::query_timer::QueryTimer::arm::<B>(stmt.core_query_timeout, &cancel_token);
 
             // If statement was closed (e.g. SQLFreeStmt(SQL_CLOSE)), re-prepare.
             if stmt.statement.is_none() {
                 let prepared =
-                    reclassify_cancelled::<B, _, _>(B::prepare(connection, cancel, &sql), cancel)?;
+                    timer.check::<B, _, _>(B::prepare(connection, cancel, &sql), cancel)?;
                 stmt.set_prepared_statement(crate::handles::StatementData::Backend(prepared));
             }
 
@@ -1349,12 +1354,10 @@ pub unsafe fn sql_param_data<B: Backend>(
             })?;
 
             let executed = match stmt_data {
-                crate::handles::StatementData::Backend(backend_stmt) => {
-                    reclassify_cancelled::<B, _, _>(
-                        B::execute(connection, cancel, backend_stmt, &params),
-                        cancel,
-                    )
-                }
+                crate::handles::StatementData::Backend(backend_stmt) => timer.check::<B, _, _>(
+                    B::execute(connection, cancel, backend_stmt, &params),
+                    cancel,
+                ),
                 crate::handles::StatementData::Synthetic(_) => {
                     return Err(OdbcError::general(
                         "Cannot execute a synthetic statement",

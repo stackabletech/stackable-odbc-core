@@ -1338,11 +1338,59 @@ macro_rules! mock_applied_backend {
             fn cancel_token(_conn: &Self::Connection) -> Self::CancelToken {
                 MockCancelToken::default()
             }
+            // A real (if trivial) cancel, not the inert default: a mock that
+            // answers `QueryTimeout::CoreCancels` is asserting that cancelling
+            // works, and one whose `cancel` did nothing would let core's timer
+            // fire into a void while the test still passed.
+            fn cancel(token: &Self::CancelToken) -> Result<(), Self::Error> {
+                token
+                    .cancelled
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            }
+            fn is_cancelled(token: &Self::CancelToken) -> bool {
+                token.cancelled.load(std::sync::atomic::Ordering::SeqCst)
+            }
+            // `"BLOCK"` stands in for a runaway query: it waits until something
+            // cancels the token, then fails the way a real client library would
+            // when its query was killed out from under it. That is the only
+            // shape in which core's query timer can be observed end to end —
+            // the timer exists precisely because a backend call blocks the
+            // calling thread, so a mock that returns immediately can never
+            // exercise it.
+            //
+            // The SQL text carries the switch rather than a static, so parallel
+            // tests cannot interfere with each other.
+            //
+            // The wait is **bounded**, and that is not belt-and-braces. If core
+            // ever stops arming its timer, nothing will cancel this token, and
+            // an unbounded wait would turn the test that catches the regression
+            // into a hung CI job — a much worse signal than a failed assertion.
+            // The bound is far longer than any deadline a test sets, so it
+            // cannot mask a genuine timeout.
             fn exec_direct(
                 _: &MockAppliedConnection,
-                _: &Self::CancelToken,
-                _: &str,
+                cancel: &Self::CancelToken,
+                sql: &str,
             ) -> Result<MockStatement, $err> {
+                if sql == "BLOCK" {
+                    // Counted rather than clock-measured: `Instant::now` is a
+                    // disallowed method crate-wide, and a bound this loose does
+                    // not need a real clock to serve its purpose.
+                    const STEP_MS: u64 = 5;
+                    const MAX_STEPS: u32 = 6_000; // ~30s, far above any test deadline
+                    let mut steps = 0;
+                    while !cancel.cancelled.load(std::sync::atomic::Ordering::SeqCst) {
+                        steps += 1;
+                        assert!(
+                            steps < MAX_STEPS,
+                            "nothing cancelled this call — core almost certainly \
+                             stopped arming its query timer",
+                        );
+                        std::thread::sleep(std::time::Duration::from_millis(STEP_MS));
+                    }
+                    return Err(MockError.into());
+                }
                 Ok(MockStatement)
             }
             fn prepare(
@@ -1419,14 +1467,34 @@ macro_rules! mock_applied_backend {
     };
 }
 
-// A data source that really can enforce a deadline: records what it was given
-// and accepts it.
+// A data source that really can enforce a deadline itself: records what it was
+// given and takes ownership of it, so core must arm no timer of its own.
 mock_applied_backend!(
     MockQueryTimeoutBackend,
-    fn set_query_timeout(conn: &MockAppliedConnection, seconds: usize) -> Result<(), MockError> {
+    fn set_query_timeout(
+        conn: &MockAppliedConnection,
+        seconds: usize,
+    ) -> Result<crate::types::QueryTimeout, MockError> {
         conn.query_timeout
             .store(seconds, std::sync::atomic::Ordering::SeqCst);
-        Ok(())
+        Ok(crate::types::QueryTimeout::DataSource)
+    }
+);
+
+// A backend that cannot set a server-side deadline but can be cancelled, so it
+// hands the deadline to core. `cancel`/`is_cancelled` come from the macro, which
+// is what makes the assertion meaningful: a mock that declared `CoreCancels`
+// with an inert `cancel` would let the timer fire into a void and the test pass
+// without proving anything reached the backend.
+mock_applied_backend!(
+    MockCoreCancelsTimeoutBackend,
+    fn set_query_timeout(
+        conn: &MockAppliedConnection,
+        seconds: usize,
+    ) -> Result<crate::types::QueryTimeout, MockError> {
+        conn.query_timeout
+            .store(seconds, std::sync::atomic::Ordering::SeqCst);
+        Ok(crate::types::QueryTimeout::CoreCancels)
     }
 );
 
@@ -1437,7 +1505,10 @@ mock_applied_backend!(
 mock_applied_backend!(
     error = OdbcError,
     MockFailingQueryTimeoutBackend,
-    fn set_query_timeout(_conn: &MockAppliedConnection, _seconds: usize) -> Result<(), OdbcError> {
+    fn set_query_timeout(
+        _conn: &MockAppliedConnection,
+        _seconds: usize,
+    ) -> Result<crate::types::QueryTimeout, OdbcError> {
         Err(OdbcError::general(
             "mock set_query_timeout failure",
             crate::types::SqlState::communication_link_failure(),

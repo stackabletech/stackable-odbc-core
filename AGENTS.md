@@ -659,6 +659,21 @@ mechanism:
   that rule was protecting against is itself spec-mandated: "a call to
   SQLCancel when no processing is being done on the statement ... has is [sic]
   no effect at all."
+- **`SQLCancel` is not the only cross-thread caller of `Backend::cancel`.**
+  `src/query_timer.rs` enforces `SQL_ATTR_QUERY_TIMEOUT` for a backend that
+  answered `QueryTimeout::CoreCancels`, and it does so the only way a
+  synchronous trait allows: a timer thread that calls `Backend::cancel` while
+  the calling thread is still blocked inside the backend. It holds **no lock**
+  — the same footing as `SQLCancel`'s cross-thread branch — so the rule that a
+  `cancel` implementation must never block on this connection's lock covers it
+  unchanged. It clones the token out of the registry for the same reason too:
+  the token has to survive a statement freed while a timer is still armed.
+
+  A timed-out call reports **`HYT00`**, not `HY008`. Both arrive through a
+  signalled token, so the ordering in `QueryTimer::check` is load-bearing: the
+  cancel pass runs first and would label it `HY008`, and the timeout pass runs
+  second so the more specific state wins. An application that set a deadline is
+  waiting to tell "my deadline passed" from "another thread cancelled me".
 - **Every lock in the crate is imported from `src/sync.rs`**, never directly
   from `std::sync`, so that building a test with `--cfg loom` swaps every one
   of them for loom's instrumented equivalent. A lock imported around that
@@ -814,12 +829,14 @@ Generic framework. Zero database-specific code.
 | `types/connect_params.rs` | `ConnectParams` — ODBC connection string parser |
 | `types/col_attr.rs` | `ColAttrValue` and column attribute logic for `SQLColAttributeW` |
 | `types/cursor_behavior.rs` | `CursorBehavior` — the `SQL_CB_*` cursor behaviour `SQLEndTran` applies, declared by the backend and reported by `SQLGetInfoW` |
+| `types/query_timeout.rs` | `QueryTimeout` — which side enforces `SQL_ATTR_QUERY_TIMEOUT`, declared by `Backend::set_query_timeout` |
 | `types/column_size.rs` | Shared ODBC column-size formulas (`catalog_column_size`/`column_size`); keeps declared vs maximum precision distinct |
 | `types/info_type_shape.rs` | The `SQLGetInfo` spec's per-`InfoType` return-value shape, transcribed for the conformance test |
 | `types/version.rs` | Parsed data-source version numbers, for a backend gating capabilities on server version |
 | `types/redacted.rs` | `Redacted<T>` — `Debug` wrapper that prints `*****` for sensitive fields (e.g. passwords) |
 | `column_value.rs` | `write_column_value()` — core data marshalling for `SQLGetData` (NULL, truncation, type coercion) |
 | `param_convert.rs` | `text_to_sql_type()` — the reverse direction: converts `SQL_C_CHAR`/`SQL_C_WCHAR` parameter text to the SQL type `SQLBindParameter` declared. The spec's "C to SQL: Character" table, transcribed |
+| `query_timer.rs` | `QueryTimer` — core-side `SQL_ATTR_QUERY_TIMEOUT` enforcement: a timer thread that calls `Backend::cancel` on expiry and relabels the resulting failure `HYT00` |
 | `synthetic.rs` | `SyntheticStatement` — in-memory result set for `SQLGetTypeInfo` and catalog functions |
 | `catalog_sort.rs` | Sorts a catalog result set into its spec-mandated order; NULL placement from `Backend::null_collation` |
 | `catalog_ident.rs` | `SQL_ATTR_METADATA_ID` identifier normalisation and the `SQLTables` `TableType` value-list parser |

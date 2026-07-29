@@ -435,6 +435,17 @@ pub struct StatementHandle<B: Backend> {
     /// Integer/pointer-valued statement attributes set via `SQLSetStmtAttr`.
     /// Values are stored as `usize` (pointer-sized). Defaults are applied at read time.
     pub attrs: std::collections::HashMap<i32, usize>,
+    /// Seconds of `SQL_ATTR_QUERY_TIMEOUT` that **core** must enforce, if any.
+    ///
+    /// Set only when [`Backend::set_query_timeout`] answered
+    /// [`QueryTimeout::CoreCancels`], so it is deliberately narrower than the
+    /// attribute in `attrs`: a timeout the *data source* enforces is stored
+    /// there and absent here, because core arming a second timer for it would
+    /// cancel a statement the server was already managing.
+    ///
+    /// [`Backend::set_query_timeout`]: crate::backend::Backend::set_query_timeout
+    /// [`QueryTimeout::CoreCancels`]: crate::types::QueryTimeout::CoreCancels
+    pub core_query_timeout: Option<usize>,
     /// Descriptor handles required by the Windows Driver Manager.
     /// The DM queries these via SQLGetStmtAttrW(10010–10013) after statement
     /// allocation. Without valid handles, the DM crashes.
@@ -644,6 +655,10 @@ pub unsafe fn alloc_statement<B: Backend>(
             )]),
             None => std::collections::HashMap::new(),
         },
+        // Not inherited from the connection: `SQL_ATTR_QUERY_TIMEOUT` is a
+        // statement attribute, so a fresh statement starts with no deadline
+        // until something sets one on it.
+        core_query_timeout: None,
         app_row_desc: alloc_desc(),
         app_param_desc: alloc_desc(),
         imp_row_desc: alloc_desc(),

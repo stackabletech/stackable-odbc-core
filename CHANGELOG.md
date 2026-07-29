@@ -56,24 +56,38 @@ Everything a driver has to change for the catalog rework, in one place.
 
 ### Added
 
-- `Backend::set_query_timeout`, defaulted, lets a data source enforce
-  `SQL_ATTR_QUERY_TIMEOUT`. The attribute was substituted to `0` with `01S02`
-  for every driver, so an application that set a 30-second timeout was told the
-  driver had capped it and then waited indefinitely on a runaway query. A
-  backend that can impose a server-side deadline now returns `Ok(())` and core
-  stores the requested value, so `SQLGetStmtAttr` reports what was asked for.
-  The default reports `NotImplemented` and the `01S02` substitution is
-  unchanged, so **no existing driver's behaviour changes** until it implements
-  the hook. A backend failure that is *not* `NotImplemented` is reported as-is
+- `Backend::set_query_timeout` and the `QueryTimeout` type make
+  `SQL_ATTR_QUERY_TIMEOUT` real. The attribute was substituted to `0` with
+  `01S02` for every driver, so an application that set a 30-second timeout was
+  told the driver had capped it and then waited indefinitely on a runaway query.
+  The hook is defaulted, reports `NotImplemented`, and leaves that substitution
+  exactly as it was, so **no existing driver's behaviour changes** until it opts
+  in. A backend failure that is *not* `NotImplemented` is now reported as-is
   rather than substituted: `01S02` tells an application its timeout was capped,
   which is a different claim from "the connection is broken".
 
-  Two limits worth knowing. The hook receives the connection, not the
-  statement — `SQL_ATTR_QUERY_TIMEOUT` is a statement attribute, so a backend
-  that applies it session-wide gives every statement on that connection the most
-  recently set value; scoping it per statement is the backend's job. And core
-  itself still enforces nothing, so a backend that leaves the hook defaulted has
-  no timeout at all.
+  A backend that opts in says *who enforces the deadline*, because core cannot
+  decide that for itself. `QueryTimeout::DataSource` means the data source
+  imposes its own deadline and core arms nothing. `QueryTimeout::CoreCancels`
+  means the backend cannot set a server-side deadline but can be cancelled, so
+  core arms a timer that calls `Backend::cancel` when the deadline passes; an
+  execution stopped that way reports `HYT00`, not the `HY008` an explicit
+  `SQLCancel` produces. Returning `CoreCancels` asserts that `cancel` really
+  cancels — core has no way to check, since `cancel`'s default returns
+  `NotImplemented` and `SQLCancel` treats that as "nothing to cancel".
+
+  The reason the enforcer has to be declared rather than inferred is that every
+  statement-producing `Backend` method is synchronous and blocks the calling
+  thread. Core cannot abandon one; asking the backend to stop the work is the
+  only lever it has. A timer is armed at all fourteen statement-producing call
+  sites and disarmed when the call returns, so a fast query leaves no thread
+  behind and an untimed statement pays only a null check.
+
+  One limit worth knowing: the hook receives the connection, not the statement.
+  `SQL_ATTR_QUERY_TIMEOUT` is a statement attribute, so a backend that applies
+  it session-wide gives every statement on that connection the most recently set
+  value; scoping it per statement is the backend's job. Core's own timer is
+  per-statement either way.
 
 - `Backend::current_catalog` and `Backend::set_current_catalog`, both defaulted,
   make `SQL_ATTR_CURRENT_CATALOG` more than a handle-local string.

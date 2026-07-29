@@ -9,7 +9,7 @@ use crate::errors::{IntoOdbc, OdbcError};
 use crate::handles::StatementHandle;
 use crate::panic::panic_safe;
 use crate::types::{
-    SQL_CURSOR_FORWARD_ONLY, SQL_FALSE, SQL_UNSPECIFIED, SqlReturn, SqlState,
+    QueryTimeout, SQL_CURSOR_FORWARD_ONLY, SQL_FALSE, SQL_UNSPECIFIED, SqlReturn, SqlState,
     statement_attribute_from_raw,
 };
 
@@ -510,15 +510,27 @@ pub unsafe fn sql_set_stmt_attr_w<B: Backend>(
                         return Ok(substitute(stmt));
                     };
                     match B::set_query_timeout(connection, int_val).into_odbc() {
-                        Ok(()) => {
+                        Ok(enforcer) => {
                             tracing::debug!(
-                                "SQLSetStmtAttrW: SQL_ATTR_QUERY_TIMEOUT={}s applied by the data source",
-                                int_val
+                                "SQLSetStmtAttrW: SQL_ATTR_QUERY_TIMEOUT={}s enforced by {:?}",
+                                int_val,
+                                enforcer
                             );
+                            // Recorded only for `CoreCancels`. Arming a core
+                            // timer for a deadline the data source is already
+                            // managing would give the statement two independent
+                            // cancellers racing the same query.
+                            stmt.core_query_timeout = match enforcer {
+                                QueryTimeout::CoreCancels => Some(int_val),
+                                QueryTimeout::DataSource => None,
+                            };
                             stmt.attrs.insert(attribute, int_val);
                             Ok(SqlReturn::SUCCESS)
                         }
-                        Err(OdbcError::NotImplemented { .. }) => Ok(substitute(stmt)),
+                        Err(OdbcError::NotImplemented { .. }) => {
+                            stmt.core_query_timeout = None;
+                            Ok(substitute(stmt))
+                        }
                         Err(e) => Err(e),
                     }
                 }
@@ -946,8 +958,9 @@ mod tests {
     use super::*;
     use crate::handles::ConnectionHandle;
     use crate::test_utils::{
-        MockBackend, MockFailingQueryTimeoutBackend, MockNoQueryTimeoutBackend,
-        MockQueryTimeoutBackend, alloc_env_conn_stmt, cleanup_env_conn_stmt, with_handle,
+        MockBackend, MockCoreCancelsTimeoutBackend, MockFailingQueryTimeoutBackend,
+        MockNoQueryTimeoutBackend, MockQueryTimeoutBackend, alloc_env_conn_stmt,
+        cleanup_env_conn_stmt, with_handle,
     };
     use crate::types::{SQL_SENSITIVE, SQL_TRUE};
 
@@ -1648,6 +1661,61 @@ mod tests {
             );
             assert_eq!(get, SqlReturn::SUCCESS, "reading the attribute back");
             (set, state, val, env, conn, stmt)
+        }
+    }
+
+    #[test]
+    fn a_data_source_enforced_timeout_arms_no_core_timer() {
+        // Two enforcers for one deadline would mean two independent cancellers
+        // racing the same query, so `DataSource` must leave `core_query_timeout`
+        // clear even though the attribute itself is stored.
+        unsafe {
+            let (set, _state, val, env, conn, stmt) =
+                set_then_get_query_timeout::<MockQueryTimeoutBackend>(30);
+            assert_eq!(set, SqlReturn::SUCCESS);
+            assert_eq!(val, 30);
+
+            with_handle::<MockQueryTimeoutBackend, StatementHandle<MockQueryTimeoutBackend>, _>(
+                stmt,
+                |s| {
+                    assert_eq!(
+                        s.core_query_timeout, None,
+                        "the data source owns this deadline; core must not arm a second one"
+                    );
+                },
+            );
+
+            crate::test_utils::cleanup_connected_env_conn_stmt::<MockQueryTimeoutBackend>(
+                env, conn, stmt,
+            );
+        }
+    }
+
+    #[test]
+    fn a_backend_that_delegates_to_core_records_the_deadline_for_the_timer() {
+        unsafe {
+            let (set, state, val, env, conn, stmt) =
+                set_then_get_query_timeout::<MockCoreCancelsTimeoutBackend>(30);
+
+            assert_eq!(set, SqlReturn::SUCCESS, "delegating is still accepting");
+            assert_eq!(state, None, "a delegated timeout is not a substitution");
+            assert_eq!(val, 30, "SQLGetStmtAttr must report what was asked for");
+
+            with_handle::<
+                MockCoreCancelsTimeoutBackend,
+                StatementHandle<MockCoreCancelsTimeoutBackend>,
+                _,
+            >(stmt, |s| {
+                assert_eq!(
+                    s.core_query_timeout,
+                    Some(30),
+                    "core was asked to own this deadline and did not record it"
+                );
+            });
+
+            crate::test_utils::cleanup_connected_env_conn_stmt::<MockCoreCancelsTimeoutBackend>(
+                env, conn, stmt,
+            );
         }
     }
 
