@@ -200,9 +200,29 @@ pub(crate) fn text_to_sql_type(
         return to_timestamp(text);
     }
 
-    // Character SQL types, the interval types (which `ColumnValue` cannot
-    // carry), `SQL_GUID` (absent from the table, so 07006 at bind time) and
-    // any driver-specific identifier.
+    // Character targets. The table gives the narrow row "Byte length of data >
+    // Column length" and the wide row the same test in characters; both are
+    // measured here in characters, and the narrow row's deviation from its own
+    // wording is deliberate — see this function's "Declared size" note.
+    if sql_type == SqlDataType::CHAR
+        || sql_type == SqlDataType::VARCHAR
+        || sql_type == SqlDataType::EXT_LONG_VARCHAR
+    {
+        check_declared_char_size(text.chars().count(), col_size)?;
+        return Ok(ColumnValue::String(text.to_owned()));
+    }
+    if sql_type == SqlDataType::EXT_W_CHAR
+        || sql_type == SqlDataType::EXT_W_VARCHAR
+        || sql_type == SqlDataType::EXT_W_LONG_VARCHAR
+    {
+        check_declared_char_size(text.encode_utf16().count(), col_size)?;
+        return Ok(ColumnValue::String(text.to_owned()));
+    }
+
+    // The interval types (which `ColumnValue` cannot carry), `SQL_GUID` (absent
+    // from the table, so 07006 at bind time) and any driver-specific
+    // identifier. None of these carries a declared length this function can
+    // test, so none is size-checked.
     Ok(ColumnValue::String(text.to_owned()))
 }
 
@@ -372,6 +392,46 @@ impl DecimalLiteral {
 
 fn decimal_literal(text: &str, sql_type: &str) -> Result<DecimalLiteral, OdbcError> {
     parse_numeric_literal(text).ok_or_else(|| not_a_literal(text, sql_type))
+}
+
+/// The declared column size was exceeded — the [C to SQL: Character] table's
+/// "Byte length of data > Column length" row and its siblings.
+///
+/// The message names the measured length and the declared size rather than the
+/// value, unlike [`truncation`] and [`out_of_range`] next door. These are
+/// precisely the rows with large values: a 10 MB parameter's contents in a
+/// diagnostic record helps nobody, and the two numbers are the whole of what an
+/// application needs to fix its bind.
+///
+/// [C to SQL: Character]: https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/c-to-sql-character
+fn oversized(actual: usize, unit: &str, declared: ULen) -> OdbcError {
+    OdbcError::general(
+        format!(
+            "Parameter value of {actual} {unit} exceeds the declared column size of {declared}"
+        ),
+        SqlState::string_data_right_truncation(),
+    )
+}
+
+/// Apply the declared `ColumnSize` to a character target.
+///
+/// `measured` is the value's length in the unit its row names — characters for
+/// `SQL_CHAR` and its siblings, UTF-16 code units for the `SQL_W*` ones. The
+/// caller picks the unit, because it is fixed by the target SQL type and not by
+/// the C type the value arrived in.
+///
+/// A `col_size` of 0 states that the application declared no size rather than a
+/// zero-length column, exactly as in [`check_declared_decimal_size`]: ODBC
+/// defines no sentinel for "size unknown", and reading 0 literally would reject
+/// every value an application that omits `ColumnSize` ever binds.
+fn check_declared_char_size(measured: usize, col_size: ULen) -> Result<(), OdbcError> {
+    if col_size == 0 {
+        return Ok(());
+    }
+    if measured > col_size {
+        return Err(oversized(measured, "characters", col_size));
+    }
+    Ok(())
 }
 
 /// Apply the declared `DECIMAL(col_size, decimal_digits)` to a parsed literal.
@@ -824,17 +884,6 @@ mod tests {
         );
     }
 
-    /// The same for a character target: this change enforces the declared size
-    /// for `SQL_DECIMAL` and `SQL_NUMERIC` only. See `text_to_sql_type`'s
-    /// "Declared size" note for the two targets still unchecked.
-    #[test]
-    fn a_character_target_ignores_the_declared_column_size() {
-        assert_eq!(
-            text_to_sql_type("abcdefghij", SqlDataType::VARCHAR, 5, 0).unwrap(),
-            ColumnValue::String("abcdefghij".into())
-        );
-    }
-
     // -- exact integer targets ----------------------------------------------
 
     #[test]
@@ -1196,6 +1245,106 @@ mod tests {
         assert_eq!(
             convert("whatever", SqlDataType(4242)),
             ColumnValue::String("whatever".into())
+        );
+    }
+
+    // -- character targets: the declared size -------------------------------
+
+    /// Convert as `VARCHAR(col_size)` and friends. `decimal_digits` is
+    /// irrelevant to a character target, so it is fixed at 0.
+    fn sized(text: &str, sql_type: SqlDataType, col_size: ULen) -> Result<ColumnValue, OdbcError> {
+        text_to_sql_type(text, sql_type, col_size, 0)
+    }
+
+    #[test]
+    fn a_character_value_shorter_than_the_declared_size_is_accepted() {
+        assert_eq!(
+            sized("abcd", SqlDataType::VARCHAR, 5).expect("four characters fit VARCHAR(5)"),
+            ColumnValue::String("abcd".into())
+        );
+    }
+
+    #[test]
+    fn a_character_value_exactly_the_declared_size_is_accepted() {
+        assert_eq!(
+            sized("abcde", SqlDataType::VARCHAR, 5).expect("five characters fit VARCHAR(5)"),
+            ColumnValue::String("abcde".into())
+        );
+    }
+
+    /// The reported defect: a ten-character string declared `VARCHAR(5)`
+    /// reached the backend whole.
+    #[test]
+    fn a_character_value_over_the_declared_size_is_22001() {
+        assert_eq!(
+            state_of(sized("0123456789", SqlDataType::VARCHAR, 5)),
+            "22001"
+        );
+    }
+
+    #[test]
+    fn the_declared_size_is_checked_for_char_and_longvarchar_too() {
+        assert_eq!(state_of(sized("abcdef", SqlDataType::CHAR, 5)), "22001");
+        assert_eq!(
+            state_of(sized("abcdef", SqlDataType::EXT_LONG_VARCHAR, 5)),
+            "22001"
+        );
+    }
+
+    /// A `ColumnSize` of 0 is "the application declared no size", not a
+    /// zero-length column.
+    #[test]
+    fn a_character_value_is_unchecked_when_no_size_was_declared() {
+        assert_eq!(
+            sized("0123456789", SqlDataType::VARCHAR, 0).expect("no declared size, no check"),
+            ColumnValue::String("0123456789".into())
+        );
+    }
+
+    /// The deliberate deviation from the narrow row's "byte length" wording:
+    /// `ColumnSize` is declared in characters, and these five characters are
+    /// nine UTF-8 bytes. Reading the row literally would reject a value bound
+    /// at its column's own declared length.
+    #[test]
+    fn a_multibyte_character_value_is_measured_in_characters_not_bytes() {
+        assert_eq!(
+            sized("äöüßx", SqlDataType::VARCHAR, 5).expect("five characters fit VARCHAR(5)"),
+            ColumnValue::String("äöüßx".into())
+        );
+    }
+
+    #[test]
+    fn a_wide_character_value_over_the_declared_size_is_22001() {
+        assert_eq!(
+            state_of(sized("abcdef", SqlDataType::EXT_W_VARCHAR, 5)),
+            "22001"
+        );
+        assert_eq!(
+            state_of(sized("abcdef", SqlDataType::EXT_W_CHAR, 5)),
+            "22001"
+        );
+        assert_eq!(
+            state_of(sized("abcdef", SqlDataType::EXT_W_LONG_VARCHAR, 5)),
+            "22001"
+        );
+    }
+
+    /// The two rows are genuinely different tests, and an astral character is
+    /// where they part company: one character, two UTF-16 code units. Do not
+    /// "fix" this into consistency.
+    #[test]
+    fn an_astral_character_counts_once_narrow_and_twice_wide() {
+        assert_eq!(
+            sized("😀", SqlDataType::VARCHAR, 1).expect("one character fits VARCHAR(1)"),
+            ColumnValue::String("😀".into())
+        );
+        assert_eq!(
+            state_of(sized("😀", SqlDataType::EXT_W_VARCHAR, 1)),
+            "22001"
+        );
+        assert_eq!(
+            sized("😀", SqlDataType::EXT_W_VARCHAR, 2).expect("two code units fit WVARCHAR(2)"),
+            ColumnValue::String("😀".into())
         );
     }
 }
