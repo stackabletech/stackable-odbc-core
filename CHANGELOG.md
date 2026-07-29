@@ -297,6 +297,25 @@ Everything a driver has to change for the catalog rework, in one place.
 
 ### Changed
 
+- **Breaking:** the ten catalog row types — `TableRow`, `ColumnRow`,
+  `PrimaryKeyRow`, `ForeignKeyRow`, `StatisticsRow`, `SpecialColumnRow`,
+  `ProcedureRow`, `ProcedureColumnRow`, `ColumnPrivilegeRow` and
+  `TablePrivilegeRow` — are `#[non_exhaustive]`, so core can add a column to a
+  spec result set without breaking every driver that constructs one. Rust
+  rejects a struct expression for such a type outside its own crate, including
+  `..Default::default()` (`E0639`), so each type gained one consuming setter per
+  column, generated from its field list by the `catalog_rows!` macro. Each takes
+  `impl Into<T>`: an `Option<String>` column accepts a bare `String`, a `String`
+  column accepts a `&str`, and a nullable numeric column accepts the bare
+  number. Migration: replace a struct expression with `Default` plus setters,
+
+  ```rust
+  let row = TableRow::default().catalog(catalog).name(name).table_type("TABLE");
+  ```
+
+  Adding a column after this is additive — one more setter, which no driver has
+  to react to.
+
 - **Breaking:** `Backend::table_types` is a new **required** method, returning
   the table types the data source has (e.g. `["TABLE", "VIEW"]`) for
   `SQLTables`' `SQL_ALL_TABLE_TYPES` enumeration. It has no safe default: an

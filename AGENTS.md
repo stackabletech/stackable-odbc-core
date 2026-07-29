@@ -249,7 +249,24 @@ consequences for a driver author:
   can be deleted.
 - **Core owns the column layout.** A backend fills named fields, so it cannot
   get column order or count wrong, and a column added to a spec result set is a
-  core-only change.
+  core-only change. That last part is what `#[non_exhaustive]` on all ten row
+  types buys. Since that rules out a struct expression outside core — including
+  `..Default::default()`, which Rust rejects cross-crate with `E0639` — each
+  type carries one consuming setter per column, generated from the same field
+  list by the `catalog_rows!` macro:
+
+  ```rust
+  let row = TableRow::default()
+      .catalog(catalog)          // Option<String> column takes a bare String
+      .name(name)
+      .table_type("TABLE");      // String column takes a &str
+  ```
+
+  Setters take `impl Into<T>` and are named after their field, so adding a
+  column adds a setter and breaks nothing. There is deliberately no positional
+  `new(...)`: `ColumnRow` has eighteen columns and `ProcedureColumnRow`
+  nineteen, so an argument list would reintroduce the ordering mistake named
+  fields exist to prevent.
 - **The `SQL_ALL_*` enumerations never reach these methods.** Core serves
   `SQL_ALL_CATALOGS`, `SQL_ALL_SCHEMAS` and `SQL_ALL_TABLE_TYPES` from
   `Backend::catalogs`, `Backend::schemas` and `Backend::table_types`, building
