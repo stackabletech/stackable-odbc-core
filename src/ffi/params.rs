@@ -72,10 +72,12 @@ use crate::{
 ///   (DM)): `column_size` and `decimal_digits` are stored verbatim without range validation.
 ///   This row is about a precision or scale "outside the range of values supported by the data
 ///   source", which needs backend metadata not available at bind time, so it is not returned.
-///   The values are not merely stored, though: at execute time a character parameter bound as
-///   `SQL_DECIMAL` or `SQL_NUMERIC` is checked against them and reports `22001` if the
-///   conversion would truncate (`crate::param_convert`). That is a different question — whether
-///   *this value* fits *this declaration* — and a different SQLSTATE.
+///   The values are not merely stored, though: at execute time the value is checked against
+///   them and reports `22001` if it does not fit — a `SQL_DECIMAL` or `SQL_NUMERIC` parameter
+///   whose conversion would truncate, a character parameter longer than `column_size`
+///   characters, or a binary one longer than `column_size` bytes (`crate::param_convert`).
+///   That is a different question — whether *this value* fits *this declaration* — and a
+///   different SQLSTATE.
 /// - `HY105` Invalid parameter type — (DM) the spec marks HY105 as DM-only. When the driver
 ///   receives an unrecognised `input_output_type`, it returns `HY024` (invalid attribute value)
 ///   instead, since the DM should have rejected it first.
@@ -649,6 +651,14 @@ pub(crate) unsafe fn read_param_value(
             };
             match byte_len {
                 Some(n) => {
+                    // "C to SQL: Binary", the binary row. The table's other
+                    // three rows need a binary-to-SQL conversion that does not
+                    // exist yet, so a non-binary target is not size-checked
+                    // here — see `param_convert::text_to_sql_type`'s
+                    // "Not done here" note.
+                    if crate::param_convert::is_binary_sql_type(binding.sql_type) {
+                        crate::param_convert::check_declared_binary_size(n, binding.col_size)?;
+                    }
                     // SAFETY: value_ptr is non-null (guarded above) and the caller guarantees
                     // it points to at least `n` valid bytes as indicated by str_len_or_ind_ptr.
                     let bytes = unsafe { std::slice::from_raw_parts(ptr, n) };
@@ -965,7 +975,14 @@ fn dae_buffer_to_value(
 ) -> Result<ColumnValue, OdbcError> {
     use odbc_sys::CDataType;
     let text = match c_type {
-        Some(CDataType::Binary) => return Ok(ColumnValue::Bytes(buffer.to_vec())),
+        Some(CDataType::Binary) => {
+            // The same "C to SQL: Binary" row `read_param_value` applies, and
+            // the same carve-out for a non-binary target.
+            if crate::param_convert::is_binary_sql_type(sql_type) {
+                crate::param_convert::check_declared_binary_size(buffer.len(), col_size)?;
+            }
+            return Ok(ColumnValue::Bytes(buffer.to_vec()));
+        }
         Some(CDataType::WChar) => {
             let units: Vec<u16> = buffer
                 .chunks_exact(2)
@@ -1190,9 +1207,12 @@ pub unsafe fn sql_put_data<B: Backend>(
 /// - 07006: Restricted data type attribute violation — propagated from backend.
 /// - 08S01: Communication link failure — propagated from backend.
 /// - 22001: String data, right truncation — returned here when the accumulated
-///   data-at-execution text would be truncated by conversion to the declared SQL type, the
-///   same check `SQLExecute` applies to a value delivered in one piece
-///   (`crate::param_convert`). Also propagated from backend.
+///   data-at-execution value does not survive conversion to the declared SQL type: text
+///   truncated by an exact-numeric target, or a value longer than the declared
+///   `ColumnSize` for a character or binary target. This is the same check `SQLExecute`
+///   applies to a value delivered in one piece (`crate::param_convert`), because
+///   `SQLPutData` is only a different way to hand over the same parameter. Also
+///   propagated from backend.
 /// - 22003: Numeric value out of range — returned here when that text falls outside the
 ///   range of the declared numeric type (`crate::param_convert`). Also propagated from
 ///   backend.
@@ -2948,6 +2968,52 @@ mod tests {
         assert_eq!(val, ColumnValue::Bytes(vec![0xDE, 0xAD, 0x00, 0xBE]));
     }
 
+    /// "C to SQL: Binary"'s binary row: "Length of data > column length" is
+    /// 22001. `read_param_value_binary` above is the accepting half — four
+    /// bytes into a `col_size` of 4.
+    #[test]
+    fn read_param_value_binary_over_the_declared_size_is_22001() {
+        let bytes: [u8; 5] = [0xDE, 0xAD, 0x00, 0xBE, 0xEF];
+        let mut indicator: isize = 5;
+        let binding = ParameterBinding {
+            input_output_type: odbc_sys::ParamType::Input,
+            c_type: odbc_sys::CDataType::Binary,
+            sql_type: SqlDataType::EXT_VAR_BINARY,
+            col_size: 4,
+            decimal_digits: 0,
+            value_ptr: bytes.as_ptr() as *mut c_void,
+            buffer_length: 5,
+            str_len_or_ind_ptr: &mut indicator,
+        };
+        let err =
+            unsafe { read_param_value(&binding) }.expect_err("five bytes exceed VARBINARY(4)");
+        assert_eq!(err.sqlstate().as_str(), "22001");
+    }
+
+    /// The deferral, pinned: `SQL_C_BINARY` has no conversion to a non-binary
+    /// SQL type, so its `ColumnSize` is not a byte length and is not tested
+    /// against. Deleting this check is part of implementing that conversion,
+    /// not a tidy-up.
+    #[test]
+    fn read_param_value_binary_ignores_the_declared_size_for_a_non_binary_target() {
+        let bytes: [u8; 5] = [0xDE, 0xAD, 0x00, 0xBE, 0xEF];
+        let mut indicator: isize = 5;
+        let binding = ParameterBinding {
+            input_output_type: odbc_sys::ParamType::Input,
+            c_type: odbc_sys::CDataType::Binary,
+            sql_type: SqlDataType::INTEGER,
+            col_size: 4,
+            decimal_digits: 0,
+            value_ptr: bytes.as_ptr() as *mut c_void,
+            buffer_length: 5,
+            str_len_or_ind_ptr: &mut indicator,
+        };
+        assert_eq!(
+            unsafe { read_param_value(&binding) }.expect("not size-checked"),
+            ColumnValue::Bytes(vec![0xDE, 0xAD, 0x00, 0xBE, 0xEF])
+        );
+    }
+
     #[test]
     fn dae_buffer_binary_is_bytes() {
         let buf = [0x00u8, 0xFF, 0x10];
@@ -2960,6 +3026,39 @@ mod tests {
                 &buf
             )
             .unwrap(),
+            ColumnValue::Bytes(vec![0x00, 0xFF, 0x10])
+        );
+    }
+
+    /// `SQLPutData` is only a different way to hand over the same parameter,
+    /// so it must not be a way to reach the backend with the declared size
+    /// discarded.
+    #[test]
+    fn dae_buffer_binary_over_the_declared_size_is_22001() {
+        let buf = [0x00u8, 0xFF, 0x10];
+        let err = dae_buffer_to_value(
+            Some(odbc_sys::CDataType::Binary),
+            SqlDataType::EXT_VAR_BINARY,
+            2,
+            0,
+            &buf,
+        )
+        .expect_err("three bytes exceed VARBINARY(2)");
+        assert_eq!(err.sqlstate().as_str(), "22001");
+    }
+
+    #[test]
+    fn dae_buffer_binary_at_the_declared_size_is_accepted() {
+        let buf = [0x00u8, 0xFF, 0x10];
+        assert_eq!(
+            dae_buffer_to_value(
+                Some(odbc_sys::CDataType::Binary),
+                SqlDataType::EXT_VAR_BINARY,
+                3,
+                0,
+                &buf
+            )
+            .expect("three bytes fit VARBINARY(3)"),
             ColumnValue::Bytes(vec![0x00, 0xFF, 0x10])
         );
     }
