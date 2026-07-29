@@ -797,6 +797,37 @@ Everything a driver has to change for the catalog rework, in one place.
 
 ### Fixed
 
+- **`SQLSetStmtAttr` now answers for every value it cannot honour.** Core drives
+  one forward-only, read-only cursor over one parameter set, and the spec gives
+  two ways to say so. The `01S02` row names the eight attributes a driver may
+  substitute for — `SQL_ATTR_CONCURRENCY`, `SQL_ATTR_CURSOR_TYPE`,
+  `SQL_ATTR_KEYSET_SIZE`, `SQL_ATTR_MAX_LENGTH`, `SQL_ATTR_MAX_ROWS`,
+  `SQL_ATTR_QUERY_TIMEOUT`, `SQL_ATTR_ROW_ARRAY_SIZE` and
+  `SQL_ATTR_SIMULATE_CURSOR` — and each is now stored at the value core
+  actually uses, with `01S02` posted so `SQLGetStmtAttr` reports it back.
+  Attributes off that closed list have no substitution to offer and report
+  `HYC00`: `SQL_ATTR_USE_BOOKMARKS` other than `SQL_UB_OFF` (bookmarks are not
+  implemented and `SQL_ATTR_FETCH_BOOKMARK_PTR` is not read),
+  `SQL_ATTR_RETRIEVE_DATA` = `SQL_RD_OFF` (`SQLFetch` writes bound buffers
+  unconditionally), `SQL_ATTR_CURSOR_SENSITIVITY` = `SQL_SENSITIVE`,
+  `SQL_ATTR_ENABLE_AUTO_IPD` = `SQL_TRUE` (a case the spec's `HYC00` row names,
+  given `SQL_ATTR_AUTO_IPD` is `SQL_FALSE`), and `SQL_ATTR_ASYNC_ENABLE` =
+  `SQL_ASYNC_ENABLE_ON` (`SQL_ASYNC_MODE` is `SQL_AM_NONE`). An application
+  that asks for any of these no longer reads its own request back as though the
+  driver had agreed to it. `SQL_ATTR_CURSOR_SCROLLABLE` and
+  `SQL_ATTR_PARAMSET_SIZE` are substituted although the `01S02` list does not
+  name them; both deviations are documented at their arms.
+
+- **Every statement attribute the driver recognises is now readable.**
+  `SQL_ATTR_KEYSET_SIZE`, `SQL_ATTR_PARAM_BIND_TYPE`,
+  `SQL_ATTR_PARAMS_PROCESSED_PTR`, `SQL_ATTR_PARAM_STATUS_PTR`,
+  `SQL_ATTR_PARAM_BIND_OFFSET_PTR`, `SQL_ATTR_PARAM_OPERATION_PTR`,
+  `SQL_ATTR_ROW_OPERATION_PTR`, `SQL_ATTR_FETCH_BOOKMARK_PTR` and
+  `SQL_ATTR_ASYNC_STMT_EVENT` have `SQLGetStmtAttr` arms, so a value
+  `SQLSetStmtAttr` accepts can be read back rather than answering `HYC00`. A
+  test drives this off `statement_attribute_from_raw`, so a recognised
+  attribute that is not readable fails rather than being noticed later.
+
 - **`SQL_ATTR_METADATA_ID` set on a connection never reached its statements.**
   `SQLSetStmtAttr`'s Comments make it one of exactly two attributes an
   application may set at the connection level — "ODBC 3.x statement attributes

@@ -3787,11 +3787,8 @@ mod tests {
     /// both connection attributes and statement attributes, and can be set at
     /// either the connection level or the statement level."
     ///
-    /// So the connection-level route is legal, and a statement allocated after
-    /// it must catalog-call as an identifier argument. Before this test the
-    /// value was stored on the connection and read by nobody: the application
-    /// got `SQL_SUCCESS`, read the value back correctly, and then had every
-    /// catalog call treat its arguments as patterns.
+    /// The connection-level route is therefore legal, and a statement
+    /// allocated after it treats its catalog arguments as identifiers.
     #[test]
     fn metadata_id_set_on_the_connection_reaches_a_statement_allocated_afterwards() {
         unsafe {
@@ -3828,9 +3825,8 @@ mod tests {
 
     /// The ODBC 2.x rule the connection-level route inherits: the value is the
     /// default for statements allocated *afterwards*, and does not reach back
-    /// to statements that already exist. Without this, setting the attribute
-    /// mid-session would silently reinterpret the arguments of a statement the
-    /// application had already configured.
+    /// to statements that already exist. A statement the application has
+    /// already configured keeps the argument treatment it was configured with.
     #[test]
     fn metadata_id_set_on_the_connection_leaves_an_existing_statement_alone() {
         unsafe {
@@ -3863,8 +3859,8 @@ mod tests {
     }
 
     /// Inheritance seeds the statement's own value; it does not pin it. A
-    /// statement-level `SQL_FALSE` after inheriting `SQL_TRUE` must win, or an
-    /// application could never turn the treatment off for one statement.
+    /// statement-level `SQL_FALSE` wins over an inherited `SQL_TRUE`, so an
+    /// application can turn the treatment off for one statement.
     #[test]
     fn a_statement_level_metadata_id_overrides_the_inherited_connection_value() {
         unsafe {

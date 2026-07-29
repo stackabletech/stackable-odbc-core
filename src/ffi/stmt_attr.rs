@@ -9,7 +9,7 @@ use crate::errors::OdbcError;
 use crate::handles::StatementHandle;
 use crate::panic::panic_safe;
 use crate::types::{
-    SQL_CURSOR_FORWARD_ONLY, SQL_FALSE, SQL_INSENSITIVE, SqlReturn, SqlState,
+    SQL_CURSOR_FORWARD_ONLY, SQL_FALSE, SQL_INSENSITIVE, SQL_UNSPECIFIED, SqlReturn, SqlState,
     statement_attribute_from_raw,
 };
 
@@ -22,6 +22,8 @@ const SQL_CONCUR_READ_ONLY: usize = 1;
 const SQL_RD_ON: usize = 1;
 // SQL_ATTR_USE_BOOKMARKS values
 const SQL_UB_OFF: usize = 0;
+// SQL_ATTR_ASYNC_ENABLE values
+const SQL_ASYNC_ENABLE_OFF: usize = 0;
 // SQL_ATTR_NOSCAN values
 const SQL_NOSCAN_OFF: usize = 0;
 // SQL_ATTR_ROW_BIND_TYPE values
@@ -33,8 +35,20 @@ const SQL_BIND_BY_COLUMN: usize = 0;
 // describe its cursor — and `sql.h` puts SQL_SENSITIVE at 2, one away, which
 // is what a copy would most likely drift to.
 
+// SQL_ATTR_SIMULATE_CURSOR values. Named `SQL_SC_*` in `sqlext.h`, which
+// collides with the `SQL_SC_*` SQL-conformance family in `types::constants`
+// (`SQL_SC_SQL92_ENTRY` and friends) — an unrelated value set that happens to
+// share the prefix. Kept local for that reason, like the other value sets
+// above.
+const SQL_SC_NON_UNIQUE: usize = 0;
+
 // SQL_ATTR_ROW_ARRAY_SIZE default
 const SQL_ROW_ARRAY_SIZE_DEFAULT: usize = 1;
+// SQL_ATTR_KEYSET_SIZE default: 0, "the cursor is fully keyset-driven".
+const SQL_KEYSET_SIZE_DEFAULT: usize = 0;
+// SQL_ATTR_MAX_LENGTH default: 0, "the driver attempts to return all
+// available data".
+const SQL_MAX_LENGTH_DEFAULT: usize = 0;
 // SQL_ATTR_PARAMSET_SIZE default
 const SQL_PARAMSET_SIZE_DEFAULT: usize = 1;
 // SQL_ATTR_MAX_ROWS default: 0, "return all rows".
@@ -42,14 +56,57 @@ const SQL_MAX_ROWS_DEFAULT: usize = 0;
 // SQL_ATTR_QUERY_TIMEOUT default: 0, "no timeout".
 const SQL_QUERY_TIMEOUT_DEFAULT: usize = 0;
 
+/// Apply the spec's `01S02` substitution to one statement attribute: store the
+/// value the driver will actually use, post the warning that says so, and
+/// return `SQL_SUCCESS_WITH_INFO`.
+///
+/// Spec, `SQLSetStmtAttr` `01S02`: "The driver did not support the value
+/// specified in *ValuePtr* … so the driver substituted a similar value.
+/// (**SQLGetStmtAttr** can be called to determine the temporarily substituted
+/// value.)" Storing the substituted value rather than the requested one is
+/// what makes that sentence true, and is why every caller here writes through
+/// this function instead of inserting directly.
+///
+/// The row then closes the set: "The statement attributes that can be changed
+/// are: SQL_ATTR_CONCURRENCY SQL_ATTR_CURSOR_TYPE SQL_ATTR_KEYSET_SIZE
+/// SQL_ATTR_MAX_LENGTH SQL_ATTR_MAX_ROWS SQL_ATTR_QUERY_TIMEOUT
+/// SQL_ATTR_ROW_ARRAY_SIZE SQL_ATTR_SIMULATE_CURSOR". An attribute outside
+/// that list must not be substituted — it takes `HYC00` instead — with the two
+/// documented exceptions noted at their call sites.
+fn substitute_stmt_attr<B: Backend>(
+    stmt: &mut StatementHandle<B>,
+    attribute: i32,
+    attr_name: &str,
+    requested: usize,
+    substituted: usize,
+    substituted_display: &str,
+) -> SqlReturn {
+    tracing::warn!(
+        "SQLSetStmtAttrW: {}={} not supported, substituting {} (01S02)",
+        attr_name,
+        requested,
+        substituted_display
+    );
+    stmt.attrs.insert(attribute, substituted);
+    stmt.diagnostics.push(&OdbcError::general(
+        format!("{attr_name} {requested} is not supported; substituted {substituted_display}"),
+        SqlState::option_value_changed(),
+    ));
+    SqlReturn::SUCCESS_WITH_INFO
+}
+
 /// Generic implementation of SQLSetStmtAttrW.
 ///
 /// Spec: <https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlsetstmtattr-function>
 ///
 /// Accepts and stores all recognised integer/pointer attributes.
-/// Only forward-only, read-only cursors are supported: a request for a
-/// scrollable cursor type is substituted with the supported value and reported
-/// as `01S02`, and a non-read-only concurrency mode reports `HYC00`.
+///
+/// Core drives one forward-only, read-only cursor over one parameter set, and
+/// two rules divide the attributes that ask for anything else. An attribute on
+/// the spec's closed `01S02` list is stored at the value core will actually
+/// use, with `01S02` posted so `SQLGetStmtAttr` reports what the application
+/// got. An attribute off that list has no substitution to offer and reports
+/// `HYC00`. See `substitute_stmt_attr` for the list itself.
 ///
 /// # Parameters
 ///
@@ -64,13 +121,16 @@ const SQL_QUERY_TIMEOUT_DEFAULT: usize = 0;
 /// # Spec compliance
 ///
 /// - 01000 General warning: not currently returned here.
-/// - 01S02 Option value changed: returned for `SQL_ATTR_CURSOR_TYPE`,
-///   `SQL_ATTR_CURSOR_SCROLLABLE`, `SQL_ATTR_ROW_ARRAY_SIZE` and
-///   `SQL_ATTR_PARAMSET_SIZE`, each of which has exactly one supported value;
-///   the driver stores that value and `SQLGetStmtAttr` reports it back, which
-///   is how the application learns what it was given. Other attributes are
-///   stored verbatim, since defining what counts as a "similar" value for them
-///   is not something the spec settles.
+/// - 01S02 Option value changed: returned for `SQL_ATTR_CONCURRENCY`,
+///   `SQL_ATTR_CURSOR_TYPE`, `SQL_ATTR_KEYSET_SIZE`, `SQL_ATTR_MAX_LENGTH`,
+///   `SQL_ATTR_MAX_ROWS`, `SQL_ATTR_QUERY_TIMEOUT`, `SQL_ATTR_ROW_ARRAY_SIZE`
+///   and `SQL_ATTR_SIMULATE_CURSOR` — the eight the spec's `01S02` row names —
+///   plus `SQL_ATTR_CURSOR_SCROLLABLE` and `SQL_ATTR_PARAMSET_SIZE`, two
+///   deviations documented at their arms. Each has exactly one value core can
+///   honour; the driver stores that value and `SQLGetStmtAttr` reports it back,
+///   which is how the application learns what it was given. Attributes with no
+///   single such value, the pointer-valued ones among them, are stored
+///   verbatim.
 /// - 24000 Invalid cursor state: returned when setting `SQL_ATTR_CONCURRENCY`,
 ///   `SQL_ATTR_CURSOR_TYPE`, `SQL_ATTR_SIMULATE_CURSOR`, or
 ///   `SQL_ATTR_USE_BOOKMARKS` while a cursor is open (`stmt.cursor_open`). A
@@ -94,21 +154,23 @@ const SQL_QUERY_TIMEOUT_DEFAULT: usize = 0;
 ///   (driver-manager-handled; not returned here). Descriptor
 ///   attributes are accepted silently because descriptors are not yet
 ///   fully implemented.
-/// - HY024 Invalid attribute value: not returned. An unsupported cursor-type
-///   value is substituted and reported as 01S02 rather than rejected, per the
-///   spec's own note that the driver "substituted a similar value".
-///   Per-attribute range validation for other discrete-valued attributes is not
-///   implemented. Deferred.
+/// - HY024 Invalid attribute value: not returned. A value core cannot honour
+///   takes one of the two paths above — 01S02 substitution on the spec's list,
+///   HYC00 off it — rather than being rejected as invalid, since the values in
+///   question are valid ODBC values that this driver does not implement.
 /// - HY090 Invalid string or buffer length: (driver-manager-handled; not
 ///   returned here).
 /// - HY092 Invalid attribute/option identifier: (driver-manager-handled; not
 ///   returned here). Unknown attributes are accepted silently.
 /// - HY117 Connection is suspended due to unknown transaction state:
 ///   (driver-manager-handled; not returned here).
-/// - HYC00 Optional feature not implemented: returned for a non-read-only
-///   `SQL_ATTR_CONCURRENCY` and the other unsupported optional features below.
-///   Cursor type and scrollability are *not* among them — those take the
-///   01S02 substitution path above.
+/// - HYC00 Optional feature not implemented: returned for
+///   `SQL_ATTR_USE_BOOKMARKS` other than `SQL_UB_OFF`,
+///   `SQL_ATTR_RETRIEVE_DATA` = `SQL_RD_OFF`, `SQL_ATTR_CURSOR_SENSITIVITY` =
+///   `SQL_SENSITIVE`, `SQL_ATTR_ENABLE_AUTO_IPD` = `SQL_TRUE` (a case the
+///   spec's own HYC00 row names), and `SQL_ATTR_ASYNC_ENABLE` =
+///   `SQL_ASYNC_ENABLE_ON`. These are the unsupported values that the spec's
+///   `01S02` row does not cover, so there is no substitution to report instead.
 /// - HYT01 Connection timeout expired: not returned; this function does not
 ///   communicate with the data source.
 /// - IM001 Driver does not support this function: (driver-manager-handled; not
@@ -164,30 +226,78 @@ pub unsafe fn sql_set_stmt_attr_w<B: Backend>(
                             SqlState::attribute_cannot_be_set_now(),
                         ));
                     }
-                    // Cursor-type-specific validation: only forward-only is
-                    // supported. If a driver ever needs scrollable cursors,
-                    // this check would have to move from stackable-odbc-core into the
-                    // backend trait so each driver could decide independently.
+                    // Three of these four are on the spec's closed 01S02 list
+                    // and take the substitution path; `SQL_ATTR_USE_BOOKMARKS`
+                    // is not on it and takes HYC00. See `substitute_stmt_attr`.
+                    //
+                    // Cursor type: only forward-only is supported. If a driver
+                    // ever needs scrollable cursors, this check would have to
+                    // move from stackable-odbc-core into the backend trait so
+                    // each driver could decide independently.
                     if matches!(attr, Some(StatementAttribute::CursorType))
                         && int_val != SQL_CURSOR_FORWARD_ONLY
                     {
-                        // Spec: the driver substitutes a similar value and
-                        // reports 01S02, rather than refusing the attribute.
-                        // `SQLGetStmtAttr` then reports the substituted value,
-                        // which is how the application learns what it got. The
-                        // same treatment `SQL_ATTR_ROW_ARRAY_SIZE` gets below.
-                        tracing::warn!(
-                            "SQLSetStmtAttrW: SQL_ATTR_CURSOR_TYPE={} not supported, substituting SQL_CURSOR_FORWARD_ONLY (01S02)",
-                            int_val
-                        );
-                        stmt.attrs.insert(attribute, SQL_CURSOR_FORWARD_ONLY);
-                        stmt.diagnostics.push(&OdbcError::general(
-                            format!(
-                                "SQL_ATTR_CURSOR_TYPE {int_val} is not supported; substituted SQL_CURSOR_FORWARD_ONLY"
-                            ),
-                            SqlState::option_value_changed(),
+                        return Ok(substitute_stmt_attr(
+                            stmt,
+                            attribute,
+                            "SQL_ATTR_CURSOR_TYPE",
+                            int_val,
+                            SQL_CURSOR_FORWARD_ONLY,
+                            "SQL_CURSOR_FORWARD_ONLY",
                         ));
-                        return Ok(SqlReturn::SUCCESS_WITH_INFO);
+                    }
+                    // Concurrency: core's cursor is read-only — nothing here
+                    // implements a positioned update or delete — and
+                    // `SQL_CONCUR_READ_ONLY` is the spec's own default. The
+                    // spec uses this exact attribute as its worked example of
+                    // the substitution rule: "if Attribute is
+                    // SQL_ATTR_CONCURRENCY and ValuePtr is SQL_CONCUR_ROWVER,
+                    // and if the data source does not support this, the driver
+                    // substitutes SQL_CONCUR_VALUES and returns
+                    // SQL_SUCCESS_WITH_INFO."
+                    if matches!(attr, Some(StatementAttribute::Concurrency))
+                        && int_val != SQL_CONCUR_READ_ONLY
+                    {
+                        return Ok(substitute_stmt_attr(
+                            stmt,
+                            attribute,
+                            "SQL_ATTR_CONCURRENCY",
+                            int_val,
+                            SQL_CONCUR_READ_ONLY,
+                            "SQL_CONCUR_READ_ONLY",
+                        ));
+                    }
+                    // Simulated positioned updates: core constructs no searched
+                    // UPDATE or DELETE and so guarantees nothing about how many
+                    // rows one would affect. `SQL_SC_NON_UNIQUE` is the value
+                    // that says exactly that — "the driver does not guarantee
+                    // that simulated positioned update or delete statements
+                    // will affect only one row" — so claiming either of the
+                    // other two would be a promise core cannot keep.
+                    if matches!(attr, Some(StatementAttribute::SimulateCursor))
+                        && int_val != SQL_SC_NON_UNIQUE
+                    {
+                        return Ok(substitute_stmt_attr(
+                            stmt,
+                            attribute,
+                            "SQL_ATTR_SIMULATE_CURSOR",
+                            int_val,
+                            SQL_SC_NON_UNIQUE,
+                            "SQL_SC_NON_UNIQUE",
+                        ));
+                    }
+                    // Bookmarks: core implements none, and nothing reads
+                    // `SQL_ATTR_FETCH_BOOKMARK_PTR`. The attribute is *not* on
+                    // the 01S02 list, so there is no substitution to offer;
+                    // `HYC00` is the row that fits — "a valid ODBC statement
+                    // attribute for the version of ODBC supported by the driver
+                    // but was not supported by the driver".
+                    if matches!(attr, Some(StatementAttribute::UseBookmarks))
+                        && int_val != SQL_UB_OFF
+                    {
+                        return Err(OdbcError::NotImplemented {
+                            feature: format!("SQL_ATTR_USE_BOOKMARKS = {int_val} (bookmarks)"),
+                        });
                     }
                     stmt.attrs.insert(attribute, int_val);
                     Ok(SqlReturn::SUCCESS)
@@ -200,17 +310,22 @@ pub unsafe fn sql_set_stmt_attr_w<B: Backend>(
                         // as SQL_ATTR_CURSOR_TYPE above: the two describe one
                         // cursor, and refusing this one while substituting the
                         // other would leave them disagreeing.
-                        tracing::warn!(
-                            "SQLSetStmtAttrW: SQL_ATTR_CURSOR_SCROLLABLE={} not supported, substituting SQL_NONSCROLLABLE (01S02)",
-                            int_val
-                        );
-                        stmt.attrs.insert(attribute, SQL_NONSCROLLABLE);
-                        stmt.diagnostics.push(&OdbcError::general(
-                            "SQL_ATTR_CURSOR_SCROLLABLE = SQL_SCROLLABLE is not supported; \
-                             substituted SQL_NONSCROLLABLE",
-                            SqlState::option_value_changed(),
+                        //
+                        // A deliberate deviation: this attribute is *not* on
+                        // the spec's closed 01S02 list, so the letter of the
+                        // spec is HYC00. Keeping the pair consistent is judged
+                        // worth more than that, because an application that
+                        // reads back a forward-only cursor type and a
+                        // scrollable cursor has been told two contradictory
+                        // things about one cursor.
+                        return Ok(substitute_stmt_attr(
+                            stmt,
+                            attribute,
+                            "SQL_ATTR_CURSOR_SCROLLABLE",
+                            int_val,
+                            SQL_NONSCROLLABLE,
+                            "SQL_NONSCROLLABLE",
                         ));
-                        return Ok(SqlReturn::SUCCESS_WITH_INFO);
                     }
                     stmt.attrs.insert(attribute, int_val);
                     Ok(SqlReturn::SUCCESS)
@@ -244,43 +359,38 @@ pub unsafe fn sql_set_stmt_attr_w<B: Backend>(
                 // explicitly listed as substitutable. SQLGetStmtAttr then
                 // reports the substituted value.
                 Some(StatementAttribute::RowArraySize) if int_val != SQL_ROW_ARRAY_SIZE_DEFAULT => {
-                    tracing::warn!(
-                        "SQLSetStmtAttrW: SQL_ATTR_ROW_ARRAY_SIZE={} not supported, substituting {} (01S02)",
+                    Ok(substitute_stmt_attr(
+                        stmt,
+                        attribute,
+                        "SQL_ATTR_ROW_ARRAY_SIZE",
                         int_val,
-                        SQL_ROW_ARRAY_SIZE_DEFAULT
-                    );
-                    stmt.attrs.insert(attribute, SQL_ROW_ARRAY_SIZE_DEFAULT);
-                    stmt.diagnostics.push(&OdbcError::general(
-                        format!(
-                            "SQL_ATTR_ROW_ARRAY_SIZE {int_val} is not supported; substituted {SQL_ROW_ARRAY_SIZE_DEFAULT}"
-                        ),
-                        SqlState::option_value_changed(),
-                    ));
-                    Ok(SqlReturn::SUCCESS_WITH_INFO)
+                        SQL_ROW_ARRAY_SIZE_DEFAULT,
+                        "1",
+                    ))
                 }
 
                 // Only a single parameter set is executed: SQLExecute binds and
                 // runs the parameter buffers once and does not iterate over an
                 // array. Accepting a larger size verbatim would silently drop
                 // every parameter set past the first and cause an undetectable
-                // batch-insert data loss. As with SQL_ATTR_ROW_ARRAY_SIZE, the
-                // spec (01S02) lets the driver substitute a similar value and
-                // return SQL_SUCCESS_WITH_INFO; SQLGetStmtAttr then reports the
-                // substituted value.
+                // batch-insert data loss.
+                //
+                // The second deliberate deviation, alongside
+                // SQL_ATTR_CURSOR_SCROLLABLE above: SQL_ATTR_PARAMSET_SIZE is
+                // not on the spec's closed 01S02 list either. Substitution is
+                // still the least-bad answer here, because the alternatives are
+                // to accept a size core will not honour — undetectable data
+                // loss — or to fail a call every parameter-array-capable tool
+                // makes.
                 Some(StatementAttribute::ParamsetSize) if int_val != SQL_PARAMSET_SIZE_DEFAULT => {
-                    tracing::warn!(
-                        "SQLSetStmtAttrW: SQL_ATTR_PARAMSET_SIZE={} not supported, substituting {} (01S02)",
+                    Ok(substitute_stmt_attr(
+                        stmt,
+                        attribute,
+                        "SQL_ATTR_PARAMSET_SIZE",
                         int_val,
-                        SQL_PARAMSET_SIZE_DEFAULT
-                    );
-                    stmt.attrs.insert(attribute, SQL_PARAMSET_SIZE_DEFAULT);
-                    stmt.diagnostics.push(&OdbcError::general(
-                        format!(
-                            "SQL_ATTR_PARAMSET_SIZE {int_val} is not supported; substituted {SQL_PARAMSET_SIZE_DEFAULT}"
-                        ),
-                        SqlState::option_value_changed(),
-                    ));
-                    Ok(SqlReturn::SUCCESS_WITH_INFO)
+                        SQL_PARAMSET_SIZE_DEFAULT,
+                        "1",
+                    ))
                 }
 
                 // No row limit is applied anywhere: `SQLFetch` asks the backend
@@ -291,19 +401,48 @@ pub unsafe fn sql_set_stmt_attr_w<B: Backend>(
                 // them. SQL_ATTR_MAX_ROWS is on the spec's own 01S02
                 // substitution list, so say so instead.
                 Some(StatementAttribute::MaxRows) if int_val != SQL_MAX_ROWS_DEFAULT => {
-                    tracing::warn!(
-                        "SQLSetStmtAttrW: SQL_ATTR_MAX_ROWS={} not supported, substituting {} (01S02)",
+                    Ok(substitute_stmt_attr(
+                        stmt,
+                        attribute,
+                        "SQL_ATTR_MAX_ROWS",
                         int_val,
-                        SQL_MAX_ROWS_DEFAULT
-                    );
-                    stmt.attrs.insert(attribute, SQL_MAX_ROWS_DEFAULT);
-                    stmt.diagnostics.push(&OdbcError::general(
-                        format!(
-                            "SQL_ATTR_MAX_ROWS {int_val} is not supported; substituted {SQL_MAX_ROWS_DEFAULT} (no limit)"
-                        ),
-                        SqlState::option_value_changed(),
-                    ));
-                    Ok(SqlReturn::SUCCESS_WITH_INFO)
+                        SQL_MAX_ROWS_DEFAULT,
+                        "0 (no limit)",
+                    ))
+                }
+
+                // The counterpart of SQL_ATTR_MAX_ROWS, one column over: no
+                // character or binary value is truncated to this limit on the
+                // way out, since neither `sql_fetch` nor `sql_get_data`
+                // consults it. 0 — "the driver attempts to return all available
+                // data" — is therefore the only value core can report honestly,
+                // and SQL_ATTR_MAX_LENGTH is on the spec's 01S02 list, which
+                // says how to report it.
+                Some(StatementAttribute::MaxLength) if int_val != SQL_MAX_LENGTH_DEFAULT => {
+                    Ok(substitute_stmt_attr(
+                        stmt,
+                        attribute,
+                        "SQL_ATTR_MAX_LENGTH",
+                        int_val,
+                        SQL_MAX_LENGTH_DEFAULT,
+                        "0 (all available data)",
+                    ))
+                }
+
+                // A keyset is a keyset-driven cursor's window, and core has no
+                // keyset-driven cursor: `SQL_ATTR_CURSOR_TYPE` is substituted
+                // back to forward-only a few arms above, so a non-zero keyset
+                // size describes a cursor that cannot exist on this statement.
+                // Also on the spec's 01S02 list.
+                Some(StatementAttribute::KeysetSize) if int_val != SQL_KEYSET_SIZE_DEFAULT => {
+                    Ok(substitute_stmt_attr(
+                        stmt,
+                        attribute,
+                        "SQL_ATTR_KEYSET_SIZE",
+                        int_val,
+                        SQL_KEYSET_SIZE_DEFAULT,
+                        "0",
+                    ))
                 }
 
                 // `Backend` is synchronous and has no cancellation deadline, so
@@ -312,19 +451,63 @@ pub unsafe fn sql_set_stmt_attr_w<B: Backend>(
                 // application that sets a 30-second timeout and gets SUCCESS is
                 // entitled to believe a runaway query will be cut off.
                 Some(StatementAttribute::QueryTimeout) if int_val != SQL_QUERY_TIMEOUT_DEFAULT => {
-                    tracing::warn!(
-                        "SQLSetStmtAttrW: SQL_ATTR_QUERY_TIMEOUT={} not supported, substituting {} (01S02)",
+                    Ok(substitute_stmt_attr(
+                        stmt,
+                        attribute,
+                        "SQL_ATTR_QUERY_TIMEOUT",
                         int_val,
-                        SQL_QUERY_TIMEOUT_DEFAULT
-                    );
-                    stmt.attrs.insert(attribute, SQL_QUERY_TIMEOUT_DEFAULT);
-                    stmt.diagnostics.push(&OdbcError::general(
-                        format!(
-                            "SQL_ATTR_QUERY_TIMEOUT {int_val} is not supported; substituted {SQL_QUERY_TIMEOUT_DEFAULT} (no timeout)"
-                        ),
-                        SqlState::option_value_changed(),
-                    ));
-                    Ok(SqlReturn::SUCCESS_WITH_INFO)
+                        SQL_QUERY_TIMEOUT_DEFAULT,
+                        "0 (no timeout)",
+                    ))
+                }
+
+                // `sql_fetch` retrieves and writes bound columns
+                // unconditionally, so SQL_RD_OFF — "do not retrieve data into
+                // the bound buffers" — is not something core can honour. Not on
+                // the 01S02 list, so HYC00 rather than a substitution.
+                Some(StatementAttribute::RetrieveData) if int_val != SQL_RD_ON => {
+                    Err(OdbcError::NotImplemented {
+                        feature: format!("SQL_ATTR_RETRIEVE_DATA = {int_val} (SQL_RD_OFF)"),
+                    })
+                }
+
+                // SQL_UNSPECIFIED promises nothing and is the spec's default,
+                // so it is always satisfiable; SQL_INSENSITIVE is what
+                // `SQL_CURSOR_SENSITIVITY` reports today, so accepting it keeps
+                // the attribute and the info type telling one story.
+                // SQL_SENSITIVE is the one core certainly cannot do — it would
+                // require a cursor that sees other cursors' changes — and is
+                // not on the 01S02 list, so HYC00.
+                Some(StatementAttribute::CursorSensitivity)
+                    if int_val != usize::from(SQL_UNSPECIFIED)
+                        && int_val != usize::from(SQL_INSENSITIVE) =>
+                {
+                    Err(OdbcError::NotImplemented {
+                        feature: format!("SQL_ATTR_CURSOR_SENSITIVITY = {int_val} (SQL_SENSITIVE)"),
+                    })
+                }
+
+                // Spec HYC00, verbatim: "The Attribute argument was
+                // SQL_ATTR_ENABLE_AUTO_IPD, and the value of the connection
+                // attribute SQL_ATTR_AUTO_IPD was SQL_FALSE."
+                // `SQLGetConnectAttr` reports exactly that, and
+                // `SQLGetStmtAttr` reports SQL_FALSE for this attribute, so
+                // SQL_TRUE is the one value the three cannot agree on.
+                Some(StatementAttribute::EnableAutoIpd) if int_val != SQL_FALSE as usize => {
+                    Err(OdbcError::NotImplemented {
+                        feature:
+                            "SQL_ATTR_ENABLE_AUTO_IPD = SQL_TRUE (SQL_ATTR_AUTO_IPD is SQL_FALSE)"
+                                .into(),
+                    })
+                }
+
+                // `SQLGetInfo(SQL_ASYNC_MODE)` reports SQL_AM_NONE and the
+                // `Backend` trait is synchronous, so there is no asynchronous
+                // execution to enable. Not on the 01S02 list.
+                Some(StatementAttribute::AsyncEnable) if int_val != SQL_ASYNC_ENABLE_OFF => {
+                    Err(OdbcError::NotImplemented {
+                        feature: "SQL_ATTR_ASYNC_ENABLE = SQL_ASYNC_ENABLE_ON".into(),
+                    })
                 }
 
                 // All other recognised attributes: store value.
@@ -629,6 +812,44 @@ pub unsafe fn sql_get_stmt_attr_w<B: Backend>(
                     Ok(SqlReturn::SUCCESS)
                 }
 
+                // The parameter-side counterparts of the row-side attributes
+                // above, plus the two remaining rowset pointers. `SQLSetStmtAttr`
+                // stores every one of them, and an attribute this driver stores
+                // is an attribute it can report: the spec makes
+                // `SQLGetStmtAttr` the way an application reads back what it
+                // set, so refusing one here would leave a value it accepted
+                // unreadable.
+                Some(StatementAttribute::KeysetSize) => {
+                    write_u32(
+                        stmt.attrs
+                            .get(&attribute)
+                            .copied()
+                            .unwrap_or(SQL_KEYSET_SIZE_DEFAULT) as u32,
+                    );
+                    Ok(SqlReturn::SUCCESS)
+                }
+                Some(StatementAttribute::ParamBindType) => {
+                    write_u32(
+                        stmt.attrs
+                            .get(&attribute)
+                            .copied()
+                            .unwrap_or(SQL_BIND_BY_COLUMN) as u32,
+                    );
+                    Ok(SqlReturn::SUCCESS)
+                }
+                Some(
+                    StatementAttribute::ParamsProcessedPtr
+                    | StatementAttribute::ParamStatusPtr
+                    | StatementAttribute::ParamBindOffsetPtr
+                    | StatementAttribute::ParamOpterationPtr
+                    | StatementAttribute::RowOperationPtr
+                    | StatementAttribute::FetchBookmarkPtr
+                    | StatementAttribute::AsyncStmtEvent,
+                ) => {
+                    write_ptr(stmt.attrs.get(&attribute).copied().unwrap_or(0));
+                    Ok(SqlReturn::SUCCESS)
+                }
+
                 _ => Err(OdbcError::general(
                     format!("SQLGetStmtAttrW: unsupported attribute {attribute}"),
                     SqlState::optional_feature_not_implemented(),
@@ -644,6 +865,7 @@ pub unsafe fn sql_get_stmt_attr_w<B: Backend>(
 mod tests {
     use super::*;
     use crate::test_utils::{MockBackend, alloc_env_conn_stmt, cleanup_env_conn_stmt, with_handle};
+    use crate::types::{SQL_SENSITIVE, SQL_TRUE};
 
     #[test]
     fn cursor_sensitivity_agrees_with_the_value_sqlgetinfo_reports() {
@@ -913,6 +1135,225 @@ mod tests {
                 "SQLGetStmtAttr must report the substituted value"
             );
             cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
+    /// The spec's `01S02` row closes the set of statement attributes a driver
+    /// may substitute for: "SQL_ATTR_CONCURRENCY SQL_ATTR_CURSOR_TYPE
+    /// SQL_ATTR_KEYSET_SIZE SQL_ATTR_MAX_LENGTH SQL_ATTR_MAX_ROWS
+    /// SQL_ATTR_QUERY_TIMEOUT SQL_ATTR_ROW_ARRAY_SIZE
+    /// SQL_ATTR_SIMULATE_CURSOR". Cursor type, max rows, query timeout and row
+    /// array size have tests of their own above; these are the other four.
+    /// Each has exactly one value core can honour, and `SQLGetStmtAttr` reports
+    /// that value, which is how the application learns what it was given.
+    #[test]
+    fn the_remaining_substitutable_attributes_report_01s02_and_the_value_used() {
+        // (attribute, name, requested, the value core uses)
+        let cases: &[(StatementAttribute, &str, usize, usize)] = &[
+            (
+                StatementAttribute::Concurrency,
+                "SQL_ATTR_CONCURRENCY",
+                2, // SQL_CONCUR_LOCK
+                SQL_CONCUR_READ_ONLY,
+            ),
+            (
+                StatementAttribute::MaxLength,
+                "SQL_ATTR_MAX_LENGTH",
+                4096,
+                SQL_MAX_LENGTH_DEFAULT,
+            ),
+            (
+                StatementAttribute::KeysetSize,
+                "SQL_ATTR_KEYSET_SIZE",
+                10,
+                SQL_KEYSET_SIZE_DEFAULT,
+            ),
+            (
+                StatementAttribute::SimulateCursor,
+                "SQL_ATTR_SIMULATE_CURSOR",
+                2, // SQL_SC_UNIQUE
+                SQL_SC_NON_UNIQUE,
+            ),
+        ];
+        for (attribute, name, requested, used) in cases {
+            unsafe {
+                let (env, conn, stmt) = alloc_env_conn_stmt();
+
+                let ret = sql_set_stmt_attr_w::<MockBackend>(
+                    stmt,
+                    *attribute as i32,
+                    std::ptr::without_provenance_mut(*requested),
+                    0,
+                );
+                assert_eq!(
+                    ret,
+                    SqlReturn::SUCCESS_WITH_INFO,
+                    "{name} was accepted without 01S02"
+                );
+
+                with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+                    assert_eq!(
+                        handle
+                            .diagnostics
+                            .get(0)
+                            .unwrap_or_else(|| panic!("{name}: a 01S02 record"))
+                            .sqlstate
+                            .as_str(),
+                        "01S02",
+                        "{name} posted the wrong SQLSTATE"
+                    );
+                });
+
+                let mut out: u32 = 99;
+                assert_eq!(
+                    sql_get_stmt_attr_w::<MockBackend>(
+                        stmt,
+                        *attribute as i32,
+                        std::ptr::from_mut(&mut out).cast(),
+                        0,
+                        std::ptr::null_mut(),
+                    ),
+                    SqlReturn::SUCCESS
+                );
+                assert_eq!(
+                    out as usize, *used,
+                    "{name}: SQLGetStmtAttr must report the value the driver uses"
+                );
+
+                cleanup_env_conn_stmt(env, conn, stmt);
+            }
+        }
+    }
+
+    /// The other half of that rule. An attribute the `01S02` row does not name
+    /// has no substitution to offer, so a value core cannot honour reports
+    /// `HYC00` — "a valid ODBC statement attribute for the version of ODBC
+    /// supported by the driver but was not supported by the driver" — rather
+    /// than being stored and echoed back.
+    #[test]
+    fn unsupported_values_off_the_01s02_list_report_hyc00() {
+        // (attribute, name, value core cannot honour)
+        let cases: &[(StatementAttribute, &str, usize)] = &[
+            (
+                StatementAttribute::UseBookmarks,
+                "SQL_ATTR_USE_BOOKMARKS",
+                2, // SQL_UB_VARIABLE
+            ),
+            (
+                StatementAttribute::RetrieveData,
+                "SQL_ATTR_RETRIEVE_DATA",
+                0, // SQL_RD_OFF
+            ),
+            (
+                StatementAttribute::CursorSensitivity,
+                "SQL_ATTR_CURSOR_SENSITIVITY",
+                SQL_SENSITIVE as usize,
+            ),
+            (
+                StatementAttribute::EnableAutoIpd,
+                "SQL_ATTR_ENABLE_AUTO_IPD",
+                SQL_TRUE as usize,
+            ),
+            (
+                StatementAttribute::AsyncEnable,
+                "SQL_ATTR_ASYNC_ENABLE",
+                1, // SQL_ASYNC_ENABLE_ON
+            ),
+        ];
+        for (attribute, name, value) in cases {
+            unsafe {
+                let (env, conn, stmt) = alloc_env_conn_stmt();
+
+                let ret = sql_set_stmt_attr_w::<MockBackend>(
+                    stmt,
+                    *attribute as i32,
+                    std::ptr::without_provenance_mut(*value),
+                    0,
+                );
+                assert_eq!(ret, SqlReturn::ERROR, "{name} was accepted");
+
+                with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+                    assert_eq!(
+                        handle
+                            .diagnostics
+                            .get(0)
+                            .unwrap_or_else(|| panic!("{name}: a HYC00 record"))
+                            .sqlstate
+                            .as_str(),
+                        "HYC00",
+                        "{name} posted the wrong SQLSTATE"
+                    );
+                });
+
+                cleanup_env_conn_stmt(env, conn, stmt);
+            }
+        }
+    }
+
+    /// An attribute this driver recognises is an attribute it can report.
+    /// `SQLGetStmtAttr` is how an application reads back what `SQLSetStmtAttr`
+    /// accepted, so a recognised attribute that answers `HYC00` here would hide
+    /// a value the driver is holding.
+    ///
+    /// Driven off `statement_attribute_from_raw` rather than a hand-written
+    /// list, so an attribute that becomes recognised without becoming readable
+    /// fails this test.
+    #[test]
+    fn every_recognised_statement_attribute_is_readable() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            for raw in 0..=10_100i32 {
+                let Some(attr) = statement_attribute_from_raw(raw) else {
+                    continue;
+                };
+                // The one exception, and the spec's own: `SQL_ATTR_ROW_NUMBER`
+                // is 24000 while no cursor is open, which is the state a fresh
+                // statement is in.
+                if matches!(attr, StatementAttribute::RowNumber) {
+                    continue;
+                }
+                // Wide enough for both the u32 and the pointer-valued writes.
+                let mut out: usize = 0;
+                let ret = sql_get_stmt_attr_w::<MockBackend>(
+                    stmt,
+                    raw,
+                    std::ptr::from_mut(&mut out).cast(),
+                    0,
+                    std::ptr::null_mut(),
+                );
+                assert_eq!(
+                    ret,
+                    SqlReturn::SUCCESS,
+                    "SQLGetStmtAttr({attr:?}) does not report a value"
+                );
+            }
+            cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
+    /// `SQL_UNSPECIFIED` is the spec's default for this attribute and promises
+    /// nothing, so it is always satisfiable; `SQL_INSENSITIVE` is what
+    /// `SQLGetInfo(SQL_CURSOR_SENSITIVITY)` reports, so accepting it keeps the
+    /// attribute and the info type telling one story. Only `SQL_SENSITIVE` is
+    /// refused, which the test above pins.
+    #[test]
+    fn the_two_satisfiable_cursor_sensitivities_are_accepted() {
+        for value in [SQL_UNSPECIFIED, SQL_INSENSITIVE] {
+            unsafe {
+                let (env, conn, stmt) = alloc_env_conn_stmt();
+                let ret = sql_set_stmt_attr_w::<MockBackend>(
+                    stmt,
+                    StatementAttribute::CursorSensitivity as i32,
+                    std::ptr::without_provenance_mut(usize::from(value)),
+                    0,
+                );
+                assert_eq!(
+                    ret,
+                    SqlReturn::SUCCESS,
+                    "cursor sensitivity {value} refused"
+                );
+                cleanup_env_conn_stmt(env, conn, stmt);
+            }
         }
     }
 

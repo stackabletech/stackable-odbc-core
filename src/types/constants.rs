@@ -199,6 +199,13 @@ pub const SQL_NC_START: u16 = 0x0002;
 /// the `ASC` / `DESC` keywords.
 pub const SQL_NC_END: u16 = 0x0004;
 
+/// `SQL_UNSPECIFIED` — it is unspecified whether cursors make visible the
+/// changes another cursor made to a result set; they "may make visible none,
+/// some, or all such changes". The spec's default for the
+/// `SQL_ATTR_CURSOR_SENSITIVITY` statement attribute, and what a SQL-92
+/// Entry-level-conformant driver reports for the `SQL_CURSOR_SENSITIVITY`
+/// info type.
+pub const SQL_UNSPECIFIED: u16 = 0;
 /// `SQL_INSENSITIVE` — cursors are insensitive to changes made by any other transaction or cursor.
 pub const SQL_INSENSITIVE: u16 = 1;
 /// `SQL_SENSITIVE` — cursors reflect changes made by other transactions or other cursors.
