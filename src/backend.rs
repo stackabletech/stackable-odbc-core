@@ -2724,6 +2724,17 @@ mod tests {
     /// The whole `u16` range is scanned rather than a hand-picked set: what is
     /// answered here is exactly what the function's `match` decides, and a list
     /// maintained beside it would be a second statement of the same fact.
+    ///
+    /// That scan is 131 072 evaluations, which costs nothing on stable (the
+    /// whole suite runs in 0.2s) and 43.7s under Miri — a quarter of the job on
+    /// its own. `common_get_info_raw` contains no `unsafe`, so Miri has nothing
+    /// to check here and pays that purely to re-run a classification stable
+    /// already made. Same reasoning as
+    /// `escape::tests::pathological_nesting_returns_an_error_rather_than_killing_the_process`.
+    #[cfg_attr(
+        miri,
+        ignore = "131k-evaluation scan; the function under test has no unsafe for Miri to check"
+    )]
     #[test]
     fn common_get_info_raw_answers_are_backend_derived_or_declared() {
         use crate::test_utils::MockAltBackend;
