@@ -483,6 +483,23 @@ Everything a driver has to change for the catalog rework, in one place.
 
 ### Changed
 
+- **Column and parameter bindings now live in the descriptors that own them.**
+  ODBC makes a binding *be* a descriptor record rather than a copy of one, and
+  core kept the two side by side: `DescriptorHandle` held nothing but a header,
+  while `StatementHandle` carried separate `bindings` and `param_bindings` maps.
+  `SQLBindCol` now writes an ARD record; `SQLBindParameter` writes an `ApdRecord`
+  for the C-side buffer and an `IpdRecord` for the declared SQL type, since those
+  halves belong to different descriptors and one struct spanning both is what
+  would make `SQLSetDescField` unimplementable. The eight statement attributes
+  that ODBC also defines as descriptor header fields moved onto the ARD and APD
+  headers, leaving `stmt.attrs` for everything else.
+
+  This is internal — every exported entry point behaves as before, and the
+  existing fetch, bind and parameter suites pass with their assertions unchanged
+  — but it removes the second copy of state that would otherwise let a binding
+  and its descriptor disagree once `SQLSetDescField` is implemented. `Backend`
+  and `StatementBackend` are unaffected; a driver needs no change.
+
 - **The `package` CI job pins its actions and drops its credentials.** It was
   the last job using floating tags (`actions/checkout@v5`,
   `Swatinem/rust-cache@v2`) and the only checkout without
@@ -1123,6 +1140,33 @@ Everything a driver has to change for the catalog rework, in one place.
   compared against. Use `HeaderDiagnosticIdentifier::MessageText as i16`.
 
 ### Fixed
+
+- **The descriptor functions no longer fail silently, and are no longer
+  advertised.** `SQLGetDescFieldW`, `SQLSetDescFieldW` and `SQLSetDescRec`
+  returned a bare `SQL_ERROR` with no diagnostic record, so an application knew
+  something had failed and could not learn what. They now return `HYC00` with a
+  retrievable diagnostic, posted on the descriptor handle the call named — which
+  needed a diagnostic queue on the descriptor, and a way to reach it. `HYC00` is
+  in none of the three functions' diagnostics tables, and `src/ffi/desc.rs`'s
+  module docs record why it is used anyway: `IM001` is the exact meaning but is
+  **(DM)** on all three pages, and `HY000` is the catch-all that distinguishes
+  nothing. `SQLGetFunctions` no longer reports any of the five descriptor
+  functions supported. The three symbols stay exported, because a NULL entry in
+  the Windows Driver Manager's dispatch table is a crash rather than an error —
+  so "has a symbol" and "is reported supported" now deliberately disagree, and a
+  test pins both halves. **This does not make `SQL_OIC_CORE` true**; it makes the
+  driver's self-description true, which is a smaller claim. D3 and D4 remain.
+
+- **`SQLSetStmtAttrW` no longer accepts a descriptor swap it cannot honour.**
+  Setting `SQL_ATTR_APP_ROW_DESC` or `SQL_ATTR_APP_PARAM_DESC` to an explicitly
+  allocated descriptor returned `SQL_SUCCESS` and was ignored, so an application
+  could swap in its own ARD, be told it worked, and have the statement's own
+  used instead. It now returns `HYC00`: core cannot allocate an explicit
+  descriptor at all, so it cannot honour one being swapped in. `SQL_NULL_DESC`
+  still succeeds, because reverting to the implicit descriptor is the state core
+  is already in. The two implementation descriptors are untouched — `HY017` is
+  **(DM)** on both of its clauses, so core adds neither check, and
+  `SQLSetStmtAttrW`'s doc comment now records that so nobody adds it later.
 
 - **`SQL_DATE` (9) is a date again, not a timestamp.** `odbc-sys` names the
   value 9 `DATETIME`, after the ODBC 3.x *verbose* `SQL_DATETIME`, and core had

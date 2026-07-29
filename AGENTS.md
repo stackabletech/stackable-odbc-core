@@ -17,6 +17,7 @@ framework itself and, where relevant, how a downstream driver crate consumes it.
 | [Converting raw values](#converting-raw-values-to-strongly-typed-enums) | Handling raw integers from the C ABI |
 | [Adding a new driver](#adding-a-new-driver) | Creating a new backend crate on top of core |
 | [Testing](#testing) | Writing tests, or running Miri / fuzz |
+| [Descriptors](#descriptors) | Touching a binding, a descriptor, or a statement attribute that is a header field |
 | [Concurrency: the lock discipline](#concurrency-the-lock-discipline) | Understanding the per-connection lock, `HandleScope`, `SQLCancel`'s exemption, or loom |
 | [Architecture](#architecture) | Understanding call flow or crate layout |
 
@@ -792,6 +793,91 @@ registry outside a model, which panics as soon as `Registry::new` resolves to
 loom's `RwLock`. If a model runs long, lower `LOOM_MAX_PREEMPTIONS` (set to
 `3` in CI) before simplifying the model itself — a smaller bound still proves
 more than no model.
+
+### Descriptors
+
+A statement owns four descriptors — the ARD, APD, IRD and IPD — and ODBC makes
+them the *definition* of a binding rather than a copy of one. `SQLBindCol`'s
+page: "when `SQLBindCol` is called, the driver sets fields in the ARD." So
+there is one storage, not a binding map beside a descriptor:
+
+| Descriptor | Field | Records | What they are |
+|---|---|---|---|
+| ARD | `app_row_desc` | `ColumnBinding` | what `SQLBindCol` set |
+| APD | `app_param_desc` | `ApdRecord` | `SQLBindParameter`'s C-side buffer |
+| IPD | `imp_param_desc` | `IpdRecord` | `SQLBindParameter`'s declared SQL type |
+| IRD | `imp_row_desc` | `()` | deliberately unbacked |
+
+`Descriptor<R>` is generic over the record type so a role mismatch cannot be
+written. Four points follow, and each of them has already been the wrong answer
+once:
+
+- **`SQLBindParameter` writes two descriptors.** The C-side fields are an
+  `ApdRecord` and the declared type is an `IpdRecord`, under the same key,
+  removed together. One struct spanning both is what makes `SQLSetDescField`
+  unimplementable. Readers take `ParamRecord<'_>`, a borrowed view of both
+  halves, from `ParamRecords::get`.
+- **The IRD is unbacked on purpose.** `SQLDescribeColW` and `SQLColAttributeW`
+  answer from `ColumnDescriptor` directly, so backing it would mean deciding
+  when it is populated, what `SQLMoreResults` does to it and what a pre-execute
+  read returns — and inventing a second source of truth for column metadata is
+  the failure this whole model exists to prevent. `()` says so at the type
+  level. D3/D4 decide.
+- **Eight statement attributes are descriptor header fields**, per
+  `SQLSetStmtAttr`'s own mapping table, which says setting one sets the other.
+  `HeaderOwner::of` names them and `StatementHandle::attr_store(_mut)` is the
+  only way to reach an attribute's storage, so `stmt.attrs` no longer holds
+  those keys at all. The four IRD- and IPD-side pairs
+  (`SQL_ATTR_ROW_STATUS_PTR`, `SQL_ATTR_ROWS_FETCHED_PTR`,
+  `SQL_ATTR_PARAM_STATUS_PTR`, `SQL_ATTR_PARAMS_PROCESSED_PTR`) are absent
+  deliberately and stay on `stmt.attrs`.
+- **`odbc-sys` misspells one of the eight.** `SQL_ATTR_PARAM_OPERATION_PTR` is
+  `StatementAttribute::ParamOpterationPtr` — transposed letters, upstream. A
+  grep for the correct spelling finds nothing and reads as "core does not
+  implement it", which is false.
+
+#### Reaching a descriptor
+
+**Through the statement's own field, or resolved alone — never both at once.**
+There is no `stmt_with_desc` combinator and there must not be: the four
+`Box<Descriptor<_>>` fields *are* reachable through `StatementHandle`'s `&mut`,
+so a combinator built like `stmt_with_parent` would alias under Stacked/Tree
+Borrows even though the two addresses differ (see `handles/scope.rs`).
+
+`Descriptor<R>` therefore has **no `HasKind` impl**, and that is load-bearing
+rather than an omission. `HandleScope::get` dispatches on `HandleKind` alone and
+all four descriptors register as `HandleKind::Desc`, so
+`get::<Descriptor<A>>` on a token naming a `Descriptor<B>` would pass every
+check the registry can make and hand back the wrong type. Without the impl it
+does not compile.
+
+What resolves a descriptor token instead is `HandleScope::descriptor_diagnostics`,
+which reads `Slot::parent` for the owning statement and compares the token
+against its four fields. That identifies the role exactly, rather than assuming
+it, and reaches the descriptor through the statement — the only form the borrow
+rule permits. Anything D3 adds should be built the same way.
+
+#### What is still missing
+
+`SQLGetDescFieldW`, `SQLSetDescFieldW` and `SQLSetDescRec` are exported and
+answer `HYC00` with a posted diagnostic (`src/ffi/desc.rs`); `SQLGetDescRec` and
+`SQLCopyDesc` are not exported. None of the five is reported supported by
+`SQLGetFunctions`, and `SQLAllocHandle(SQL_HANDLE_DESC)` refuses with `HYC00`.
+The symbols stay exported because a NULL in the Windows Driver Manager's
+dispatch table is a crash, not an error — so "has a symbol" and "is reported
+supported" deliberately disagree here, and a test pins both halves.
+
+`SQLSetStmtAttrW` accepts `SQL_ATTR_APP_ROW_DESC` / `SQL_ATTR_APP_PARAM_DESC`
+only as `SQL_NULL_DESC` (revert to the implicit descriptor, which is the only
+state core has) and answers `HYC00` otherwise. It does **not** check
+`SQL_ATTR_IMP_ROW_DESC` / `SQL_ATTR_IMP_PARAM_DESC`: `HY017` is `(DM)` on
+*both* of its clauses, so core adds neither check.
+
+D3 (the four accessor functions over the implicit descriptors) and D4 (explicit
+descriptors, `SQLAllocHandle(SQL_HANDLE_DESC)`, `SQLCopyDesc`, and the registry
+and Stacked-Borrows work they carry) remain. **`SQL_OIC_CORE` is not satisfied
+yet** — Core-level conformance requires working descriptors, and what has landed
+so far only makes the driver's self-description true.
 
 ### Fuzzing
 
