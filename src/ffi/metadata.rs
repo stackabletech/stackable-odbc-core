@@ -290,6 +290,12 @@ pub unsafe fn sql_tables_w<B: Backend>(
             }
 
             // Spec HY010: Connection must be open.
+            // Manual-commit mode: this call opens a transaction (or extends
+            // the open one), which is what SQL_ATTR_TXN_ISOLATION's HY011 is
+            // about. Recorded before the backend call, not after it succeeds:
+            // a call that fails partway may still have opened one.
+            conn.note_work_started();
+
             let Some(ref connection) = conn.connection else {
                 return Err(OdbcError::general(
                     "Connection is not open",
@@ -522,6 +528,12 @@ pub unsafe fn sql_columns_w<B: Backend>(
             }
 
             // Spec HY010: Connection must be open.
+            // Manual-commit mode: this call opens a transaction (or extends
+            // the open one), which is what SQL_ATTR_TXN_ISOLATION's HY011 is
+            // about. Recorded before the backend call, not after it succeeds:
+            // a call that fails partway may still have opened one.
+            conn.note_work_started();
+
             let Some(ref connection) = conn.connection else {
                 return Err(OdbcError::general(
                     "Connection is not open",
@@ -669,6 +681,12 @@ pub unsafe fn sql_primary_keys_w<B: Backend>(
                     SqlState::invalid_cursor_state(),
                 ));
             }
+
+            // Manual-commit mode: this call opens a transaction (or extends
+            // the open one), which is what SQL_ATTR_TXN_ISOLATION's HY011 is
+            // about. Recorded before the backend call, not after it succeeds:
+            // a call that fails partway may still have opened one.
+            conn.note_work_started();
 
             let Some(ref connection) = conn.connection else {
                 return Err(OdbcError::general(
@@ -844,6 +862,12 @@ pub unsafe fn sql_foreign_keys_w<B: Backend>(
                     SqlState::invalid_cursor_state(),
                 ));
             }
+
+            // Manual-commit mode: this call opens a transaction (or extends
+            // the open one), which is what SQL_ATTR_TXN_ISOLATION's HY011 is
+            // about. Recorded before the backend call, not after it succeeds:
+            // a call that fails partway may still have opened one.
+            conn.note_work_started();
 
             let Some(ref connection) = conn.connection else {
                 return Err(OdbcError::general(
@@ -1044,6 +1068,12 @@ pub unsafe fn sql_statistics_w<B: Backend>(
                 ));
             }
 
+            // Manual-commit mode: this call opens a transaction (or extends
+            // the open one), which is what SQL_ATTR_TXN_ISOLATION's HY011 is
+            // about. Recorded before the backend call, not after it succeeds:
+            // a call that fails partway may still have opened one.
+            conn.note_work_started();
+
             let Some(ref connection) = conn.connection else {
                 return Err(OdbcError::general(
                     "Connection is not open",
@@ -1242,6 +1272,12 @@ pub unsafe fn sql_special_columns_w<B: Backend>(
                     SqlState::invalid_cursor_state(),
                 ));
             }
+
+            // Manual-commit mode: this call opens a transaction (or extends
+            // the open one), which is what SQL_ATTR_TXN_ISOLATION's HY011 is
+            // about. Recorded before the backend call, not after it succeeds:
+            // a call that fails partway may still have opened one.
+            conn.note_work_started();
 
             let Some(ref connection) = conn.connection else {
                 return Err(OdbcError::general(
@@ -1832,6 +1868,12 @@ pub unsafe fn sql_procedures_w<B: Backend>(
                 ));
             }
 
+            // Manual-commit mode: this call opens a transaction (or extends
+            // the open one), which is what SQL_ATTR_TXN_ISOLATION's HY011 is
+            // about. Recorded before the backend call, not after it succeeds:
+            // a call that fails partway may still have opened one.
+            conn.note_work_started();
+
             let Some(ref connection) = conn.connection else {
                 return Err(OdbcError::general(
                     "Connection is not open",
@@ -2035,6 +2077,12 @@ pub unsafe fn sql_procedure_columns_w<B: Backend>(
                 ));
             }
 
+            // Manual-commit mode: this call opens a transaction (or extends
+            // the open one), which is what SQL_ATTR_TXN_ISOLATION's HY011 is
+            // about. Recorded before the backend call, not after it succeeds:
+            // a call that fails partway may still have opened one.
+            conn.note_work_started();
+
             let Some(ref connection) = conn.connection else {
                 return Err(OdbcError::general(
                     "Connection is not open",
@@ -2228,6 +2276,12 @@ pub unsafe fn sql_column_privileges_w<B: Backend>(
                 ));
             }
 
+            // Manual-commit mode: this call opens a transaction (or extends
+            // the open one), which is what SQL_ATTR_TXN_ISOLATION's HY011 is
+            // about. Recorded before the backend call, not after it succeeds:
+            // a call that fails partway may still have opened one.
+            conn.note_work_started();
+
             let Some(ref connection) = conn.connection else {
                 return Err(OdbcError::general(
                     "Connection is not open",
@@ -2420,6 +2474,12 @@ pub unsafe fn sql_table_privileges_w<B: Backend>(
                     SqlState::invalid_cursor_state(),
                 ));
             }
+
+            // Manual-commit mode: this call opens a transaction (or extends
+            // the open one), which is what SQL_ATTR_TXN_ISOLATION's HY011 is
+            // about. Recorded before the backend call, not after it succeeds:
+            // a call that fails partway may still have opened one.
+            conn.note_work_started();
 
             let Some(ref connection) = conn.connection else {
                 return Err(OdbcError::general(

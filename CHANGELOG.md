@@ -945,6 +945,24 @@ Everything a driver has to change for the catalog rework, in one place.
 
 ### Fixed
 
+- **`SQLSetConnectAttr(SQL_ATTR_TXN_ISOLATION)` now returns `HY011` when a
+  transaction is open.** The spec states this three times — the `HY011` row
+  ("the *Attribute* argument was SQL_ATTR_TXN_ISOLATION, and a transaction was
+  open"), the attribute's own description ("an application must call
+  `SQLEndTran` to commit or roll back all open transactions on a connection,
+  before calling `SQLSetConnectAttr` with this option") and footnote [3] — and
+  core checked none of them, so an application could change isolation level
+  mid-transaction and get `SQL_SUCCESS` for a change the data source could not
+  honour retroactively.
+
+  Core now tracks it as `ConnectionHandle::txn_dirty`: set when a
+  statement-producing call runs while `SQL_ATTR_AUTOCOMMIT` is
+  `SQL_AUTOCOMMIT_OFF`, cleared by `SQLEndTran` and by switching autocommit back
+  on (which the spec says commits any open transaction). It is set *before* the
+  backend call rather than after it succeeds, because a call that fails partway
+  may still have opened a transaction and the spec's requirement is to refuse
+  the change while one might be open. No backend hook and no driver change.
+
 - **`SQLSetConnectAttr(SQL_ATTR_CURRENT_CATALOG)` now returns `24000` when a
   result set is pending.** The spec's row — "the *Attribute* argument was
   SQL_ATTR_CURRENT_CATALOG, and a result set was pending" — carries no `(DM)`

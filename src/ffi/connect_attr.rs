@@ -230,9 +230,12 @@ fn connection_has_result_set_pending<B: Backend>(
 /// - HY011 Attribute cannot be set now: returned for `SQL_ATTR_PACKET_SIZE`
 ///   once the connection is open, which the spec states directly — "if the
 ///   application sets packet size after a connection has already been made,
-///   the driver will return SQLSTATE HY011". Not returned for
-///   `SQL_ATTR_TXN_ISOLATION` with an open transaction: that needs a
-///   transaction-state flag on `ConnectionHandle`, which is not tracked.
+///   the driver will return SQLSTATE HY011". Also returned for
+///   `SQL_ATTR_TXN_ISOLATION` when a transaction is open, which the spec's own
+///   HY011 row names — tracked as `ConnectionHandle::txn_dirty`, set when a
+///   statement-producing call runs under manual commit and cleared by
+///   `SQLEndTran` or by switching autocommit back on. Note this is *not* the
+///   cursor condition 24000 describes.
 ///   Deferred.
 /// - HY013 Memory management error: not returned; Rust panics on memory errors,
 ///   caught by `panic_safe` and converted to `SQL_ERROR`/HY000.
@@ -359,6 +362,17 @@ pub unsafe fn sql_set_connect_attr_w<B: Backend>(
                         B::set_autocommit(connection, val == SQL_AUTOCOMMIT_ON).into_odbc()?;
                     }
 
+                    // Spec: "Any open transactions on the connection are
+                    // committed when SQL_ATTR_AUTOCOMMIT is set to
+                    // SQL_AUTOCOMMIT_ON to change from manual-commit mode to
+                    // autocommit mode." That commit ends the transaction, so
+                    // SQL_ATTR_TXN_ISOLATION becomes settable again. Only after
+                    // `set_autocommit` succeeded — a backend that refused the
+                    // switch committed nothing.
+                    if val == SQL_AUTOCOMMIT_ON {
+                        conn.txn_dirty = false;
+                    }
+
                     conn.attrs.insert(attribute, val);
                     Ok(SqlReturn::SUCCESS)
                 }
@@ -398,6 +412,24 @@ pub unsafe fn sql_set_connect_attr_w<B: Backend>(
                 // stored and echoed back, and a level it can must actually
                 // reach the data source.
                 _ if attr == ConnectionAttribute::TXN_ISOLATION => {
+                    // Spec HY011, verbatim: "The Attribute argument was
+                    // SQL_ATTR_TXN_ISOLATION, and a transaction was open." The
+                    // attribute's own description says the same thing from the
+                    // application's side — "an application must call SQLEndTran
+                    // to commit or roll back all open transactions on a
+                    // connection, before calling SQLSetConnectAttr with this
+                    // option" — and footnote [3] a third time.
+                    //
+                    // Checked before the value itself: an open transaction
+                    // makes the call illegal whatever level was asked for, so
+                    // reporting HY024 for a bad value here would tell the
+                    // application to fix the wrong thing.
+                    if conn.txn_dirty {
+                        return Err(OdbcError::general(
+                            "SQL_ATTR_TXN_ISOLATION cannot be set while a transaction is open",
+                            SqlState::attribute_cannot_be_set_now(),
+                        ));
+                    }
                     let level = u32::try_from(value_ptr as usize).map_err(|_| {
                         OdbcError::general(
                             format!("SQL_ATTR_TXN_ISOLATION: invalid value {:?}", value_ptr),
@@ -904,6 +936,147 @@ mod tests {
             assert_eq!(ret, SqlReturn::SUCCESS);
             assert_eq!(val, SQL_AUTOCOMMIT_ON as u32);
             cleanup(env, conn);
+        }
+    }
+
+    /// Set `SQL_ATTR_AUTOCOMMIT` to manual commit, optionally run a statement,
+    /// then try to change the isolation level. Returns the first SQLSTATE.
+    unsafe fn isolation_after<B: Backend>(execute_first: bool) -> String {
+        unsafe {
+            let (env, conn, stmt) = crate::test_utils::alloc_connected_env_conn_stmt::<B>();
+
+            assert_eq!(
+                sql_set_connect_attr_w::<B>(
+                    conn,
+                    ConnectionAttribute::AUTOCOMMIT.0,
+                    std::ptr::without_provenance_mut::<c_void>(SQL_AUTOCOMMIT_OFF),
+                    0,
+                ),
+                SqlReturn::SUCCESS,
+                "the mock supports manual-commit mode",
+            );
+
+            if execute_first {
+                let sql: Vec<u16> = "UPDATE t SET c = 1".encode_utf16().collect();
+                assert_eq!(
+                    crate::ffi::execute::sql_exec_direct_w::<B>(
+                        stmt,
+                        sql.as_ptr(),
+                        sql.len() as i32,
+                    ),
+                    SqlReturn::SUCCESS,
+                );
+            }
+
+            let _ = sql_set_connect_attr_w::<B>(
+                conn,
+                ConnectionAttribute::TXN_ISOLATION.0,
+                std::ptr::without_provenance_mut::<c_void>(
+                    crate::types::SQL_TXN_SERIALIZABLE as usize,
+                ),
+                0,
+            );
+            let state = with_handle::<B, ConnectionHandle<B>, _>(conn, |c| {
+                c.diagnostics
+                    .get(0)
+                    .map(|r| r.sqlstate.as_str().to_owned())
+                    .unwrap_or_default()
+            });
+            crate::test_utils::cleanup_connected_env_conn_stmt::<B>(env, conn, stmt);
+            state
+        }
+    }
+
+    /// Spec `SQLSetConnectAttr` HY011: "The *Attribute* argument was
+    /// SQL_ATTR_TXN_ISOLATION, and a transaction was open." Unmarked, so the
+    /// driver owes it.
+    #[test]
+    fn setting_txn_isolation_with_an_open_transaction_is_hy011() {
+        unsafe {
+            assert_eq!(
+                isolation_after::<crate::test_utils::MockTxnPreserveBackend>(true),
+                "HY011",
+            );
+        }
+    }
+
+    /// The control: manual-commit mode entered but no work done, so no
+    /// transaction is open yet and HY011 must not fire. Without this, the test
+    /// above would pass just as well if core rejected the attribute whenever
+    /// autocommit was off.
+    #[test]
+    fn setting_txn_isolation_in_manual_commit_with_no_work_done_is_not_hy011() {
+        unsafe {
+            assert_ne!(
+                isolation_after::<crate::test_utils::MockTxnPreserveBackend>(false),
+                "HY011",
+                "entering manual-commit mode does not by itself open a transaction",
+            );
+        }
+    }
+
+    /// `SQLEndTran` ends the transaction, so the attribute becomes settable
+    /// again. Pins the clearing half: without it a connection would be locked
+    /// out of isolation changes for the rest of its life after one statement.
+    #[test]
+    fn setting_txn_isolation_after_end_tran_is_not_hy011() {
+        unsafe {
+            type B = crate::test_utils::MockTxnPreserveBackend;
+            let (env, conn, stmt) = crate::test_utils::alloc_connected_env_conn_stmt::<B>();
+
+            assert_eq!(
+                sql_set_connect_attr_w::<B>(
+                    conn,
+                    ConnectionAttribute::AUTOCOMMIT.0,
+                    std::ptr::without_provenance_mut::<c_void>(SQL_AUTOCOMMIT_OFF),
+                    0,
+                ),
+                SqlReturn::SUCCESS,
+            );
+            let sql: Vec<u16> = "UPDATE t SET c = 1".encode_utf16().collect();
+            assert_eq!(
+                crate::ffi::execute::sql_exec_direct_w::<B>(stmt, sql.as_ptr(), sql.len() as i32),
+                SqlReturn::SUCCESS,
+            );
+            with_handle::<B, ConnectionHandle<B>, _>(conn, |c| {
+                assert!(
+                    c.txn_dirty,
+                    "the execution was supposed to open a transaction"
+                );
+            });
+
+            assert_eq!(
+                crate::ffi::tran::sql_end_tran::<B>(
+                    odbc_sys::HandleType::Dbc as i16,
+                    conn,
+                    odbc_sys::CompletionType::Commit as i16,
+                ),
+                SqlReturn::SUCCESS,
+            );
+            with_handle::<B, ConnectionHandle<B>, _>(conn, |c| {
+                assert!(!c.txn_dirty, "a committed transaction is no longer open");
+            });
+
+            let _ = sql_set_connect_attr_w::<B>(
+                conn,
+                ConnectionAttribute::TXN_ISOLATION.0,
+                std::ptr::without_provenance_mut::<c_void>(
+                    crate::types::SQL_TXN_SERIALIZABLE as usize,
+                ),
+                0,
+            );
+            let state = with_handle::<B, ConnectionHandle<B>, _>(conn, |c| {
+                c.diagnostics
+                    .get(0)
+                    .map(|r| r.sqlstate.as_str().to_owned())
+                    .unwrap_or_default()
+            });
+            assert_ne!(
+                state, "HY011",
+                "SQLEndTran must clear the open-transaction state"
+            );
+
+            crate::test_utils::cleanup_connected_env_conn_stmt::<B>(env, conn, stmt);
         }
     }
 

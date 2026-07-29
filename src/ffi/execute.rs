@@ -182,6 +182,12 @@ pub unsafe fn sql_exec_direct_w<B: Backend>(
             }
 
             // Spec HY010: Connection must be open.
+            // Manual-commit mode: this call opens a transaction (or extends
+            // the open one), which is what SQL_ATTR_TXN_ISOLATION's HY011 is
+            // about. Recorded before the backend call, not after it succeeds:
+            // a call that fails partway may still have opened one.
+            conn.note_work_started();
+
             let Some(ref connection) = conn.connection else {
                 return Err(OdbcError::general(
                     "Connection is not open",
@@ -397,6 +403,12 @@ pub unsafe fn sql_prepare_w<B: Backend>(
 
             // Resolved before translating, because the escape dialect is a
             // property of the connection.
+            // Manual-commit mode: this call opens a transaction (or extends
+            // the open one), which is what SQL_ATTR_TXN_ISOLATION's HY011 is
+            // about. Recorded before the backend call, not after it succeeds:
+            // a call that fails partway may still have opened one.
+            conn.note_work_started();
+
             let Some(ref connection) = conn.connection else {
                 return Err(OdbcError::general(
                     "Connection is not open",
@@ -600,6 +612,12 @@ pub unsafe fn sql_execute<B: Backend>(statement_handle: *mut c_void) -> SqlRetur
             // No DAE params: collect all values normally and execute immediately.
             // SAFETY: caller guarantees all bound buffer pointers remain valid.
             let params = crate::ffi::params::collect_params(&stmt.param_bindings, param_count)?;
+
+            // Manual-commit mode: this call opens a transaction (or extends
+            // the open one), which is what SQL_ATTR_TXN_ISOLATION's HY011 is
+            // about. Recorded before the backend call, not after it succeeds:
+            // a call that fails partway may still have opened one.
+            conn.note_work_started();
 
             let Some(ref connection) = conn.connection else {
                 return Err(OdbcError::general(

@@ -1322,6 +1322,12 @@ pub unsafe fn sql_param_data<B: Backend>(
                 );
             }
 
+            // Manual-commit mode: this call opens a transaction (or extends
+            // the open one), which is what SQL_ATTR_TXN_ISOLATION's HY011 is
+            // about. Recorded before the backend call, not after it succeeds:
+            // a call that fails partway may still have opened one.
+            conn.note_work_started();
+
             let Some(ref connection) = conn.connection else {
                 return Err(OdbcError::general(
                     "Connection is not open",

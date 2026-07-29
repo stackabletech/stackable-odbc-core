@@ -180,10 +180,59 @@ pub struct ConnectionHandle<B: Backend> {
     /// Accumulated connection string attributes from iterative
     /// `SQLBrowseConnectW` calls. Reset on successful connect or `SQLDisconnect`.
     pub browse_request: Option<ConnectParams>,
+    /// Whether work has been done on this connection under manual commit since
+    /// the last `SQLEndTran` — that is, whether a transaction is open.
+    ///
+    /// Backs the spec's `HY011` row for `SQLSetConnectAttr`: "The *Attribute*
+    /// argument was SQL_ATTR_TXN_ISOLATION, and a transaction was open." The
+    /// attribute table says the same thing twice over — "an application must
+    /// call `SQLEndTran` to commit or roll back all open transactions on a
+    /// connection, before calling `SQLSetConnectAttr` with this option", and
+    /// footnote [3], "SQL_ATTR_TXN_ISOLATION can be set only if there are no
+    /// open transactions on the connection".
+    ///
+    /// **Not the same state as an open cursor.** `SQLSetConnectAttr`'s
+    /// neighbouring `24000` row is about a pending *result set*, which is
+    /// [`StatementHandle::cursor_open`] on one of this connection's statements.
+    /// A `SELECT` under autocommit leaves a cursor open with no transaction,
+    /// and a rolled-back transaction may have no cursor, so the two conditions
+    /// cannot substitute for each other.
+    ///
+    /// Deliberately conservative: set *before* the backend call rather than
+    /// after it succeeds, because a call that fails partway may still have
+    /// opened a transaction, and the spec's requirement is to refuse an
+    /// isolation change while one might be open.
+    pub txn_dirty: bool,
 }
 
 impl<B: Backend> HasKind for ConnectionHandle<B> {
     const KIND: HandleKind = HandleKind::Dbc;
+}
+
+impl<B: Backend> ConnectionHandle<B> {
+    /// Whether this connection is in manual-commit mode.
+    ///
+    /// `SQL_ATTR_AUTOCOMMIT` defaults to `SQL_AUTOCOMMIT_ON` — the spec's "this
+    /// is the default" — so an attribute that was never set means autocommit,
+    /// and only an explicit `SQL_AUTOCOMMIT_OFF` puts the connection into the
+    /// mode where work opens a transaction.
+    pub fn in_manual_commit(&self) -> bool {
+        self.attrs
+            .get(&odbc_sys::ConnectionAttribute::AUTOCOMMIT.0)
+            .is_some_and(|&v| v == crate::types::SQL_AUTOCOMMIT_OFF)
+    }
+
+    /// Record that work is about to run on this connection, opening a
+    /// transaction if it is in manual-commit mode.
+    ///
+    /// Called by every statement-producing entry point. A no-op under
+    /// autocommit, where each statement commits as it completes and no
+    /// transaction outlives the call.
+    pub fn note_work_started(&mut self) {
+        if self.in_manual_commit() {
+            self.txn_dirty = true;
+        }
+    }
 }
 
 /// Wraps either a real backend statement or a driver-synthesized in-memory
@@ -560,6 +609,9 @@ pub unsafe fn alloc_connection<B: Backend>(
         attrs: std::collections::HashMap::new(),
         attr_strings: std::collections::HashMap::new(),
         browse_request: None,
+        // A fresh connection has done no work, so no transaction is open
+        // whatever commit mode it is later put into.
+        txn_dirty: false,
     });
     let ptr = Box::into_raw(handle);
     // SAFETY: as in `alloc_environment`.

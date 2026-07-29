@@ -209,6 +209,11 @@ fn end_tran_on_connection<B: Backend>(
     // SQLSTATE even though 25S03/40001/40002 do say the transaction ended;
     // see the "Nothing is applied when B::end_tran fails" paragraph on
     // `sql_end_tran`.
+    //
+    // The transaction is over, so `SQL_ATTR_TXN_ISOLATION` may be set again.
+    // Cleared only on success, for the same reason nothing else is applied on
+    // failure: a commit that failed may have left the transaction open.
+    conn.txn_dirty = false;
     apply_cursor_behavior::<B>(scope, conn_token, behavior)?;
     Ok(EndTranOutcome::Applied)
 }
