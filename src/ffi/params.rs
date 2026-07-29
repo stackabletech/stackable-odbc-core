@@ -855,6 +855,56 @@ pub(crate) unsafe fn collect_params(
 /// # Safety
 /// Every output binding's `value_ptr` / `str_len_or_ind_ptr` must point to a
 /// valid writable buffer, as guaranteed by the `SQLBindParameter` contract.
+/// `SQL_PARAM_SUCCESS` — the parameter-status value for a set the data source
+/// processed without a diagnostic.
+pub(crate) const SQL_PARAM_SUCCESS: u16 = 0;
+/// `SQL_PARAM_ERROR` — the parameter-status value for a set whose execution
+/// failed.
+pub(crate) const SQL_PARAM_ERROR: u16 = 5;
+
+/// Write one processed parameter set through `SQL_ATTR_PARAMS_PROCESSED_PTR`
+/// and `status` into the first element of `SQL_ATTR_PARAM_STATUS_PTR`, when the
+/// application set either.
+///
+/// The parameter-side counterpart of `ffi::fetch`'s `report_rows_fetched`, and
+/// bounded the same way: `SQL_ATTR_PARAMSET_SIZE` is pinned at 1
+/// (`ffi/stmt_attr.rs` substitutes anything else back with `01S02`), so an
+/// execution processes exactly one parameter set and the application's status
+/// array is required to be at least that long. The count is written for every
+/// execution, including one with no bound parameters — the set count is a
+/// property of `SQL_ATTR_PARAMSET_SIZE`, not of how many parameters are in the
+/// set.
+///
+/// # Safety
+///
+/// Each stored attribute must be null or a pointer to a valid, writable
+/// `usize` / `u16` respectively — the application's undertaking when it set
+/// them.
+pub(crate) unsafe fn report_params_processed<B: Backend>(stmt: &StatementHandle<B>, status: u16) {
+    let processed = stmt
+        .attrs
+        .get(&(odbc_sys::StatementAttribute::ParamsProcessedPtr as i32))
+        .copied()
+        .unwrap_or(0);
+    if processed != 0 {
+        // SAFETY: non-zero means the application supplied a writable SQLULEN.
+        // Unaligned because ODBC applications place these in packed structures.
+        unsafe { std::ptr::write_unaligned(processed as *mut usize, 1) };
+    }
+
+    let statuses = stmt
+        .attrs
+        .get(&(odbc_sys::StatementAttribute::ParamStatusPtr as i32))
+        .copied()
+        .unwrap_or(0);
+    if statuses != 0 {
+        // SAFETY: non-zero means the application supplied a parameter-status
+        // array of at least SQL_ATTR_PARAMSET_SIZE (= 1) elements. Unaligned
+        // for the same reason as above.
+        unsafe { std::ptr::write_unaligned(statuses as *mut u16, status) };
+    }
+}
+
 pub(crate) unsafe fn write_output_params(
     bindings: &std::collections::HashMap<u16, ParameterBinding>,
     output_params: &[crate::types::OutputParam],
@@ -1305,12 +1355,12 @@ pub unsafe fn sql_param_data<B: Backend>(
                 OdbcError::general("No prepared statement", SqlState::function_sequence_error())
             })?;
 
-            match stmt_data {
+            let executed = match stmt_data {
                 crate::handles::StatementData::Backend(backend_stmt) => {
                     reclassify_cancelled::<B, _, _>(
                         B::execute(connection, cancel, backend_stmt, &params),
                         cancel,
-                    )?;
+                    )
                 }
                 crate::handles::StatementData::Synthetic(_) => {
                     return Err(OdbcError::general(
@@ -1318,7 +1368,22 @@ pub unsafe fn sql_param_data<B: Backend>(
                         SqlState::general_error(),
                     ));
                 }
-            }
+            };
+            // The data-at-execution path completes an execution like
+            // `SQLExecute` does, so it reports its parameter set the same way.
+            // Before the error is propagated, so a failed set is reported as
+            // SQL_PARAM_ERROR.
+            // SAFETY: the application's parameter-status pointers remain valid
+            // per the `SQLSetStmtAttr` contract.
+            report_params_processed(
+                stmt,
+                if executed.is_ok() {
+                    SQL_PARAM_SUCCESS
+                } else {
+                    SQL_PARAM_ERROR
+                },
+            );
+            executed?;
 
             // A cursor is open only if the execution produced columns.
             stmt.cursor_open = stmt

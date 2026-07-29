@@ -828,6 +828,18 @@ Everything a driver has to change for the catalog rework, in one place.
   test drives this off `statement_attribute_from_raw`, so a recognised
   attribute that is not readable fails rather than being noticed later.
 
+- **An execution reports its parameter set through
+  `SQL_ATTR_PARAMS_PROCESSED_PTR` and `SQL_ATTR_PARAM_STATUS_PTR`.**
+  `SQLSetStmtAttr` stores both pointers, and `SQLExecDirect`, `SQLExecute` and
+  the `SQLParamData` data-at-execution completion now write through them: the
+  processed count is `1`, since `SQL_ATTR_PARAMSET_SIZE` is pinned at 1, and the
+  first status-array element is `SQL_PARAM_SUCCESS` or, when the execution
+  failed, `SQL_PARAM_ERROR`. This is the parameter-side counterpart of what
+  `SQLFetch` already wrote through `SQL_ATTR_ROWS_FETCHED_PTR` and
+  `SQL_ATTR_ROW_STATUS_PTR`, and an application that binds a status array to
+  detect per-set errors now reads a value rather than its own initial buffer
+  contents.
+
 - **`SQLSetConnectAttr` enforces the state and support rules its spec page
   assigns to the driver.** `SQL_ATTR_PACKET_SIZE` reports `HY011` once the
   connection is open, which the spec states directly — "if the application sets

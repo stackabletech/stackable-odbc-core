@@ -5,9 +5,26 @@ use std::ffi::c_void;
 use crate::backend::{Backend, StatementBackend};
 use crate::cancel::reclassify_cancelled;
 use crate::errors::OdbcError;
+use crate::handles::StatementHandle;
 use crate::panic::panic_safe;
 use crate::types::{SQL_NTS, SqlReturn, SqlState};
 use crate::utf16::utf16_to_string;
+
+/// Report this execution's one parameter set through the application's
+/// `SQL_ATTR_PARAMS_PROCESSED_PTR` and `SQL_ATTR_PARAM_STATUS_PTR`.
+///
+/// # Safety
+///
+/// See [`crate::ffi::params::report_params_processed`].
+unsafe fn report_param_set<B: Backend>(stmt: &StatementHandle<B>, succeeded: bool) {
+    let status = if succeeded {
+        crate::ffi::params::SQL_PARAM_SUCCESS
+    } else {
+        crate::ffi::params::SQL_PARAM_ERROR
+    };
+    // SAFETY: the caller's contract, forwarded.
+    unsafe { crate::ffi::params::report_params_processed(stmt, status) };
+}
 
 /// Generic implementation of SQLExecDirectW.
 ///
@@ -227,10 +244,16 @@ pub unsafe fn sql_exec_direct_w<B: Backend>(
                 let params = crate::ffi::params::collect_params(&stmt.param_bindings, param_count)?;
                 let mut prepared =
                     reclassify_cancelled::<B, _, _>(B::prepare(connection, cancel, &sql), cancel)?;
-                let outcome = reclassify_cancelled::<B, _, _>(
+                let executed = reclassify_cancelled::<B, _, _>(
                     B::execute(connection, cancel, &mut prepared, &params),
                     cancel,
-                )?;
+                );
+                // Reported before the error is propagated, so a set that failed
+                // is reported as SQL_PARAM_ERROR rather than left unwritten.
+                // SAFETY: the application's parameter-status pointers remain
+                // valid per the `SQLSetStmtAttr` contract.
+                report_param_set(stmt, executed.is_ok());
+                let outcome = executed?;
                 // SAFETY: the application's bound output buffer pointers remain
                 // valid per the caller contract (same guarantee collect_params relies on).
                 // Already inside the enclosing `unsafe` context, like collect_params above.
@@ -240,7 +263,13 @@ pub unsafe fn sql_exec_direct_w<B: Backend>(
                 )?;
                 prepared
             } else {
-                reclassify_cancelled::<B, _, _>(B::exec_direct(connection, cancel, &sql), cancel)?
+                let executed = reclassify_cancelled::<B, _, _>(
+                    B::exec_direct(connection, cancel, &sql),
+                    cancel,
+                );
+                // SAFETY: as above.
+                report_param_set(stmt, executed.is_ok());
+                executed?
             };
             // Opens a cursor only if the statement actually returned columns.
             stmt.set_result_set(crate::handles::StatementData::Backend(result));
@@ -603,12 +632,12 @@ pub unsafe fn sql_execute<B: Backend>(statement_handle: *mut c_void) -> SqlRetur
                 )
             })?;
 
-            let outcome = match stmt_data {
+            let executed = match stmt_data {
                 crate::handles::StatementData::Backend(backend_stmt) => {
                     reclassify_cancelled::<B, _, _>(
                         B::execute(connection, cancel, backend_stmt, &params),
                         cancel,
-                    )?
+                    )
                 }
                 crate::handles::StatementData::Synthetic(_) => {
                     return Err(OdbcError::general(
@@ -617,6 +646,10 @@ pub unsafe fn sql_execute<B: Backend>(statement_handle: *mut c_void) -> SqlRetur
                     ));
                 }
             };
+            // SAFETY: the application's parameter-status pointers remain valid
+            // per the `SQLSetStmtAttr` contract.
+            report_param_set(stmt, executed.is_ok());
+            let outcome = executed?;
 
             // The `stmt_data` mutable borrow has ended; write any OUTPUT / INOUT
             // parameter values back into the bound buffers, the symmetric
@@ -1084,6 +1117,110 @@ mod tests {
             );
 
             cleanup(env, conn, stmt);
+        }
+    }
+
+    /// Spec, `SQL_ATTR_PARAMS_PROCESSED_PTR`: the driver returns the number of
+    /// sets of parameters that have been processed, and
+    /// `SQL_ATTR_PARAM_STATUS_PTR` holds one status per set.
+    /// `SQL_ATTR_PARAMSET_SIZE` is pinned at 1, so an execution processes
+    /// exactly one set and reports `SQL_PARAM_SUCCESS` for it — the
+    /// parameter-side counterpart of what `SQLFetch` writes through
+    /// `SQL_ATTR_ROWS_FETCHED_PTR`.
+    #[test]
+    fn an_execution_reports_its_parameter_set_as_processed() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockRecordingBackend>();
+            with_handle::<MockRecordingBackend, ConnectionHandle<MockRecordingBackend>, _>(
+                conn,
+                |c| {
+                    c.connection = Some(MockConnection);
+                },
+            );
+
+            let mut processed: usize = usize::MAX;
+            let mut status: u16 = u16::MAX;
+            assert_eq!(
+                crate::ffi::stmt_attr::sql_set_stmt_attr_w::<MockRecordingBackend>(
+                    stmt,
+                    odbc_sys::StatementAttribute::ParamsProcessedPtr as i32,
+                    std::ptr::from_mut(&mut processed).cast(),
+                    0,
+                ),
+                SqlReturn::SUCCESS
+            );
+            assert_eq!(
+                crate::ffi::stmt_attr::sql_set_stmt_attr_w::<MockRecordingBackend>(
+                    stmt,
+                    odbc_sys::StatementAttribute::ParamStatusPtr as i32,
+                    std::ptr::from_mut(&mut status).cast(),
+                    0,
+                ),
+                SqlReturn::SUCCESS
+            );
+
+            let wide: Vec<u16> = "SELECT 1".encode_utf16().collect();
+            assert_eq!(
+                sql_exec_direct_w::<MockRecordingBackend>(stmt, wide.as_ptr(), wide.len() as i32),
+                SqlReturn::SUCCESS
+            );
+
+            assert_eq!(
+                processed, 1,
+                "SQL_ATTR_PARAMS_PROCESSED_PTR was not written"
+            );
+            assert_eq!(
+                status,
+                crate::ffi::params::SQL_PARAM_SUCCESS,
+                "SQL_ATTR_PARAM_STATUS_PTR was not written"
+            );
+
+            cleanup_env_conn_stmt_for::<MockRecordingBackend>(env, conn, stmt);
+        }
+    }
+
+    /// The other half: a set whose execution failed is reported as
+    /// `SQL_PARAM_ERROR`, so an application reading the status array sees the
+    /// failure rather than an untouched buffer.
+    #[test]
+    fn a_failed_execution_reports_its_parameter_set_as_errored() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockBackend>();
+            with_handle::<MockBackend, ConnectionHandle<MockBackend>, _>(conn, |c| {
+                c.connection = Some(MockConnection);
+            });
+
+            let mut processed: usize = usize::MAX;
+            let mut status: u16 = u16::MAX;
+            assert_eq!(
+                crate::ffi::stmt_attr::sql_set_stmt_attr_w::<MockBackend>(
+                    stmt,
+                    odbc_sys::StatementAttribute::ParamsProcessedPtr as i32,
+                    std::ptr::from_mut(&mut processed).cast(),
+                    0,
+                ),
+                SqlReturn::SUCCESS
+            );
+            assert_eq!(
+                crate::ffi::stmt_attr::sql_set_stmt_attr_w::<MockBackend>(
+                    stmt,
+                    odbc_sys::StatementAttribute::ParamStatusPtr as i32,
+                    std::ptr::from_mut(&mut status).cast(),
+                    0,
+                ),
+                SqlReturn::SUCCESS
+            );
+
+            let wide: Vec<u16> = "SELECT 1".encode_utf16().collect();
+            assert_eq!(
+                sql_exec_direct_w::<MockBackend>(stmt, wide.as_ptr(), wide.len() as i32),
+                SqlReturn::ERROR
+            );
+
+            assert_eq!(processed, 1);
+            assert_eq!(status, crate::ffi::params::SQL_PARAM_ERROR);
+
+            cleanup_env_conn_stmt_for::<MockBackend>(env, conn, stmt);
         }
     }
 
