@@ -15,6 +15,8 @@ use crate::types::{
 use crate::types::{SQL_TXN_READ_COMMITTED, SQL_TXN_REPEATABLE_READ, SQL_TXN_SERIALIZABLE};
 use crate::utf16::{utf16_to_string, write_utf16};
 
+// SQL_ATTR_ASYNC_ENABLE values
+const SQL_ASYNC_ENABLE_OFF: usize = 0;
 // SQL_ATTR_ACCESS_MODE values
 const SQL_MODE_READ_WRITE: usize = 0;
 const SQL_MODE_READ_ONLY: usize = 1;
@@ -149,7 +151,9 @@ fn validate_txn_isolation<B: Backend>(
 /// - 24000 Invalid cursor state: not returned. Connection-level result-set state
 ///   is not currently tracked. Deferred.
 /// - 25000 Illegal operation while in a local transaction: not applicable;
-///   distributed transactions (DTC) are not supported.
+///   distributed transactions (DTC) are not supported, and
+///   `SQL_ATTR_ENLIST_IN_DTC` reports HYC00 before a transaction can be
+///   enlisted in one.
 /// - 3D000 Invalid catalog name: not returned; the catalog string is stored
 ///   verbatim without validation.
 /// - HY000 General error: returned for unexpected internal errors.
@@ -164,9 +168,13 @@ fn validate_txn_isolation<B: Backend>(
 ///   `SQL_ATTR_CURRENT_CATALOG` is the only string attribute handled, and null
 ///   means "clear the catalog" (a valid operation).
 /// - HY010 Function sequence error: (driver-manager-handled; not returned here).
-/// - HY011 Attribute cannot be set now: not returned for `SQL_ATTR_TXN_ISOLATION`.
-///   Requires a `has_active_transaction` flag on `ConnectionHandle`, which is not
-///   currently tracked. Deferred.
+/// - HY011 Attribute cannot be set now: returned for `SQL_ATTR_PACKET_SIZE`
+///   once the connection is open, which the spec states directly — "if the
+///   application sets packet size after a connection has already been made,
+///   the driver will return SQLSTATE HY011". Not returned for
+///   `SQL_ATTR_TXN_ISOLATION` with an open transaction: that needs a
+///   transaction-state flag on `ConnectionHandle`, which is not tracked.
+///   Deferred.
 /// - HY013 Memory management error: not returned; Rust panics on memory errors,
 ///   caught by `panic_safe` and converted to `SQL_ERROR`/HY000.
 /// - HY024 Invalid attribute value: returned for `SQL_ATTR_ACCESS_MODE` (not 0 or 1),
@@ -190,11 +198,15 @@ fn validate_txn_isolation<B: Backend>(
 ///   (driver-manager-handled; not returned here).
 /// - HY121 Cursor Library and Driver-Aware Pooling cannot be enabled simultaneously:
 ///   not applicable; the cursor library and connection pooling are not used.
-/// - HYC00 Optional feature not implemented: not returned; unknown/unsupported
-///   attributes are accepted silently for DM/tool compatibility (a warning is
-///   logged instead). Note that this row is about an unsupported *attribute*,
-///   not an unsupported *value* — an isolation level the data source cannot
-///   run at is HY024 above, not HYC00.
+/// - HYC00 Optional feature not implemented: returned for
+///   `SQL_ATTR_ASYNC_ENABLE` = `SQL_ASYNC_ENABLE_ON`, since
+///   `SQLGetInfo(SQL_ASYNC_MODE)` reports `SQL_AM_NONE`, and for
+///   `SQL_ATTR_ENLIST_IN_DTC`, since core enlists in no distributed
+///   transaction. An *unrecognized* attribute is still accepted silently for
+///   DM/tool compatibility (a warning is logged instead). Note the distinction
+///   this row draws between an unsupported *attribute* and an unsupported
+///   *value* — an isolation level the data source cannot run at is HY024
+///   above, not HYC00.
 /// - HYT01 Connection timeout expired: not returned; this function does not wait
 ///   on the data source.
 /// - IM001 Driver does not support this function: (driver-manager-handled; not
@@ -327,6 +339,36 @@ pub unsafe fn sql_set_connect_attr_w<B: Backend>(
                     conn.attrs.insert(attribute, level as usize);
                     Ok(SqlReturn::SUCCESS)
                 }
+
+                // Spec: "If the application sets packet size after a connection
+                // has already been made, the driver will return SQLSTATE HY011
+                // (Attribute cannot be set now)." The attribute table lists it
+                // as settable "Before" only.
+                _ if attr == ConnectionAttribute::PACKET_SIZE && conn.connection.is_some() => {
+                    Err(OdbcError::general(
+                        "SQL_ATTR_PACKET_SIZE cannot be set once the connection is open",
+                        SqlState::attribute_cannot_be_set_now(),
+                    ))
+                }
+
+                // `SQLGetInfo(SQL_ASYNC_MODE)` reports SQL_AM_NONE and the
+                // `Backend` trait is synchronous, so there is no asynchronous
+                // execution to enable for the statements on this connection.
+                _ if attr == ConnectionAttribute::ASYNC_ENABLE
+                    && value_ptr as usize != SQL_ASYNC_ENABLE_OFF =>
+                {
+                    Err(OdbcError::NotImplemented {
+                        feature: "SQL_ATTR_ASYNC_ENABLE = SQL_ASYNC_ENABLE_ON".into(),
+                    })
+                }
+
+                // Enlisting in an MS DTC distributed transaction requires a
+                // transaction object core does nothing with. Accepting it
+                // silently would leave an application believing its work is
+                // under the protection of that transaction.
+                _ if attr == ConnectionAttribute::ENLIST_IN_DTC => Err(OdbcError::NotImplemented {
+                    feature: "SQL_ATTR_ENLIST_IN_DTC (distributed transactions)".into(),
+                }),
 
                 // Non-discrete integer-valued attributes: store value directly.
                 _ if attr == ConnectionAttribute::LOGIN_TIMEOUT
@@ -559,6 +601,25 @@ pub unsafe fn sql_get_connect_attr_w<B: Backend>(
                     Ok(SqlReturn::SUCCESS)
                 }
 
+                // The two remaining attributes `SQLSetConnectAttr` stores. An
+                // attribute this driver holds a value for is one it can report:
+                // `SQLGetConnectAttr` is how an application reads back what it
+                // set.
+                _ if attr == ConnectionAttribute::ASYNC_ENABLE => {
+                    let v = conn
+                        .attrs
+                        .get(&attribute)
+                        .copied()
+                        .unwrap_or(SQL_ASYNC_ENABLE_OFF);
+                    write_u32(v as u32);
+                    Ok(SqlReturn::SUCCESS)
+                }
+                _ if attr == ConnectionAttribute::TRANSLATE_OPTION => {
+                    let v = conn.attrs.get(&attribute).copied().unwrap_or(0);
+                    write_u32(v as u32);
+                    Ok(SqlReturn::SUCCESS)
+                }
+
                 // SQL_ATTR_CONNECTION_DEAD: always report connection is alive.
                 _ if attr == ConnectionAttribute::CONNECTION_DEAD => {
                     write_u32(SQL_CD_FALSE as u32);
@@ -749,6 +810,180 @@ mod tests {
             );
             assert_eq!(ret, SqlReturn::ERROR);
             cleanup(env, conn);
+        }
+    }
+
+    /// Spec, `SQL_ATTR_PACKET_SIZE`: "If the application sets packet size after
+    /// a connection has already been made, the driver will return SQLSTATE
+    /// HY011 (Attribute cannot be set now)." The attribute table lists it as
+    /// settable "Before" only.
+    #[test]
+    fn packet_size_after_connect_reports_hy011() {
+        unsafe {
+            let (env, conn) = alloc_env_conn();
+
+            // Before connecting it is an ordinary stored attribute.
+            assert_eq!(
+                sql_set_connect_attr_w::<MockBackend>(
+                    conn,
+                    ConnectionAttribute::PACKET_SIZE.0,
+                    std::ptr::without_provenance_mut(8192),
+                    0,
+                ),
+                SqlReturn::SUCCESS
+            );
+
+            connect(conn);
+
+            assert_eq!(
+                sql_set_connect_attr_w::<MockBackend>(
+                    conn,
+                    ConnectionAttribute::PACKET_SIZE.0,
+                    std::ptr::without_provenance_mut(4096),
+                    0,
+                ),
+                SqlReturn::ERROR
+            );
+            with_handle::<MockBackend, ConnectionHandle<MockBackend>, _>(conn, |handle| {
+                assert_eq!(
+                    handle
+                        .diagnostics
+                        .get(0)
+                        .expect("a HY011 record")
+                        .sqlstate
+                        .as_str(),
+                    "HY011"
+                );
+            });
+
+            cleanup(env, conn);
+        }
+    }
+
+    /// `SQLGetInfo(SQL_ASYNC_MODE)` reports `SQL_AM_NONE`, so there is no
+    /// asynchronous execution to enable; and core enlists in no distributed
+    /// transaction. Both are valid ODBC attributes this driver does not
+    /// implement, which is the HYC00 row.
+    #[test]
+    fn attributes_core_does_not_implement_report_hyc00() {
+        // (attribute, name, value)
+        let cases: &[(i32, &str, usize)] = &[
+            (
+                ConnectionAttribute::ASYNC_ENABLE.0,
+                "SQL_ATTR_ASYNC_ENABLE",
+                1, // SQL_ASYNC_ENABLE_ON
+            ),
+            (
+                ConnectionAttribute::ENLIST_IN_DTC.0,
+                "SQL_ATTR_ENLIST_IN_DTC",
+                1,
+            ),
+        ];
+        for (attribute, name, value) in cases {
+            unsafe {
+                let (env, conn) = alloc_env_conn();
+                let ret = sql_set_connect_attr_w::<MockBackend>(
+                    conn,
+                    *attribute,
+                    std::ptr::without_provenance_mut(*value),
+                    0,
+                );
+                assert_eq!(ret, SqlReturn::ERROR, "{name} was accepted");
+                with_handle::<MockBackend, ConnectionHandle<MockBackend>, _>(conn, |handle| {
+                    assert_eq!(
+                        handle
+                            .diagnostics
+                            .get(0)
+                            .unwrap_or_else(|| panic!("{name}: a HYC00 record"))
+                            .sqlstate
+                            .as_str(),
+                        "HYC00",
+                        "{name} posted the wrong SQLSTATE"
+                    );
+                });
+                cleanup(env, conn);
+            }
+        }
+    }
+
+    /// An attribute `SQLSetConnectAttr` stores is one `SQLGetConnectAttr` can
+    /// report: the spec makes the getter the way an application reads back what
+    /// it set, so a stored value that answers HY092 would be unreachable.
+    #[test]
+    fn every_stored_connection_attribute_is_readable() {
+        // (attribute, name, a value the setter accepts)
+        let cases: &[(i32, &str, usize)] = &[
+            (
+                ConnectionAttribute::ACCESS_MODE.0,
+                "SQL_ATTR_ACCESS_MODE",
+                1,
+            ),
+            (ConnectionAttribute::AUTOCOMMIT.0, "SQL_ATTR_AUTOCOMMIT", 1),
+            (
+                ConnectionAttribute::LOGIN_TIMEOUT.0,
+                "SQL_ATTR_LOGIN_TIMEOUT",
+                30,
+            ),
+            (
+                ConnectionAttribute::CONNECTION_TIMEOUT.0,
+                "SQL_ATTR_CONNECTION_TIMEOUT",
+                30,
+            ),
+            (ConnectionAttribute::TRACE.0, "SQL_ATTR_TRACE", 0),
+            (
+                ConnectionAttribute::ODBC_CURSORS.0,
+                "SQL_ATTR_ODBC_CURSORS",
+                2,
+            ),
+            (
+                ConnectionAttribute::PACKET_SIZE.0,
+                "SQL_ATTR_PACKET_SIZE",
+                8192,
+            ),
+            (
+                ConnectionAttribute::METADATA_ID.0,
+                "SQL_ATTR_METADATA_ID",
+                1,
+            ),
+            (
+                ConnectionAttribute::ASYNC_ENABLE.0,
+                "SQL_ATTR_ASYNC_ENABLE",
+                0,
+            ),
+            (
+                ConnectionAttribute::TRANSLATE_OPTION.0,
+                "SQL_ATTR_TRANSLATE_OPTION",
+                7,
+            ),
+        ];
+        for (attribute, name, value) in cases {
+            unsafe {
+                let (env, conn) = alloc_env_conn();
+                assert_eq!(
+                    sql_set_connect_attr_w::<MockBackend>(
+                        conn,
+                        *attribute,
+                        std::ptr::without_provenance_mut(*value),
+                        0,
+                    ),
+                    SqlReturn::SUCCESS,
+                    "{name} was not accepted"
+                );
+                let mut out: u32 = u32::MAX;
+                assert_eq!(
+                    sql_get_connect_attr_w::<MockBackend>(
+                        conn,
+                        *attribute,
+                        std::ptr::from_mut(&mut out).cast(),
+                        0,
+                        std::ptr::null_mut(),
+                    ),
+                    SqlReturn::SUCCESS,
+                    "{name} was stored but cannot be read back"
+                );
+                assert_eq!(out as usize, *value, "{name} read back a different value");
+                cleanup(env, conn);
+            }
         }
     }
 

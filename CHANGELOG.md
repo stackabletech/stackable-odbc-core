@@ -828,6 +828,20 @@ Everything a driver has to change for the catalog rework, in one place.
   test drives this off `statement_attribute_from_raw`, so a recognised
   attribute that is not readable fails rather than being noticed later.
 
+- **`SQLSetConnectAttr` enforces the state and support rules its spec page
+  assigns to the driver.** `SQL_ATTR_PACKET_SIZE` reports `HY011` once the
+  connection is open, which the spec states directly — "if the application sets
+  packet size after a connection has already been made, the driver will return
+  SQLSTATE HY011 (Attribute cannot be set now)". `SQL_ATTR_ASYNC_ENABLE` =
+  `SQL_ASYNC_ENABLE_ON` and `SQL_ATTR_ENLIST_IN_DTC` report `HYC00`: core is
+  synchronous and `SQL_ASYNC_MODE` is `SQL_AM_NONE`, and core enlists in no
+  distributed transaction, so accepting either would leave an application
+  believing in behaviour it does not get. Unrecognized attributes are still
+  accepted silently for Driver Manager and tool compatibility.
+  `SQL_ATTR_ASYNC_ENABLE` and `SQL_ATTR_TRANSLATE_OPTION` also gained
+  `SQLGetConnectAttr` arms, so every attribute the setter stores can be read
+  back.
+
 - **`SQL_ATTR_METADATA_ID` set on a connection never reached its statements.**
   `SQLSetStmtAttr`'s Comments make it one of exactly two attributes an
   application may set at the connection level — "ODBC 3.x statement attributes
