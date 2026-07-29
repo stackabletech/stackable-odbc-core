@@ -418,7 +418,39 @@ pub struct ColumnBinding {
 unsafe impl Send for ColumnBinding {}
 unsafe impl Sync for ColumnBinding {}
 
-/// Parameter binding information stored by `SQLBindParameter`.
+/// The application-side half of a `SQLBindParameter` call: an APD record.
+///
+/// These four are what the ODBC spec's `SQLBindParameter` page maps onto
+/// application parameter descriptor fields — `SQL_DESC_CONCISE_TYPE`,
+/// `SQL_DESC_DATA_PTR`, `SQL_DESC_OCTET_LENGTH` and
+/// `SQL_DESC_OCTET_LENGTH_PTR` / `SQL_DESC_INDICATOR_PTR`. They describe the
+/// *buffer* the application supplied, and say nothing about the parameter's
+/// type at the data source; that is [`IpdRecord`].
+///
+/// One struct holding both halves is what would make `SQLSetDescField`
+/// unimplementable: setting `SQL_DESC_DATA_PTR` on the APD would have to reach
+/// into a record that also claims to be the IPD's.
+#[derive(Debug)]
+pub struct ApdRecord {
+    /// The C data type of the value buffer (`SQL_DESC_CONCISE_TYPE`).
+    pub c_type: CDataType,
+    /// Pointer to the value buffer, which may be null for output-only
+    /// parameters (`SQL_DESC_DATA_PTR`).
+    pub value_ptr: *mut c_void,
+    /// Size of the value buffer in bytes (`SQL_DESC_OCTET_LENGTH`).
+    pub buffer_length: isize,
+    /// Pointer to the length/indicator value; `SQL_NULL_DATA` (-1) signals NULL
+    /// (`SQL_DESC_OCTET_LENGTH_PTR` / `SQL_DESC_INDICATOR_PTR`).
+    pub str_len_or_ind_ptr: *mut isize,
+}
+
+// SAFETY: ApdRecord holds raw pointers to application-owned buffers.
+// The ODBC contract guarantees these buffers remain valid until the binding is
+// changed or the statement is freed.
+unsafe impl Send for ApdRecord {}
+unsafe impl Sync for ApdRecord {}
+
+/// The data-source-side half of a `SQLBindParameter` call: an IPD record.
 ///
 /// `col_size` and `decimal_digits` are `SQLBindParameter`'s `ColumnSize` and
 /// `DecimalDigits`, the declared size of the parameter. [`crate::param_convert`]
@@ -433,34 +465,74 @@ unsafe impl Sync for ColumnBinding {}
 /// `sql_type` **is** read: it is `SQLBindParameter`'s `ParameterType`, the SQL
 /// type the value is converted to before it reaches the backend. For every C
 /// type but the two character ones the conversion is a no-op, because
-/// `c_type` already fixes the value's shape — but for `SQL_C_CHAR` and
-/// `SQL_C_WCHAR` this field is the only statement of what the text *is*. See
-/// [`crate::param_convert`].
+/// [`ApdRecord::c_type`] already fixes the value's shape — but for `SQL_C_CHAR`
+/// and `SQL_C_WCHAR` this field is the only statement of what the text *is*.
+/// See [`crate::param_convert`].
 #[derive(Debug)]
-pub struct ParameterBinding {
-    /// Whether this is an input, output, or input/output parameter.
-    pub input_output_type: ParamType,
-    /// The C data type of the value buffer.
-    pub c_type: CDataType,
-    /// The SQL data type of the parameter.
+pub struct IpdRecord {
+    /// The SQL data type of the parameter (`SQL_DESC_CONCISE_TYPE`).
     pub sql_type: SqlDataType,
-    /// Column size (precision for numerics, length for strings).
+    /// Column size: precision for numerics, length for strings
+    /// (`SQL_DESC_LENGTH`).
     pub col_size: ULen,
-    /// Decimal digits (scale for numerics).
+    /// Decimal digits, the scale for numerics (`SQL_DESC_SCALE`).
     pub decimal_digits: i16,
-    /// Pointer to the value buffer (may be null for output-only params).
-    pub value_ptr: *mut c_void,
-    /// Size of the value buffer in bytes.
-    pub buffer_length: isize,
-    /// Pointer to the length/indicator value. `SQL_NULL_DATA` (-1) signals NULL.
-    pub str_len_or_ind_ptr: *mut isize,
+    /// Whether this is an input, output, or input/output parameter
+    /// (`SQL_DESC_PARAMETER_TYPE`).
+    pub input_output_type: ParamType,
 }
 
-// SAFETY: ParameterBinding holds raw pointers to application-owned buffers.
-// The ODBC contract guarantees these buffers remain valid until the binding is
-// changed or the statement is freed.
-unsafe impl Send for ParameterBinding {}
-unsafe impl Sync for ParameterBinding {}
+/// Both halves of one bound parameter, borrowed together.
+///
+/// What the readers of a parameter binding want: they need the buffer from the
+/// APD and the declared type from the IPD, and a value assembled from two
+/// different parameters' records would be nonsense. Constructed only by
+/// [`ParamRecords::get`], which will not pair records under different keys.
+#[derive(Clone, Copy)]
+pub(crate) struct ParamRecord<'a> {
+    /// The APD half: where the value is and how it is laid out.
+    pub apd: &'a ApdRecord,
+    /// The IPD half: what the value is declared to be.
+    pub ipd: &'a IpdRecord,
+}
+
+/// The two parameter descriptors' record maps, borrowed together.
+///
+/// The free functions in [`crate::ffi::params`] took one `HashMap` before the
+/// split and take this after, so they still borrow one field-path of the
+/// statement rather than the whole handle.
+#[derive(Clone, Copy)]
+pub(crate) struct ParamRecords<'a> {
+    /// The APD's records.
+    pub apd: &'a std::collections::HashMap<u16, ApdRecord>,
+    /// The IPD's records.
+    pub ipd: &'a std::collections::HashMap<u16, IpdRecord>,
+}
+
+impl<'a> ParamRecords<'a> {
+    /// Both halves of parameter `number`, or `None` if it is not bound.
+    ///
+    /// `Err` is reserved for the one case that is neither: a parameter present
+    /// in one descriptor and absent from the other. `SQLBindParameter` writes
+    /// and removes both under the same key, so that state is unreachable — but
+    /// it is unreachable by construction rather than by type, and the
+    /// alternative to reporting it is an `unwrap` on a path that marshals
+    /// application pointers.
+    pub(crate) fn get(&self, number: u16) -> Result<Option<ParamRecord<'a>>, OdbcError> {
+        match (self.apd.get(&number), self.ipd.get(&number)) {
+            (Some(apd), Some(ipd)) => Ok(Some(ParamRecord { apd, ipd })),
+            (None, None) => Ok(None),
+            (apd, _) => Err(OdbcError::general(
+                format!(
+                    "internal: parameter {number} is bound in the {} but not the {}",
+                    if apd.is_some() { "APD" } else { "IPD" },
+                    if apd.is_some() { "IPD" } else { "APD" },
+                ),
+                crate::types::SqlState::general_error(),
+            )),
+        }
+    }
+}
 
 /// How far `SQLGetData` has read into a single column of the current row, so
 /// that a repeated call for the same column returns the *next* part.
@@ -558,8 +630,6 @@ pub struct StatementHandle<B: Backend> {
     pub prepared_sql: Option<String>,
     /// Number of `?` parameter markers counted in `prepared_sql` by `SQLPrepareW`.
     pub param_count: Option<u16>,
-    /// Parameter bindings set by `SQLBindParameter`. Key is 1-based parameter number.
-    pub param_bindings: std::collections::HashMap<u16, ParameterBinding>,
     /// Cursor name set by SQLSetCursorNameW or auto-generated by SQLGetCursorNameW.
     pub cursor_name: Option<String>,
     /// Data-at-execution state for SQLParamData/SQLPutData.
@@ -596,18 +666,18 @@ pub struct StatementHandle<B: Backend> {
     /// `SQLBindCol` sets — the spec makes binding a column *be* setting ARD
     /// fields, so this is the binding, not a copy of it.
     pub app_row_desc: Box<Descriptor<ColumnBinding>>,
-    /// The application parameter descriptor. Records still to come: the
-    /// parameter split lands in the commit after this one, and until it does
-    /// [`Self::param_bindings`] holds both halves.
-    pub app_param_desc: Box<Descriptor<()>>,
+    /// The application parameter descriptor. Its records are the C-side half of
+    /// each `SQLBindParameter` call — see [`ApdRecord`].
+    pub app_param_desc: Box<Descriptor<ApdRecord>>,
     /// The implementation row descriptor, deliberately unbacked — see
     /// [`Descriptor`]. It exists because the Windows Driver Manager queries
     /// `SQLGetStmtAttrW(10010–10013)` after statement allocation and crashes
     /// without a valid handle for each.
     pub imp_row_desc: Box<Descriptor<()>>,
-    /// The implementation parameter descriptor. Records still to come, as for
-    /// [`Self::app_param_desc`].
-    pub imp_param_desc: Box<Descriptor<()>>,
+    /// The implementation parameter descriptor. Its records are the
+    /// data-source-side half of each `SQLBindParameter` call — see
+    /// [`IpdRecord`].
+    pub imp_param_desc: Box<Descriptor<IpdRecord>>,
 }
 
 impl<B: Backend> HasKind for StatementHandle<B> {
@@ -615,6 +685,27 @@ impl<B: Backend> HasKind for StatementHandle<B> {
 }
 
 impl<B: Backend> StatementHandle<B> {
+    /// The two parameter descriptors' records, borrowed together.
+    ///
+    /// One call site rather than four field paths, so a reader cannot pair the
+    /// APD of this statement with the IPD of nothing.
+    pub(crate) fn param_records(&self) -> ParamRecords<'_> {
+        ParamRecords {
+            apd: &self.app_param_desc.records,
+            ipd: &self.imp_param_desc.records,
+        }
+    }
+
+    /// Remove every parameter binding, from both descriptors.
+    ///
+    /// `SQLFreeStmt(SQL_RESET_PARAMS)`. Clearing one map and not the other
+    /// leaves exactly the split state [`ParamRecords::get`] reports as an
+    /// internal error, so the two clears live in one place.
+    pub(crate) fn clear_param_records(&mut self) {
+        self.app_param_desc.records.clear();
+        self.imp_param_desc.records.clear();
+    }
+
     /// Store the result of an execution and open a cursor over it if it has
     /// columns.
     ///
@@ -791,7 +882,6 @@ pub unsafe fn alloc_statement<B: Backend>(
         cursor_open: false,
         prepared_sql: None,
         param_count: None,
-        param_bindings: std::collections::HashMap::new(),
         cursor_name: None,
         data_at_exec: None,
         get_data_cursor: None,

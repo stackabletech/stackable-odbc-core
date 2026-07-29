@@ -1205,17 +1205,22 @@ mod tests {
                             str_len_or_ind_ptr: std::ptr::null_mut(),
                         },
                     );
-                    handle.param_bindings.insert(
+                    handle.app_param_desc.records.insert(
                         1,
-                        crate::handles::ParameterBinding {
-                            input_output_type: crate::types::ParamType::Input,
+                        crate::handles::ApdRecord {
                             c_type: crate::types::CDataType::SLong,
-                            sql_type: crate::types::SqlDataType::INTEGER,
-                            col_size: 10,
-                            decimal_digits: 0,
                             value_ptr: std::ptr::null_mut(),
                             buffer_length: 4,
                             str_len_or_ind_ptr: std::ptr::null_mut(),
+                        },
+                    );
+                    handle.imp_param_desc.records.insert(
+                        1,
+                        crate::handles::IpdRecord {
+                            sql_type: crate::types::SqlDataType::INTEGER,
+                            col_size: 10,
+                            decimal_digits: 0,
+                            input_output_type: crate::types::ParamType::Input,
                         },
                     );
                 },
@@ -1241,8 +1246,12 @@ mod tests {
                         "SQL_CB_DELETE cleared the column bindings"
                     );
                     assert!(
-                        handle.param_bindings.contains_key(&1),
-                        "SQL_CB_DELETE cleared the parameter bindings"
+                        handle.app_param_desc.records.contains_key(&1),
+                        "SQL_CB_DELETE cleared the APD's parameter records"
+                    );
+                    assert!(
+                        handle.imp_param_desc.records.contains_key(&1),
+                        "SQL_CB_DELETE cleared the IPD's parameter records"
                     );
                 },
             );

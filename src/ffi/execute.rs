@@ -221,7 +221,7 @@ pub unsafe fn sql_exec_direct_w<B: Backend>(
             if param_count > 0 {
                 // SAFETY: caller guarantees all bound buffer pointers remain valid.
                 let (non_dae_values, dae_params) = crate::ffi::params::find_data_at_exec_params(
-                    &stmt.param_bindings,
+                    stmt.param_records(),
                     param_count,
                 )?;
 
@@ -257,7 +257,7 @@ pub unsafe fn sql_exec_direct_w<B: Backend>(
             // backend and silently discard every bound value.
             let result = if param_count > 0 {
                 // SAFETY: caller guarantees all bound buffer pointers remain valid.
-                let params = crate::ffi::params::collect_params(&stmt.param_bindings, param_count)?;
+                let params = crate::ffi::params::collect_params(stmt.param_records(), param_count)?;
                 let mut prepared =
                     timer.check::<B, _, _>(B::prepare(connection, cancel, &sql), cancel)?;
                 let executed = timer.check::<B, _, _>(
@@ -274,7 +274,7 @@ pub unsafe fn sql_exec_direct_w<B: Backend>(
                 // valid per the caller contract (same guarantee collect_params relies on).
                 // Already inside the enclosing `unsafe` context, like collect_params above.
                 crate::ffi::params::write_output_params(
-                    &stmt.param_bindings,
+                    stmt.param_records(),
                     &outcome.output_params,
                 )?;
                 prepared
@@ -580,7 +580,7 @@ pub unsafe fn sql_execute<B: Backend>(statement_handle: *mut c_void) -> SqlRetur
     tracing::debug!("SQLExecute(stmt={:?})", statement_handle);
     // SAFETY: statement_handle is null or a valid StatementHandle<B>; kind and group
     // validated by scope.stmt_with_parent inside the closure. Bound parameter buffer
-    // pointers in stmt.param_bindings are validated when they were registered via
+    // pointers in the APD are validated when they were registered via
     // SQLBindParameter; collect_params reads them under the caller's guarantee that
     // they remain valid.
     let ret = unsafe {
@@ -601,7 +601,7 @@ pub unsafe fn sql_execute<B: Backend>(statement_handle: *mut c_void) -> SqlRetur
             // Check for data-at-execution parameters.
             // SAFETY: caller guarantees all bound buffer pointers remain valid.
             let (non_dae_values, dae_params) =
-                crate::ffi::params::find_data_at_exec_params(&stmt.param_bindings, param_count)?;
+                crate::ffi::params::find_data_at_exec_params(stmt.param_records(), param_count)?;
 
             if !dae_params.is_empty() {
                 // Store DAE state and return SQL_NEED_DATA.
@@ -623,7 +623,7 @@ pub unsafe fn sql_execute<B: Backend>(statement_handle: *mut c_void) -> SqlRetur
 
             // No DAE params: collect all values normally and execute immediately.
             // SAFETY: caller guarantees all bound buffer pointers remain valid.
-            let params = crate::ffi::params::collect_params(&stmt.param_bindings, param_count)?;
+            let params = crate::ffi::params::collect_params(stmt.param_records(), param_count)?;
 
             // Manual-commit mode: this call opens a transaction (or extends
             // the open one), which is what SQL_ATTR_TXN_ISOLATION's HY011 is
@@ -702,7 +702,7 @@ pub unsafe fn sql_execute<B: Backend>(statement_handle: *mut c_void) -> SqlRetur
             // SAFETY: the application's bound output buffer pointers remain valid
             // per the caller contract (same guarantee collect_params relies on).
             // Already inside the enclosing `unsafe` context, like collect_params above.
-            crate::ffi::params::write_output_params(&stmt.param_bindings, &outcome.output_params)?;
+            crate::ffi::params::write_output_params(stmt.param_records(), &outcome.output_params)?;
 
             Ok(SqlReturn::SUCCESS)
         })
@@ -1014,7 +1014,8 @@ mod tests {
                 stmt,
                 |stmt_handle| {
                     assert!(
-                        stmt_handle.param_bindings.contains_key(&1),
+                        stmt_handle.app_param_desc.records.contains_key(&1)
+                            && stmt_handle.imp_param_desc.records.contains_key(&1),
                         "SQLPrepare unbound a parameter, which only SQLBindParameter, \
                          SQLFreeStmt(SQL_RESET_PARAMS) or SQLSetDescField may do"
                     );
