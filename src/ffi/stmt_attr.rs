@@ -88,7 +88,8 @@ fn substitute_stmt_attr<B: Backend>(
         requested,
         substituted_display
     );
-    stmt.attrs.insert(attribute, substituted);
+    stmt.attr_store_mut(statement_attribute_from_raw(attribute))
+        .insert(attribute, substituted);
     stmt.diagnostics.push(&OdbcError::general(
         format!("{attr_name} {requested} is not supported; substituted {substituted_display}"),
         SqlState::option_value_changed(),
@@ -158,7 +159,8 @@ fn offer_to_data_source<B: Backend, T>(
                 sub.name,
                 sub.requested
             );
-            stmt.attrs.insert(sub.attribute, sub.requested);
+            stmt.attr_store_mut(statement_attribute_from_raw(sub.attribute))
+                .insert(sub.attribute, sub.requested);
             Ok((Some(value), SqlReturn::SUCCESS))
         }
         // The backend says it cannot do this at all: substitute and report.
@@ -405,7 +407,7 @@ pub unsafe fn sql_set_stmt_attr_w<B: Backend>(
                             feature: format!("SQL_ATTR_USE_BOOKMARKS = {int_val} (bookmarks)"),
                         });
                     }
-                    stmt.attrs.insert(attribute, int_val);
+                    stmt.attr_store_mut(attr).insert(attribute, int_val);
                     Ok(SqlReturn::SUCCESS)
                 }
 
@@ -433,7 +435,7 @@ pub unsafe fn sql_set_stmt_attr_w<B: Backend>(
                             "SQL_NONSCROLLABLE",
                         ));
                     }
-                    stmt.attrs.insert(attribute, int_val);
+                    stmt.attr_store_mut(attr).insert(attribute, int_val);
                     Ok(SqlReturn::SUCCESS)
                 }
 
@@ -685,7 +687,10 @@ pub unsafe fn sql_set_stmt_attr_w<B: Backend>(
                     })
                 }
 
-                // All other recognised attributes: store value.
+                // All other recognised attributes: store value, in whichever
+                // map owns it — see `HeaderOwner`. The six remaining
+                // header-field attributes reach here, and land on the ARD or
+                // APD rather than on `stmt.attrs`.
                 //
                 // SQL_ATTR_ROWS_FETCHED_PTR, SQL_ATTR_ROW_STATUS_PTR and
                 // SQL_ATTR_ROW_BIND_OFFSET_PTR reach here and are stored
@@ -694,7 +699,7 @@ pub unsafe fn sql_set_stmt_attr_w<B: Backend>(
                 // the spec's 01S02 list is closed and names none of them, and
                 // there is no "similar value" to substitute for a pointer.
                 Some(_) => {
-                    stmt.attrs.insert(attribute, int_val);
+                    stmt.attr_store_mut(attr).insert(attribute, int_val);
                     Ok(SqlReturn::SUCCESS)
                 }
 
@@ -849,20 +854,20 @@ pub unsafe fn sql_get_stmt_attr_w<B: Backend>(
 
             match attr {
                 Some(StatementAttribute::QueryTimeout) => {
-                    write_ulen(stmt.attrs.get(&attribute).copied().unwrap_or(0));
+                    write_ulen(stmt.attr_store(attr).get(&attribute).copied().unwrap_or(0));
                     Ok(SqlReturn::SUCCESS)
                 }
                 Some(StatementAttribute::MaxRows) => {
-                    write_ulen(stmt.attrs.get(&attribute).copied().unwrap_or(0));
+                    write_ulen(stmt.attr_store(attr).get(&attribute).copied().unwrap_or(0));
                     Ok(SqlReturn::SUCCESS)
                 }
                 Some(StatementAttribute::MaxLength) => {
-                    write_ulen(stmt.attrs.get(&attribute).copied().unwrap_or(0));
+                    write_ulen(stmt.attr_store(attr).get(&attribute).copied().unwrap_or(0));
                     Ok(SqlReturn::SUCCESS)
                 }
                 Some(StatementAttribute::NoScan) => {
                     write_ulen(
-                        stmt.attrs
+                        stmt.attr_store(attr)
                             .get(&attribute)
                             .copied()
                             .unwrap_or(SQL_NOSCAN_OFF),
@@ -871,7 +876,7 @@ pub unsafe fn sql_get_stmt_attr_w<B: Backend>(
                 }
                 Some(StatementAttribute::RowBindType) => {
                     write_ulen(
-                        stmt.attrs
+                        stmt.attr_store(attr)
                             .get(&attribute)
                             .copied()
                             .unwrap_or(SQL_BIND_BY_COLUMN),
@@ -880,7 +885,7 @@ pub unsafe fn sql_get_stmt_attr_w<B: Backend>(
                 }
                 Some(StatementAttribute::CursorType) => {
                     write_ulen(
-                        stmt.attrs
+                        stmt.attr_store(attr)
                             .get(&attribute)
                             .copied()
                             .unwrap_or(SQL_CURSOR_FORWARD_ONLY),
@@ -889,7 +894,7 @@ pub unsafe fn sql_get_stmt_attr_w<B: Backend>(
                 }
                 Some(StatementAttribute::Concurrency) => {
                     write_ulen(
-                        stmt.attrs
+                        stmt.attr_store(attr)
                             .get(&attribute)
                             .copied()
                             .unwrap_or(SQL_CONCUR_READ_ONLY),
@@ -897,16 +902,26 @@ pub unsafe fn sql_get_stmt_attr_w<B: Backend>(
                     Ok(SqlReturn::SUCCESS)
                 }
                 Some(StatementAttribute::RetrieveData) => {
-                    write_ulen(stmt.attrs.get(&attribute).copied().unwrap_or(SQL_RD_ON));
+                    write_ulen(
+                        stmt.attr_store(attr)
+                            .get(&attribute)
+                            .copied()
+                            .unwrap_or(SQL_RD_ON),
+                    );
                     Ok(SqlReturn::SUCCESS)
                 }
                 Some(StatementAttribute::UseBookmarks) => {
-                    write_ulen(stmt.attrs.get(&attribute).copied().unwrap_or(SQL_UB_OFF));
+                    write_ulen(
+                        stmt.attr_store(attr)
+                            .get(&attribute)
+                            .copied()
+                            .unwrap_or(SQL_UB_OFF),
+                    );
                     Ok(SqlReturn::SUCCESS)
                 }
                 Some(StatementAttribute::RowArraySize) => {
                     write_ulen(
-                        stmt.attrs
+                        stmt.attr_store(attr)
                             .get(&attribute)
                             .copied()
                             .unwrap_or(SQL_ROW_ARRAY_SIZE_DEFAULT),
@@ -915,7 +930,7 @@ pub unsafe fn sql_get_stmt_attr_w<B: Backend>(
                 }
                 Some(StatementAttribute::ParamsetSize) => {
                     write_ulen(
-                        stmt.attrs
+                        stmt.attr_store(attr)
                             .get(&attribute)
                             .copied()
                             .unwrap_or(SQL_PARAMSET_SIZE_DEFAULT),
@@ -930,7 +945,7 @@ pub unsafe fn sql_get_stmt_attr_w<B: Backend>(
                             SqlState::invalid_cursor_state(),
                         ));
                     }
-                    let v = stmt.attrs.get(&attribute).copied().unwrap_or(0);
+                    let v = stmt.attr_store(attr).get(&attribute).copied().unwrap_or(0);
                     write_ulen(v);
                     Ok(SqlReturn::SUCCESS)
                 }
@@ -939,12 +954,12 @@ pub unsafe fn sql_get_stmt_attr_w<B: Backend>(
                     Ok(SqlReturn::SUCCESS)
                 }
                 Some(StatementAttribute::AsyncEnable) => {
-                    write_ulen(stmt.attrs.get(&attribute).copied().unwrap_or(0));
+                    write_ulen(stmt.attr_store(attr).get(&attribute).copied().unwrap_or(0));
                     Ok(SqlReturn::SUCCESS)
                 }
                 Some(StatementAttribute::MetadataId) => {
                     write_ulen(
-                        stmt.attrs
+                        stmt.attr_store(attr)
                             .get(&attribute)
                             .copied()
                             .unwrap_or(SQL_FALSE as usize),
@@ -953,7 +968,7 @@ pub unsafe fn sql_get_stmt_attr_w<B: Backend>(
                 }
                 Some(StatementAttribute::CursorScrollable) => {
                     write_ulen(
-                        stmt.attrs
+                        stmt.attr_store(attr)
                             .get(&attribute)
                             .copied()
                             .unwrap_or(SQL_NONSCROLLABLE),
@@ -962,7 +977,7 @@ pub unsafe fn sql_get_stmt_attr_w<B: Backend>(
                 }
                 Some(StatementAttribute::CursorSensitivity) => {
                     write_ulen(
-                        stmt.attrs
+                        stmt.attr_store(attr)
                             .get(&attribute)
                             .copied()
                             .unwrap_or(usize::from(SQL_UNSPECIFIED)),
@@ -970,21 +985,21 @@ pub unsafe fn sql_get_stmt_attr_w<B: Backend>(
                     Ok(SqlReturn::SUCCESS)
                 }
                 Some(StatementAttribute::SimulateCursor) => {
-                    write_ulen(stmt.attrs.get(&attribute).copied().unwrap_or(0));
+                    write_ulen(stmt.attr_store(attr).get(&attribute).copied().unwrap_or(0));
                     Ok(SqlReturn::SUCCESS)
                 }
 
                 // Pointer-valued attributes.
                 Some(StatementAttribute::RowStatusPtr) => {
-                    write_ptr(stmt.attrs.get(&attribute).copied().unwrap_or(0));
+                    write_ptr(stmt.attr_store(attr).get(&attribute).copied().unwrap_or(0));
                     Ok(SqlReturn::SUCCESS)
                 }
                 Some(StatementAttribute::RowsFetchedPtr) => {
-                    write_ptr(stmt.attrs.get(&attribute).copied().unwrap_or(0));
+                    write_ptr(stmt.attr_store(attr).get(&attribute).copied().unwrap_or(0));
                     Ok(SqlReturn::SUCCESS)
                 }
                 Some(StatementAttribute::RowBindOffsetPtr) => {
-                    write_ptr(stmt.attrs.get(&attribute).copied().unwrap_or(0));
+                    write_ptr(stmt.attr_store(attr).get(&attribute).copied().unwrap_or(0));
                     Ok(SqlReturn::SUCCESS)
                 }
 
@@ -1016,7 +1031,7 @@ pub unsafe fn sql_get_stmt_attr_w<B: Backend>(
                 // unreadable.
                 Some(StatementAttribute::KeysetSize) => {
                     write_ulen(
-                        stmt.attrs
+                        stmt.attr_store(attr)
                             .get(&attribute)
                             .copied()
                             .unwrap_or(SQL_KEYSET_SIZE_DEFAULT),
@@ -1025,7 +1040,7 @@ pub unsafe fn sql_get_stmt_attr_w<B: Backend>(
                 }
                 Some(StatementAttribute::ParamBindType) => {
                     write_ulen(
-                        stmt.attrs
+                        stmt.attr_store(attr)
                             .get(&attribute)
                             .copied()
                             .unwrap_or(SQL_BIND_BY_COLUMN),
@@ -1041,7 +1056,7 @@ pub unsafe fn sql_get_stmt_attr_w<B: Backend>(
                     | StatementAttribute::FetchBookmarkPtr
                     | StatementAttribute::AsyncStmtEvent,
                 ) => {
-                    write_ptr(stmt.attrs.get(&attribute).copied().unwrap_or(0));
+                    write_ptr(stmt.attr_store(attr).get(&attribute).copied().unwrap_or(0));
                     Ok(SqlReturn::SUCCESS)
                 }
 
@@ -1059,7 +1074,7 @@ pub unsafe fn sql_get_stmt_attr_w<B: Backend>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::handles::ConnectionHandle;
+    use crate::handles::{ConnectionHandle, HeaderOwner};
     use crate::test_utils::{
         MockBackend, MockCoreCancelsTimeoutBackend, MockFailingQueryTimeoutBackend,
         MockNoQueryTimeoutBackend, MockQueryTimeoutBackend, alloc_env_conn_stmt,
@@ -1091,6 +1106,152 @@ mod tests {
                 usize::from(SQL_UNSPECIFIED),
                 "SQLGetStmtAttr reported a different cursor sensitivity than SQLGetInfo"
             );
+
+            cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
+    /// `SQLSetStmtAttr`'s mapping table makes this attribute the ARD's
+    /// `SQL_DESC_BIND_TYPE`, and says setting one sets the other. Two copies of
+    /// the value is what this removes, so the assertion is in two parts: the
+    /// descriptor holds it, and `stmt.attrs` does *not*.
+    ///
+    /// The second half is the one that matters. Writing to both maps leaves
+    /// every other test green — a reader that finds the right value cannot tell
+    /// a duplicate write from a single one — so without it the guarantee here
+    /// would be structural only.
+    #[test]
+    fn a_row_header_attribute_is_stored_on_the_ard() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            let attribute = StatementAttribute::RowBindType as i32;
+
+            let ret = sql_set_stmt_attr_w::<MockBackend>(
+                stmt,
+                attribute,
+                std::ptr::without_provenance_mut(SQL_BIND_BY_COLUMN + 8),
+                0,
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+                assert_eq!(
+                    handle.app_row_desc.attrs.get(&attribute).copied(),
+                    Some(SQL_BIND_BY_COLUMN + 8),
+                    "SQL_ATTR_ROW_BIND_TYPE did not land on the ARD's header"
+                );
+                assert!(
+                    !handle.attrs.contains_key(&attribute),
+                    "the value is also in stmt.attrs, so there are two copies to disagree"
+                );
+            });
+
+            // And it still reads back through the statement attribute, which is
+            // the whole point of the descriptor being the single copy.
+            let mut out: usize = 0;
+            assert_eq!(
+                sql_get_stmt_attr_w::<MockBackend>(
+                    stmt,
+                    attribute,
+                    std::ptr::from_mut(&mut out).cast(),
+                    0,
+                    std::ptr::null_mut(),
+                ),
+                SqlReturn::SUCCESS
+            );
+            assert_eq!(out, SQL_BIND_BY_COLUMN + 8);
+
+            cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
+    /// The parameter-side counterpart. `SQL_ATTR_PARAM_BIND_TYPE` is the APD's
+    /// `SQL_DESC_BIND_TYPE`.
+    #[test]
+    fn a_param_header_attribute_is_stored_on_the_apd() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            let attribute = StatementAttribute::ParamBindType as i32;
+
+            let ret = sql_set_stmt_attr_w::<MockBackend>(
+                stmt,
+                attribute,
+                std::ptr::without_provenance_mut(SQL_BIND_BY_COLUMN + 16),
+                0,
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+                assert_eq!(
+                    handle.app_param_desc.attrs.get(&attribute).copied(),
+                    Some(SQL_BIND_BY_COLUMN + 16),
+                    "SQL_ATTR_PARAM_BIND_TYPE did not land on the APD's header"
+                );
+                assert!(
+                    !handle.attrs.contains_key(&attribute),
+                    "the value is also in stmt.attrs, so there are two copies to disagree"
+                );
+                assert!(
+                    !handle.app_row_desc.attrs.contains_key(&attribute),
+                    "a parameter-side attribute landed on the row descriptor"
+                );
+            });
+
+            let mut out: usize = 0;
+            assert_eq!(
+                sql_get_stmt_attr_w::<MockBackend>(
+                    stmt,
+                    attribute,
+                    std::ptr::from_mut(&mut out).cast(),
+                    0,
+                    std::ptr::null_mut(),
+                ),
+                SqlReturn::SUCCESS
+            );
+            assert_eq!(out, SQL_BIND_BY_COLUMN + 16);
+
+            cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
+    /// The substituted value goes to the descriptor too, not just the accepted
+    /// one. `SQL_ATTR_ROW_ARRAY_SIZE` and `SQL_ATTR_PARAMSET_SIZE` are the two
+    /// header-field attributes that take the `01S02` path, and that path writes
+    /// through `substitute_stmt_attr` rather than the catch-all arm — a second
+    /// write site, and so a second place for the routing to be missed.
+    #[test]
+    fn a_substituted_header_attribute_lands_on_the_descriptor() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+
+            for (attribute, owner) in [
+                (StatementAttribute::RowArraySize as i32, HeaderOwner::Ard),
+                (StatementAttribute::ParamsetSize as i32, HeaderOwner::Apd),
+            ] {
+                let ret = sql_set_stmt_attr_w::<MockBackend>(
+                    stmt,
+                    attribute,
+                    std::ptr::without_provenance_mut(10usize),
+                    0,
+                );
+                assert_eq!(ret, SqlReturn::SUCCESS_WITH_INFO, "attr {attribute}");
+
+                with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+                    let stored = match owner {
+                        HeaderOwner::Ard => handle.app_row_desc.attrs.get(&attribute),
+                        HeaderOwner::Apd => handle.app_param_desc.attrs.get(&attribute),
+                    };
+                    assert_eq!(
+                        stored.copied(),
+                        Some(1),
+                        "the substituted value did not land on the {owner:?} header"
+                    );
+                    assert!(
+                        !handle.attrs.contains_key(&attribute),
+                        "the substituted value is also in stmt.attrs"
+                    );
+                });
+            }
 
             cleanup_env_conn_stmt(env, conn, stmt);
         }

@@ -684,7 +684,91 @@ impl<B: Backend> HasKind for StatementHandle<B> {
     const KIND: HandleKind = HandleKind::Stmt;
 }
 
+/// The descriptor whose header field a statement attribute aliases.
+///
+/// `SQLSetStmtAttr`'s own page carries a table mapping statement attributes
+/// onto descriptor **header** fields and states: "When a descriptor field that
+/// is also a statement attribute is set by a call to **SQLSetDescField**, the
+/// corresponding statement attribute is set." Two copies of the value is how
+/// those two views come to disagree, so the descriptor's header is the only
+/// copy and [`StatementHandle::attrs`] no longer holds these keys at all.
+///
+/// | Statement attribute | Header field | Descriptor |
+/// |---|---|---|
+/// | `SQL_ATTR_ROW_ARRAY_SIZE` | `SQL_DESC_ARRAY_SIZE` | ARD |
+/// | `SQL_ATTR_ROW_BIND_TYPE` | `SQL_DESC_BIND_TYPE` | ARD |
+/// | `SQL_ATTR_ROW_BIND_OFFSET_PTR` | `SQL_DESC_BIND_OFFSET_PTR` | ARD |
+/// | `SQL_ATTR_ROW_OPERATION_PTR` | `SQL_DESC_ARRAY_STATUS_PTR` | ARD |
+/// | `SQL_ATTR_PARAMSET_SIZE` | `SQL_DESC_ARRAY_SIZE` | APD |
+/// | `SQL_ATTR_PARAM_BIND_TYPE` | `SQL_DESC_BIND_TYPE` | APD |
+/// | `SQL_ATTR_PARAM_BIND_OFFSET_PTR` | `SQL_DESC_BIND_OFFSET_PTR` | APD |
+/// | `SQL_ATTR_PARAM_OPERATION_PTR` | `SQL_DESC_ARRAY_STATUS_PTR` | APD |
+///
+/// The IRD- and IPD-side pairs are absent deliberately, not by oversight:
+/// `SQL_ATTR_ROW_STATUS_PTR` and `SQL_ATTR_ROWS_FETCHED_PTR` are
+/// `SQL_DESC_ARRAY_STATUS_PTR` and `SQL_DESC_ROWS_PROCESSED_PTR` on the **IRD**,
+/// which [`Descriptor`] does not back, and `SQL_ATTR_PARAM_STATUS_PTR` and
+/// `SQL_ATTR_PARAMS_PROCESSED_PTR` are the same two fields on the IPD, whose
+/// header D3 has yet to define. They stay in [`StatementHandle::attrs`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HeaderOwner {
+    /// The application row descriptor.
+    Ard,
+    /// The application parameter descriptor.
+    Apd,
+}
+
+impl HeaderOwner {
+    /// The descriptor `attr` is a header field of, or `None` if it is an
+    /// ordinary statement attribute.
+    ///
+    /// `SQL_ATTR_PARAM_OPERATION_PTR` is spelled
+    /// `StatementAttribute::ParamOpterationPtr` in `odbc-sys` — transposed
+    /// letters, upstream. A grep for the correct spelling finds nothing here
+    /// and reads as "core does not implement it", which is false.
+    pub(crate) fn of(attr: Option<odbc_sys::StatementAttribute>) -> Option<Self> {
+        use odbc_sys::StatementAttribute as A;
+        match attr? {
+            A::RowArraySize | A::RowBindType | A::RowBindOffsetPtr | A::RowOperationPtr => {
+                Some(Self::Ard)
+            }
+            A::ParamsetSize | A::ParamBindType | A::ParamBindOffsetPtr | A::ParamOpterationPtr => {
+                Some(Self::Apd)
+            }
+            _ => None,
+        }
+    }
+}
+
 impl<B: Backend> StatementHandle<B> {
+    /// Where the value of `attr` is stored: a descriptor's header when ODBC
+    /// defines the attribute as one, this statement's own bag otherwise.
+    ///
+    /// Both the set and the get path go through this, so the two cannot
+    /// disagree about which map to look in.
+    pub(crate) fn attr_store(
+        &self,
+        attr: Option<odbc_sys::StatementAttribute>,
+    ) -> &std::collections::HashMap<i32, usize> {
+        match HeaderOwner::of(attr) {
+            Some(HeaderOwner::Ard) => &self.app_row_desc.attrs,
+            Some(HeaderOwner::Apd) => &self.app_param_desc.attrs,
+            None => &self.attrs,
+        }
+    }
+
+    /// [`Self::attr_store`], for writing.
+    pub(crate) fn attr_store_mut(
+        &mut self,
+        attr: Option<odbc_sys::StatementAttribute>,
+    ) -> &mut std::collections::HashMap<i32, usize> {
+        match HeaderOwner::of(attr) {
+            Some(HeaderOwner::Ard) => &mut self.app_row_desc.attrs,
+            Some(HeaderOwner::Apd) => &mut self.app_param_desc.attrs,
+            None => &mut self.attrs,
+        }
+    }
+
     /// The two parameter descriptors' records, borrowed together.
     ///
     /// One call site rather than four field paths, so a reader cannot pair the

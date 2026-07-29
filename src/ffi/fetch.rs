@@ -28,8 +28,10 @@ const SQL_ROW_SUCCESS_WITH_INFO: u16 = 6;
 /// The stored attribute must be null or a pointer to a valid `usize`, which is
 /// the application's undertaking when it sets the attribute.
 unsafe fn row_bind_offset<B: Backend>(stmt: &StatementHandle<B>) -> usize {
+    // On the ARD's header, not `stmt.attrs`: `SQL_ATTR_ROW_BIND_OFFSET_PTR`
+    // *is* `SQL_DESC_BIND_OFFSET_PTR` — see `HeaderOwner`.
     let raw = stmt
-        .attrs
+        .attr_store(Some(odbc_sys::StatementAttribute::RowBindOffsetPtr))
         .get(&(odbc_sys::StatementAttribute::RowBindOffsetPtr as i32))
         .copied()
         .unwrap_or(0);
