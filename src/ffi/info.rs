@@ -139,6 +139,7 @@ use crate::utf16::write_utf16;
 /// then keep the reported value and its hooks in sync itself.
 fn info_type_default_response<B: Backend>(
     conn: Option<&B::Connection>,
+    current_catalog: Option<&str>,
     info_type: u16,
 ) -> Result<InfoValue, OdbcError> {
     if let Some(conn) = conn
@@ -154,6 +155,20 @@ fn info_type_default_response<B: Backend>(
     // via `common_get_info_raw`.
     if info_type == crate::types::SQL_CURSOR_COMMIT_BEHAVIOR {
         return Ok(InfoValue::U16(B::cursor_commit_behavior().as_u16()));
+    }
+
+    // Spec, `SQL_DATABASE_NAME`: "In ODBC 3.x, the value returned for this
+    // InfoType can also be returned by calling SQLGetConnectAttr with an
+    // Attribute argument of SQL_ATTR_CURRENT_CATALOG." So it is that attribute,
+    // read back through a second name, and answering it from anywhere else
+    // would give one fact two sources. The attribute lives on the connection
+    // *handle*, which is why this cannot sit in `common_get_info_raw` with the
+    // rest of the raw-path answers. A backend that knows the real current
+    // database still wins: `get_info_raw` above runs first.
+    if info_type == crate::types::SQL_DATABASE_NAME {
+        return Ok(InfoValue::String(
+            current_catalog.unwrap_or_default().to_string(),
+        ));
     }
 
     // The shared raw-path answers, for a backend whose `get_info_raw` does not
@@ -242,11 +257,14 @@ fn info_type_default_response<B: Backend>(
 fn info_type_or_default<B: Backend>(
     result: Result<InfoValue, OdbcError>,
     conn: Option<&B::Connection>,
+    current_catalog: Option<&str>,
     info_type: u16,
 ) -> Result<InfoValue, OdbcError> {
     match result {
         Ok(value) => Ok(value),
-        Err(OdbcError::NotImplemented { .. }) => info_type_default_response::<B>(conn, info_type),
+        Err(OdbcError::NotImplemented { .. }) => {
+            info_type_default_response::<B>(conn, current_catalog, info_type)
+        }
         Err(e) => Err(e),
     }
 }
@@ -338,22 +356,34 @@ pub unsafe fn sql_get_info_w<B: Backend>(
             // `NotImplemented`). Both routes must produce the same benign
             // answer (see `info_type_default_response`): naming a raw value must
             // never turn a benign default into `SQL_ERROR`.
+            // `SQL_ATTR_CURRENT_CATALOG`, which the spec makes the same value
+            // as `SQL_DATABASE_NAME`. Read before the dispatch below, which
+            // borrows the handle's diagnostics mutably.
+            let current_catalog = handle
+                .attr_strings
+                .get(&odbc_sys::ConnectionAttribute::CURRENT_CATALOG.0)
+                .cloned();
+            let current_catalog = current_catalog.as_deref();
             let info = match handle.connection.as_ref() {
                 Some(conn) => match info_type_id {
                     Ok(type_id) => info_type_or_default::<B>(
                         B::get_info(conn, type_id).into_odbc(),
                         Some(conn),
+                        current_catalog,
                         info_type,
                     )?,
-                    Err(()) => info_type_default_response::<B>(Some(conn), info_type)?,
+                    Err(()) => {
+                        info_type_default_response::<B>(Some(conn), current_catalog, info_type)?
+                    }
                 },
                 None => match info_type_id {
                     Ok(type_id) => info_type_or_default::<B>(
                         B::get_info_pre_connect(type_id).into_odbc(),
                         None,
+                        current_catalog,
                         info_type,
                     )?,
-                    Err(()) => info_type_default_response::<B>(None, info_type)?,
+                    Err(()) => info_type_default_response::<B>(None, current_catalog, info_type)?,
                 },
             };
 
@@ -1681,6 +1711,55 @@ mod tests {
         }
     }
 
+    /// Spec, `SQL_DATABASE_NAME`: "In ODBC 3.x, the value returned for this
+    /// InfoType can also be returned by calling SQLGetConnectAttr with an
+    /// Attribute argument of SQL_ATTR_CURRENT_CATALOG." One fact, two names, so
+    /// setting the attribute moves the info type.
+    #[test]
+    fn database_name_follows_the_current_catalog_attribute() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            assert_eq!(connect_handle(conn), SqlReturn::SUCCESS);
+
+            let read = |buf: &mut [u16; 32]| {
+                let mut str_len: i16 = -1;
+                let ret = sql_get_info_w::<MockBackend>(
+                    conn,
+                    crate::types::SQL_DATABASE_NAME,
+                    buf.as_mut_ptr() as *mut c_void,
+                    (buf.len() * 2) as i16,
+                    &mut str_len,
+                );
+                assert_eq!(ret, SqlReturn::SUCCESS);
+                (
+                    str_len,
+                    String::from_utf16_lossy(&buf[..(str_len / 2) as usize]),
+                )
+            };
+
+            // Unset: the empty string, in the shape a character info type
+            // declares rather than a numeric zero.
+            let mut buf = [0xEEu16; 32];
+            assert_eq!(read(&mut buf), (0, String::new()));
+
+            let catalog: Vec<u16> = "analytics".encode_utf16().collect();
+            assert_eq!(
+                crate::ffi::connect_attr::sql_set_connect_attr_w::<MockBackend>(
+                    conn,
+                    odbc_sys::ConnectionAttribute::CURRENT_CATALOG.0,
+                    catalog.as_ptr() as *mut c_void,
+                    (catalog.len() * 2) as i32,
+                ),
+                SqlReturn::SUCCESS
+            );
+
+            let mut buf = [0xEEu16; 32];
+            assert_eq!(read(&mut buf), (18, "analytics".to_string()));
+
+            cleanup(env, conn, stmt);
+        }
+    }
+
     #[test]
     fn backend_error_other_than_not_implemented_still_propagates() {
         // The fallback in `info_type_or_default` must only trigger for
@@ -1696,6 +1775,7 @@ mod tests {
                     "boom",
                     crate::types::SqlState::general_error(),
                 )),
+                None,
                 None,
                 InfoType::OuterJoins as u16,
             );

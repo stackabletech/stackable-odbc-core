@@ -9,7 +9,7 @@ use crate::errors::OdbcError;
 use crate::handles::StatementHandle;
 use crate::panic::panic_safe;
 use crate::types::{
-    SQL_CURSOR_FORWARD_ONLY, SQL_FALSE, SQL_INSENSITIVE, SQL_UNSPECIFIED, SqlReturn, SqlState,
+    SQL_CURSOR_FORWARD_ONLY, SQL_FALSE, SQL_UNSPECIFIED, SqlReturn, SqlState,
     statement_attribute_from_raw,
 };
 
@@ -29,11 +29,12 @@ const SQL_NOSCAN_OFF: usize = 0;
 // SQL_ATTR_ROW_BIND_TYPE values
 const SQL_BIND_BY_COLUMN: usize = 0;
 // SQL_ATTR_CURSOR_SENSITIVITY deliberately has no constant here: it uses the
-// shared `SQL_INSENSITIVE` from `types::constants`, which is what
+// shared `SQL_UNSPECIFIED` from `types::constants`, which is what
 // `default_get_info` answers SQL_CURSOR_SENSITIVITY with. The two draw on the
 // same value set, so a local copy is a second place for the same statement to
-// describe its cursor — and `sql.h` puts SQL_SENSITIVE at 2, one away, which
-// is what a copy would most likely drift to.
+// describe its cursor — and `sql.h` puts SQL_INSENSITIVE at 1 and
+// SQL_SENSITIVE at 2, either side of it, which is what a copy would most
+// likely drift to.
 
 // SQL_ATTR_SIMULATE_CURSOR values. Named `SQL_SC_*` in `sqlext.h`, which
 // collides with the `SQL_SC_*` SQL-conformance family in `types::constants`
@@ -471,19 +472,17 @@ pub unsafe fn sql_set_stmt_attr_w<B: Backend>(
                     })
                 }
 
-                // SQL_UNSPECIFIED promises nothing and is the spec's default,
-                // so it is always satisfiable; SQL_INSENSITIVE is what
-                // `SQL_CURSOR_SENSITIVITY` reports today, so accepting it keeps
-                // the attribute and the info type telling one story.
-                // SQL_SENSITIVE is the one core certainly cannot do — it would
-                // require a cursor that sees other cursors' changes — and is
-                // not on the 01S02 list, so HYC00.
+                // `SQL_UNSPECIFIED` promises nothing, which is exactly what a
+                // streaming forward-only cursor can guarantee, and it is what
+                // `SQLGetInfo(SQL_CURSOR_SENSITIVITY)` reports. The other two
+                // are promises core cannot keep: `SQL_INSENSITIVE` says no
+                // other cursor's changes ever become visible, `SQL_SENSITIVE`
+                // says they all do. Neither is on the 01S02 list, so HYC00.
                 Some(StatementAttribute::CursorSensitivity)
-                    if int_val != usize::from(SQL_UNSPECIFIED)
-                        && int_val != usize::from(SQL_INSENSITIVE) =>
+                    if int_val != usize::from(SQL_UNSPECIFIED) =>
                 {
                     Err(OdbcError::NotImplemented {
-                        feature: format!("SQL_ATTR_CURSOR_SENSITIVITY = {int_val} (SQL_SENSITIVE)"),
+                        feature: format!("SQL_ATTR_CURSOR_SENSITIVITY = {int_val}"),
                     })
                 }
 
@@ -770,7 +769,7 @@ pub unsafe fn sql_get_stmt_attr_w<B: Backend>(
                         stmt.attrs
                             .get(&attribute)
                             .copied()
-                            .unwrap_or(usize::from(SQL_INSENSITIVE)) as u32,
+                            .unwrap_or(usize::from(SQL_UNSPECIFIED)) as u32,
                     );
                     Ok(SqlReturn::SUCCESS)
                 }
@@ -871,7 +870,7 @@ mod tests {
     fn cursor_sensitivity_agrees_with_the_value_sqlgetinfo_reports() {
         // `SQL_ATTR_CURSOR_SENSITIVITY` and `SQL_CURSOR_SENSITIVITY` draw from
         // the same value set, so a statement must not describe itself two ways.
-        assert_eq!(SQL_INSENSITIVE, 1, "sql.h defines SQL_INSENSITIVE as 1");
+        assert_eq!(SQL_UNSPECIFIED, 0, "sql.h defines SQL_UNSPECIFIED as 0");
 
         unsafe {
             let (env, conn, stmt) = alloc_env_conn_stmt();
@@ -888,7 +887,7 @@ mod tests {
             assert_eq!(ret, SqlReturn::SUCCESS);
             assert_eq!(
                 value,
-                u32::from(SQL_INSENSITIVE),
+                u32::from(SQL_UNSPECIFIED),
                 "SQLGetStmtAttr reported a different cursor sensitivity than SQLGetInfo"
             );
 
@@ -1331,14 +1330,13 @@ mod tests {
         }
     }
 
-    /// `SQL_UNSPECIFIED` is the spec's default for this attribute and promises
-    /// nothing, so it is always satisfiable; `SQL_INSENSITIVE` is what
-    /// `SQLGetInfo(SQL_CURSOR_SENSITIVITY)` reports, so accepting it keeps the
-    /// attribute and the info type telling one story. Only `SQL_SENSITIVE` is
-    /// refused, which the test above pins.
+    /// `SQL_UNSPECIFIED` promises nothing, which is what a streaming
+    /// forward-only cursor can guarantee and what
+    /// `SQLGetInfo(SQL_CURSOR_SENSITIVITY)` reports. It is therefore the one
+    /// value this attribute accepts; the test above pins the other two.
     #[test]
-    fn the_two_satisfiable_cursor_sensitivities_are_accepted() {
-        for value in [SQL_UNSPECIFIED, SQL_INSENSITIVE] {
+    fn the_satisfiable_cursor_sensitivity_is_accepted() {
+        for value in [SQL_UNSPECIFIED] {
             unsafe {
                 let (env, conn, stmt) = alloc_env_conn_stmt();
                 let ret = sql_set_stmt_attr_w::<MockBackend>(

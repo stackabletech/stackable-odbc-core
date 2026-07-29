@@ -1442,8 +1442,8 @@ pub fn default_get_info<B: Backend>(
     use crate::types::{
         InfoType, InfoValue, SQL_AM_NONE, SQL_ASYNC_NOTIFICATION_NOT_CAPABLE, SQL_CA1_NEXT,
         SQL_DRIVER_ODBC_VER_STRING, SQL_GD_ANY_COLUMN, SQL_GD_ANY_ORDER, SQL_GD_BOUND,
-        SQL_INSENSITIVE, SQL_MAX_CURSOR_NAME_LEN, SQL_OIC_CORE, SQL_PARC_NO_BATCH,
-        SQL_PAS_NO_SELECT, SQL_SO_FORWARD_ONLY,
+        SQL_MAX_CURSOR_NAME_LEN, SQL_OIC_CORE, SQL_PARC_NO_BATCH, SQL_PAS_NO_SELECT,
+        SQL_SO_FORWARD_ONLY, SQL_UNSPECIFIED,
     };
     match info_type {
         // --- String types identical in all drivers ---
@@ -1627,7 +1627,18 @@ pub fn default_get_info<B: Backend>(
         // declared shape rather than relying on a hand-picked subset. `U16`
         // here would hand a numeric type expecting 4 bytes only 2, leaving
         // the upper 2 bytes as whatever the caller's buffer already held.
-        InfoType::CursorSensitivity => Some(InfoValue::U32(u32::from(SQL_INSENSITIVE))),
+        // `SQL_UNSPECIFIED`, not `SQL_INSENSITIVE`. Insensitivity is a promise
+        // that no other cursor's changes become visible, and core's fetch
+        // streams rows from the backend as the application asks for them — it
+        // makes no such promise about rows it has not read yet. The spec puts
+        // the two on either side of a conformance line ("a SQL-92 Entry
+        // level-conformant driver will always return the SQL_UNSPECIFIED
+        // option as supported. A SQL-92 Full level-conformant driver will
+        // always return the SQL_INSENSITIVE option"), but this describes core's
+        // cursor rather than the backend's SQL grammar, so it does not follow
+        // `Backend::sql_conformance`. `SQLGetStmtAttr(SQL_ATTR_CURSOR_
+        // SENSITIVITY)` reports the same value.
+        InfoType::CursorSensitivity => Some(InfoValue::U32(u32::from(SQL_UNSPECIFIED))),
         InfoType::MaxIdentifierLen => Some(InfoValue::U16(
             B::catalog_result_column_widths().identifier_len,
         )),
@@ -1766,7 +1777,7 @@ pub fn common_get_info_raw<B: Backend>(
     info_type: u16,
 ) -> Option<InfoValue> {
     use crate::types::{
-        InfoValue, SQL_CURSOR_ROLLBACK_BEHAVIOR, SQL_DATABASE_NAME, SQL_FILE_USAGE, SQL_KEYWORDS,
+        InfoValue, SQL_CURSOR_ROLLBACK_BEHAVIOR, SQL_FILE_USAGE, SQL_KEYWORDS,
         SQL_MULTIPLE_ACTIVE_TXN, SQL_PROCEDURE_TERM, SQL_PROCEDURES, SQL_QUOTED_IDENTIFIER_CASE,
         SQL_ROW_UPDATES, SQL_TABLE_TERM,
     };
@@ -1806,13 +1817,16 @@ pub fn common_get_info_raw<B: Backend>(
         // capability, so it comes from `Backend::keywords`; core only owns the
         // rule.
         SQL_KEYWORDS => Some(InfoValue::String(data_source_specific_keywords::<B>(conn?))),
-        // The remaining character-string info types with no
-        // `odbc_sys::InfoType` variant. Empty is a valid value for both:
-        // there is no shared name for the current database, and — given
-        // SQL_PROCEDURES above answers "N" — no procedures to have a vendor
-        // term for. Every data source has tables, so SQL_TABLE_TERM gets the
-        // generic term rather than "".
-        SQL_DATABASE_NAME => Some(InfoValue::String(String::new())),
+        // `SQL_DATABASE_NAME` is deliberately absent: the spec equates it with
+        // `SQLGetConnectAttr(SQL_ATTR_CURRENT_CATALOG)`, which lives on the
+        // connection *handle* rather than on `B::Connection`, so `sql_get_info_w`
+        // answers it from there. Answering `""` here as well would give the
+        // same info type two sources and let them disagree.
+        //
+        // Empty is a valid value for `SQL_PROCEDURE_TERM`: given
+        // `SQL_PROCEDURES` above answers "N", there are no procedures to have a
+        // vendor term for. Every data source has tables, so `SQL_TABLE_TERM`
+        // gets the generic term rather than "".
         SQL_PROCEDURE_TERM => Some(InfoValue::String(String::new())),
         SQL_TABLE_TERM => Some(InfoValue::String("table".into())),
         _ => None,
@@ -1830,11 +1844,11 @@ mod tests {
         DEFAULT_IDENTIFIER_LEN, InfoType, InfoValue, SQL_AM_NONE, SQL_AT_ADD_COLUMN_SINGLE,
         SQL_AT_DROP_COLUMN_RESTRICT, SQL_CA1_NEXT, SQL_CB_PRESERVE, SQL_CN_ANY,
         SQL_DRIVER_ODBC_VER_STRING, SQL_FN_CVT_CAST, SQL_FN_TSI_DAY, SQL_FN_TSI_SECOND,
-        SQL_FN_TSI_YEAR, SQL_GB_GROUP_BY_EQUALS_SELECT, SQL_INSENSITIVE, SQL_MAX_CURSOR_NAME_LEN,
-        SQL_NC_END, SQL_NNC_NON_NULL, SQL_OIC_CORE, SQL_OJ_LEFT, SQL_OJ_NESTED, SQL_SC_SQL92_ENTRY,
+        SQL_FN_TSI_YEAR, SQL_GB_GROUP_BY_EQUALS_SELECT, SQL_MAX_CURSOR_NAME_LEN, SQL_NC_END,
+        SQL_NNC_NON_NULL, SQL_OIC_CORE, SQL_OJ_LEFT, SQL_OJ_NESTED, SQL_SC_SQL92_ENTRY,
         SQL_SO_FORWARD_ONLY, SQL_SQ_COMPARISON, SQL_SQ_CORRELATED_SUBQUERIES, SQL_SQ_EXISTS,
         SQL_SQ_IN, SQL_SQ_QUANTIFIED, SQL_TC_ALL, SQL_TXN_SERIALIZABLE, SQL_U_UNION,
-        SQL_U_UNION_ALL,
+        SQL_U_UNION_ALL, SQL_UNSPECIFIED,
     };
 
     enum Expected {
@@ -1911,7 +1925,7 @@ mod tests {
         // --- U32 values ---
         // CursorSensitivity is SQLUINTEGER per spec, not SQLUSMALLINT — see
         // the matching comment on its arm in `default_get_info`.
-        (InfoType::CursorSensitivity,             Expected::U32(SQL_INSENSITIVE as u32)),
+        (InfoType::CursorSensitivity,             Expected::U32(SQL_UNSPECIFIED as u32)),
         (InfoType::Subqueries,                    Expected::U32(SQL_SQ_COMPARISON | SQL_SQ_EXISTS | SQL_SQ_IN | SQL_SQ_QUANTIFIED | SQL_SQ_CORRELATED_SUBQUERIES)),
         (InfoType::UnionStatement,                Expected::U32(SQL_U_UNION | SQL_U_UNION_ALL)),
         (InfoType::ScrollOptions,                 Expected::U32(SQL_SO_FORWARD_ONLY)),
@@ -2409,7 +2423,7 @@ mod tests {
         (InfoType::ScrollOptions, "core's fetch is forward-only"),
         (
             InfoType::CursorSensitivity,
-            "forward-only cursors cannot see other transactions' changes",
+            "core's fetch streams rows and promises nothing about another cursor's changes",
         ),
         (
             InfoType::ForwardOnlyCursorAttributes1,
@@ -2693,10 +2707,6 @@ mod tests {
     /// silently.
     #[rustfmt::skip]
     const RAW_PATH_GAPS: &[(u16, &str)] = &[
-        (
-            crate::types::SQL_DATABASE_NAME,
-            "the spec equates this with SQLGetConnectAttr(SQL_ATTR_CURRENT_CATALOG), which the connection already stores; derive it from there rather than answering the empty string",
-        ),
     ];
 
     /// The raw-path sibling of

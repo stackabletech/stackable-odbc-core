@@ -297,6 +297,24 @@ Everything a driver has to change for the catalog rework, in one place.
 
 ### Changed
 
+- **`SQL_DATABASE_NAME` is the current catalog, not the empty string.** The spec
+  makes it a second name for one value — "in ODBC 3.x, the value returned for
+  this InfoType can also be returned by calling SQLGetConnectAttr with an
+  Attribute argument of SQL_ATTR_CURRENT_CATALOG" — so `SQLGetInfo` now reads
+  the attribute the connection already stores instead of answering `""` from a
+  second place. A backend that knows the real current database still wins:
+  `Backend::get_info_raw` is consulted first.
+
+- **`SQL_CURSOR_SENSITIVITY` reports `SQL_UNSPECIFIED` rather than
+  `SQL_INSENSITIVE`.** Insensitivity is a promise that no other cursor's changes
+  become visible, and core's fetch streams rows from the backend as the
+  application asks for them, so it cannot make that promise about rows it has
+  not read. `SQL_UNSPECIFIED` — "cursors on the statement handle may make
+  visible none, some, or all such changes" — is what core can back.
+  `SQLSetStmtAttr(SQL_ATTR_CURSOR_SENSITIVITY)` accepts that value and reports
+  `HYC00` for the other two, and `SQLGetStmtAttr` reports the same value the
+  info type does.
+
 - **Breaking:** ten new **required** `Backend` methods, each stating something
   about the data source that core was previously deciding on its behalf.
   `quoted_identifier_case` (`SQL_QUOTED_IDENTIFIER_CASE`, the counterpart of the
