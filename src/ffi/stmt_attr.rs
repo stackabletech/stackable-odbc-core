@@ -773,6 +773,28 @@ pub unsafe fn sql_set_stmt_attr_w<B: Backend>(
                     Ok(ret)
                 }
 
+                // The application withdrew the deadline. The spec's row for
+                // this attribute is explicit — "if the value is 0, there is
+                // no timeout" — and core has two pieces of state to keep in
+                // step with that, not one: the attribute `SQLGetStmtAttr`
+                // reports, and the deadline `core_query_timeout` arms the
+                // timer from at every statement-producing call and at
+                // `SQLFetch`.
+                //
+                // Guarded on `==` rather than left to the store-only
+                // catch-all below, which is where this value used to land:
+                // that arm stores the attribute and touches nothing else, so
+                // an earlier non-zero deadline stayed armed and the next
+                // query was cancelled with an `HYT00` the application had
+                // just opted out of.
+                Some(StatementAttribute::QueryTimeout) if int_val == SQL_QUERY_TIMEOUT_DEFAULT => {
+                    scope.attr_set::<B>(statement_handle, attribute, int_val)?;
+                    scope
+                        .get::<StatementHandle<B>>(statement_handle)?
+                        .core_query_timeout = None;
+                    Ok(SqlReturn::SUCCESS)
+                }
+
                 // `sql_fetch` retrieves and writes bound columns
                 // unconditionally, so SQL_RD_OFF — "do not retrieve data into
                 // the bound buffers" — is not something core can honour. Not on
@@ -2623,6 +2645,79 @@ mod tests {
             crate::test_utils::cleanup_connected_env_conn_stmt::<MockCoreCancelsTimeoutBackend>(
                 env, conn, stmt,
             );
+        }
+    }
+
+    /// `SQL_ATTR_QUERY_TIMEOUT` = 0 is the spec's "there is no timeout", so the
+    /// deadline core recorded for its own timer has to go with it.
+    ///
+    /// `core_query_timeout` is read at every statement-producing call and at
+    /// `SQLFetch`, and it had one writer, inside the arm that runs only for a
+    /// *non-default* value. Withdrawing the timeout therefore left the old
+    /// deadline armed and the application's next query died with an `HYT00` it
+    /// had already opted out of.
+    ///
+    /// The backend is `MockCoreCancelsTimeoutBackend` because it is the only one
+    /// for which core arms a timer at all: a `DataSource` backend leaves the field
+    /// `None` throughout, so the assertion would pass without proving anything.
+    #[test]
+    fn withdrawing_a_query_timeout_disarms_cores_timer() {
+        unsafe {
+            type B = MockCoreCancelsTimeoutBackend;
+            let (env, conn, stmt) = crate::test_utils::alloc_connected_env_conn_stmt::<B>();
+
+            assert_eq!(
+                sql_set_stmt_attr_w::<B>(
+                    stmt,
+                    StatementAttribute::QueryTimeout as i32,
+                    std::ptr::without_provenance_mut::<c_void>(30),
+                    0,
+                ),
+                SqlReturn::SUCCESS,
+            );
+            with_handle::<B, StatementHandle<B>, _>(stmt, |s| {
+                assert_eq!(
+                    s.core_query_timeout,
+                    Some(30),
+                    "the deadline core was asked to own was never recorded",
+                );
+            });
+
+            assert_eq!(
+                sql_set_stmt_attr_w::<B>(
+                    stmt,
+                    StatementAttribute::QueryTimeout as i32,
+                    std::ptr::without_provenance_mut::<c_void>(SQL_QUERY_TIMEOUT_DEFAULT),
+                    0,
+                ),
+                SqlReturn::SUCCESS,
+                "withdrawing a timeout is not an error",
+            );
+
+            let mut val: usize = usize::MAX;
+            assert_eq!(
+                sql_get_stmt_attr_w::<B>(
+                    stmt,
+                    StatementAttribute::QueryTimeout as i32,
+                    std::ptr::from_mut(&mut val).cast(),
+                    0,
+                    std::ptr::null_mut(),
+                ),
+                SqlReturn::SUCCESS,
+            );
+            assert_eq!(
+                val, SQL_QUERY_TIMEOUT_DEFAULT,
+                "SQLGetStmtAttr must report that there is no timeout",
+            );
+
+            with_handle::<B, StatementHandle<B>, _>(stmt, |s| {
+                assert_eq!(
+                    s.core_query_timeout, None,
+                    "the application withdrew the deadline; core must not keep enforcing it",
+                );
+            });
+
+            crate::test_utils::cleanup_connected_env_conn_stmt::<B>(env, conn, stmt);
         }
     }
 

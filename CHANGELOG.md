@@ -1429,6 +1429,17 @@ Everything a driver has to change for the catalog rework, in one place.
 
 ### Fixed
 
+- **Withdrawing `SQL_ATTR_QUERY_TIMEOUT` disarms core's timer.** Setting the
+  attribute back to `0` — the spec's "there is no timeout" — took the
+  store-only path, so `SQLGetStmtAttr` reported `0` while the deadline
+  recorded by the earlier set stayed on the statement. Every later
+  `SQLExecute`, `SQLExecDirect`, `SQLFetch`, `SQLParamData` and catalog call
+  armed a timer from that field, so a backend answering
+  `QueryTimeout::CoreCancels` had its query cancelled and reported `HYT00`
+  against a deadline the application had already removed. Only a backend that
+  delegates enforcement to core was affected; one that answers
+  `QueryTimeout::DataSource` never had the field set.
+
 - **`ConfigDSNW` returned FALSE without saying why.** The spec makes the
   installer error buffer the function's only channel — "When **ConfigDSN**
   returns FALSE, an associated *\*pfErrorCode* value is posted to the installer
