@@ -2,7 +2,7 @@
 
 use std::ffi::c_void;
 
-use crate::backend::{Backend, StatementBackend};
+use crate::backend::Backend;
 use crate::errors::OdbcError;
 use crate::handles::StatementHandle;
 use crate::panic::panic_safe;
@@ -723,10 +723,7 @@ pub unsafe fn sql_execute<B: Backend>(statement_handle: *mut c_void) -> SqlRetur
             // counterpart of collecting the input params.
             // A cursor is open only if the execution produced columns; an
             // `UPDATE` leaves the statement in S4, not S5.
-            stmt.cursor_open = stmt
-                .statement
-                .as_ref()
-                .is_some_and(|s| s.column_count() > 0);
+            stmt.note_executed();
             // SAFETY: the application's bound output buffer pointers remain valid
             // per the caller contract (same guarantee collect_params relies on).
             // Already inside the enclosing `unsafe` context, like collect_params above.

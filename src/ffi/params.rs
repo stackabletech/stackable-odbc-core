@@ -7,7 +7,7 @@ use std::ffi::c_void;
 use odbc_sys::SqlDataType;
 
 use crate::{
-    backend::{Backend, StatementBackend},
+    backend::Backend,
     cancel::reclassify_cancelled_opt,
     descriptor::{DescriptorRecord, DescriptorRole},
     errors::OdbcError,
@@ -1805,11 +1805,9 @@ pub unsafe fn sql_param_data<B: Backend>(
             );
             executed?;
 
-            // A cursor is open only if the execution produced columns.
-            stmt.cursor_open = stmt
-                .statement
-                .as_ref()
-                .is_some_and(|s| s.column_count() > 0);
+            // A cursor is open only if the execution produced columns; an
+            // `UPDATE` leaves the statement in S4, not S5.
+            stmt.note_executed();
 
             Ok(if converted_with_info {
                 SqlReturn::SUCCESS_WITH_INFO

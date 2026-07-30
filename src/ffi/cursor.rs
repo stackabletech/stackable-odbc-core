@@ -632,7 +632,11 @@ pub unsafe fn sql_get_cursor_name_w<B: Backend>(
 ///   named a cursor it cannot then reference.
 /// - 24000 (invalid cursor state): **returned by this driver**. The row carries no (DM)
 ///   marker, and the Comments state the rule in the positive direction — a cursor may be
-///   renamed "as long as the cursor is in an allocated or prepared state".
+///   renamed "as long as the cursor is in an allocated or prepared state". Appendix B's
+///   row gives all four columns: `--` for `S1 Allocated` and `S2-S3 Prepared`, `24000`
+///   for `S4 Executed` and `S5-S7 Cursor`. So a prepared-but-unexecuted statement is
+///   accepted and an executed one is refused whether or not it opened a cursor, which is
+///   why the check reads `StatementHandle::executed` rather than `statement.is_some()`.
 /// - 34000 (invalid cursor name): **returned by this driver** for an empty name, for one
 ///   longer than `SQL_MAX_CURSOR_NAME_LEN`, and for one starting with `SQLCUR` or
 ///   `SQL_CUR` — prefixes reserved for the names [`sql_get_cursor_name_w`] generates.
@@ -737,11 +741,24 @@ pub unsafe fn sql_set_cursor_name_w<B: Backend>(
             }
 
             // Spec 24000: "the statement corresponding to StatementHandle was
-            // already in an executed or cursor-positioned state". The Comments say
-            // the same in the positive direction — a cursor may be renamed "as long
-            // as the cursor is in an allocated or prepared state".
+            // already in an executed or cursor-positioned state". The Comments
+            // say the same in the positive direction — a cursor may be renamed
+            // "as long as the cursor is in an allocated or prepared state" — and
+            // Appendix B's row spells out all four columns: `--` for
+            // `S1 Allocated` and `S2-S3 Prepared`, `24000` for `S4 Executed` and
+            // `S5-S7 Cursor`.
+            //
+            // So this reads `executed`, not `statement.is_some()`: `SQLPrepare`
+            // stores a backend statement without executing anything, and
+            // `SQLPrepare` -> `SQLSetCursorName` -> `SQLExecute` is the ordinary
+            // positioned-update setup. `cursor_open` alone would not do either —
+            // an `UPDATE` that executed leaves S4, which this row still refuses.
+            //
+            // `SQLEndTran` under `SQL_CB_CLOSE` deliberately leaves `executed`
+            // set: it closes the cursor and keeps the statement, and no spec text
+            // says a statement returns to the renameable prepared state that way.
             let stmt = scope.get::<StatementHandle<B>>(statement_handle)?;
-            if stmt.cursor_open || stmt.statement.is_some() {
+            if stmt.cursor_open || stmt.executed {
                 return Err(OdbcError::general(
                     "Cannot set a cursor name once the statement has been executed",
                     SqlState::invalid_cursor_state(),
@@ -2120,6 +2137,86 @@ mod tests {
             crate::test_utils::cleanup_connected_env_conn_stmt::<MockFailingCloseBackend>(
                 env, conn, stmt,
             );
+        }
+    }
+
+    /// Appendix B's `SQLSetCursorName` row reads `--` for `S2-S3 Prepared` and
+    /// `24000` for `S4 Executed` and `S5-S7 Cursor`, and the Comments say the
+    /// same in the positive direction: a cursor may be renamed "as long as the
+    /// cursor is in an allocated or prepared state".
+    ///
+    /// `SQLPrepare` -> `SQLSetCursorName` -> `SQLExecute` is the ordinary
+    /// positioned-update setup, so a driver that refuses the middle call locks
+    /// the pattern out entirely.
+    #[test]
+    fn set_cursor_name_is_allowed_in_the_prepared_state() {
+        unsafe {
+            let (env, conn, stmt) =
+                crate::test_utils::alloc_connected_env_conn_stmt::<MockBackend>();
+
+            let sql: Vec<u16> = "SELECT * FROM t WHERE id = 1".encode_utf16().collect();
+            assert_eq!(
+                crate::ffi::execute::sql_prepare_w::<MockBackend>(
+                    stmt,
+                    sql.as_ptr(),
+                    i32::try_from(sql.len()).expect("the fixed test SQL is short"),
+                ),
+                SqlReturn::SUCCESS,
+                "precondition: the statement is prepared but not executed",
+            );
+
+            assert_eq!(
+                set_cursor_name(stmt, "PreparedCursor"),
+                SqlReturn::SUCCESS,
+                "a prepared statement's cursor may still be named",
+            );
+
+            crate::test_utils::cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
+        }
+    }
+
+    /// The other half of the same table row: state S4, executed with no result
+    /// set, is `24000` even though no cursor was ever opened. Dropping the
+    /// `statement.is_some()` term outright — the obvious way to let the prepared
+    /// state through — would accept this, so it is pinned in its own test.
+    ///
+    /// `MockStatement` reports zero columns, so `SQLExecute` leaves the handle
+    /// in S4 rather than S5.
+    #[test]
+    fn set_cursor_name_is_refused_in_the_executed_state_with_no_result_set() {
+        unsafe {
+            let (env, conn, stmt) =
+                crate::test_utils::alloc_connected_env_conn_stmt::<MockBackend>();
+
+            let sql: Vec<u16> = "UPDATE t SET a = 1".encode_utf16().collect();
+            assert_eq!(
+                crate::ffi::execute::sql_prepare_w::<MockBackend>(
+                    stmt,
+                    sql.as_ptr(),
+                    i32::try_from(sql.len()).expect("the fixed test SQL is short"),
+                ),
+                SqlReturn::SUCCESS
+            );
+            assert_eq!(
+                crate::ffi::execute::sql_execute::<MockBackend>(stmt),
+                SqlReturn::SUCCESS,
+                "precondition: the statement executed",
+            );
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+                assert!(
+                    !handle.cursor_open,
+                    "precondition: state S4, executed with no result set",
+                );
+            });
+
+            assert_eq!(
+                set_cursor_name(stmt, "TooLate"),
+                SqlReturn::ERROR,
+                "state S4 is 24000 in Appendix B, cursor or no cursor",
+            );
+            assert_eq!(first_sqlstate(stmt), "24000");
+
+            crate::test_utils::cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 

@@ -116,6 +116,25 @@ Everything a driver has to change for the catalog rework, in one place.
    passing a null there was relying on a spec violation. The other three
    functions must *not* check it, and do not.
 
+### Migration: SQLSetCursorName accepts the prepared state
+
+`SQLSetCursorName` refused any statement holding a backend statement, which
+included the prepared-but-unexecuted states S2 and S3. The spec permits those:
+its Comments allow a rename "as long as the cursor is in an allocated or
+prepared state", and Appendix B's row reads `--` for `S2-S3 Prepared` against
+`24000` for `S4 Executed` and `S5-S7 Cursor`.
+
+**`SQLPrepare` -> `SQLSetCursorName` -> `SQLExecute` now works.** It previously
+returned `24000` from the middle call, which locked out the standard
+positioned-update setup. Nothing that used to succeed now fails: state S4 —
+executed with no result set — is still `24000`, and a driver relying on the
+earlier over-refusal was relying on a bug.
+
+`StatementHandle` gained a public `executed: bool` and a `note_executed()`
+method for the distinction. A driver that constructs or inspects a
+`StatementHandle` directly (only the `test-support` paths do) sees the new
+field.
+
 ### Added
 
 - **`SqlState::attempt_to_concatenate_a_null_value`** (`HY020`), and

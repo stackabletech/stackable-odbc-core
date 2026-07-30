@@ -692,6 +692,17 @@ pub struct StatementHandle<B: Backend> {
     /// cursor but keeps the statement. Every `24000` "cursor already open" /
     /// "no cursor open" check reads this field.
     pub cursor_open: bool,
+    /// Whether this statement has been **executed** (ODBC states S4-S7), as
+    /// opposed to merely prepared (S2/S3).
+    ///
+    /// A third fact, because neither of the other two answers the question.
+    /// `statement.is_some()` is true from `SQLPrepare` onwards, and
+    /// `cursor_open` is false for an `UPDATE` that executed perfectly well —
+    /// so a check written against either one gets state S4 wrong in one
+    /// direction or the other. Appendix B separates `S2-S3 Prepared` from
+    /// `S4 Executed` in almost every row, and `SQLSetCursorName`'s is the row
+    /// where the two answers differ: `--` for prepared, `24000` for executed.
+    pub executed: bool,
     /// SQL text stored by `SQLPrepareW`, executed by `SQLExecute`.
     pub prepared_sql: Option<String>,
     /// Number of `?` parameter markers counted in `prepared_sql` by `SQLPrepareW`.
@@ -940,6 +951,7 @@ impl<B: Backend> StatementHandle<B> {
     pub fn set_result_set(&mut self, data: StatementData<B>) {
         self.cursor_open = data.column_count() > 0;
         self.statement = Some(data);
+        self.executed = true;
         self.get_data_cursor = None;
     }
 
@@ -949,6 +961,7 @@ impl<B: Backend> StatementHandle<B> {
     pub fn set_prepared_statement(&mut self, data: StatementData<B>) {
         self.statement = Some(data);
         self.cursor_open = false;
+        self.executed = false;
         self.get_data_cursor = None;
     }
 
@@ -957,7 +970,24 @@ impl<B: Backend> StatementHandle<B> {
     pub fn discard_result_set(&mut self) {
         self.statement = None;
         self.cursor_open = false;
+        self.executed = false;
         self.get_data_cursor = None;
+    }
+
+    /// Record that the backend statement already held has now been executed,
+    /// opening a cursor over it if it produced columns.
+    ///
+    /// `SQLExecute` and the `SQLParamData` that completes a data-at-execution
+    /// execution both land here: `SQLPrepare` already stored the backend
+    /// statement, so there is nothing to store — only the S2/S3 -> S4/S5
+    /// transition to record. Both used to assign `cursor_open` inline, which
+    /// left `executed` behind the moment it existed.
+    pub fn note_executed(&mut self) {
+        self.executed = true;
+        self.cursor_open = self
+            .statement
+            .as_ref()
+            .is_some_and(|s| s.column_count() > 0);
     }
 
     /// True when `SQL_ATTR_NOSCAN` is `SQL_NOSCAN_ON` (escape scanning disabled).
@@ -1105,6 +1135,7 @@ pub unsafe fn alloc_statement<B: Backend>(
         conn: conn_ptr,
         statement: None,
         cursor_open: false,
+        executed: false,
         prepared_sql: None,
         param_count: None,
         cursor_name: None,
