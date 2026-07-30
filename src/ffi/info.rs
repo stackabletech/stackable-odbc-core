@@ -536,7 +536,11 @@ pub(crate) fn type_info_columns(widths: &CatalogResultColumnWidths) -> Vec<Colum
 /// - 01000 (general warning): not returned; driver does not produce informational messages here.
 /// - 01S02 (option value changed): (driver-manager-handled; not returned here)
 /// - 08S01 (communication link failure): propagated from the backend via `OdbcError`.
-/// - 24000 (invalid cursor state): (driver-manager-handled; not returned here)
+/// - 24000 (invalid cursor state): **returned by this driver** when a cursor is already open
+///   on the statement. The row's first clause is the Driver Manager's — it answers while
+///   `SQLFetch` has not yet returned `SQL_NO_DATA` — but the other two are the driver's, and
+///   Appendix B puts this function in one transition table with the ten catalog functions,
+///   whose cursor-states row is `24000` in all three columns.
 /// - 40001 (serialization failure): propagated from the backend via `OdbcError` if applicable.
 /// - 40003 (statement completion unknown): propagated from the backend via `OdbcError`.
 /// - HY000 (general error): propagated via `OdbcError` for unclassified failures.
@@ -549,7 +553,8 @@ pub(crate) fn type_info_columns(widths: &CatalogResultColumnWidths) -> Vec<Colum
 ///   `Backend::get_type_info` returns its rows infallibly, as a `Cow` — so there is no error for a
 ///   cancellation to be reported through. The asynchronous clause is inapplicable: core never
 ///   returns `SQL_STILL_EXECUTING`.
-/// - HY010 (function sequence error): (driver-manager-handled; not returned here)
+/// - HY010 (function sequence error): returned if the connection is not open (checked here).
+///   DM cases (async, etc.) are driver-manager-handled; not returned here.
 /// - HY013 (memory management error): not explicitly returned; Rust panics on OOM.
 /// - HY117 (connection suspended): (driver-manager-handled; not returned here)
 /// - HYC00 (optional feature not implemented): not returned; the full type-info result set
@@ -581,6 +586,21 @@ pub unsafe fn sql_get_type_info<B: Backend>(
         panic_safe::<B, _>(statement_handle, |scope| {
             let (handle, conn) = scope.stmt_with_parent::<B>(statement_handle)?;
             handle.diagnostics.clear();
+
+            // Spec 24000: "A result set was open on the StatementHandle, but
+            // SQLFetch or SQLFetchScroll had not been called." Two of that row's
+            // three clauses are the driver's — the (DM) half covers only the
+            // case where SQLFetch has not yet returned SQL_NO_DATA — and
+            // Appendix B puts this function in one transition table with the ten
+            // catalog functions, whose cursor-states row is `24000` in all three
+            // columns. Without it a second call silently overwrote the first
+            // result set.
+            if handle.cursor_open {
+                return Err(OdbcError::general(
+                    "A cursor is already open on this statement",
+                    crate::types::SqlState::invalid_cursor_state(),
+                ));
+            }
 
             // The type list is the data source's, so it comes from the
             // statement's connection.
@@ -1206,6 +1226,70 @@ mod tests {
                 seen.len() >= 3,
                 "the mock must declare enough rows to order"
             );
+
+            cleanup_for::<MockTypeInfoBackend>(env, conn, stmt);
+        }
+    }
+
+    /// `SQLGetTypeInfo` shares one Appendix B transition table with the ten
+    /// catalog functions, and its cursor-states row is `24000` in all three
+    /// columns. The spec's own row splits the clauses: the Driver Manager
+    /// answers when `SQLFetch` has not returned `SQL_NO_DATA`, and **the
+    /// driver** answers when it has, plus the "result set was open but
+    /// `SQLFetch` had not been called" clause.
+    ///
+    /// Without the guard a second call silently overwrote the first result set,
+    /// which is the one outcome the application cannot detect.
+    ///
+    /// `MockTypeInfoBackend` declares real rows, so the first call produces a
+    /// result set with columns and really does open a cursor.
+    #[test]
+    fn get_type_info_refuses_a_second_call_while_a_cursor_is_open() {
+        use crate::test_utils::MockTypeInfoBackend;
+
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockTypeInfoBackend>();
+
+            assert_eq!(
+                sql_get_type_info::<MockTypeInfoBackend>(
+                    stmt,
+                    crate::types::SqlDataType::UNKNOWN_TYPE.0,
+                ),
+                SqlReturn::SUCCESS
+            );
+            with_handle::<MockTypeInfoBackend, StatementHandle<MockTypeInfoBackend>, _>(
+                stmt,
+                |handle| assert!(handle.cursor_open, "precondition: a cursor is open"),
+            );
+
+            assert_eq!(
+                sql_get_type_info::<MockTypeInfoBackend>(
+                    stmt,
+                    crate::types::SqlDataType::UNKNOWN_TYPE.0,
+                ),
+                SqlReturn::ERROR,
+                "a second call must not overwrite an open result set",
+            );
+
+            let mut state = [0u16; 6];
+            let mut msg = [0u16; 256];
+            let mut native: i32 = 0;
+            let mut msg_len: i16 = 0;
+            assert_eq!(
+                crate::ffi::diag::sql_get_diag_rec_w::<MockTypeInfoBackend>(
+                    HandleType::Stmt as i16,
+                    stmt,
+                    1,
+                    state.as_mut_ptr(),
+                    std::ptr::from_mut(&mut native),
+                    msg.as_mut_ptr(),
+                    256,
+                    std::ptr::from_mut(&mut msg_len),
+                ),
+                SqlReturn::SUCCESS,
+                "SQL_ERROR with no diagnostic",
+            );
+            assert_eq!(String::from_utf16_lossy(&state[..5]), "24000");
 
             cleanup_for::<MockTypeInfoBackend>(env, conn, stmt);
         }

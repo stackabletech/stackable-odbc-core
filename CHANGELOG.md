@@ -135,6 +135,19 @@ method for the distinction. A driver that constructs or inspects a
 `StatementHandle` directly (only the `test-support` paths do) sees the new
 field.
 
+### Migration: SQLGetTypeInfo refuses a second call while a cursor is open
+
+`SQLGetTypeInfo` had no open-cursor check, so a second call silently replaced
+the result set the first one produced. Its `24000` row gives two of three
+clauses to the driver, and Appendix B puts it in one transition table with the
+ten catalog functions — whose cursor-states row is `24000` in all three columns
+and which core already implements.
+
+**A second `SQLGetTypeInfo` on a statement with an open cursor now returns
+`SQL_ERROR` with `24000`.** An application that relied on the overwrite must
+call `SQLCloseCursor` or `SQLFreeStmt(SQL_CLOSE)` first, as it already must for
+`SQLTables` and its neighbours.
+
 ### Added
 
 - **`SqlState::attempt_to_concatenate_a_null_value`** (`HY020`), and
