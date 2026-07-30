@@ -907,8 +907,22 @@ is called for an APD, ARD, or IPD" — plus `SQLSetDescField` when it sets
 **So `SQLBindCol` and `SQLBindParameter` can now fail where they did not.** That
 was taken deliberately; `CHANGELOG.md` carries it as a migration note. The
 function's doc comment lists all five of the spec's clauses and states which
-core reduces and why — it supports no interval types, so the interval clauses
-become the converse check.
+core reduces and why.
+
+**Clause 5 is checked, and was not always.** It reads "if
+`SQL_DESC_CONCISE_TYPE` is an interval type,
+`SQL_DESC_DATETIME_INTERVAL_PRECISION` is a valid interval leading precision",
+and its doc comment used to say it could not be enforced because core supported
+no interval types. The *C to SQL: Numeric* table's interval row reads that
+field, so it can be and is: a leading precision is a digit count and cannot be
+negative, while zero passes and means the application declared none. That last
+reading — zero as "unspecified" rather than as a literal limit — is the same one
+`check_declared_decimal_size` gives a zero `ColumnSize`, and the conversion
+relies on it. The clauses about interval *seconds* precision remain reduced.
+
+The generalisable point: a doc comment saying a clause is unenforceable is a
+claim about what core currently does, not about the spec. Check whether it is
+still true before repeating it.
 
 A value core cannot honour must be refused identically through both doors:
 `SQL_DESC_ARRAY_SIZE` set through `SQLSetDescField` routes through the same
@@ -1168,7 +1182,9 @@ Generic framework. Zero database-specific code.
 | `types/version.rs` | Parsed data-source version numbers, for a backend gating capabilities on server version |
 | `types/redacted.rs` | `Redacted<T>` — `Debug` wrapper that prints `*****` for sensitive fields (e.g. passwords) |
 | `column_value.rs` | `write_column_value()` — core data marshalling for `SQLGetData` (NULL, truncation, type coercion) |
-| `param_convert.rs` | `text_to_sql_type()` — the reverse direction: converts `SQL_C_CHAR`/`SQL_C_WCHAR` parameter text to the SQL type `SQLBindParameter` declared. The spec's "C to SQL: Character" table, transcribed |
+| `param_convert.rs` | `text_to_sql_type()` — the reverse direction: converts `SQL_C_CHAR`/`SQL_C_WCHAR` parameter text to the SQL type `SQLBindParameter` declared. The spec's "C to SQL: Character" table, transcribed. Also owns the size checks all three C-to-SQL tables share (`DecimalLiteral`, `check_declared_char_size`, `check_declared_decimal_size`, `check_declared_binary_size`) |
+| `binary_convert.rs` | The spec's "C to SQL: Binary" table, transcribed. `SQL_C_BINARY` to the targets whose byte layout ODBC defines; refuses the rest at bind with `07006` |
+| `numeric_convert.rs` | The spec's "C to SQL: Numeric" table, transcribed. Every numeric C type to any of its six target rows, including the interval row and footnote [b]'s optional `01S07`. `numeric_pairing_is_supported` is `SQLBindParameter`'s gate |
 | `prompt.rs` | `Prompter` — the trait a driver implements to present a login URL to the user during a connect. Definition only: core ships no implementation and gains no dependency |
 | `query_timer.rs` | `QueryTimer` — core-side `SQL_ATTR_QUERY_TIMEOUT` enforcement: a timer thread that calls `Backend::cancel` on expiry and relabels the resulting failure `HYT00` |
 | `synthetic.rs` | `SyntheticStatement` — in-memory result set for `SQLGetTypeInfo` and catalog functions |

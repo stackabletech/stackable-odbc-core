@@ -18,6 +18,50 @@ baseline that a driver built against it has to act on when it moves to this
 crate, which is what the two sibling drivers are doing. At the 0.1.0 cut these
 markers go away and this section becomes the initial-release notes.
 
+### Migration: numeric parameters are converted to their declared SQL type
+
+Core implements the ODBC spec's [C to SQL: Numeric] table. It previously
+implemented two of the three C-to-SQL tables and none of this one, so a numeric
+parameter reached the backend as whatever C type it arrived in and
+`SQLBindParameter`'s `ParameterType` was discarded. `Backend::execute` receives
+only `&[ColumnValue]`, so if core does not honour that argument, nobody does.
+
+**A numeric parameter bound to a character target now arrives as
+`ColumnValue::String`.** It previously arrived as `ColumnValue::F64`,
+`ColumnValue::I32` and so on. Core renders the number itself, so the length it
+range-checks is the value that is sent. A backend matching on the variant must
+handle `String` for `SQL_CHAR`, `SQL_VARCHAR`, `SQL_LONGVARCHAR` and their
+Unicode counterparts. Likewise an integer bound to `SQL_DECIMAL` now arrives as
+`ColumnValue::Decimal`, and one bound to `SQL_SMALLINT` as `ColumnValue::I16`
+rather than at the C type's own width.
+
+**A bind or execute that succeeded before can now fail**, with the table's own
+SQLSTATEs:
+
+| Target | Test | SQLSTATE |
+|---|---|---|
+| `SQL_CHAR` / `SQL_VARCHAR` / `SQL_LONGVARCHAR` | rendered digits exceed `ColumnSize` | `22001` |
+| the `SQL_W*` character types | the same, in UTF-16 code units | `22001` |
+| `SQL_DECIMAL` / `SQL_NUMERIC` / the four integer types | whole digits do not fit | `22003` |
+| `SQL_REAL` / `SQL_FLOAT` / `SQL_DOUBLE` | outside the target's range | `22003` |
+| `SQL_BIT` | `>0 <2 ≠1` / `<0` or `≥2` | `22001` / `22003` |
+| `SQL_INTERVAL_*` | field exceeds the leading precision, or carries a fraction | `22015` |
+
+**Fractional truncation to an exact numeric target returns
+`SQL_SUCCESS_WITH_INFO` with `01S07`.** Binding `3.7` to a `SQL_INTEGER`
+parameter sends `3` and says so; it previously sent `3` silently. This is the
+table's own optional behaviour, which core takes.
+
+**`SQLBindParameter` returns `07006` for pairings the table excludes**:
+`SQL_C_FLOAT` or `SQL_C_DOUBLE` to any interval, any numeric C type to a
+multi-field interval, and any numeric C type to a target the table does not
+list, such as `SQL_GUID`.
+
+Run your driver's test suite against this version before shipping it, as for
+the consistency check below.
+
+[C to SQL: Numeric]: https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/c-to-sql-numeric
+
 ### Migration: SQLBindCol and SQLBindParameter now run the consistency check
 
 The ODBC spec requires a consistency check whenever `SQL_DESC_DATA_PTR` is set,
@@ -73,6 +117,16 @@ Everything a driver has to change for the catalog rework, in one place.
    functions must *not* check it, and do not.
 
 ### Added
+
+- **The *C to SQL: Numeric* conversion table.** Core now implements all three of
+  the spec's C-to-SQL tables. See the migration note above for what changes for
+  a driver.
+- **`SqlState::interval_field_overflow`** (`22015`), the interval row's outcome.
+- **The thirteen concise `SQL_INTERVAL_*` `SqlDataType` constants** and
+  **`interval_from_raw`**, neither of which `odbc-sys` provides — it has the
+  C-side `CDataType::Interval*` codes and the `SQL_IS_*` subcodes as
+  `odbc_sys::Interval`, but no `SqlDataType` constants and no conversion.
+- **`is_interval_sql_type`**, for a driver that needs to recognise the family.
 
 - **A driver can reach the user during a connect: `Prompter`.** The new
   `prompt::Prompter` trait has one method, `present_url(&str)`, and the new
@@ -1269,6 +1323,21 @@ Everything a driver has to change for the catalog rework, in one place.
   compared against. Use `HeaderDiagnosticIdentifier::MessageText as i16`.
 
 ### Fixed
+
+- **Unsigned numeric parameters no longer wrap negative.** `SQL_C_UBIGINT` was
+  read as a `u64` and cast to `i64`, so every value above `i64::MAX` reached the
+  data source as a negative number; `SQL_C_USHORT` and `SQL_C_UTINYINT` had the
+  same shape. The reads now go through `i128`, where no cast can wrap, and the
+  declared target's own range check decides what fits.
+- **`SQL_C_TINYINT` is accepted.** `c_data_type_from_raw` normalised the
+  deprecated ODBC 2.x spellings `SQL_C_LONG` (4) and `SQL_C_SHORT` (5) to their
+  signed 3.x equivalents but had no arm for `SQL_C_TINYINT` (-6), so binding it
+  was refused. `odbc-sys` models none of the three; that is a gap in the
+  binding, not in the ABI core accepts.
+- **The descriptor consistency check validates an interval's
+  `SQL_DESC_DATETIME_INTERVAL_PRECISION`.** Its fifth clause was documented as
+  unenforceable — "core supports no interval types" — which the numeric
+  conversion's interval row falsified.
 
 - **A parameter bound to NULL is no longer reported as unbound.** Binding a
   NULL with a null `ParameterValuePtr` and an indicator of `SQL_NULL_DATA` —
