@@ -1520,6 +1520,14 @@ pub unsafe fn sql_param_data<B: Backend>(
             // All parameters collected — execute the statement.
             let param_count = stmt.param_count.unwrap_or(0);
             let sql = dae.sql.clone();
+            // The conversions ran at the call that returned SQL_NEED_DATA, and
+            // their warnings travelled here rather than being posted there —
+            // see `DataAtExecState::warnings`. This is the call that sends the
+            // values, so this is the call that reports them.
+            let converted_with_info = !dae.warnings.is_empty();
+            for warning in &dae.warnings {
+                stmt.diagnostics.push(warning);
+            }
 
             // Assemble complete parameter vector from collected values.
             let mut params = Vec::with_capacity(param_count as usize);
@@ -1603,7 +1611,11 @@ pub unsafe fn sql_param_data<B: Backend>(
                 .as_ref()
                 .is_some_and(|s| s.column_count() > 0);
 
-            Ok(SqlReturn::SUCCESS)
+            Ok(if converted_with_info {
+                SqlReturn::SUCCESS_WITH_INFO
+            } else {
+                SqlReturn::SUCCESS
+            })
         })
     };
     tracing::debug!("SQLParamData -> {:?}", ret);

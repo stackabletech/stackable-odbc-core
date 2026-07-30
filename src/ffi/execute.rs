@@ -216,22 +216,31 @@ pub unsafe fn sql_exec_direct_w<B: Backend>(
                 crate::escape::translate_escapes(&sql, &dialect)?
             };
 
+            // Whether a parameter conversion raised a warning, which makes
+            // this call SQL_SUCCESS_WITH_INFO rather than SQL_SUCCESS. The
+            // "C to SQL: Numeric" table's footnote [b] is the only source:
+            // fractional truncation sends the value and tells the application.
+            let mut converted_with_info = false;
+
             // Check for data-at-execution parameters.
             let param_count = crate::ffi::params::count_params(&sql, &dialect);
             if param_count > 0 {
                 // SAFETY: caller guarantees all bound buffer pointers remain valid.
-                // Warnings are posted in the following commit, which is also
-                // where the return value learns to become SUCCESS_WITH_INFO.
-                let (non_dae_values, dae_params, _warnings) =
+                let (non_dae_values, dae_params, warnings) =
                     crate::ffi::params::find_data_at_exec_params(records, param_count)?;
 
                 if !dae_params.is_empty() {
+                    // The warnings travel with the state rather than being
+                    // posted here: `SQL_NEED_DATA` is not a completion and the
+                    // diagnostic belongs with the call that sends the value.
+                    // See `DataAtExecState::warnings`.
                     stmt.data_at_exec = Some(crate::handles::DataAtExecState {
                         pending_params: dae_params.into(),
                         current_param: None,
                         buffer: Vec::new(),
                         collected_values: non_dae_values,
                         sql: sql.clone(),
+                        warnings,
                     });
                     stmt.param_count = Some(param_count);
                     return Ok(SqlReturn::NEED_DATA);
@@ -257,7 +266,11 @@ pub unsafe fn sql_exec_direct_w<B: Backend>(
             // backend and silently discard every bound value.
             let result = if param_count > 0 {
                 // SAFETY: caller guarantees all bound buffer pointers remain valid.
-                let (params, _warnings) = crate::ffi::params::collect_params(records, param_count)?;
+                let (params, warnings) = crate::ffi::params::collect_params(records, param_count)?;
+                for warning in &warnings {
+                    stmt.diagnostics.push(warning);
+                }
+                converted_with_info |= !warnings.is_empty();
                 let mut prepared =
                     timer.check::<B, _, _>(B::prepare(connection, cancel, &sql), cancel)?;
                 let executed = timer.check::<B, _, _>(
@@ -285,7 +298,11 @@ pub unsafe fn sql_exec_direct_w<B: Backend>(
             // Opens a cursor only if the statement actually returned columns.
             stmt.set_result_set(crate::handles::StatementData::Backend(result));
 
-            Ok(SqlReturn::SUCCESS)
+            Ok(if converted_with_info {
+                SqlReturn::SUCCESS_WITH_INFO
+            } else {
+                SqlReturn::SUCCESS
+            })
         })
     };
     tracing::debug!("SQLExecDirectW -> {:?}", ret);
@@ -595,14 +612,19 @@ pub unsafe fn sql_execute<B: Backend>(statement_handle: *mut c_void) -> SqlRetur
                 }
             };
 
+            // Whether a parameter conversion raised a warning, which makes this
+            // call SQL_SUCCESS_WITH_INFO rather than SQL_SUCCESS. See the twin
+            // of this flag in `sql_exec_direct_w`.
+            let mut converted_with_info = false;
+
             // Check for data-at-execution parameters.
             // SAFETY: caller guarantees all bound buffer pointers remain valid.
-            // Warnings are posted in the following commit, which is also
-            // where the return value learns to become SUCCESS_WITH_INFO.
-            let (non_dae_values, dae_params, _warnings) =
+            let (non_dae_values, dae_params, warnings) =
                 crate::ffi::params::find_data_at_exec_params(records, param_count)?;
 
             if !dae_params.is_empty() {
+                // Carried, not posted; see `DataAtExecState::warnings` and the
+                // twin of this branch in `sql_exec_direct_w`.
                 // Store DAE state and return SQL_NEED_DATA.
                 let sql = stmt.prepared_sql.clone().ok_or_else(|| {
                     OdbcError::general(
@@ -616,13 +638,18 @@ pub unsafe fn sql_execute<B: Backend>(statement_handle: *mut c_void) -> SqlRetur
                     buffer: Vec::new(),
                     collected_values: non_dae_values,
                     sql,
+                    warnings,
                 });
                 return Ok(SqlReturn::NEED_DATA);
             }
 
             // No DAE params: collect all values normally and execute immediately.
             // SAFETY: caller guarantees all bound buffer pointers remain valid.
-            let (params, _warnings) = crate::ffi::params::collect_params(records, param_count)?;
+            let (params, warnings) = crate::ffi::params::collect_params(records, param_count)?;
+            for warning in &warnings {
+                stmt.diagnostics.push(warning);
+            }
+            converted_with_info |= !warnings.is_empty();
 
             // Manual-commit mode: this call opens a transaction (or extends
             // the open one), which is what SQL_ATTR_TXN_ISOLATION's HY011 is
@@ -703,7 +730,11 @@ pub unsafe fn sql_execute<B: Backend>(statement_handle: *mut c_void) -> SqlRetur
             // Already inside the enclosing `unsafe` context, like collect_params above.
             crate::ffi::params::write_output_params(records, &outcome.output_params)?;
 
-            Ok(SqlReturn::SUCCESS)
+            Ok(if converted_with_info {
+                SqlReturn::SUCCESS_WITH_INFO
+            } else {
+                SqlReturn::SUCCESS
+            })
         })
     };
     tracing::debug!("SQLExecute -> {:?}", ret);
@@ -722,7 +753,7 @@ mod tests {
         MockCoreCancelsTimeoutBackend, MockRecordingBackend, alloc_env_conn_stmt, with_descriptor,
         with_handle,
     };
-    use odbc_sys::HandleType;
+    use odbc_sys::{CDataType, HandleType, ParamType, SqlDataType};
 
     /// As [`alloc_env_conn_stmt`], but generic over `B`. Needed for
     /// [`MockRecordingBackend`], which is not `MockBackend`.
@@ -1162,6 +1193,155 @@ mod tests {
             );
 
             cleanup(env, conn, stmt);
+        }
+    }
+
+    /// Read record 1 of a statement's diagnostic queue as a SQLSTATE, or `None`
+    /// if the queue is empty.
+    unsafe fn first_diag_state<B: Backend>(stmt: *mut c_void) -> Option<String> {
+        let mut state = [0u16; 6];
+        let mut native_err: i32 = 0;
+        let mut msg_buf = [0u16; 512];
+        let mut msg_len: i16 = 0;
+        // SAFETY: every buffer is a live local of the declared size.
+        let ret = unsafe {
+            crate::ffi::diag::sql_get_diag_rec_w::<B>(
+                HandleType::Stmt as i16,
+                stmt,
+                1,
+                state.as_mut_ptr(),
+                &mut native_err,
+                msg_buf.as_mut_ptr(),
+                512,
+                &mut msg_len,
+            )
+        };
+        if ret == SqlReturn::NO_DATA {
+            return None;
+        }
+        Some(String::from_utf16_lossy(&state[..5]))
+    }
+
+    /// Bind `3.7` as a `SQL_C_DOUBLE` to a `SQL_INTEGER` parameter.
+    ///
+    /// # Safety
+    ///
+    /// `value` must outlive the execution that reads it.
+    unsafe fn bind_truncating_double<B: Backend>(stmt: *mut c_void, value: &mut f64) {
+        // SAFETY: `value` is a live local the caller keeps alive.
+        let ret = unsafe {
+            crate::ffi::params::sql_bind_parameter::<B>(
+                stmt,
+                1,
+                ParamType::Input as i16,
+                CDataType::Double as i16,
+                SqlDataType::INTEGER.0,
+                0,
+                0,
+                std::ptr::from_mut(value).cast(),
+                8,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(ret, SqlReturn::SUCCESS, "binding the parameter failed");
+    }
+
+    /// Footnote [b] of the *C to SQL: Numeric* table, end to end: binding 3.7
+    /// to an `SQL_INTEGER` parameter sends 3 and tells the application it lost
+    /// the fraction.
+    #[test]
+    fn exec_direct_reports_a_truncated_parameter_as_success_with_info() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockRecordingBackend>();
+            with_handle::<MockRecordingBackend, ConnectionHandle<MockRecordingBackend>, _>(
+                conn,
+                |c| {
+                    c.connection = Some(MockConnection);
+                },
+            );
+
+            let mut value: f64 = 3.7;
+            bind_truncating_double::<MockRecordingBackend>(stmt, &mut value);
+
+            let wide: Vec<u16> = "SELECT ?".encode_utf16().collect();
+            assert_eq!(
+                sql_exec_direct_w::<MockRecordingBackend>(stmt, wide.as_ptr(), wide.len() as i32),
+                SqlReturn::SUCCESS_WITH_INFO
+            );
+            assert_eq!(
+                first_diag_state::<MockRecordingBackend>(stmt).as_deref(),
+                Some("01S07")
+            );
+
+            let _ = sql_free_handle::<MockRecordingBackend>(HandleType::Stmt as i16, stmt);
+            let _ = sql_free_handle::<MockRecordingBackend>(HandleType::Dbc as i16, conn);
+            let _ = sql_free_handle::<MockRecordingBackend>(HandleType::Env as i16, env);
+        }
+    }
+
+    /// The same through prepare + execute, which assembles its return value
+    /// separately and so could regress on its own.
+    #[test]
+    fn execute_reports_a_truncated_parameter_as_success_with_info() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockRecordingBackend>();
+            with_handle::<MockRecordingBackend, ConnectionHandle<MockRecordingBackend>, _>(
+                conn,
+                |c| {
+                    c.connection = Some(MockConnection);
+                },
+            );
+
+            let wide: Vec<u16> = "SELECT ?".encode_utf16().collect();
+            assert_eq!(
+                sql_prepare_w::<MockRecordingBackend>(stmt, wide.as_ptr(), wide.len() as i32),
+                SqlReturn::SUCCESS
+            );
+
+            let mut value: f64 = 3.7;
+            bind_truncating_double::<MockRecordingBackend>(stmt, &mut value);
+
+            assert_eq!(
+                sql_execute::<MockRecordingBackend>(stmt),
+                SqlReturn::SUCCESS_WITH_INFO
+            );
+            assert_eq!(
+                first_diag_state::<MockRecordingBackend>(stmt).as_deref(),
+                Some("01S07")
+            );
+
+            let _ = sql_free_handle::<MockRecordingBackend>(HandleType::Stmt as i16, stmt);
+            let _ = sql_free_handle::<MockRecordingBackend>(HandleType::Dbc as i16, conn);
+            let _ = sql_free_handle::<MockRecordingBackend>(HandleType::Env as i16, env);
+        }
+    }
+
+    /// A parameter that converts cleanly leaves the call at plain
+    /// `SQL_SUCCESS` — the flag must not latch on.
+    #[test]
+    fn an_untruncated_parameter_leaves_the_return_at_success() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockRecordingBackend>();
+            with_handle::<MockRecordingBackend, ConnectionHandle<MockRecordingBackend>, _>(
+                conn,
+                |c| {
+                    c.connection = Some(MockConnection);
+                },
+            );
+
+            let mut value: f64 = 4.0;
+            bind_truncating_double::<MockRecordingBackend>(stmt, &mut value);
+
+            let wide: Vec<u16> = "SELECT ?".encode_utf16().collect();
+            assert_eq!(
+                sql_exec_direct_w::<MockRecordingBackend>(stmt, wide.as_ptr(), wide.len() as i32),
+                SqlReturn::SUCCESS
+            );
+            assert_eq!(first_diag_state::<MockRecordingBackend>(stmt), None);
+
+            let _ = sql_free_handle::<MockRecordingBackend>(HandleType::Stmt as i16, stmt);
+            let _ = sql_free_handle::<MockRecordingBackend>(HandleType::Dbc as i16, conn);
+            let _ = sql_free_handle::<MockRecordingBackend>(HandleType::Env as i16, env);
         }
     }
 

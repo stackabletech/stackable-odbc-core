@@ -1072,6 +1072,7 @@ mod tests {
                         buffer: vec![0xAB],
                         collected_values: std::collections::HashMap::new(),
                         sql: "INSERT INTO t VALUES (?)".to_string(),
+                        warnings: Vec::new(),
                     });
                 },
             );

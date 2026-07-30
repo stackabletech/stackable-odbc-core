@@ -609,6 +609,15 @@ pub struct DataAtExecState {
     /// The SQL text to execute once all DAE params are supplied.
     /// Needed because SQLExecDirectW doesn't store prepared_sql.
     pub sql: String,
+    /// Warnings raised converting the parameters that were readable at the
+    /// call which returned `SQL_NEED_DATA`.
+    ///
+    /// Carried rather than posted there: `SQL_NEED_DATA` is not a completion,
+    /// an application that receives it does not call `SQLGetDiagRec`, and the
+    /// diagnostic belongs with the call that actually sends the value. They are
+    /// posted by the `SQLParamData` that completes the execution, which then
+    /// answers `SQL_SUCCESS_WITH_INFO`.
+    pub warnings: Vec<crate::errors::OdbcError>,
 }
 
 // SAFETY: DataAtExecState contains no raw pointers — all data is owned.
