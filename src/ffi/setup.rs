@@ -241,6 +241,84 @@ fn installer_result(call: &str, ret: i32) -> i32 {
     ret
 }
 
+/// The key every registered data source has, and therefore the one to read when
+/// asking whether it is registered at all.
+///
+/// `SQLWriteDSNToIni` "creates a specification section for the data source and
+/// adds a single keyword (**Driver**) with the name of the driver DLL as its
+/// value", so a section without it is not a data source this or any other
+/// installer created.
+#[cfg(windows)]
+const DSN_DRIVER_KEY: &str = "Driver";
+
+/// The ODBC system information file `ConfigDSN` reads and writes.
+#[cfg(windows)]
+const ODBC_INI: &str = "ODBC.INI";
+
+/// Whether `dsn_w` names a data source already in ODBC.INI.
+///
+/// The spec's modify precondition: "**ConfigDSN** checks that the data source
+/// name is in the Odbc.ini file (or registry)."
+///
+/// A four-unit buffer is enough. The question is whether *anything* was read,
+/// not what: a longer `Driver` value is truncated to three units plus a
+/// terminator and still answers a positive count.
+#[cfg(windows)]
+fn dsn_is_registered(dsn_w: &[u16]) -> bool {
+    let entry_w = to_wide_null(DSN_DRIVER_KEY);
+    let default_w = to_wide_null("");
+    let odbc_ini_w = to_wide_null(ODBC_INI);
+    let mut buf = [0u16; 4];
+    // SAFETY: `dsn_w` is null-terminated by its constructor and the other three
+    // pointers are null-terminated UTF-16 buffers allocated in this scope.
+    // `buf` is writable for exactly the length passed alongside it.
+    let read = unsafe {
+        crate::odbcinst::SQLGetPrivateProfileStringW(
+            dsn_w.as_ptr(),
+            entry_w.as_ptr(),
+            default_w.as_ptr(),
+            buf.as_mut_ptr(),
+            i32::try_from(buf.len()).unwrap_or(i32::MAX),
+            odbc_ini_w.as_ptr(),
+        )
+    };
+    read > 0
+}
+
+/// Write every non-reserved attribute under the DSN's own section.
+///
+/// Shared by `ODBC_ADD_DSN` and `ODBC_CONFIG_DSN` so that the reserved-key
+/// filter and the propagated failure cannot apply to one request and not the
+/// other.
+///
+/// Returns `ConfigDSN`'s TRUE/FALSE. A zero here means `odbccp32` has already
+/// posted its own error; see [`installer_result`].
+#[cfg(windows)]
+fn write_dsn_attributes(dsn_w: &[u16], attrs: &std::collections::HashMap<String, String>) -> i32 {
+    let odbc_ini_w = to_wide_null(ODBC_INI);
+    for (k, v) in dsn_section_attributes(attrs) {
+        let k_w = to_wide_null(k);
+        let v_w = to_wide_null(v);
+        // SAFETY: all four pointers are null-terminated UTF-16 strings alive for
+        // the duration of the call.
+        if installer_result("SQLWritePrivateProfileStringW", unsafe {
+            SQLWritePrivateProfileStringW(
+                dsn_w.as_ptr(),
+                k_w.as_ptr(),
+                v_w.as_ptr(),
+                odbc_ini_w.as_ptr(),
+            )
+        }) == 0
+        {
+            // A data source whose name registered but whose attributes did not
+            // is not configured, and reporting TRUE for it hands the caller a
+            // DSN that cannot connect.
+            return 0;
+        }
+    }
+    1
+}
+
 /// Headless implementation of the ODBC setup library's `ConfigDSNW` entry point.
 ///
 /// Spec: <https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/configdsn-function>
@@ -254,8 +332,14 @@ fn installer_result(call: &str, ret: i32) -> i32 {
 /// - `_hwnd_parent`: Parent window handle. This implementation never displays a UI, so
 ///   the value is ignored entirely (headless mode only).
 /// - `f_request`: Type of request. Must be one of:
-///   - `ODBC_ADD_DSN` (1): Add a new data source.
+///   - `ODBC_ADD_DSN` (1): Add a new data source. Registers the name with
+///     `SQLWriteDSNToIni`, which "removes the old section before creating the
+///     new one" — so re-adding an existing data source drops any keyword this
+///     call leaves out.
 ///   - `ODBC_CONFIG_DSN` (2): Configure (modify) an existing data source.
+///     Writes only through `SQLWritePrivateProfileString`, so keywords absent
+///     from the call are left standing. Fails if the data source is not already
+///     registered.
 ///   - `ODBC_REMOVE_DSN` (3): Remove an existing data source.
 ///
 ///   Any other value returns FALSE (0).
@@ -304,7 +388,14 @@ fn installer_result(call: &str, ret: i32) -> i32 {
 /// - **ODBC_ERROR_INVALID_REQUEST_TYPE** — **posted** by the `_` match arm, for
 ///   an `fRequest` outside the three defined values.
 /// - **ODBC_ERROR_REQUEST_FAILED** — **posted** when a panic is caught (see
-///   below). A failure *inside* `odbccp32` is left to it: `SQLWriteDSNToIniW`,
+///   below), and when `ODBC_CONFIG_DSN` names a data source that is not in
+///   ODBC.INI. The spec makes that check `ConfigDSN`'s: "**ConfigDSN** checks
+///   that the data source name is in the Odbc.ini file (or registry)", and of
+///   the codes this function's table offers, "Could not perform the operation
+///   requested by the *fRequest* argument" is the one that describes it —
+///   `ODBC_ERROR_INVALID_KEYWORD_VALUE` is for a syntax error and
+///   `odbcinst.h`'s `ODBC_ERROR_INVALID_DSN` is absent from this table.
+///   A failure *inside* `odbccp32` is left to it: `SQLWriteDSNToIniW`,
 ///   `SQLWritePrivateProfileStringW` and `SQLRemoveDSNFromIniW` each post their
 ///   own error before returning zero, and overwriting it here would replace a
 ///   specific cause with a generic one. Their zero is **propagated**, not
@@ -417,8 +508,20 @@ unsafe fn config_dsn_body(
     }
 
     match f_request {
-        ODBC_ADD_DSN | ODBC_CONFIG_DSN => {
-            // Register the DSN → driver mapping in ODBC.INI
+        ODBC_ADD_DSN => {
+            // "Adding a Data Source": SQLWriteDSNToIni registers the name and the
+            // Driver value, then "ConfigDSN calls SQLWritePrivateProfileString in
+            // the installer DLL to add any additional keywords and values used by
+            // the driver."
+            //
+            // Re-adding an existing data source is an overwrite, and both halves
+            // of the spec say so: "If the data source name matches an existing
+            // data source name and hwndParent is null, ConfigDSN overwrites the
+            // existing name", and SQLWriteDSNToIni "removes the old section
+            // before creating the new one". So an ADD carrying fewer keywords
+            // than a previous ADD *drops* the ones it left out -- callers must
+            // supply the full attribute set, or use ODBC_CONFIG_DSN.
+            //
             // SAFETY: dsn_w and lpsz_driver are null-terminated UTF-16 strings;
             // lpsz_driver was validated non-null above, dsn_w was constructed here.
             if installer_result("SQLWriteDSNToIniW", unsafe {
@@ -427,33 +530,35 @@ unsafe fn config_dsn_body(
             {
                 return 0;
             }
-            // Write each attribute under the DSN's section. `dsn_section_attributes`
-            // drops the keywords that must not appear there and logs each drop.
-            let odbc_ini_w = to_wide_null("ODBC.INI");
-            for (k, v) in dsn_section_attributes(&attrs) {
-                let k_w = to_wide_null(k);
-                let v_w = to_wide_null(v);
-                // SAFETY: all four pointers are null-terminated UTF-16 strings
-                // allocated in this scope; they remain valid for the duration of
-                // the call.
-                if installer_result("SQLWritePrivateProfileStringW", unsafe {
-                    SQLWritePrivateProfileStringW(
-                        dsn_w.as_ptr(),
-                        k_w.as_ptr(),
-                        v_w.as_ptr(),
-                        odbc_ini_w.as_ptr(),
-                    )
-                }) == 0
-                {
-                    // A data source whose name registered but whose attributes
-                    // did not is not configured, and reporting TRUE for it hands
-                    // the caller a DSN that cannot connect. The spec pairs the
-                    // posted error with FALSE, so returning TRUE also leaves the
-                    // caller no reason to read it.
-                    return 0;
-                }
+            write_dsn_attributes(&dsn_w, &attrs)
+        }
+        ODBC_CONFIG_DSN => {
+            // "Modifying a Data Source": "ConfigDSN checks that the data source
+            // name is in the Odbc.ini file (or registry)", and "If the data
+            // source name was not changed, ConfigDSN calls
+            // SQLWritePrivateProfileString in the installer DLL to make any
+            // other changes."
+            //
+            // SQLWriteDSNToIni is deliberately not called here. It "removes the
+            // old section before creating the new one", so a modify carrying
+            // three keywords would delete every other keyword the data source
+            // had -- which is what this arm did while it shared ODBC_ADD_DSN's
+            // body. Keywords absent from a CONFIG are left standing, which is
+            // what makes it a modify.
+            //
+            // The rename branch -- "If the data source name was changed,
+            // ConfigDSN first calls SQLRemoveDSNFromIni" -- is unreachable
+            // rather than unimplemented: lpszAttributes carries one DSN keyword
+            // and no previous name, so there is nothing to compare against and
+            // no rename to detect.
+            if !dsn_is_registered(&dsn_w) {
+                return fail(
+                    ODBC_ERROR_REQUEST_FAILED,
+                    "ODBC_CONFIG_DSN names a data source that is not in ODBC.INI; \
+                     use ODBC_ADD_DSN to create one",
+                );
             }
-            1
+            write_dsn_attributes(&dsn_w, &attrs)
         }
         // SAFETY: dsn_w is a null-terminated UTF-16 string constructed above.
         ODBC_REMOVE_DSN => installer_result("SQLRemoveDSNFromIniW", unsafe {
@@ -494,7 +599,7 @@ mod tests {
     /// A `return 0` moved into a helper is a `return 0` the audit stops seeing,
     /// so this list has to grow with the code. Adding a helper that can fail
     /// without adding it here silently narrows every audit below.
-    const AUDITED_FUNCTIONS: &[&str] = &["unsafe fn config_dsn_body("];
+    const AUDITED_FUNCTIONS: &[&str] = &["unsafe fn config_dsn_body(", "fn write_dsn_attributes("];
 
     fn audited_source() -> String {
         AUDITED_FUNCTIONS
@@ -651,6 +756,70 @@ mod tests {
         let utf16_vec: Vec<u16> = s.encode_utf16().collect();
         let attrs = unsafe { parse_attributes_w(utf16_vec.as_ptr()) };
         assert!(attrs.is_empty());
+    }
+
+    /// `ODBC_CONFIG_DSN` must not call `SQLWriteDSNToIni`.
+    ///
+    /// That function "removes the old section before creating the new one", so
+    /// using it to *modify* a data source deletes every key the caller did not
+    /// restate. The spec's modify recipe names the other function instead: "If
+    /// the data source name was not changed, **ConfigDSN** calls
+    /// **SQLWritePrivateProfileString** in the installer DLL to make any other
+    /// changes."
+    ///
+    /// Checked at the source, because `config_dsn_body` is `#[cfg(windows)]` and
+    /// links `odbccp32`.
+    #[test]
+    fn the_config_dsn_arm_never_calls_sql_write_dsn_to_ini() {
+        // `config_dsn_body` alone, not `audited_source()`: the arms live here,
+        // and slicing a concatenation would let a later-added function's text
+        // fall between the markers.
+        let body = function_source("unsafe fn config_dsn_body(");
+        let config_arm_start = body
+            .find("ODBC_CONFIG_DSN => {")
+            .expect("ODBC_CONFIG_DSN has an arm of its own");
+        let add_arm_start = body
+            .find("ODBC_ADD_DSN => {")
+            .expect("ODBC_ADD_DSN has an arm of its own");
+        assert!(
+            add_arm_start < config_arm_start,
+            "the arms are expected in ADD, CONFIG order; adjust the slice below"
+        );
+        let config_arm = &body[config_arm_start..];
+        let config_arm_end = config_arm
+            .find("ODBC_REMOVE_DSN")
+            .expect("ODBC_REMOVE_DSN follows the CONFIG arm");
+        let config_arm = &config_arm[..config_arm_end];
+
+        assert!(
+            !config_arm.contains("SQLWriteDSNToIniW"),
+            "the ODBC_CONFIG_DSN arm calls SQLWriteDSNToIniW, which removes the \
+             data source's whole section before recreating it -- so a modify \
+             carrying three keys deletes everything else the DSN had"
+        );
+        assert!(
+            config_arm.contains("dsn_is_registered"),
+            "the spec: 'ConfigDSN checks that the data source name is in the \
+             Odbc.ini file (or registry)'. Without the check, a CONFIG of a \
+             nonexistent data source silently creates one."
+        );
+    }
+
+    /// The two arms are separate, and both write their attributes through the
+    /// same helper — so the reserved-key filter and the propagated failure
+    /// cannot apply to one and not the other.
+    #[test]
+    fn both_write_arms_go_through_write_dsn_attributes() {
+        // `config_dsn_body` alone. `audited_source()` also carries
+        // `write_dsn_attributes`'s own signature line, which would make the
+        // count 3 and the assertion meaningless.
+        let body = function_source("unsafe fn config_dsn_body(");
+        assert_eq!(
+            body.matches("write_dsn_attributes(").count(),
+            2,
+            "ODBC_ADD_DSN and ODBC_CONFIG_DSN must each write their attributes \
+             through write_dsn_attributes, and nothing else may"
+        );
     }
 
     /// A `DRIVER=` pair in `lpszAttributes` must never be written into the DSN's

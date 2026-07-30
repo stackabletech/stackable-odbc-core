@@ -1482,6 +1482,18 @@ call `SQLCloseCursor` or `SQLFreeStmt(SQL_CLOSE)` first, as it already must for
   conversion the FFI boundary uses; `attr_odbc_version_from_raw` is unchanged and
   still cannot name `SQL_OV_ODBC2`.
 
+- `ConfigDSNW(ODBC_CONFIG_DSN)` modifies a data source instead of re-creating
+  it. It shared `ODBC_ADD_DSN`'s body, so it called `SQLWriteDSNToIni` — which
+  "removes the old section before creating the new one" — and a modify carrying
+  three keywords deleted every other keyword the data source had. It also never
+  checked that the data source existed, so a CONFIG of an unknown name silently
+  created one. Both are now per spec: existence is checked, and changes go
+  through `SQLWritePrivateProfileString` only.
+
+  A source comment claiming that keywords absent from a call are not removed has
+  been deleted; `SQLWriteDSNToIni`'s own page says the opposite, and it is
+  `ODBC_ADD_DSN` that this affects.
+
 - `ConfigDSNW` returns FALSE when a registry write fails. It discarded
   `SQLWritePrivateProfileString`'s result, so a data source whose name
   registered but whose attributes did not was reported as configured. The spec
