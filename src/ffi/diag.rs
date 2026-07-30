@@ -108,6 +108,38 @@ unsafe fn write_diag_string(
     ret
 }
 
+/// [`write_diag_string`] with `SQLGetDiagField`'s negative-`BufferLength` rule,
+/// which applies to character fields and to nothing else.
+///
+/// The spec's SQL_ERROR list: "The value requested **was a character string**
+/// and *BufferLength* was less than zero." An integer field is exempt by name —
+/// "If *DiagIdentifier* is an ODBC-defined field and \**DiagInfoPtr* is an
+/// integer, *BufferLength* is ignored" — and applications are told to pass a
+/// negative value there: "If *\*DiagInfoPtr* contains a fixed-length data type,
+/// *BufferLength* is SQL_IS_INTEGER, SQL_IS_UINTEGER, SQL_IS_SMALLINT, or
+/// SQL_IS_USMALLINT, as appropriate", which are -6, -5, -8 and -7.
+///
+/// A single check ahead of the field match was therefore failing conventional,
+/// spec-recommended calls to `SQL_DIAG_NATIVE`, `SQL_DIAG_COLUMN_NUMBER` and
+/// `SQL_DIAG_ROW_NUMBER`. Here instead of triplicated at the three character
+/// arms, so a fourth character field cannot be added without it.
+///
+/// # Safety
+///
+/// Same preconditions as [`write_diag_string`].
+unsafe fn write_diag_string_checked(
+    value: &str,
+    diag_info: *mut c_void,
+    buffer_length: i16,
+    string_length: *mut i16,
+) -> SqlReturn {
+    if buffer_length < 0 {
+        return SqlReturn::ERROR;
+    }
+    // SAFETY: the caller's contract is passed straight through.
+    unsafe { write_diag_string(value, diag_info, buffer_length, string_length) }
+}
+
 /// Generic implementation of SQLGetDiagRecW.
 ///
 /// Spec: <https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlgetdiagrec-function>
@@ -339,7 +371,13 @@ fn statement_header_field(diag_identifier: i16) -> Option<StatementHeaderField> 
 ///     SQL_DIAG_ROW_COUNT, which will return SQL_ERROR if *Handle* is not a
 ///     statement handle."
 ///   - `rec_number` was negative or 0 for a record field (not a header field).
-///   - `buffer_length` was less than zero for a character string field.
+///   - `buffer_length` was less than zero **for a character-string field**. An
+///     integer-valued field ignores it, per "If *DiagIdentifier* is an
+///     ODBC-defined field and \**DiagInfoPtr* is an integer, *BufferLength* is
+///     ignored" — and applications are told to pass a negative sentinel there
+///     ("*BufferLength* is SQL_IS_INTEGER, SQL_IS_UINTEGER, SQL_IS_SMALLINT, or
+///     SQL_IS_USMALLINT, as appropriate"), so a blanket check fails a
+///     conventional call.
 ///   - Async-operation-not-complete case: not applicable (the `Backend` trait is synchronous).
 /// - `SQL_NO_DATA` — `rec_number` was greater than the number of diagnostic
 ///   records, or the handle has no diagnostic records.
@@ -488,12 +526,12 @@ pub unsafe fn sql_get_diag_field_w<B: Backend>(
                         // A character field, so the spec's negative-BufferLength
                         // rule applies: "The value requested was a character
                         // string and BufferLength was less than zero."
-                        if buffer_length < 0 {
-                            return Ok(SqlReturn::ERROR);
-                        }
+                        // `write_diag_string_checked` is the one place that
+                        // states it.
+                        //
                         // SAFETY: diag_info is either null (write_utf16 handles
                         // that) or a buffer of at least buffer_length/2 u16s.
-                        write_diag_string(
+                        write_diag_string_checked(
                             SQL_DIAG_DYNAMIC_FUNCTION_UNKNOWN,
                             diag_info,
                             buffer_length,
@@ -528,15 +566,6 @@ pub unsafe fn sql_get_diag_field_w<B: Backend>(
                 return Ok(SqlReturn::ERROR);
             }
 
-            // Spec: SQL_ERROR if BufferLength < 0 for a character string
-            // field. Check conservatively here (before we know the field
-            // type) so that negative buffer lengths are never passed to
-            // write_utf16. `Ok`, not `Err` — same invariant as immediately
-            // above.
-            if buffer_length < 0 {
-                return Ok(SqlReturn::ERROR);
-            }
-
             let queue = match scope.diagnostics::<B>(handle) {
                 Some(q) => q,
                 None => return Ok(SqlReturn::INVALID_HANDLE),
@@ -554,7 +583,7 @@ pub unsafe fn sql_get_diag_field_w<B: Backend>(
                     let state_str = record.sqlstate.as_str();
                     // SAFETY: diag_info is either null (write_utf16 handles that) or a
                     // caller-allocated buffer of at least buffer_length/2 u16 values.
-                    write_diag_string(state_str, diag_info, buffer_length, string_length)
+                    write_diag_string_checked(state_str, diag_info, buffer_length, string_length)
                 }
                 // SQL_DIAG_NATIVE
                 SQL_DIAG_NATIVE => {
@@ -574,7 +603,12 @@ pub unsafe fn sql_get_diag_field_w<B: Backend>(
                 SQL_DIAG_MESSAGE_TEXT => {
                     // SAFETY: diag_info is either null (write_utf16 handles that) or a
                     // caller-allocated buffer of at least buffer_length/2 u16 values.
-                    write_diag_string(&record.message, diag_info, buffer_length, string_length)
+                    write_diag_string_checked(
+                        &record.message,
+                        diag_info,
+                        buffer_length,
+                        string_length,
+                    )
                 }
                 // SQL_DIAG_CLASS_ORIGIN, SQL_DIAG_SUBCLASS_ORIGIN (9),
                 // SQL_DIAG_CONNECTION_NAME (10), SQL_DIAG_SERVER_NAME
@@ -582,7 +616,7 @@ pub unsafe fn sql_get_diag_field_w<B: Backend>(
                 SQL_DIAG_CLASS_ORIGIN..=SQL_DIAG_SERVER_NAME => {
                     // SAFETY: diag_info is either null (write_utf16 handles that) or a
                     // caller-allocated buffer of at least buffer_length/2 u16 values.
-                    write_diag_string("", diag_info, buffer_length, string_length)
+                    write_diag_string_checked("", diag_info, buffer_length, string_length)
                 }
                 // An arm each, because the spec's Record Fields table types these
                 // two differently: SQL_DIAG_COLUMN_NUMBER is SQLINTEGER and
@@ -1346,6 +1380,124 @@ mod tests {
         assert_eq!(SQL_DIAG_DYNAMIC_FUNCTION_CODE, 12);
         assert_eq!(SQL_DIAG_CURSOR_ROW_COUNT, -1249);
         assert_eq!(SQL_DIAG_UNKNOWN_STATEMENT, 0);
+    }
+
+    /// The spec tells applications to pass a negative `BufferLength` for a
+    /// fixed-length field — "If *\*DiagInfoPtr* contains a fixed-length data
+    /// type, *BufferLength* is SQL_IS_INTEGER, SQL_IS_UINTEGER, SQL_IS_SMALLINT,
+    /// or SQL_IS_USMALLINT, as appropriate" — and every one of those constants
+    /// is negative. Its SQL_ERROR condition is narrower than the check that was
+    /// here: "The value requested **was a character string** and *BufferLength*
+    /// was less than zero."
+    ///
+    /// So the integer fields must answer, and a conventional call must not be a
+    /// failure.
+    #[test]
+    fn diag_field_integer_fields_ignore_a_negative_buffer_length() {
+        unsafe {
+            let mut env: *mut c_void = std::ptr::null_mut();
+            let _ = sql_alloc_handle::<MockBackend>(
+                HandleType::Env as i16,
+                std::ptr::null_mut(),
+                &mut env,
+            );
+            with_handle::<MockBackend, EnvironmentHandle<MockBackend>, _>(env, |handle| {
+                handle
+                    .diagnostics
+                    .push(&crate::errors::OdbcError::NotConnected);
+            });
+
+            let mut native: i32 = 0;
+            assert_eq!(
+                sql_get_diag_field_w::<MockBackend>(
+                    HandleType::Env as i16,
+                    env,
+                    1,
+                    SQL_DIAG_NATIVE,
+                    std::ptr::from_mut(&mut native).cast::<c_void>(),
+                    odbc_sys::IS_INTEGER as i16,
+                    std::ptr::null_mut(),
+                ),
+                SqlReturn::SUCCESS,
+                "SQL_DIAG_NATIVE is SQLINTEGER, so BufferLength is ignored"
+            );
+
+            let mut column: i32 = 0;
+            assert_eq!(
+                sql_get_diag_field_w::<MockBackend>(
+                    HandleType::Env as i16,
+                    env,
+                    1,
+                    SQL_DIAG_COLUMN_NUMBER,
+                    std::ptr::from_mut(&mut column).cast::<c_void>(),
+                    odbc_sys::IS_INTEGER as i16,
+                    std::ptr::null_mut(),
+                ),
+                SqlReturn::SUCCESS
+            );
+            assert_eq!(column, SQL_NO_COLUMN_NUMBER);
+
+            let mut row: isize = 0;
+            assert_eq!(
+                sql_get_diag_field_w::<MockBackend>(
+                    HandleType::Env as i16,
+                    env,
+                    1,
+                    SQL_DIAG_ROW_NUMBER,
+                    std::ptr::from_mut(&mut row).cast::<c_void>(),
+                    odbc_sys::IS_SMALLINT as i16,
+                    std::ptr::null_mut(),
+                ),
+                SqlReturn::SUCCESS
+            );
+            assert_eq!(row, SQL_NO_ROW_NUMBER);
+
+            let _ = sql_free_handle::<MockBackend>(HandleType::Env as i16, env);
+        }
+    }
+
+    /// The other half of the same rule: a character field with a negative
+    /// `BufferLength` is still SQL_ERROR, and narrowing the check must not have
+    /// dropped it. `SQL_DIAG_SQLSTATE` is already covered by
+    /// `diag_field_negative_buffer_length_returns_error`; this covers the rest,
+    /// including the statement-only `SQL_DIAG_DYNAMIC_FUNCTION`.
+    #[test]
+    fn diag_field_character_fields_still_reject_a_negative_buffer_length() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+                handle.statement = Some(crate::handles::StatementData::Synthetic(
+                    synthetic_result_set(vec![]),
+                ));
+                handle
+                    .diagnostics
+                    .push(&crate::errors::OdbcError::NoResultSet);
+            });
+
+            let mut buf = [0u16; DIAG_MSG_BUF_LEN];
+            for (field, rec_number) in [
+                (SQL_DIAG_MESSAGE_TEXT, 1i16),
+                (SQL_DIAG_CLASS_ORIGIN, 1),
+                (SQL_DIAG_SERVER_NAME, 1),
+                (SQL_DIAG_DYNAMIC_FUNCTION, 0),
+            ] {
+                assert_eq!(
+                    sql_get_diag_field_w::<MockBackend>(
+                        HandleType::Stmt as i16,
+                        stmt,
+                        rec_number,
+                        field,
+                        buf.as_mut_ptr().cast::<c_void>(),
+                        -1,
+                        std::ptr::null_mut(),
+                    ),
+                    SqlReturn::ERROR,
+                    "character field {field} must reject a negative BufferLength"
+                );
+            }
+
+            cleanup_env_conn_stmt(env, conn, stmt);
+        }
     }
 
     /// `SQL_DIAG_ROW_COUNT` is the same number `SQLRowCount` reports — the

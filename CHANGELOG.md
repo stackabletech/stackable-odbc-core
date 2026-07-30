@@ -1501,6 +1501,15 @@ call `SQLCloseCursor` or `SQLFreeStmt(SQL_CLOSE)` first, as it already must for
   conversion the FFI boundary uses; `attr_odbc_version_from_raw` is unchanged and
   still cannot name `SQL_OV_ODBC2`.
 
+- `SQLGetDiagFieldW` no longer rejects a negative `BufferLength` for an
+  integer-valued field. The check ran ahead of the field match, so
+  `SQL_DIAG_NATIVE`, `SQL_DIAG_COLUMN_NUMBER` and `SQL_DIAG_ROW_NUMBER` failed
+  on the sentinels the spec tells applications to pass — "If *\*DiagInfoPtr*
+  contains a fixed-length data type, *BufferLength* is SQL_IS_INTEGER,
+  SQL_IS_UINTEGER, SQL_IS_SMALLINT, or SQL_IS_USMALLINT, as appropriate",
+  all of which are negative. The spec's `SQL_ERROR` condition names character
+  strings only, and that is now what is checked.
+
 - `ConfigDSNW(ODBC_CONFIG_DSN)` modifies a data source instead of re-creating
   it. It shared `ODBC_ADD_DSN`'s body, so it called `SQLWriteDSNToIni` — which
   "removes the old section before creating the new one" — and a modify carrying
