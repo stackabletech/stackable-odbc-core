@@ -614,8 +614,12 @@ pub unsafe fn sql_prepare_w<B: Backend>(
 /// - 22019: Invalid escape character — propagated from backend.
 /// - 22025: Invalid escape sequence — propagated from backend.
 /// - 23000: Integrity constraint violation — propagated from backend.
-/// - 24000: Invalid cursor state — propagated from backend (cursor open or positioned-update/delete
-///   on improperly positioned cursor).
+/// - 24000: Invalid cursor state — **returned here** when a cursor is already open on the
+///   statement, which the Comments require the application to close first: "to execute a
+///   SELECT statement more than once, the application must call SQLCloseCursor before
+///   reexecuting". The row's other clause is the Driver Manager's, and covers the case where
+///   `SQLFetch` has not yet returned `SQL_NO_DATA`. Also propagated from the backend for a
+///   positioned update or delete on an improperly positioned cursor.
 /// - 40001: Serialization failure — propagated from backend.
 /// - 40003: Statement completion unknown — propagated from backend.
 /// - 42000: Syntax error or access violation — propagated from backend.
@@ -669,6 +673,28 @@ pub unsafe fn sql_execute<B: Backend>(statement_handle: *mut c_void) -> SqlRetur
                     ));
                 }
             };
+
+            // Spec 24000: "A cursor was open on the StatementHandle." The
+            // Comments say it plainly — "to execute a SELECT statement more than
+            // once, the application must call SQLCloseCursor before
+            // reexecuting" — and the row's driver clause covers the case where
+            // SQLFetch has already returned SQL_NO_DATA. `SQLExecDirectW`
+            // carries the same check.
+            //
+            // After the "no SQL has been prepared" HY010 above, not before:
+            // Appendix B's cursor-states table for this function reads
+            // `24000 [p]` beside `HY010 [np]`, so an unprepared statement is
+            // HY010 whatever its cursor state.
+            //
+            // Reads `cursor_open`, which is core-owned: the backend is never
+            // told a cursor is open, so this can never have been "propagated
+            // from backend" as the doc comment used to claim.
+            if stmt.cursor_open {
+                return Err(OdbcError::general(
+                    "A cursor is already open on this statement; call SQLCloseCursor first",
+                    SqlState::invalid_cursor_state(),
+                ));
+            }
 
             // Whether a parameter conversion raised a warning, which makes this
             // call SQL_SUCCESS_WITH_INFO rather than SQL_SUCCESS. See the twin
@@ -812,8 +838,8 @@ mod tests {
     use crate::handles::StatementHandle;
     use crate::test_utils::{
         MockBackend, MockBlockingBackend, MockCancelAwareBackend, MockConnection,
-        MockCoreCancelsTimeoutBackend, MockRecordingBackend, MockRowCountBackend,
-        alloc_env_conn_stmt, with_descriptor, with_handle,
+        MockCoreCancelsTimeoutBackend, MockLongDataBackend, MockRecordingBackend,
+        MockRowCountBackend, alloc_env_conn_stmt, with_descriptor, with_handle,
     };
     use odbc_sys::{CDataType, HandleType, ParamType, SqlDataType};
 
@@ -2053,6 +2079,74 @@ mod tests {
             crate::test_utils::cleanup_connected_env_conn_stmt::<MockRowCountBackend>(
                 env, conn, stmt,
             );
+        }
+    }
+
+    /// Spec Comments: "To execute a SELECT statement more than once, the
+    /// application must call SQLCloseCursor before reexecuting." The `24000`
+    /// row gives the driver the clause where `SQLFetch` has returned
+    /// `SQL_NO_DATA`, and Appendix B's cursor-states table for this function
+    /// reads `24000 [p]` in every column — `[p]` meaning prepared, which is the
+    /// only way `SQLExecute` gets this far at all.
+    ///
+    /// `MockLongDataBackend` reports three columns, so the first execution
+    /// really opens a cursor. `MockBackend` reports none and could not reach
+    /// this branch.
+    #[test]
+    fn execute_is_refused_while_a_cursor_is_open() {
+        unsafe {
+            let (env, conn, stmt) =
+                crate::test_utils::alloc_connected_env_conn_stmt::<MockLongDataBackend>();
+
+            let sql: Vec<u16> = "SELECT a, b, c FROM t".encode_utf16().collect();
+            assert_eq!(
+                sql_prepare_w::<MockLongDataBackend>(
+                    stmt,
+                    sql.as_ptr(),
+                    i32::try_from(sql.len()).expect("the fixed test SQL is short"),
+                ),
+                SqlReturn::SUCCESS
+            );
+            assert_eq!(sql_execute::<MockLongDataBackend>(stmt), SqlReturn::SUCCESS);
+            with_handle::<MockLongDataBackend, StatementHandle<MockLongDataBackend>, _>(
+                stmt,
+                |handle| assert!(handle.cursor_open, "precondition: a cursor is open"),
+            );
+
+            assert_eq!(
+                sql_execute::<MockLongDataBackend>(stmt),
+                SqlReturn::ERROR,
+                "re-executing over an open cursor must be refused",
+            );
+            assert_eq!(
+                first_diag_state::<MockLongDataBackend>(stmt).as_deref(),
+                Some("24000"),
+            );
+
+            crate::test_utils::cleanup_connected_env_conn_stmt::<MockLongDataBackend>(
+                env, conn, stmt,
+            );
+        }
+    }
+
+    /// The other side of Appendix B's cursor-states row: `HY010 [np]` when the
+    /// statement was never prepared. `sql_execute`'s existing "no SQL has been
+    /// prepared" check already answers that, and the new `24000` must come
+    /// after it rather than in front.
+    #[test]
+    fn execute_without_prepare_is_hy010_not_24000() {
+        unsafe {
+            let (env, conn, stmt) =
+                crate::test_utils::alloc_connected_env_conn_stmt::<MockBackend>();
+
+            assert_eq!(sql_execute::<MockBackend>(stmt), SqlReturn::ERROR);
+            assert_eq!(
+                first_diag_state::<MockBackend>(stmt).as_deref(),
+                Some("HY010"),
+                "an unprepared statement is HY010, whatever its cursor state",
+            );
+
+            crate::test_utils::cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 }

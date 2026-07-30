@@ -1487,6 +1487,16 @@ call `SQLCloseCursor` or `SQLFreeStmt(SQL_CLOSE)` first, as it already must for
   implements any of the three hooks should expect a call with `0` where it
   previously got none.
 
+- **`SQLExecute` refuses to re-execute over an open cursor.** `SQLExecDirect`
+  already returned `24000` for it; `SQLExecute` executed anyway and recomputed
+  the cursor state afterwards. The spec's Comments are direct — "to execute a
+  SELECT statement more than once, the application must call SQLCloseCursor
+  before reexecuting" — and Appendix B's cursor-states table for this function
+  reads `24000 [p]` in every column. An unprepared statement is still `HY010`,
+  which is the `[np]` half of the same row. The doc comment no longer describes
+  this state as propagated from the backend: `cursor_open` is core-owned and
+  the backend never sees it.
+
 - **`SQLExecDirect` and `SQLExecute` return `SQL_NO_DATA` for a searched DML
   that affected no rows.** Both success paths could only answer `SQL_SUCCESS`
   or `SQL_SUCCESS_WITH_INFO`, so the outcome both spec pages describe in the
