@@ -447,8 +447,13 @@ fn write_dsn_attributes(dsn_w: &[u16], attrs: &std::collections::HashMap<String,
 ///
 /// # Parameters
 ///
-/// - `_hwnd_parent`: Parent window handle. This implementation never displays a UI, so
-///   the value is ignored entirely (headless mode only).
+/// - `hwnd_parent`: Parent window handle. This implementation never displays a
+///   UI, so the value is only ever compared against null. A **non-null** value
+///   is logged at `WARN`, because the spec attaches behaviour to it that is not
+///   provided: "If it matches an existing name and *hwndParent* is not null,
+///   **ConfigDSN** prompts the user to overwrite the existing name." A null
+///   value is fully conforming: "The function will not display any dialog
+///   boxes if the handle is null."
 /// - `f_request`: Type of request. Must be one of:
 ///   - `ODBC_ADD_DSN` (1): Add a new data source. Registers the name with
 ///     `SQLWriteDSNToIni`, which "removes the old section before creating the
@@ -484,9 +489,11 @@ fn write_dsn_attributes(dsn_w: &[u16], attrs: &std::collections::HashMap<String,
 /// The ConfigDSN spec defines no ODBC SQLSTATEs; errors go through the installer
 /// mechanism instead. Every code in its diagnostics table:
 ///
-/// - **ODBC_ERROR_INVALID_HWND** — not returned. `hwnd_parent` is ignored
-///   entirely: this implementation is headless and shows no dialog, so there is
-///   no window handle for it to find invalid.
+/// - **ODBC_ERROR_INVALID_HWND** — not returned. `hwnd_parent` is never
+///   dereferenced: this implementation is headless and shows no dialog, so
+///   there is no window handle for it to find invalid. A non-null value is
+///   logged rather than rejected, because the spec's own fallback for a driver
+///   that cannot prompt is the null-handle behaviour, which is what happens.
 /// - **ODBC_ERROR_INVALID_KEYWORD_VALUE** — **posted** when the attribute list
 ///   carries no `DSN` keyword, and when `SQLValidDSN` rejects the name the `DSN`
 ///   keyword carries. The spec asks for the latter check by name: "ConfigDSN
@@ -557,20 +564,22 @@ fn write_dsn_attributes(dsn_w: &[u16], attrs: &std::collections::HashMap<String,
 /// - `lpsz_attributes` must be null or a valid double-null-terminated UTF-16 attribute string.
 #[cfg(windows)]
 pub unsafe fn config_dsn_w(
-    _hwnd_parent: *mut std::ffi::c_void,
+    hwnd_parent: *mut std::ffi::c_void,
     f_request: u16,
     lpsz_driver: *const u16,
     lpsz_attributes: *const u16,
 ) -> i32 {
     tracing::trace!(
-        "ConfigDSNW(request={}, driver={:?})",
+        "ConfigDSNW(request={}, driver={:?}, hwnd_parent={:?})",
         f_request,
-        lpsz_driver
+        lpsz_driver,
+        hwnd_parent
     );
     let ret = crate::panic::panic_safe_unlocked(
         // SAFETY: the caller's contract on `lpsz_driver` and `lpsz_attributes`
-        // is passed straight through to the body.
-        || unsafe { config_dsn_body(f_request, lpsz_driver, lpsz_attributes) },
+        // is passed straight through to the body. `hwnd_parent` is only ever
+        // compared against null, never dereferenced.
+        || unsafe { config_dsn_body(hwnd_parent, f_request, lpsz_driver, lpsz_attributes) },
         || {
             fail(
                 ODBC_ERROR_REQUEST_FAILED,
@@ -587,9 +596,11 @@ pub unsafe fn config_dsn_w(
 /// including the argument checks.
 ///
 /// # Safety
-/// Same contract as [`config_dsn_w`].
+/// Same contract as [`config_dsn_w`]. `hwnd_parent` adds none: it is compared
+/// against null and never dereferenced.
 #[cfg(windows)]
 unsafe fn config_dsn_body(
+    hwnd_parent: *mut std::ffi::c_void,
     f_request: u16,
     lpsz_driver: *const u16,
     lpsz_attributes: *const u16,
@@ -607,6 +618,21 @@ unsafe fn config_dsn_body(
         );
     };
     tracing::debug!("ConfigDSNW: request={:?}", request);
+
+    if !hwnd_parent.is_null() {
+        // AGENTS.md: an ignored feature gets a `warn!`. The spec attaches real
+        // behaviour to this argument ("If it matches an existing name and
+        // hwndParent is not null, ConfigDSN prompts the user to overwrite the
+        // existing name") and this driver has no setup dialog, so the prompt
+        // becomes an unconditional overwrite. Only a caller that passed non-null
+        // is affected: "The function will not display any dialog boxes if the
+        // handle is null" is exactly what a null caller gets.
+        tracing::warn!(
+            "ConfigDSNW: hwndParent is non-null but this driver ships no setup \
+             dialog, so it proceeds headlessly. An existing data source of the \
+             same name is overwritten without prompting."
+        );
+    }
 
     if lpsz_driver.is_null() {
         return fail(
@@ -930,6 +956,55 @@ mod tests {
         let utf16_vec: Vec<u16> = s.encode_utf16().collect();
         let attrs = unsafe { parse_attributes_w(utf16_vec.as_ptr()) }.attributes;
         assert!(attrs.is_empty());
+    }
+
+    /// A non-null `hwndParent` must be logged, not silently ignored.
+    ///
+    /// The spec hangs real behaviour off it ("If it matches an existing name
+    /// and *hwndParent* is not null, **ConfigDSN** prompts the user to overwrite
+    /// the existing name") and this driver replaces the prompt with an
+    /// unconditional overwrite. AGENTS.md requires a `warn!` for an ignored
+    /// feature, and this is the whole of one.
+    ///
+    /// Source-audited rather than executed: `config_dsn_w` is `#[cfg(windows)]`
+    /// and links `odbccp32`, and the crate has no log-capture harness for unit
+    /// tests.
+    #[test]
+    fn a_non_null_parent_window_is_warned_about() {
+        let body = function_source("unsafe fn config_dsn_body(");
+        let branch_start = body
+            .find("if !hwnd_parent.is_null() {")
+            .expect("config_dsn_body inspects hwnd_parent");
+        // Sliced to the branch's own closing brace, which sits at the
+        // function's statement indent of four spaces. Bounding it by "the next
+        // `if `" instead would find the word "if" inside the branch's own
+        // prose comment and conclude the warning was outside the branch.
+        let branch = &body[branch_start..];
+        let branch_end = branch
+            .find("\n    }")
+            .expect("the hwnd_parent branch has a closing brace");
+        let branch = &branch[..branch_end];
+        assert!(
+            branch.contains("tracing::warn!"),
+            "the non-null hwnd_parent branch must warn"
+        );
+
+        // And the argument must actually reach the body: an ignored
+        // `_hwnd_parent` in `config_dsn_w` cannot be inspected at all.
+        //
+        // Asserted as the *absence* of the underscore rather than the presence
+        // of the bare name, because `"hwnd_parent: *mut std::ffi::c_void"` is a
+        // substring of `"_hwnd_parent: *mut std::ffi::c_void"` and a `contains`
+        // check for it passes either way.
+        let entry = function_source("pub unsafe fn config_dsn_w(");
+        assert!(
+            !entry.contains("_hwnd_parent"),
+            "config_dsn_w must name the argument rather than discard it as _hwnd_parent"
+        );
+        assert!(
+            entry.contains("hwnd_parent: *mut std::ffi::c_void"),
+            "config_dsn_w must still declare the argument"
+        );
     }
 
     /// A segment with no `=` is not a keyword-value pair, and the spec defines

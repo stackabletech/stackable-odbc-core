@@ -711,6 +711,12 @@ call `SQLCloseCursor` or `SQLFreeStmt(SQL_CLOSE)` first, as it already must for
 
 ### Changed
 
+- `ConfigDSNW` logs a `WARN` when `hwndParent` is non-null. The driver ships no
+  setup dialog, so the spec's prompt-on-overwrite behaviour ("If it matches an
+  existing name and *hwndParent* is not null, **ConfigDSN** prompts the user to
+  overwrite the existing name") becomes an unconditional overwrite. A caller
+  passing null is unaffected and fully conforming.
+
 - `ConfigDSNW` reports a malformed `lpszAttributes` as
   `ODBC_ERROR_INVALID_KEYWORD_VALUE` instead of proceeding with what it could
   read. A segment with no `=` was skipped with no log at all, and a list missing
