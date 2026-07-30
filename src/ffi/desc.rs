@@ -455,7 +455,12 @@ fn read_ird_field<B: Backend>(
 /// - `HY092` Invalid attribute/option identifier — returned when the value is not valid for
 ///   the field: a numeric handed to `SQL_DESC_NAME`, a value too wide for the field, or
 ///   `SQL_NAMED` written to `SQL_DESC_UNNAMED`, which the row names explicitly
-/// - `HY105` Invalid parameter type — **(DM)**; not returned here
+/// - `HY105` Invalid parameter type — **(DM)**; not returned here. Core does still reject an
+///   unrecognised `SQL_DESC_PARAMETER_TYPE`, in `descriptor::set_record_field`, but reports
+///   it as `HY092` — the driver-side row for a value that is not valid for the field. The
+///   check is defence in depth for a caller that does not come through a Driver Manager,
+///   since this door bypasses `SQLBindParameter`'s own validation; it is not this row, and
+///   core does not borrow a `(DM)` code to report a check of its own
 /// - `HY117` Connection is suspended — **(DM)**; not returned here
 /// - `HYT01` Connection timeout expired — (not returned here; this function performs no I/O)
 /// - `IM001` Driver does not support this function — **(DM)**; not returned here
@@ -2584,6 +2589,53 @@ mod tests {
                 SqlReturn::NO_DATA,
                 "a diagnostic leaked onto a descriptor that was never called"
             );
+
+            cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
+    /// `SQL_DESC_PARAMETER_TYPE` is validated by core even though the spec's
+    /// `HY105` row for that condition is `(DM)`-marked. A caller that does not
+    /// come through a Driver Manager would otherwise store an integer naming no
+    /// `SQL_PARAM_*` value, and `SQLBindParameter`'s own validation would never
+    /// see it — this door bypasses that one.
+    ///
+    /// The state is `HY092`, the driver-side row for a value that is not valid
+    /// for the field, not the Driver Manager's `HY105`. Core does not borrow a
+    /// `(DM)` code to report a check of its own.
+    #[test]
+    fn an_unrecognised_parameter_type_reports_hy092_not_hy105() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            let ipd = ipd_of(stmt);
+
+            // Not one of the SQL_PARAM_* values: `ParamType` runs 0..=5 plus 8
+            // and 16, so no `param_type_from_raw` entry maps this.
+            const NOT_A_PARAM_TYPE: usize = 99;
+            let ret = sql_set_desc_field_w::<MockBackend>(
+                ipd,
+                1,
+                Desc::ParameterType as i16,
+                std::ptr::without_provenance_mut(NOT_A_PARAM_TYPE),
+                0,
+            );
+
+            assert_eq!(ret, SqlReturn::ERROR);
+            assert_eq!(
+                first_sqlstate(ipd),
+                sql_state::INVALID_ATTRIBUTE_OPTION_IDENTIFIER
+            );
+
+            // A recognised value through the same door still succeeds, so the
+            // check is a filter rather than a blanket refusal.
+            let ret = sql_set_desc_field_w::<MockBackend>(
+                ipd,
+                1,
+                Desc::ParameterType as i16,
+                std::ptr::without_provenance_mut(ParamType::Input as usize),
+                0,
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
 
             cleanup_env_conn_stmt(env, conn, stmt);
         }

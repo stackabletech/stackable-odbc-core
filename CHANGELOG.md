@@ -2532,4 +2532,10 @@ Everything a driver has to change for the catalog rework, in one place.
   calls fail that previously succeeded**, which is the report the application
   was entitled to.
 
+- **`SQLSetDescFieldW`'s documented diagnostics understated one check.** Its
+  `HY105` line read "**(DM)**; not returned here", which is true of `HY105` but
+  reads as though core validates nothing: an unrecognised
+  `SQL_DESC_PARAMETER_TYPE` has always been rejected, as `HY092`. The line now
+  says so, and a test pins it. No behaviour change.
+
 [Unreleased]: https://github.com/stackabletech/stackable-odbc-core/commits/HEAD
