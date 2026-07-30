@@ -35,10 +35,16 @@
 //! and exact-numeric rows are this module's own questions asked of a number
 //! rather than of text.
 //!
-//! The SQLSTATE is *not* shared along with the test. The numeric table answers
-//! `22003` where this one answers `22001` for whole-digit loss, so that caller
-//! re-labels the verdict. Sharing the check while diverging on the code is the
-//! point: the tables genuinely differ there, and the spec says so.
+//! The *verdicts* are not shared along with the primitives, and the
+//! exact-numeric row is where the two tables diverge most. This table refuses a
+//! value that would lose fractional digits (`22001`); the numeric table's row
+//! calls that its "n/a" case and sends the value truncated, with an optional
+//! `01S07`. Whole-digit loss is `22001` here and `22003` there. So
+//! [`check_declared_decimal_size`] is *this* table's composite answer and the
+//! numeric one asks [`DecimalLiteral::whole_digits`] and
+//! [`DecimalLiteral::required_scale`] separately, because it needs the two
+//! halves to end differently. Sharing the primitives while diverging on what
+//! they mean is the point; a shared verdict would have been wrong.
 //!
 //! [Converting Data from C to SQL Data Types]: https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/converting-data-from-c-to-sql-data-types
 //! [C to SQL: Character]: https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/c-to-sql-character
@@ -260,6 +266,7 @@ pub(crate) fn text_to_sql_type(
 /// `f64`'s 53 bits of mantissa. `scale` may be negative, which is how an
 /// exponent larger than the fraction's length is carried (`1.5e2` is digits
 /// `15` at scale `-1`).
+#[derive(Clone)]
 pub(crate) struct DecimalLiteral {
     negative: bool,
     digits: String,
@@ -358,7 +365,7 @@ impl DecimalLiteral {
     /// many fractional digits were typed, so `12.3400` fits `DECIMAL(10,2)`:
     /// dropping those two trailing zeros loses nothing, and the spec's
     /// truncation test is about what the conversion would *lose*.
-    fn required_scale(&self) -> usize {
+    pub(crate) fn required_scale(&self) -> usize {
         if self.is_zero() || self.scale <= 0 {
             return 0;
         }
@@ -366,6 +373,34 @@ impl DecimalLiteral {
         usize::try_from(self.scale)
             .unwrap_or(0)
             .saturating_sub(trailing_zeros)
+    }
+
+    /// The same value with its fraction truncated toward zero to `scale`
+    /// digits.
+    ///
+    /// Truncated, not rounded: the *C to SQL: Numeric* table's exact-numeric row
+    /// says "with truncated of fractional digits", and this is the conversion
+    /// that row describes the driver performing. Used only by
+    /// [`crate::numeric_convert`] — this table refuses such a value instead, so
+    /// it has nothing to truncate.
+    ///
+    /// A literal already at or below `scale`, or one with a negative scale
+    /// (a whole number with implied trailing zeros), is returned unchanged.
+    pub(crate) fn truncated_to_scale(&self, scale: usize) -> DecimalLiteral {
+        let Ok(current) = usize::try_from(self.scale) else {
+            return self.clone();
+        };
+        let Some(drop) = current.checked_sub(scale).filter(|d| *d > 0) else {
+            return self.clone();
+        };
+        // Every digit is fractional and all of them go: the value truncates to
+        // zero rather than underflowing the slice.
+        let keep = self.digits.len().saturating_sub(drop);
+        DecimalLiteral {
+            negative: self.negative,
+            digits: self.digits[..keep].to_owned(),
+            scale: i32::try_from(scale).unwrap_or(self.scale),
+        }
     }
 
     /// The number of digits to the left of the decimal point. Zero has none, so
@@ -513,10 +548,19 @@ pub(crate) fn check_declared_binary_size(len: usize, col_size: ULen) -> Result<(
 /// The two declared-size checks the spec's table still asks for and this does
 /// not are noted on [`text_to_sql_type`].
 ///
-/// Shared with [`crate::numeric_convert`]'s exact-numeric row, which asks the
-/// same question of the same thing. That table's row answers `22003` where this
-/// one answers `22001`, so the caller there re-labels the verdict rather than
-/// returning it unchanged — the *test* is shared, not the SQLSTATE.
+/// **Not** shared with [`crate::numeric_convert`], though it looks as though it
+/// should be. This function bundles two tests, and that table's exact-numeric
+/// row disagrees with this one about both:
+///
+/// | | this table | *C to SQL: Numeric* |
+/// |---|---|---|
+/// | fractional truncation | `22001`, refused | its "n/a" case — sent truncated, optional `01S07` |
+/// | whole-digit loss | `22001` | `22003` |
+///
+/// A shared verdict would therefore have been wrong in both halves, not merely
+/// mislabelled. That table calls [`DecimalLiteral::required_scale`] and
+/// [`DecimalLiteral::whole_digits`] directly, so the two primitives stay shared
+/// and only the composite answer is per-table.
 pub(crate) fn check_declared_decimal_size(
     literal: &DecimalLiteral,
     text: &str,
