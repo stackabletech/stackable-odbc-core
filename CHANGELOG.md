@@ -1482,6 +1482,13 @@ call `SQLCloseCursor` or `SQLFreeStmt(SQL_CLOSE)` first, as it already must for
   conversion the FFI boundary uses; `attr_odbc_version_from_raw` is unchanged and
   still cannot name `SQL_OV_ODBC2`.
 
+- `SQLGetConnectAttrW` reports `HYC00` for a connection attribute the spec
+  defines but this driver does not answer — `SQL_ATTR_QUIET_MODE`,
+  `SQL_ATTR_TRACEFILE`, `SQL_ATTR_TRANSLATE_LIB`, `SQL_ATTR_ENLIST_IN_DTC`,
+  `SQL_ATTR_ASYNC_DBC_FUNCTIONS_ENABLE` and the rest. It answered `HY092` for
+  all of them, which the spec reserves for an identifier that is not an ODBC
+  connection attribute at all; that case is unchanged.
+
 - `SQLDisconnect` cancels an in-progress `SQLBrowseConnect` sequence rather than
   reporting `08003`. `handle.connection` is `None` for the whole of a browse, so
   the `08003` guard answered the one call the spec names as the way out of one.

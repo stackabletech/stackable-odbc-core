@@ -633,6 +633,46 @@ pub unsafe fn sql_set_connect_attr_w<B: Backend>(
     ret
 }
 
+/// Every connection attribute the ODBC specification defines, as `odbc-sys`
+/// names them.
+///
+/// `SQLGetConnectAttr`'s diagnostics table draws a line this list is the whole
+/// of: `HY092` is "the value specified for the argument *Attribute* was not
+/// valid for the version of ODBC supported by the driver", while `HYC00` is
+/// "...was a valid ODBC connection attribute for the version of ODBC supported
+/// by the driver, but was not supported by the driver". A number absent from
+/// this list is not an ODBC connection attribute at all and is the first; one
+/// present but with no arm in the match below is the second.
+///
+/// Transcribed from `odbc_sys::ConnectionAttribute`'s own constants rather than
+/// from `sqlext.h`, so it cannot name a value the crate does not.
+const DEFINED_CONNECTION_ATTRIBUTES: &[ConnectionAttribute] = &[
+    ConnectionAttribute::ASYNC_ENABLE,
+    ConnectionAttribute::ACCESS_MODE,
+    ConnectionAttribute::AUTOCOMMIT,
+    ConnectionAttribute::LOGIN_TIMEOUT,
+    ConnectionAttribute::TRACE,
+    ConnectionAttribute::TRACEFILE,
+    ConnectionAttribute::TRANSLATE_LIB,
+    ConnectionAttribute::TRANSLATE_OPTION,
+    ConnectionAttribute::TXN_ISOLATION,
+    ConnectionAttribute::CURRENT_CATALOG,
+    ConnectionAttribute::ODBC_CURSORS,
+    ConnectionAttribute::QUIET_MODE,
+    ConnectionAttribute::PACKET_SIZE,
+    ConnectionAttribute::CONNECTION_TIMEOUT,
+    ConnectionAttribute::DISCONNECT_BEHAVIOUR,
+    ConnectionAttribute::RESET_CONNECTION,
+    ConnectionAttribute::ASYNC_DBC_FUNCTIONS_ENABLE,
+    ConnectionAttribute::DBC_INFO_TOKEN,
+    ConnectionAttribute::ASYNC_DBC_EVENT,
+    ConnectionAttribute::ENLIST_IN_DTC,
+    ConnectionAttribute::ENLIST_IN_XA,
+    ConnectionAttribute::CONNECTION_DEAD,
+    ConnectionAttribute::AUTO_IPD,
+    ConnectionAttribute::METADATA_ID,
+];
+
 /// Generic implementation of SQLGetConnectAttrW.
 ///
 /// Spec: <https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlgetconnectattr-function>
@@ -676,14 +716,23 @@ pub unsafe fn sql_set_connect_attr_w<B: Backend>(
 ///   HY090. However, when `buffer_length` is valid but exceeds the maximum
 ///   (32767 chars), HY000 (general error) is returned instead, as the buffer
 ///   is not "invalid" but unsupported.
-/// - HY092 Invalid attribute/option identifier: returned for unrecognised
-///   attribute identifiers in the catch-all branch.
+/// - HY092 Invalid attribute/option identifier: returned for an identifier that
+///   is not an ODBC connection attribute at all — see
+///   `DEFINED_CONNECTION_ATTRIBUTES`, which is the whole of the spec's list.
+///   The spec's own wording for this row is "not valid for the version of ODBC
+///   supported by the driver", which is a different claim from the HYC00 row
+///   below.
 /// - HY114 Driver does not support connection-level asynchronous function execution:
 ///   (driver-manager-handled; not returned here).
 /// - HY117 Connection is suspended due to unknown transaction state:
 ///   (driver-manager-handled; not returned here).
-/// - HYC00 Optional feature not implemented: returned for valid ODBC connection
-///   attributes that are not supported.
+/// - HYC00 Optional feature not implemented: returned for an attribute that is
+///   on the spec's list but that this function has no answer for —
+///   `SQL_ATTR_QUIET_MODE`, `SQL_ATTR_TRACEFILE`, `SQL_ATTR_TRANSLATE_LIB`,
+///   `SQL_ATTR_ENLIST_IN_DTC`, `SQL_ATTR_ASYNC_DBC_FUNCTIONS_ENABLE` and the
+///   rest. The spec's wording is "a valid ODBC connection attribute for the
+///   version of ODBC supported by the driver, but was not supported by the
+///   driver".
 /// - HYT01 Connection timeout expired: not returned; this function does not wait
 ///   on the data source.
 /// - IM001 Driver does not support this function: (driver-manager-handled; not
@@ -915,8 +964,21 @@ pub unsafe fn sql_get_connect_attr_w<B: Backend>(
                     Ok(ret)
                 }
 
+                // Spec HYC00: "a valid ODBC connection attribute for the version
+                // of ODBC supported by the driver, but was not supported by the
+                // driver." MySQL Connector/ODBC answers HYC00 in this function
+                // too, for the one attribute it cannot report
+                // (`driver/options.cc` returns `MYERR_S1C00` when
+                // SQL_ATTR_CURRENT_CATALOG is read before a connection exists).
+                _ if DEFINED_CONNECTION_ATTRIBUTES.contains(&attr) => {
+                    Err(OdbcError::NotImplemented {
+                        feature: format!("SQLGetConnectAttrW attribute {attr:?}"),
+                    })
+                }
+
+                // Spec HY092: not an ODBC connection attribute at all.
                 _ => Err(OdbcError::general(
-                    format!("SQLGetConnectAttrW: unsupported attribute {attr:?}"),
+                    format!("SQLGetConnectAttrW: unknown attribute {attr:?}"),
                     SqlState::invalid_attribute_option_identifier(),
                 )),
             }
@@ -2120,6 +2182,89 @@ mod tests {
                 std::ptr::null_mut(),
             );
             assert_eq!(ret, SqlReturn::ERROR);
+            cleanup(env, conn);
+        }
+    }
+
+    /// The spec names both rows and distinguishes them precisely: `HY092` is
+    /// "the value specified for the argument Attribute was not valid for the
+    /// version of ODBC supported by the driver", while `HYC00` is "...was a
+    /// valid ODBC connection attribute for the version of ODBC supported by the
+    /// driver, but was not supported by the driver". These five are all spec
+    /// attributes core does not answer, so they are the second.
+    #[test]
+    fn a_valid_but_unsupported_connection_attribute_is_hyc00() {
+        unsafe {
+            let (env, conn) = alloc_env_conn();
+            for (attribute, name) in [
+                (ConnectionAttribute::QUIET_MODE, "SQL_ATTR_QUIET_MODE"),
+                (ConnectionAttribute::TRACEFILE, "SQL_ATTR_TRACEFILE"),
+                (ConnectionAttribute::TRANSLATE_LIB, "SQL_ATTR_TRANSLATE_LIB"),
+                (ConnectionAttribute::ENLIST_IN_DTC, "SQL_ATTR_ENLIST_IN_DTC"),
+                (
+                    ConnectionAttribute::ASYNC_DBC_FUNCTIONS_ENABLE,
+                    "SQL_ATTR_ASYNC_DBC_FUNCTIONS_ENABLE",
+                ),
+            ] {
+                let mut value: u32 = 0;
+                assert_eq!(
+                    sql_get_connect_attr_w::<MockBackend>(
+                        conn,
+                        attribute.0,
+                        std::ptr::from_mut(&mut value).cast::<c_void>(),
+                        0,
+                        std::ptr::null_mut(),
+                    ),
+                    SqlReturn::ERROR,
+                    "{name}"
+                );
+                with_handle::<MockBackend, ConnectionHandle<MockBackend>, _>(conn, |h| {
+                    assert_eq!(
+                        h.diagnostics
+                            .get(0)
+                            .expect("a diagnostic record")
+                            .sqlstate
+                            .as_str(),
+                        "HYC00",
+                        "{name} must report the unsupported-feature state, not the \
+                         unknown-identifier one",
+                    );
+                });
+            }
+            cleanup(env, conn);
+        }
+    }
+
+    /// The other side of the line: a number that is not an ODBC connection
+    /// attribute at all stays `HY092`. Without this, widening `HYC00` to
+    /// everything would pass the test above.
+    #[test]
+    fn an_identifier_that_is_not_a_connection_attribute_is_still_hy092() {
+        const NOT_A_CONNECTION_ATTRIBUTE: i32 = 424_242;
+
+        unsafe {
+            let (env, conn) = alloc_env_conn();
+            let mut value: u32 = 0;
+            assert_eq!(
+                sql_get_connect_attr_w::<MockBackend>(
+                    conn,
+                    NOT_A_CONNECTION_ATTRIBUTE,
+                    std::ptr::from_mut(&mut value).cast::<c_void>(),
+                    0,
+                    std::ptr::null_mut(),
+                ),
+                SqlReturn::ERROR,
+            );
+            with_handle::<MockBackend, ConnectionHandle<MockBackend>, _>(conn, |h| {
+                assert_eq!(
+                    h.diagnostics
+                        .get(0)
+                        .expect("a diagnostic record")
+                        .sqlstate
+                        .as_str(),
+                    "HY092",
+                );
+            });
             cleanup(env, conn);
         }
     }
