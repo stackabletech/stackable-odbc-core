@@ -2,12 +2,16 @@
 //! `SQLConnectW`, `SQLDisconnect`, `SQLNativeSqlW`.
 
 use std::ffi::c_void;
+use std::sync::Arc;
 
 use crate::backend::Backend;
 use crate::errors::{IntoOdbc, OdbcError};
 use crate::handles::ConnectionHandle;
 use crate::panic::panic_safe;
-use crate::types::{ConnectParams, SQL_NTS, SqlReturn, SqlState};
+use crate::types::{
+    ConnectParams, DriverConnectOption, SQL_NTS, SqlReturn, SqlState,
+    driver_connect_option_from_raw,
+};
 use crate::utf16::{utf16_to_string, write_utf16};
 
 /// Generic implementation of SQLDriverConnectW.
@@ -27,7 +31,11 @@ use crate::utf16::{utf16_to_string, write_utf16};
 /// - `out_connection_string`: Buffer to receive the completed connection string; may be null.
 /// - `buffer_length`: Size of `out_connection_string` in characters.
 /// - `string_length2_ptr`: Receives the length of the completed connection string; may be null.
-/// - `_driver_completion`: `SQL_DRIVER_*` completion flag; ignored (we always connect directly).
+/// - `driver_completion`: `SQL_DRIVER_*` completion flag. Core never puts up a dialog of its
+///   own, so this argument decides exactly one thing: whether the backend is handed the
+///   driver's [`Backend::prompter`]. Under
+///   `SQL_DRIVER_NOPROMPT` it is not, and a driver needing interactive authentication has
+///   nothing to call. See `prompter_for` for the unrecognised-value and no-argument cases.
 ///
 /// # Spec compliance
 ///
@@ -71,7 +79,15 @@ use crate::utf16::{utf16_to_string, write_utf16};
 ///   or when `buffer_length < 0`. Note: spec marks these as `(DM)`, but they are checked here
 ///   as a defence-in-depth guard when called outside a full Driver Manager stack.
 /// - HY092: Invalid attribute/option identifier — (driver-manager-handled; not returned here).
-/// - HY110: Invalid driver completion — (driver-manager-handled; not returned here).
+/// - HY110: Invalid driver completion — (driver-manager-handled; not returned here). Both
+///   clauses of this row carry `(DM)`, so an unrecognised *DriverCompletion* is accepted
+///   here and treated as permitting a prompt rather than rejected; see `prompter_for`.
+/// - IM007: No data source or driver specified, dialog prohibited — not returned here. Core
+///   puts up no dialog of its own, and a backend that cannot connect without one reports its
+///   own failure through `B::connect`.
+/// - IM008: Dialog failed — not returned here. Core never calls
+///   [`Prompter::present_url`](crate::prompt::Prompter::present_url); a driver whose prompt
+///   fails maps that itself, inside `B::connect`.
 /// - HYC00: Optional feature not implemented — **returned by this driver**, but only from a
 ///   connection attribute set before the connect. Core applies those here (see
 ///   `apply_pending_connect_attrs`), and an unimplemented hook — most often the defaulted
@@ -96,12 +112,28 @@ pub unsafe fn sql_driver_connect_w<B: Backend>(
     out_connection_string: *mut u16,
     buffer_length: i16,
     string_length2_ptr: *mut i16,
-    _driver_completion: u16,
+    driver_completion: u16,
 ) -> SqlReturn {
-    tracing::debug!(
-        "SQLDriverConnectW(conn={:?}, in_len={})",
+    tracing::trace!(
+        "SQLDriverConnectW(conn={:?}, in_len={}, raw_completion={})",
         connection_handle,
-        string_length1
+        string_length1,
+        driver_completion
+    );
+    let completion = driver_connect_option_from_raw(driver_completion);
+    if completion.is_none() {
+        // HY110 is `(DM)` on both clauses, so this is not core's to reject.
+        tracing::warn!(
+            "SQLDriverConnectW: unrecognised DriverCompletion {}; accepting it and permitting \
+             a prompt (HY110 is Driver-Manager-owned)",
+            driver_completion
+        );
+    }
+    tracing::debug!(
+        "SQLDriverConnectW(conn={:?}, in_len={}, completion={:?})",
+        connection_handle,
+        string_length1,
+        completion
     );
     // SAFETY: connection_handle is null or a valid ConnectionHandle<B> allocated by
     // sql_alloc_handle; kind and group are validated by scope.get inside the closure.
@@ -145,6 +177,7 @@ pub unsafe fn sql_driver_connect_w<B: Backend>(
             let conn_str = utf16_to_string(in_connection_string, string_length1.into())?;
             let mut params = merge_dsn_params::<B>(&conn_str, read_dsn_keys)?;
             crate::ffi::connect_attr::carry_connect_timeouts::<B>(handle, &mut params);
+            params.set_prompter(prompter_for::<B>(completion));
             let connection = B::connect(&params).into_odbc()?;
             handle.connection = Some(connection);
             // A deferred attribute the backend cannot honour fails the
@@ -323,6 +356,10 @@ pub unsafe fn sql_connect_w<B: Backend>(
                 params.insert("password", auth);
             }
             crate::ffi::connect_attr::carry_connect_timeouts::<B>(handle, &mut params);
+            // `SQLConnect` has no *DriverCompletion* argument, so there is
+            // nothing here that could forbid a prompt: `prompter_for`'s `None`
+            // means "this entry point cannot be told", not "do not prompt".
+            params.set_prompter(prompter_for::<B>(None));
             tracing::debug!("SQLConnectW: params = {:?}", params);
             let connection = B::connect(&params).into_odbc()?;
             handle.connection = Some(connection);
@@ -537,6 +574,11 @@ pub unsafe fn sql_browse_connect_w<B: Backend>(
 
             // All required attributes are present; connect.
             crate::ffi::connect_attr::carry_connect_timeouts::<B>(handle, &mut merged);
+            // No *DriverCompletion* argument here either, for the reason given
+            // at `sql_connect_w`. Set after the `NEED_DATA` branch above has
+            // stored `merged` in `handle.browse_request`, so nothing that
+            // outlives this call ever holds a prompter.
+            merged.set_prompter(prompter_for::<B>(None));
             let connection = B::connect(&merged).into_odbc()?;
             handle.connection = Some(connection);
             // A deferred attribute the backend cannot honour fails the
@@ -605,6 +647,41 @@ pub unsafe fn sql_browse_connect_w<B: Backend>(
 /// [`ConnectParams::merge`] does not overwrite existing keys, which is exactly
 /// the required precedence.
 ///
+/// The prompter this connect may use, given the entry point's *DriverCompletion*.
+///
+/// **The one place that decides whether a driver is allowed to prompt.** The
+/// three connect entry points differ only in what they can pass here, and two
+/// of them can pass nothing at all; putting the rule in each of them is how
+/// they would come to disagree.
+///
+/// `completion` is `None` when the entry point has no *DriverCompletion*
+/// argument — `SQLConnect` and `SQLBrowseConnect` — or when the value did not
+/// name a flag. Both are read as permitting a prompt:
+///
+/// - `SQLConnect` is the DSN path, which is how `isql` and Excel connect, so
+///   they are the likeliest interactive callers of the whole driver. Reading
+///   the absent argument as `SQL_DRIVER_NOPROMPT` would lock DSN connections
+///   out of interactive authentication entirely, and no spec text asks for
+///   that.
+/// - An unrecognised value is `HY110` ("Invalid driver completion") in
+///   `SQLDriverConnect`'s diagnostics table, but **both** clauses of that row
+///   carry `(DM)`. The check is the Driver Manager's; core adds none, and falls
+///   back to the most permissive treatment rather than inventing a driver-side
+///   error the spec assigns elsewhere.
+///
+/// Only `SQL_DRIVER_NOPROMPT` forbids prompting. `SQL_DRIVER_COMPLETE`,
+/// `SQL_DRIVER_PROMPT` and `SQL_DRIVER_COMPLETE_REQUIRED` all permit it — the
+/// spec's Driver Guidelines describe the driver putting up a dialog under each
+/// of the three.
+fn prompter_for<B: Backend>(
+    completion: Option<DriverConnectOption>,
+) -> Option<Arc<dyn crate::prompt::Prompter>> {
+    if completion == Some(DriverConnectOption::NoPrompt) {
+        return None;
+    }
+    B::prompter()
+}
+
 /// `dsn_resolver` is injectable so unit tests can supply fake DSN data.
 fn merge_dsn_params<B: Backend>(
     conn_str: &str,
@@ -1070,6 +1147,181 @@ mod tests {
         .unwrap();
 
         assert_eq!(params.get("host"), Some("explicit.internal"));
+    }
+
+    // -----------------------------------------------------------------------
+    // The *DriverCompletion* gate
+    //
+    // `SQL_DRIVER_NOPROMPT` is the spec's instruction that the driver must not
+    // prompt. Core enforces it by withholding the prompter, so a backend has
+    // nothing to call and cannot forget the rule at a call site.
+    // -----------------------------------------------------------------------
+
+    /// Connect with `MockPrompterBackend` and report what `Backend::connect`
+    /// saw: whether a prompter arrived, and the URL it was driven with.
+    unsafe fn prompter_seen_by<B, F>(connect: F) -> (bool, Option<String>)
+    where
+        B: Backend<Connection = crate::test_utils::MockPrompterConnection>,
+        F: FnOnce(*mut c_void),
+    {
+        unsafe {
+            let mut env: *mut c_void = std::ptr::null_mut();
+            let _ = sql_alloc_handle::<B>(HandleType::Env as i16, std::ptr::null_mut(), &mut env);
+            let mut conn: *mut c_void = std::ptr::null_mut();
+            let _ = sql_alloc_handle::<B>(HandleType::Dbc as i16, env, &mut conn);
+
+            connect(conn);
+
+            let seen = crate::test_utils::with_handle::<B, ConnectionHandle<B>, _>(conn, |c| {
+                let c = c.connection.as_ref().expect("connected");
+                (c.saw_prompter, c.presented.clone())
+            });
+
+            let _ = sql_disconnect::<B>(conn);
+            let _ = sql_free_handle::<B>(HandleType::Dbc as i16, conn);
+            let _ = sql_free_handle::<B>(HandleType::Env as i16, env);
+            seen
+        }
+    }
+
+    /// `SQLDriverConnectW` with the given raw *DriverCompletion*.
+    unsafe fn prompter_seen_by_driver_connect(completion: u16) -> (bool, Option<String>) {
+        unsafe {
+            prompter_seen_by::<crate::test_utils::MockPrompterBackend, _>(|conn| {
+                let wide: Vec<u16> = "Host=localhost".encode_utf16().collect();
+                assert_eq!(
+                    sql_driver_connect_w::<crate::test_utils::MockPrompterBackend>(
+                        conn,
+                        std::ptr::null_mut(),
+                        wide.as_ptr(),
+                        wide.len() as i16,
+                        std::ptr::null_mut(),
+                        0,
+                        std::ptr::null_mut(),
+                        completion,
+                    ),
+                    SqlReturn::SUCCESS,
+                );
+            })
+        }
+    }
+
+    #[test]
+    fn sql_driver_noprompt_withholds_the_prompter_even_though_the_backend_has_one() {
+        // The point of the whole mechanism. `MockPrompterBackend::prompter`
+        // returns `Some` unconditionally, so a `None` here can only be core's
+        // gate.
+        unsafe {
+            assert_eq!(
+                prompter_seen_by_driver_connect(DriverConnectOption::NoPrompt as u16),
+                (false, None),
+            );
+        }
+    }
+
+    #[test]
+    fn the_three_prompting_completions_pass_the_prompter_through() {
+        // `SQL_DRIVER_PROMPT`, `SQL_DRIVER_COMPLETE` and
+        // `SQL_DRIVER_COMPLETE_REQUIRED` all permit the driver to prompt; only
+        // `SQL_DRIVER_NOPROMPT` forbids it.
+        for completion in [
+            DriverConnectOption::Complete,
+            DriverConnectOption::Prompt,
+            DriverConnectOption::CompleteRequired,
+        ] {
+            unsafe {
+                assert_eq!(
+                    prompter_seen_by_driver_connect(completion as u16),
+                    (true, Some("https://example.invalid/oauth".to_owned())),
+                    "{completion:?} must permit prompting",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_unrecognised_driver_completion_is_accepted_and_permits_prompting() {
+        // `HY110` carries `(DM)` on both of its clauses, so the check is the
+        // Driver Manager's and core adds none. Reaching the driver at all means
+        // no DM validated it; the permissive reading is the one that does not
+        // silently disable interactive authentication.
+        unsafe {
+            assert_eq!(
+                prompter_seen_by_driver_connect(99),
+                (true, Some("https://example.invalid/oauth".to_owned())),
+            );
+        }
+    }
+
+    // `sql_connect_w` always resolves the DSN through the installer library, so
+    // this is the one entry point of the three that Miri cannot reach: it
+    // interprets rather than links, and `SQLGetPrivateProfileStringW` is a
+    // foreign function it refuses outright. The gate itself is pure Rust with no
+    // `unsafe` for Miri to check, and the other two entry points cover the same
+    // `prompter_for` call under Miri, so nothing is lost.
+    #[cfg_attr(miri, ignore = "calls the foreign SQLGetPrivateProfileStringW")]
+    #[test]
+    fn sql_connect_has_no_completion_argument_and_so_permits_prompting() {
+        // `SQLConnect` is the DSN path — `isql` and Excel reach it, and those
+        // are the likeliest interactive callers. Reading the absent argument as
+        // `SQL_DRIVER_NOPROMPT` would lock DSN connections out of interactive
+        // authentication entirely.
+        unsafe {
+            let seen = prompter_seen_by::<crate::test_utils::MockPrompterBackend, _>(|conn| {
+                let dsn: Vec<u16> = "nonexistent-dsn".encode_utf16().collect();
+                assert_eq!(
+                    sql_connect_w::<crate::test_utils::MockPrompterBackend>(
+                        conn,
+                        dsn.as_ptr(),
+                        dsn.len() as i16,
+                        std::ptr::null(),
+                        0,
+                        std::ptr::null(),
+                        0,
+                    ),
+                    SqlReturn::SUCCESS,
+                );
+            });
+            assert_eq!(
+                seen,
+                (true, Some("https://example.invalid/oauth".to_owned()))
+            );
+        }
+    }
+
+    #[test]
+    fn sql_browse_connect_has_no_completion_argument_and_so_permits_prompting() {
+        // Same reasoning as `SQLConnect`, and the same entry point's
+        // `B::connect`. `MockPrompterBackend` declares no
+        // `browse_connect_attrs`, so the first call has everything it needs and
+        // connects immediately.
+        unsafe {
+            let seen = prompter_seen_by::<crate::test_utils::MockPrompterBackend, _>(|conn| {
+                let wide: Vec<u16> = "Host=localhost".encode_utf16().collect();
+                assert_eq!(
+                    sql_browse_connect_w::<crate::test_utils::MockPrompterBackend>(
+                        conn,
+                        wide.as_ptr(),
+                        wide.len() as i16,
+                        std::ptr::null_mut(),
+                        0,
+                        std::ptr::null_mut(),
+                    ),
+                    SqlReturn::SUCCESS,
+                );
+            });
+            assert_eq!(
+                seen,
+                (true, Some("https://example.invalid/oauth".to_owned()))
+            );
+        }
+    }
+
+    #[test]
+    fn a_backend_that_declares_no_prompter_never_receives_one() {
+        // The defaulted `Backend::prompter` is what keeps every existing driver
+        // compiling and behaving exactly as before.
+        assert!(MockBackend::prompter().is_none());
     }
 
     #[test]

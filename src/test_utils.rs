@@ -4109,3 +4109,150 @@ impl Backend for MockCatalogRejectingBackend {
 
     minimal_capability_decls!();
 }
+
+// ---------------------------------------------------------------------------
+// MockPrompterBackend — declares a `Prompter`, and records whether one arrived
+// ---------------------------------------------------------------------------
+
+/// A [`Prompter`](crate::prompt::Prompter) that records what it was shown.
+///
+/// Recording rather than inert: a prompter that did nothing could not tell
+/// "core handed the backend a live prompter" apart from "core handed it one it
+/// could not call".
+#[derive(Default)]
+pub struct RecordingPrompter {
+    pub urls: crate::sync::Mutex<Vec<String>>,
+}
+
+impl crate::prompt::Prompter for RecordingPrompter {
+    fn present_url(&self, url: &str) -> Result<(), OdbcError> {
+        let mut urls = self.urls.lock().map_err(|_| {
+            OdbcError::general(
+                "prompter mutex poisoned",
+                crate::types::SqlState::general_error(),
+            )
+        })?;
+        urls.push(url.to_owned());
+        Ok(())
+    }
+}
+
+/// What `Backend::connect` observed about the prompter core handed it.
+pub struct MockPrompterConnection {
+    /// Whether [`ConnectParams::prompter`] was `Some` at the moment
+    /// `Backend::connect` ran. Captured there because that call is the only
+    /// place a backend ever sees it.
+    pub saw_prompter: bool,
+    /// The URL the prompter was actually driven with, if `connect` called it.
+    /// Proves the value core passed is a working prompter and not just a
+    /// non-`None` pointer.
+    pub presented: Option<String>,
+}
+
+/// A backend that declares a real prompter.
+///
+/// Its `connect` presents a fixed URL through whatever prompter it was given,
+/// so a test can assert on both the gate (`saw_prompter`) and the fact that the
+/// thing passed through is callable (`presented`).
+pub struct MockPrompterBackend;
+
+impl Backend for MockPrompterBackend {
+    type Connection = MockPrompterConnection;
+    type Statement = MockStatement;
+    type Error = MockError;
+    type CancelToken = MockCancelToken;
+
+    fn prompter() -> Option<std::sync::Arc<dyn crate::prompt::Prompter>> {
+        Some(std::sync::Arc::new(RecordingPrompter::default()))
+    }
+
+    fn connect(params: &ConnectParams) -> Result<MockPrompterConnection, MockError> {
+        let presented = params.prompter().map(|p| {
+            let url = "https://example.invalid/oauth";
+            p.present_url(url).expect("RecordingPrompter never fails");
+            url.to_owned()
+        });
+        Ok(MockPrompterConnection {
+            saw_prompter: params.prompter().is_some(),
+            presented,
+        })
+    }
+    fn disconnect(_: &mut MockPrompterConnection) -> Result<(), MockError> {
+        Ok(())
+    }
+    fn cancel_token(_conn: &Self::Connection) -> Self::CancelToken {
+        MockCancelToken::default()
+    }
+    fn exec_direct(
+        _: &Self::Connection,
+        _: &Self::CancelToken,
+        _: &str,
+    ) -> Result<MockStatement, MockError> {
+        Err(MockError)
+    }
+    fn prepare(
+        _: &Self::Connection,
+        _: &Self::CancelToken,
+        _: &str,
+    ) -> Result<MockStatement, MockError> {
+        Err(MockError)
+    }
+    fn execute(
+        _: &Self::Connection,
+        _: &Self::CancelToken,
+        _: &mut MockStatement,
+        _: &[crate::types::ColumnValue],
+    ) -> Result<crate::types::ExecuteOutcome, MockError> {
+        Err(MockError)
+    }
+    fn get_info(_: &Self::Connection, _: crate::types::InfoType) -> Result<InfoValue, MockError> {
+        Err(MockError)
+    }
+    fn get_functions() -> Cow<'static, [crate::function_id::FunctionId]> {
+        Cow::Borrowed(&[])
+    }
+    fn get_type_info(_conn: &Self::Connection) -> Cow<'static, [TypeInfoRow]> {
+        Cow::Borrowed(&[])
+    }
+    fn tables(
+        _: &Self::Connection,
+        _: &Self::CancelToken,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: &[String],
+    ) -> Result<Vec<TableRow>, MockError> {
+        Err(MockError)
+    }
+    fn columns(
+        _: &Self::Connection,
+        _: &Self::CancelToken,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+    ) -> Result<Vec<ColumnRow>, MockError> {
+        Err(MockError)
+    }
+
+    fn supports_catalogs(_conn: &Self::Connection) -> bool {
+        false
+    }
+    fn supports_schemas(_conn: &Self::Connection) -> bool {
+        false
+    }
+    fn alter_table_support(_conn: &Self::Connection) -> u32 {
+        0
+    }
+    fn outer_join_capabilities(_conn: &Self::Connection) -> u32 {
+        0
+    }
+    fn default_txn_isolation(_conn: &Self::Connection) -> u32 {
+        0
+    }
+    fn txn_isolation_options(_conn: &Self::Connection) -> u32 {
+        0
+    }
+
+    minimal_capability_decls!();
+}

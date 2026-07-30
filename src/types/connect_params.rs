@@ -4,8 +4,10 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::errors::OdbcError;
+use crate::prompt::Prompter;
 
 // ---------------------------------------------------------------------------
 // ODBC spec connection string keyword constants
@@ -40,6 +42,11 @@ pub struct ConnectParams {
     /// `SQL_ATTR_CONNECTION_TIMEOUT`, in seconds, if the application set one.
     /// Kept out of `params` for the same reason as [`Self::login_timeout`].
     connection_timeout: Option<u32>,
+    /// The backend's own [`Prompter`], when the entry point's
+    /// *DriverCompletion* permits prompting. Kept out of `params` for the same
+    /// reason as the two timeouts above, and for a second one: it is not a
+    /// string and could not be rendered into a connection string at all.
+    prompter: Option<Arc<dyn Prompter>>,
 }
 
 /// Substrings that mark a connection-string keyword as carrying a credential.
@@ -79,6 +86,13 @@ fn is_sensitive_keyword(key: &str) -> bool {
 }
 
 impl std::fmt::Debug for ConnectParams {
+    /// Renders the connection-string keywords and nothing else.
+    ///
+    /// The three fields that are not keywords are deliberately omitted rather
+    /// than redacted. The two timeouts are already logged where they are read,
+    /// and [`Self::prompter`] is a trait object with nothing to render — an
+    /// entry for it would only add noise to a line whose job is to show what
+    /// the application actually asked for.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut map = f.debug_map();
         for (key, value) in &self.params {
@@ -200,6 +214,7 @@ impl ConnectParams {
             // `Backend::connect`.
             login_timeout: None,
             connection_timeout: None,
+            prompter: None,
         })
     }
 
@@ -299,6 +314,38 @@ impl ConnectParams {
         self.connection_timeout = connection;
     }
 
+    /// The driver's own [`Prompter`], if this connect is allowed to use one.
+    ///
+    /// `None` has two causes a backend does not need to tell apart, and must
+    /// treat identically: the driver declared no
+    /// [`Backend::prompter`](crate::backend::Backend::prompter), or the
+    /// application passed `SQL_DRIVER_NOPROMPT` to `SQLDriverConnect` and the
+    /// spec forbids prompting for this call. Either way there is nothing to
+    /// call, which is the point of routing it through here rather than letting
+    /// a backend reach `Backend::prompter` itself: a call site cannot forget a
+    /// rule it never has to check.
+    ///
+    /// A backend that needs interactive authentication and finds `None` should
+    /// fail the connect with whatever its non-interactive path reports —
+    /// `SQL_DRIVER_NOPROMPT`'s own clause in the spec says exactly that: "if the
+    /// connection string contains enough information, the driver connects to
+    /// the data source ... Otherwise, the driver returns SQL_ERROR."
+    #[must_use]
+    pub fn prompter(&self) -> Option<&dyn Prompter> {
+        self.prompter.as_deref()
+    }
+
+    /// Record the prompter this connect may use, just before
+    /// [`Backend::connect`](crate::backend::Backend::connect).
+    ///
+    /// Called by the three connect entry points; not public, because the
+    /// decision is core's — it is what enforces *DriverCompletion*, and a
+    /// driver able to set this could hand itself a prompter the application
+    /// forbade.
+    pub(crate) fn set_prompter(&mut self, prompter: Option<Arc<dyn Prompter>>) {
+        self.prompter = prompter;
+    }
+
     /// Insert a key-value pair. The key is stored in lowercase for case-insensitive lookup.
     pub fn insert(&mut self, key: impl Into<String>, value: impl Into<String>) {
         self.params.insert(key.into().to_lowercase(), value.into());
@@ -365,6 +412,7 @@ impl FromIterator<(String, String)> for ConnectParams {
             sensitive_keywords: Cow::Borrowed(&[]),
             login_timeout: None,
             connection_timeout: None,
+            prompter: None,
         }
     }
 }
@@ -547,6 +595,47 @@ mod tests {
         params.insert("driver", "My Driver;v2");
         let s = params.to_connection_string();
         assert!(s.contains("driver={My Driver;v2}"));
+    }
+
+    // -----------------------------------------------------------------------
+    // prompter
+    //
+    // The prompter is core's, not the connection string's: it is set from
+    // `Backend::prompter` under `SQLDriverConnect`'s *DriverCompletion* gate.
+    // Everything that renders a `ConnectParams` back to the application or to a
+    // log must therefore be blind to it.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_freshly_parsed_connect_params_carries_no_prompter() {
+        let params = ConnectParams::parse("Host=localhost").unwrap();
+        assert!(params.prompter().is_none());
+    }
+
+    #[test]
+    fn debug_does_not_render_the_prompter() {
+        // `Debug` is hand-written for redaction. A prompter is not a value to
+        // render at all, so it must be absent rather than redacted — an entry
+        // reading `prompter: *****` would still be an entry no application
+        // wrote.
+        let mut params = ConnectParams::parse("Host=localhost").unwrap();
+        let bare = format!("{params:?}");
+        params.set_prompter(Some(std::sync::Arc::new(
+            crate::test_utils::RecordingPrompter::default(),
+        )));
+        assert_eq!(format!("{params:?}"), bare);
+    }
+
+    #[test]
+    fn to_connection_string_is_unchanged_by_a_prompter() {
+        // `to_connection_string` feeds `SQLDriverConnect`'s
+        // *OutConnectionString*, which the application may hand back verbatim.
+        let mut params = ConnectParams::parse("Host=localhost;Port=8080").unwrap();
+        let bare = params.to_connection_string();
+        params.set_prompter(Some(std::sync::Arc::new(
+            crate::test_utils::RecordingPrompter::default(),
+        )));
+        assert_eq!(params.to_connection_string(), bare);
     }
 
     #[test]

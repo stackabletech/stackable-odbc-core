@@ -4,8 +4,8 @@
 //! called at the FFI boundary before any logic runs.
 
 use odbc_sys::{
-    AttrOdbcVersion, CDataType, Desc, EnvironmentAttribute, FetchOrientation, FreeStmtOption,
-    HandleType, InfoType, StatementAttribute,
+    AttrOdbcVersion, CDataType, Desc, DriverConnectOption, EnvironmentAttribute, FetchOrientation,
+    FreeStmtOption, HandleType, InfoType, StatementAttribute,
 };
 use odbc_sys::{BulkOperation, CompletionType, ParamType};
 
@@ -316,6 +316,28 @@ pub fn free_stmt_option_from_raw(value: u16) -> Option<FreeStmtOption> {
         0 => Some(FreeStmtOption::Close),
         2 => Some(FreeStmtOption::Unbind),
         3 => Some(FreeStmtOption::ResetParams),
+        _ => None,
+    }
+}
+
+/// Convert a raw `u16` from the ODBC ABI into an `odbc_sys::DriverConnectOption`.
+///
+/// This is `SQLDriverConnect`'s *DriverCompletion* argument, which tells the
+/// driver whether it may prompt the user.
+///
+/// Returns `None` for values that are not a recognised completion flag. The
+/// spec's state for that is `HY110` ("Invalid driver completion"), but **both**
+/// of its clauses carry `(DM)`, so the check belongs to the Driver Manager and
+/// core adds none — the caller treats `None` as permitting a prompt, which is
+/// the reading that does not silently disable interactive authentication for an
+/// application whose value never reached a Driver Manager to be validated.
+#[must_use]
+pub fn driver_connect_option_from_raw(value: u16) -> Option<DriverConnectOption> {
+    match value {
+        0 => Some(DriverConnectOption::NoPrompt),
+        1 => Some(DriverConnectOption::Complete),
+        2 => Some(DriverConnectOption::Prompt),
+        3 => Some(DriverConnectOption::CompleteRequired),
         _ => None,
     }
 }
@@ -901,6 +923,34 @@ mod tests {
         // 1 is SQL_DROP (handled separately), not a FreeStmtOption
         assert_eq!(free_stmt_option_from_raw(1), None);
         assert_eq!(free_stmt_option_from_raw(4), None);
+    }
+
+    // --- driver_connect_option_from_raw ---
+
+    #[test]
+    fn driver_connect_option_valid() {
+        assert_eq!(
+            driver_connect_option_from_raw(0),
+            Some(DriverConnectOption::NoPrompt)
+        );
+        assert_eq!(
+            driver_connect_option_from_raw(1),
+            Some(DriverConnectOption::Complete)
+        );
+        assert_eq!(
+            driver_connect_option_from_raw(2),
+            Some(DriverConnectOption::Prompt)
+        );
+        assert_eq!(
+            driver_connect_option_from_raw(3),
+            Some(DriverConnectOption::CompleteRequired)
+        );
+    }
+
+    #[test]
+    fn driver_connect_option_invalid() {
+        assert_eq!(driver_connect_option_from_raw(4), None);
+        assert_eq!(driver_connect_option_from_raw(u16::MAX), None);
     }
 
     // --- statement_attribute_from_raw ---

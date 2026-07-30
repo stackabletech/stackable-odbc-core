@@ -74,6 +74,35 @@ Everything a driver has to change for the catalog rework, in one place.
 
 ### Added
 
+- **A driver can reach the user during a connect: `Prompter`.** The new
+  `prompt::Prompter` trait has one method, `present_url(&str)`, and the new
+  defaulted `Backend::prompter() -> Option<Arc<dyn Prompter>>` is how a driver
+  supplies an implementation. A backend reads it back through the new
+  `ConnectParams::prompter()` inside its own `connect`. This is what an OAuth
+  2.0 external-authentication flow needs: the data source answers the initial
+  request with a login URL a human has to visit, and until now there was
+  nowhere in the API to put it.
+
+  Core ships no implementation and gains no dependency — no browser opener, no
+  dialog, no cargo feature. It carries the trait definition and decides *whether*
+  prompting is permitted; the driver supplies *how*.
+
+  `present_url` must return promptly. It presents the URL; it does not wait for
+  the user to act on it. A driver polling for the result of an interactive login
+  does that in its own `connect`, which is already the call the application is
+  blocked in.
+
+  Nothing existing changes: `Backend::prompter` is defaulted to `None`, so a
+  driver that does not implement it behaves exactly as before, and
+  `ConnectParams`' hand-written `Debug` and its `to_connection_string` are both
+  blind to the new field — a prompter never appears in a log line or in
+  `SQLDriverConnect`'s *OutConnectionString*.
+
+- **`driver_connect_option_from_raw`.** Converts `SQLDriverConnect`'s raw
+  *DriverCompletion* `u16` into `odbc_sys::DriverConnectOption`, which is now
+  re-exported from `types`. Follows the existing `*_from_raw` family; an
+  unrecognised value is `None`, never a transmute.
+
 - **The descriptor fields are reachable.** `SQLGetDescFieldW`,
   `SQLSetDescFieldW`, `SQLGetDescRecW` and `SQLSetDescRec` are implemented over
   the four descriptors a statement owns, and `SQLGetFunctions` reports them
@@ -1235,6 +1264,33 @@ Everything a driver has to change for the catalog rework, in one place.
   compared against. Use `HeaderDiagnosticIdentifier::MessageText as i16`.
 
 ### Fixed
+
+- **`SQLDriverConnect`'s *DriverCompletion* is no longer discarded.** The
+  argument was accepted and ignored, and the doc comment said so outright. An
+  application passing `SQL_DRIVER_NOPROMPT` — the spec's instruction that the
+  driver must not prompt the user — was getting a driver with no way to honour
+  it, because the value never reached `Backend::connect`.
+
+  It now decides exactly one thing, which is the only thing core does that a
+  prompt could affect: whether the backend is handed `Backend::prompter`.
+  `SQL_DRIVER_NOPROMPT` withholds it, so a backend needing interactive
+  authentication has nothing to call and the rule cannot be forgotten at a call
+  site. `SQL_DRIVER_COMPLETE`, `SQL_DRIVER_PROMPT` and
+  `SQL_DRIVER_COMPLETE_REQUIRED` all permit it.
+
+  `SQLConnect` and `SQLBrowseConnect` have no such argument, and their absence
+  is read as permitting a prompt rather than forbidding one. `SQLConnect` is the
+  DSN path, which is how `isql` and Excel connect, so those are the likeliest
+  interactive callers of the whole driver; treating the missing argument as
+  `SQL_DRIVER_NOPROMPT` would lock DSN connections out of interactive
+  authentication entirely, and no spec text asks for that.
+
+  An unrecognised *DriverCompletion* is accepted and permits a prompt. The
+  spec's state for it is `HY110`, but **both** clauses of that row carry `(DM)`,
+  so the check belongs to the Driver Manager and core adds none; a value
+  reaching the driver at all means no Driver Manager validated it, and the
+  permissive reading is the one that does not silently disable a feature the
+  application may be relying on. Core logs a `warn!` for it.
 
 - **`SQL_DESC_DATETIME_INTERVAL_CODE` is the subcode, not the concise type.**
   `SQLColAttributeW` reported `SQL_TYPE_TIMESTAMP` (93) for a timestamp column

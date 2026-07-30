@@ -171,6 +171,40 @@ Two consequences generalise to any hook of this shape:
   rather than degrading it; a connection that failed because the catalog does
   not exist should say so.
 
+### Prompting the user: core decides whether, the driver decides how
+
+A driver needing interactive authentication — an OAuth 2.0 external flow, say —
+implements `prompt::Prompter` and returns it from the defaulted
+`Backend::prompter`. It reads it back inside its own `connect`, from
+`ConnectParams::prompter()`, and **never** by calling `Backend::prompter`
+directly: that method is ungated and says what the driver *could* do, not what
+this call is allowed to do.
+
+The gate is `SQLDriverConnect`'s *DriverCompletion*, and it lives in exactly one
+function, `prompter_for` in `ffi/connect.rs`. Three points that are easy to get
+wrong in the other direction:
+
+- **A withheld prompter is `None`, not an error.** Under `SQL_DRIVER_NOPROMPT`
+  the backend is simply handed nothing to call, so the spec's "do not prompt"
+  cannot be forgotten at a call site. A backend that finds `None` and needs a
+  prompt fails the connect the way the spec's own `SQL_DRIVER_NOPROMPT` clause
+  says: "otherwise, the driver returns SQL_ERROR."
+- **`SQLConnect` and `SQLBrowseConnect` have no such argument, and absence
+  permits prompting.** `SQLConnect` is the DSN path — `isql` and Excel — so
+  those are the likeliest interactive callers of the whole driver. Reading the
+  missing argument as `SQL_DRIVER_NOPROMPT` would lock DSN connections out of
+  interactive authentication, and no spec text asks for it.
+- **An unrecognised value is accepted.** `HY110` carries `(DM)` on *both* of its
+  clauses, so core adds no check, and the fallback is the most permissive
+  treatment rather than a driver-side error borrowed from a Driver-Manager row.
+
+Core ships no `Prompter` implementation and must not gain a dependency for one:
+every implementation it could offer needs a platform (a browser, a window
+system) that the database-independent half of a driver has no business
+choosing. A Windows dialog implementation would belong here, next to
+`SQLDriverConnectW`, but it needs its own design and its own dependency; the
+trait is shaped so it can arrive later without changing the backend-facing API.
+
 ## Adding a new ODBC function
 
 1. **Read the ODBC spec first.** Every function has a spec page at `https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/<function-name>-function?view=sql-server-ver17` (e.g. `sqlallochandle-function`). Read it in detail before writing any code.
@@ -1078,6 +1112,7 @@ ODBC Application (e.g. isql)
           -> validation checks                 # 08002, HY090 -- per ODBC spec
           -> utf16_to_string(...)              # convert UTF-16 input to Rust String
           -> merge_dsn_params(...)             # parse "Key=Value;..."; if DSN= is present, resolve its keys from odbc.ini (explicit values win) and re-parse
+          -> params.set_prompter(prompter_for::<B>(completion))  # B::prompter(), unless DriverCompletion is SQL_DRIVER_NOPROMPT
           -> B::connect(&params)               # Backend trait method (database-specific); the one method not called under the group lock
           -> handle.connection = Some(conn)    # store result in handle
           -> apply_pending_autocommit::<B>(..) # apply a SQL_ATTR_AUTOCOMMIT set before connect; tears the connection down on failure
@@ -1134,6 +1169,7 @@ Generic framework. Zero database-specific code.
 | `types/redacted.rs` | `Redacted<T>` — `Debug` wrapper that prints `*****` for sensitive fields (e.g. passwords) |
 | `column_value.rs` | `write_column_value()` — core data marshalling for `SQLGetData` (NULL, truncation, type coercion) |
 | `param_convert.rs` | `text_to_sql_type()` — the reverse direction: converts `SQL_C_CHAR`/`SQL_C_WCHAR` parameter text to the SQL type `SQLBindParameter` declared. The spec's "C to SQL: Character" table, transcribed |
+| `prompt.rs` | `Prompter` — the trait a driver implements to present a login URL to the user during a connect. Definition only: core ships no implementation and gains no dependency |
 | `query_timer.rs` | `QueryTimer` — core-side `SQL_ATTR_QUERY_TIMEOUT` enforcement: a timer thread that calls `Backend::cancel` on expiry and relabels the resulting failure `HYT00` |
 | `synthetic.rs` | `SyntheticStatement` — in-memory result set for `SQLGetTypeInfo` and catalog functions |
 | `catalog_sort.rs` | Sorts a catalog result set into its spec-mandated order; NULL placement from `Backend::null_collation` |

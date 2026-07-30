@@ -5,9 +5,9 @@
 // See AGENTS.md for the rationale.
 pub use odbc_sys::{
     AttrOdbcVersion, CDataType, CompletionType, ConnectionAttribute, Date, Desc,
-    EnvironmentAttribute, FreeStmtOption, Guid, HandleType, HeaderDiagnosticIdentifier, InfoType,
-    Len, NO_TOTAL, Numeric, ParamType, Pointer, SqlDataType, SqlReturn, StatementAttribute, Time,
-    Timestamp, ULen, WChar,
+    DriverConnectOption, EnvironmentAttribute, FreeStmtOption, Guid, HandleType,
+    HeaderDiagnosticIdentifier, InfoType, Len, NO_TOTAL, Numeric, ParamType, Pointer, SqlDataType,
+    SqlReturn, StatementAttribute, Time, Timestamp, ULen, WChar,
 };
 
 // ---------------------------------------------------------------------------

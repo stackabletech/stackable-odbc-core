@@ -101,6 +101,32 @@ pub trait Backend: Sized + Send + Sync + 'static {
         Cow::Borrowed(&[])
     }
 
+    /// The driver's interactive prompter, if it has one.
+    ///
+    /// Core calls this while connecting and gates the result on
+    /// `SQLDriverConnect`'s *DriverCompletion*: under `SQL_DRIVER_NOPROMPT` the
+    /// backend receives `None` from
+    /// [`ConnectParams::prompter`](crate::types::ConnectParams::prompter) and
+    /// has nothing to call, so the spec's "do not prompt" cannot be forgotten
+    /// at a call site. `SQLConnect` and `SQLBrowseConnect` have no such
+    /// argument and always permit it.
+    ///
+    /// Read it from `ConnectParams` inside [`Backend::connect`], never by
+    /// calling this method directly — this one is ungated and says only what
+    /// the driver *could* do, not what this call is allowed to do.
+    ///
+    /// Static, like [`Backend::connect`] and
+    /// [`Backend::sensitive_connect_keywords`]: there is no connection yet when
+    /// core asks. A driver whose prompter varies per connection string can
+    /// return one implementation that reads the difference at
+    /// [`Prompter::present_url`](crate::prompt::Prompter::present_url) time.
+    ///
+    /// Defaulted, so a driver with no interactive authentication never has to
+    /// think about it.
+    fn prompter() -> Option<std::sync::Arc<dyn crate::prompt::Prompter>> {
+        None
+    }
+
     /// Closes an existing connection and releases associated resources.
     ///
     /// Called by `SQLDisconnect`.
