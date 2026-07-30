@@ -412,6 +412,15 @@ pub const SQL_AM_STATEMENT: u32 = 2;
 /// `SQL_CA1_NEXT` — `SQL_FETCH_NEXT` orientation is supported in `SQLFetchScroll`.
 pub const SQL_CA1_NEXT: u32 = 0x0000_0001;
 
+/// `SQL_FETCH_BOOKMARK` (8) — fetch the rowset at a bookmark.
+///
+/// Not in `odbc-sys`: its `FetchOrientation` stops at `Relative = 6` and jumps to
+/// the `SQLDataSources` directions, so the bookmark orientation has no variant.
+/// The value is nonetheless a real one an application can pass, and both
+/// `SQLFetchScroll` and `SQLExtendedFetch` name it on their `HY106` rows, so this
+/// driver has to have a name for what it is rejecting.
+pub const SQL_FETCH_BOOKMARK: i16 = 8;
+
 /// `SQL_SQ_COMPARISON` — subqueries are supported in comparison predicates.
 pub const SQL_SQ_COMPARISON: u32 = 0x0000_0001;
 /// `SQL_SQ_EXISTS` — subqueries are supported in `EXISTS` predicates.

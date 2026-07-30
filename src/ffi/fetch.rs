@@ -78,31 +78,67 @@ unsafe fn row_bind_offset(ard: &Descriptor) -> usize {
     unsafe { std::ptr::read_unaligned(raw as *const usize) }
 }
 
-/// Write `count` through `SQL_ATTR_ROWS_FETCHED_PTR` and `status` into the first
-/// element of `SQL_ATTR_ROW_STATUS_PTR`, when the application set either.
+/// Where a fetch reports its row count and row status.
 ///
-/// Only element 0 is written because `SQL_ATTR_ROW_ARRAY_SIZE` is pinned at 1
+/// `SQLFetch` and `SQLFetchScroll` report through the `SQL_ATTR_ROWS_FETCHED_PTR`
+/// and `SQL_ATTR_ROW_STATUS_PTR` statement attributes. `SQLExtendedFetch` reports
+/// through its own `RowCountPtr` and `RowStatusArray` arguments instead, and the
+/// spec is explicit that the two are not the same storage: that buffer "is used
+/// only by **SQLExtendedFetch**. It is not used by **SQLFetch** or
+/// **SQLFetchScroll**", and "the address of this array is not stored in the
+/// SQL_DESC_STATUS_ARRAY_PTR field in the IRD".
+///
+/// Modelled as a destination rather than a flag so the two are mutually
+/// exclusive by construction: writing to both is the bug this type exists to
+/// make unrepresentable.
+#[derive(Clone, Copy)]
+enum RowReport {
+    /// `SQLFetch` / `SQLFetchScroll`: the statement attributes.
+    Attributes,
+    /// `SQLExtendedFetch`: the function's own arguments. Either may be null, in
+    /// which case nothing is written through it.
+    Arguments {
+        row_count: *mut usize,
+        row_status: *mut u16,
+    },
+}
+
+/// Write `count` and `status` to wherever `report` says they go, when the
+/// application supplied a destination.
+///
+/// Only element 0 of a row-status array is written because
+/// `SQL_ATTR_ROW_ARRAY_SIZE` and `SQL_ROWSET_SIZE` are both pinned at 1
 /// (`ffi/stmt_attr.rs` substitutes anything else back with `01S02`), so the
 /// rowset this driver produces has exactly one row and the application's array
 /// is required to be at least that long.
 ///
 /// # Safety
 ///
-/// Each stored attribute must be null or a pointer to a valid, writable `usize`
-/// / `u16` respectively — the application's undertaking when it set them.
-unsafe fn report_rows_fetched<B: Backend>(stmt: &StatementHandle<B>, count: usize, status: u16) {
-    unsafe { report_rows_fetched_only(stmt, count) };
+/// For [`RowReport::Attributes`], each stored attribute must be null or a
+/// pointer to a valid, writable `usize` / `u16` respectively — the application's
+/// undertaking when it set them. For [`RowReport::Arguments`], the same
+/// undertaking applies to the two arguments, per the `SQLExtendedFetch` contract.
+unsafe fn report_rows_fetched<B: Backend>(
+    stmt: &StatementHandle<B>,
+    report: RowReport,
+    count: usize,
+    status: u16,
+) {
+    unsafe { report_rows_fetched_only(stmt, report, count) };
 
-    let raw = stmt
-        .attrs
-        .get(&(odbc_sys::StatementAttribute::RowStatusPtr as i32))
-        .copied()
-        .unwrap_or(0);
-    if raw != 0 {
-        // SAFETY: non-zero means the application supplied a row-status array of
-        // at least SQL_ATTR_ROW_ARRAY_SIZE (= 1) elements. Unaligned because the
-        // array may sit at any offset in a packed buffer.
-        unsafe { std::ptr::write_unaligned(raw as *mut u16, status) };
+    let target: *mut u16 = match report {
+        RowReport::Attributes => stmt
+            .attrs
+            .get(&(odbc_sys::StatementAttribute::RowStatusPtr as i32))
+            .copied()
+            .unwrap_or(0) as *mut u16,
+        RowReport::Arguments { row_status, .. } => row_status,
+    };
+    if !target.is_null() {
+        // SAFETY: non-null means the application supplied a row-status array of
+        // at least one element. Unaligned because the array may sit at any
+        // offset in a packed buffer.
+        unsafe { std::ptr::write_unaligned(target, status) };
     }
 }
 
@@ -112,15 +148,22 @@ unsafe fn report_rows_fetched<B: Backend>(stmt: &StatementHandle<B>, count: usiz
 /// # Safety
 ///
 /// See [`report_rows_fetched`].
-unsafe fn report_rows_fetched_only<B: Backend>(stmt: &StatementHandle<B>, count: usize) {
-    let raw = stmt
-        .attrs
-        .get(&(odbc_sys::StatementAttribute::RowsFetchedPtr as i32))
-        .copied()
-        .unwrap_or(0);
-    if raw != 0 {
-        // SAFETY: non-zero means the application supplied a writable SQLULEN.
-        unsafe { std::ptr::write_unaligned(raw as *mut usize, count) };
+unsafe fn report_rows_fetched_only<B: Backend>(
+    stmt: &StatementHandle<B>,
+    report: RowReport,
+    count: usize,
+) {
+    let target: *mut usize = match report {
+        RowReport::Attributes => stmt
+            .attrs
+            .get(&(odbc_sys::StatementAttribute::RowsFetchedPtr as i32))
+            .copied()
+            .unwrap_or(0) as *mut usize,
+        RowReport::Arguments { row_count, .. } => row_count,
+    };
+    if !target.is_null() {
+        // SAFETY: non-null means the application supplied a writable SQLULEN.
+        unsafe { std::ptr::write_unaligned(target, count) };
     }
 }
 
@@ -203,9 +246,30 @@ unsafe fn report_rows_fetched_only<B: Backend>(stmt: &StatementHandle<B>, count:
 /// `statement_handle` must point to a valid `StatementHandle<B>`.
 pub unsafe fn sql_fetch<B: Backend>(statement_handle: *mut c_void) -> SqlReturn {
     tracing::debug!("SQLFetch(stmt={:?})", statement_handle);
+    // SAFETY: same preconditions as this function.
+    let ret = unsafe { fetch_with_report::<B>(statement_handle, RowReport::Attributes) };
+    tracing::debug!("SQLFetch -> {:?}", ret);
+    ret
+}
+
+/// The shared body of `SQLFetch`, `SQLFetchScroll` and `SQLExtendedFetch`.
+///
+/// Carries no entry or exit logging: each public entry point logs under its own
+/// name, so a delegating caller does not report the wrong function. Every
+/// SQLSTATE it can produce is documented on [`sql_fetch`], whose diagnostics
+/// table it implements.
+///
+/// # Safety
+///
+/// `statement_handle` must point to a valid `StatementHandle<B>`, and `report`
+/// must satisfy [`report_rows_fetched`]'s contract.
+unsafe fn fetch_with_report<B: Backend>(
+    statement_handle: *mut c_void,
+    report: RowReport,
+) -> SqlReturn {
     // SAFETY: statement_handle is null or a valid StatementHandle<B> allocated by
     // sql_alloc_handle; kind and group are validated by scope.get inside the closure.
-    let ret = unsafe {
+    unsafe {
         panic_safe::<B, _>(statement_handle, |scope| {
             scope
                 .get::<StatementHandle<B>>(statement_handle)?
@@ -378,14 +442,14 @@ pub unsafe fn sql_fetch<B: Backend>(statement_handle: *mut c_void) -> SqlReturn 
                     if truncated {
                         // SAFETY: application-supplied pointers; see
                         // `report_rows_fetched`.
-                        report_rows_fetched(stmt, 1, SQL_ROW_SUCCESS_WITH_INFO);
+                        report_rows_fetched(stmt, report, 1, SQL_ROW_SUCCESS_WITH_INFO);
                         stmt.diagnostics.push(&OdbcError::StringTruncated);
                         return Ok(SqlReturn::SUCCESS_WITH_INFO);
                     }
 
                     // SAFETY: application-supplied pointers; see
                     // `report_rows_fetched`.
-                    report_rows_fetched(stmt, 1, SQL_ROW_SUCCESS);
+                    report_rows_fetched(stmt, report, 1, SQL_ROW_SUCCESS);
                     Ok(SqlReturn::SUCCESS)
                 }
                 FetchResult::NoData => {
@@ -396,14 +460,12 @@ pub unsafe fn sql_fetch<B: Backend>(statement_handle: *mut c_void) -> SqlReturn 
                     // driver ever produces.
                     // SAFETY: application-supplied pointer; see
                     // `report_rows_fetched`.
-                    report_rows_fetched_only(stmt, 0);
+                    report_rows_fetched_only(stmt, report, 0);
                     Ok(SqlReturn::NO_DATA)
                 }
             }
         })
-    };
-    tracing::debug!("SQLFetch -> {:?}", ret);
-    ret
+    }
 }
 
 /// Generic implementation of SQLFetchScroll.
@@ -509,6 +571,178 @@ pub unsafe fn sql_fetch_scroll<B: Backend>(
         })
     };
     tracing::debug!("SQLFetchScroll -> {:?}", ret);
+    ret
+}
+
+/// Generic implementation of SQLExtendedFetch.
+///
+/// Spec: <https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlextendedfetch-function>
+///
+/// The ODBC 2.x block-fetch entry point. ODBC 3.x replaced it with
+/// `SQLFetchScroll`, but the spec asks a 3.x driver to keep it: "ODBC 3.x
+/// drivers should support **SQLExtendedFetch** if they want to work with ODBC
+/// 2.x applications that call it." The Driver Manager also maps a 2.x
+/// application's `SQLFetchScroll` onto it.
+///
+/// Its Comments open with "the behavior of **SQLExtendedFetch** is identical to
+/// that of **SQLFetchScroll**, with the following exceptions", and for a
+/// forward-only driver with a rowset of one only two of those exceptions have
+/// any effect — both about *where* the results are reported:
+///
+/// - the row count goes to `*RowCountPtr`, because that buffer "is used only by
+///   **SQLExtendedFetch**. It is not used by **SQLFetch** or **SQLFetchScroll**";
+/// - the row status goes to `RowStatusArray`, because "the address of this array
+///   is not stored in the SQL_DESC_STATUS_ARRAY_PTR field in the IRD".
+///
+/// So this shares [`sql_fetch`]'s body through a caller-directed report and does
+/// **not** touch `SQL_ATTR_ROWS_FETCHED_PTR` or `SQL_ATTR_ROW_STATUS_PTR`. The
+/// remaining exceptions are inert here: bookmarks are unsupported, binding
+/// offsets are read per fetch either way, and the rowset size —
+/// `SQL_ROWSET_SIZE` rather than `SQL_ATTR_ROW_ARRAY_SIZE` — is pinned at 1 by
+/// `ffi/stmt_attr.rs` through both doors.
+///
+/// # Parameters
+///
+/// - `statement_handle`: statement handle (SQL_HANDLE_STMT).
+/// - `fetch_orientation`: `SQL_FETCH_NEXT`, `SQL_FETCH_PRIOR`,
+///   `SQL_FETCH_FIRST`, `SQL_FETCH_LAST`, `SQL_FETCH_ABSOLUTE`,
+///   `SQL_FETCH_RELATIVE` or `SQL_FETCH_BOOKMARK`. Only `SQL_FETCH_NEXT` is
+///   supported. Note this is `SQLUSMALLINT` here where `SQLFetchScroll` types it
+///   `SQLSMALLINT`.
+/// - `fetch_offset`: row offset for the orientations that take one; ignored,
+///   since none of those is supported.
+/// - `row_count_ptr`: receives the number of rows fetched. May be null, in which
+///   case nothing is written through it.
+/// - `row_status_array`: receives the status of each row. May be null; the spec
+///   calls the application's behaviour undefined in that case, and this driver
+///   writes nothing rather than faulting.
+///
+/// # Spec compliance
+///
+/// - 01000 (general warning): not returned; driver-specific informational
+///   messages are not generated.
+/// - 01004 (string data right truncated): delegated to the shared fetch body for
+///   `SQL_FETCH_NEXT`.
+/// - 01S01 (error in row): not returned; only single-row rowsets are processed.
+/// - 01S06 (attempt to fetch before the result set returned the first rowset):
+///   not applicable; only `SQL_FETCH_NEXT` is supported, which cannot reach
+///   before-start.
+/// - 01S07 (fractional truncation): delegated to the shared fetch body.
+/// - 07006 (restricted data type attribute violation): delegated, via
+///   `write_column_value`.
+/// - 07009 (invalid descriptor index): the row describes a column 0 binding with
+///   `SQL_ATTR_USE_BOOKMARKS` off; bookmarks are not supported and the
+///   bookmark-binding check is driver-manager-handled. Not returned here.
+/// - 08S01 (communication link failure): propagated from the backend.
+/// - 22002 (indicator variable required but not supplied): delegated.
+/// - 22003 (numeric value out of range): delegated, via `write_column_value`.
+/// - 22007 (invalid datetime format): delegated.
+/// - 22012 (division by zero): propagated from the backend if the data source
+///   reports it.
+/// - 22015 (interval field overflow): delegated.
+/// - 22018 (invalid character value for cast specification): delegated.
+/// - 24000 (invalid cursor state): delegated; returned when the statement was
+///   executed but produced no result set. The row carries no (DM) marker.
+/// - HY000 (general error): propagated from the backend.
+/// - HY001 (memory allocation error): not returned; Rust panics on allocation
+///   failure.
+/// - HY008 (operation canceled): **returned by this driver**, via the shared
+///   body. The row's asynchronous clauses do not apply — core implements no
+///   asynchronous execution and never returns `SQL_STILL_EXECUTING` — but its
+///   "from a different thread in a multithread application" clause carries no
+///   (DM) marker and is honoured.
+/// - HY010 (function sequence error): every clause on this row carries (DM),
+///   including the "cannot be mixed with `SQLFetch`" ordering rule, so all are
+///   driver-manager-handled. The shared body still returns `HY010` when no
+///   result set is open, which is `SQLFetch`'s own unmarked clause.
+/// - HY013 (memory management error): not returned.
+/// - HY106 (fetch type out of range): **returned by this driver** for any
+///   orientation other than `SQL_FETCH_NEXT`. The row's first clause carries
+///   (DM), but the clause describing this driver — "The value of the
+///   SQL_CURSOR_TYPE statement option was SQL_CURSOR_FORWARD_ONLY, and the value
+///   of argument *FetchOrientation* was not SQL_FETCH_NEXT" — does not.
+/// - HY107 (row value out of range): not applicable; keyset cursors are not
+///   supported and `SQL_KEYSET_SIZE` is pinned at its default.
+/// - HY111 (invalid bookmark value): not applicable; bookmarks are not
+///   supported.
+/// - HY117 (connection suspended): driver-manager-handled; not returned here.
+/// - HYC00 (optional feature not implemented): delegated, via
+///   `write_column_value`, for an unsupported conversion. The row's fetch-type
+///   clause is answered with `HY106` instead, per the unmarked clause above.
+/// - HYT00 (timeout expired): **returned by this driver**, via the shared body,
+///   which arms the core-side deadline for a backend answering
+///   [`crate::types::QueryTimeout::CoreCancels`].
+/// - HYT01 (connection timeout expired): not implemented.
+/// - IM001 (driver does not support this function): driver-manager-handled; not
+///   returned here.
+///
+/// # Safety
+///
+/// `statement_handle` must point to a valid `StatementHandle<B>`.
+/// `row_count_ptr` and `row_status_array` must each be null or point to a valid
+/// writable `SQLULEN` / `SQLUSMALLINT`.
+pub unsafe fn sql_extended_fetch<B: Backend>(
+    statement_handle: *mut c_void,
+    fetch_orientation: u16,
+    fetch_offset: isize,
+    row_count_ptr: *mut usize,
+    row_status_array: *mut u16,
+) -> SqlReturn {
+    tracing::trace!(
+        "SQLExtendedFetch(stmt={:?}, orientation_raw={}, offset={})",
+        statement_handle,
+        fetch_orientation,
+        fetch_offset
+    );
+    // SQLExtendedFetch types FetchOrientation as SQLUSMALLINT where
+    // SQLFetchScroll uses SQLSMALLINT. A value outside i16 cannot name any
+    // orientation, so it narrows to the same "unrecognised" answer.
+    let orientation = i16::try_from(fetch_orientation)
+        .ok()
+        .and_then(fetch_orientation_from_raw);
+    tracing::debug!(
+        "SQLExtendedFetch(stmt={:?}, orientation={:?}, offset={})",
+        statement_handle,
+        orientation,
+        fetch_offset
+    );
+
+    let ret = if orientation == Some(FetchOrientation::Next) {
+        // SAFETY: same preconditions as this function: statement_handle is null
+        // or a valid StatementHandle<B>, and the two output pointers are null or
+        // writable, which is `report_rows_fetched`'s contract.
+        unsafe {
+            fetch_with_report::<B>(
+                statement_handle,
+                RowReport::Arguments {
+                    row_count: row_count_ptr,
+                    row_status: row_status_array,
+                },
+            )
+        }
+    } else {
+        // SAFETY: statement_handle is null or a valid StatementHandle<B> allocated
+        // by sql_alloc_handle; kind and group are validated by scope.get inside
+        // the closure.
+        unsafe {
+            panic_safe::<B, _>(statement_handle, |scope| {
+                let stmt = scope.get::<StatementHandle<B>>(statement_handle)?;
+                // Spec: clear diagnostics at the start of each ODBC call. The
+                // SQL_FETCH_NEXT branch above clears inside the shared body, so
+                // only this non-delegating branch needs its own clear.
+                stmt.diagnostics.clear();
+
+                Err(OdbcError::general(
+                    format!(
+                        "SQLExtendedFetch: unsupported fetch orientation {fetch_orientation} \
+                         (this driver's cursors are forward-only)"
+                    ),
+                    SqlState::fetch_type_out_of_range(),
+                ))
+            })
+        }
+    };
+    tracing::debug!("SQLExtendedFetch -> {:?}", ret);
     ret
 }
 
@@ -1249,6 +1483,266 @@ mod tests {
             assert_eq!(rows_fetched, 0, "rows-fetched not zeroed at end of cursor");
 
             cleanup_long_data(env, conn, stmt);
+        }
+    }
+
+    /// The other half of the split: [`RowReport::Arguments`] writes through the
+    /// caller's own pointers and leaves the statement attributes alone. The
+    /// spec makes them separate storage — that buffer "is used only by
+    /// **SQLExtendedFetch**" — so a destination that wrote both would satisfy
+    /// the attribute test above and still be wrong.
+    #[test]
+    fn a_report_to_arguments_bypasses_the_statement_attributes() {
+        unsafe {
+            let (env, conn, stmt) = long_data_stmt_no_fetch();
+
+            let mut attr_rows: usize = 999;
+            assert_eq!(
+                crate::ffi::stmt_attr::sql_set_stmt_attr_w::<MockLongDataBackend>(
+                    stmt,
+                    odbc_sys::StatementAttribute::RowsFetchedPtr as i32,
+                    std::ptr::from_mut(&mut attr_rows).cast::<c_void>(),
+                    0,
+                ),
+                SqlReturn::SUCCESS
+            );
+
+            let mut arg_rows: usize = 0;
+            let mut arg_status: u16 = 0;
+            assert_eq!(
+                fetch_with_report::<MockLongDataBackend>(
+                    stmt,
+                    RowReport::Arguments {
+                        row_count: std::ptr::from_mut(&mut arg_rows),
+                        row_status: std::ptr::from_mut(&mut arg_status),
+                    },
+                ),
+                SqlReturn::SUCCESS
+            );
+            assert_eq!(arg_rows, 1, "the argument is the destination");
+            assert_eq!(arg_status, SQL_ROW_SUCCESS);
+            assert_eq!(attr_rows, 999, "the attribute must be untouched");
+
+            cleanup_long_data(env, conn, stmt);
+        }
+    }
+
+    /// `SQL_FETCH_NEXT` is the one orientation a forward-only cursor serves, and
+    /// the count and status must land in the *arguments*.
+    #[test]
+    fn extended_fetch_next_reports_through_its_arguments() {
+        unsafe {
+            let (env, conn, stmt) = long_data_stmt_no_fetch();
+
+            let mut rows_fetched: usize = 999;
+            let mut row_status: u16 = 999;
+            assert_eq!(
+                sql_extended_fetch::<MockLongDataBackend>(
+                    stmt,
+                    FetchOrientation::Next as u16,
+                    0,
+                    std::ptr::from_mut(&mut rows_fetched),
+                    std::ptr::from_mut(&mut row_status),
+                ),
+                SqlReturn::SUCCESS
+            );
+            assert_eq!(rows_fetched, 1, "RowCountPtr not written");
+            assert_eq!(row_status, SQL_ROW_SUCCESS, "RowStatusArray not written");
+
+            cleanup_long_data(env, conn, stmt);
+        }
+    }
+
+    /// The spec: the `RowCountPtr` buffer "is used only by **SQLExtendedFetch**",
+    /// and the status array's address "is not stored in the
+    /// SQL_DESC_STATUS_ARRAY_PTR field in the IRD". So the statement attributes
+    /// must be left untouched, even when the application has set them.
+    #[test]
+    fn extended_fetch_does_not_write_the_statement_attributes() {
+        unsafe {
+            let (env, conn, stmt) = long_data_stmt_no_fetch();
+
+            let mut attr_rows: usize = 999;
+            let mut attr_status: u16 = 999;
+            assert_eq!(
+                crate::ffi::stmt_attr::sql_set_stmt_attr_w::<MockLongDataBackend>(
+                    stmt,
+                    odbc_sys::StatementAttribute::RowsFetchedPtr as i32,
+                    std::ptr::from_mut(&mut attr_rows).cast::<c_void>(),
+                    0,
+                ),
+                SqlReturn::SUCCESS
+            );
+            assert_eq!(
+                crate::ffi::stmt_attr::sql_set_stmt_attr_w::<MockLongDataBackend>(
+                    stmt,
+                    odbc_sys::StatementAttribute::RowStatusPtr as i32,
+                    std::ptr::from_mut(&mut attr_status).cast::<c_void>(),
+                    0,
+                ),
+                SqlReturn::SUCCESS
+            );
+
+            let mut arg_rows: usize = 0;
+            let mut arg_status: u16 = 0;
+            assert_eq!(
+                sql_extended_fetch::<MockLongDataBackend>(
+                    stmt,
+                    FetchOrientation::Next as u16,
+                    0,
+                    std::ptr::from_mut(&mut arg_rows),
+                    std::ptr::from_mut(&mut arg_status),
+                ),
+                SqlReturn::SUCCESS
+            );
+
+            assert_eq!(arg_rows, 1, "the arguments are the destination");
+            assert_eq!(arg_status, SQL_ROW_SUCCESS);
+            assert_eq!(
+                attr_rows, 999,
+                "SQL_ATTR_ROWS_FETCHED_PTR must be untouched"
+            );
+            assert_eq!(
+                attr_status, 999,
+                "SQL_ATTR_ROW_STATUS_PTR must be untouched"
+            );
+
+            cleanup_long_data(env, conn, stmt);
+        }
+    }
+
+    /// Every orientation but `SQL_FETCH_NEXT` is `HY106` — and, unlike the macro
+    /// stub this replaces, with a diagnostic the application can actually read.
+    #[test]
+    fn extended_fetch_rejects_every_other_orientation_with_a_readable_hy106() {
+        unsafe {
+            let (env, conn, stmt) = long_data_stmt_no_fetch();
+
+            // Named rather than looped over the enum: `SQL_FETCH_BOOKMARK` has no
+            // `odbc_sys::FetchOrientation` variant, and it is the one the spec's
+            // HY106 row calls out for a forward-only cursor alongside the rest.
+            let rejected: [(u16, &str); 6] = [
+                (FetchOrientation::Prior as u16, "SQL_FETCH_PRIOR"),
+                (FetchOrientation::First as u16, "SQL_FETCH_FIRST"),
+                (FetchOrientation::Last as u16, "SQL_FETCH_LAST"),
+                (FetchOrientation::Absolute as u16, "SQL_FETCH_ABSOLUTE"),
+                (FetchOrientation::Relative as u16, "SQL_FETCH_RELATIVE"),
+                (
+                    crate::types::SQL_FETCH_BOOKMARK as u16,
+                    "SQL_FETCH_BOOKMARK",
+                ),
+            ];
+
+            for (orientation, name) in rejected {
+                let mut rows_fetched: usize = 999;
+                assert_eq!(
+                    sql_extended_fetch::<MockLongDataBackend>(
+                        stmt,
+                        orientation,
+                        0,
+                        std::ptr::from_mut(&mut rows_fetched),
+                        std::ptr::null_mut(),
+                    ),
+                    SqlReturn::ERROR,
+                    "{name} must be rejected"
+                );
+
+                let mut state = [0u16; 6];
+                let mut msg = [0u16; 256];
+                let mut native: i32 = 0;
+                let mut msg_len: i16 = 0;
+                assert_eq!(
+                    crate::ffi::diag::sql_get_diag_rec_w::<MockLongDataBackend>(
+                        HandleType::Stmt as i16,
+                        stmt,
+                        1,
+                        state.as_mut_ptr(),
+                        std::ptr::from_mut(&mut native),
+                        msg.as_mut_ptr(),
+                        256,
+                        std::ptr::from_mut(&mut msg_len),
+                    ),
+                    SqlReturn::SUCCESS,
+                    "{name} returned SQL_ERROR with no diagnostic"
+                );
+                let sqlstate = String::from_utf16_lossy(&state[..5]);
+                assert_eq!(sqlstate, "HY106", "{name} reported {sqlstate}");
+            }
+
+            cleanup_long_data(env, conn, stmt);
+        }
+    }
+
+    /// The spec calls the application's behaviour undefined when it supplies no
+    /// `RowStatusArray`. Declining to write through a null target is the
+    /// discipline `write_column_value` already follows, and it must not fault.
+    #[test]
+    fn extended_fetch_tolerates_null_output_arguments() {
+        unsafe {
+            let (env, conn, stmt) = long_data_stmt_no_fetch();
+
+            assert_eq!(
+                sql_extended_fetch::<MockLongDataBackend>(
+                    stmt,
+                    FetchOrientation::Next as u16,
+                    0,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                ),
+                SqlReturn::SUCCESS
+            );
+
+            cleanup_long_data(env, conn, stmt);
+        }
+    }
+
+    /// Draining the cursor returns `SQL_NO_DATA` and zeroes the count, as the
+    /// spec's rows-fetched rule requires. The status array is left alone: with no
+    /// row there is no status to report.
+    #[test]
+    fn extended_fetch_zeroes_the_count_at_end_of_cursor() {
+        unsafe {
+            let (env, conn, stmt) = long_data_stmt_no_fetch();
+
+            let mut rows_fetched: usize = 999;
+            let mut row_status: u16 = 42;
+            let next = FetchOrientation::Next as u16;
+            let count = std::ptr::from_mut(&mut rows_fetched);
+            let status = std::ptr::from_mut(&mut row_status);
+
+            assert_eq!(
+                sql_extended_fetch::<MockLongDataBackend>(stmt, next, 0, count, status),
+                SqlReturn::SUCCESS
+            );
+            assert_eq!(
+                sql_extended_fetch::<MockLongDataBackend>(stmt, next, 0, count, status),
+                SqlReturn::SUCCESS
+            );
+            assert_eq!(
+                sql_extended_fetch::<MockLongDataBackend>(stmt, next, 0, count, status),
+                SqlReturn::NO_DATA
+            );
+            assert_eq!(rows_fetched, 0, "count not zeroed at end of cursor");
+
+            cleanup_long_data(env, conn, stmt);
+        }
+    }
+
+    /// The stub this replaces returned `SQL_ERROR` for a bad handle. Going
+    /// through `panic_safe` is what makes it `SQL_INVALID_HANDLE`.
+    #[test]
+    fn extended_fetch_rejects_an_invalid_handle() {
+        unsafe {
+            assert_eq!(
+                sql_extended_fetch::<MockBackend>(
+                    std::ptr::null_mut(),
+                    FetchOrientation::Next as u16,
+                    0,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                ),
+                SqlReturn::INVALID_HANDLE
+            );
         }
     }
 

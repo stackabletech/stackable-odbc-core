@@ -840,13 +840,21 @@ macro_rules! forward_ffi {
         #[allow(non_snake_case, clippy::too_many_arguments, clippy::missing_safety_doc)]
         #[unsafe(no_mangle)]
         pub unsafe extern "system" fn SQLExtendedFetch(
-            _stmt: *mut ::std::ffi::c_void,
-            _fetch_type: u16,
-            _row_offset: isize,
-            _rows_fetched: *mut usize,
-            _row_status: *mut u16,
+            stmt: *mut ::std::ffi::c_void,
+            fetch_type: u16,
+            row_offset: isize,
+            rows_fetched: *mut usize,
+            row_status: *mut u16,
         ) -> $crate::types::SqlReturn {
-            $crate::types::SqlReturn::ERROR
+            unsafe {
+                $crate::ffi::fetch::sql_extended_fetch::<$B>(
+                    stmt,
+                    fetch_type,
+                    row_offset,
+                    rows_fetched,
+                    row_status,
+                )
+            }
         }
 
         #[allow(non_snake_case, clippy::missing_safety_doc)]
