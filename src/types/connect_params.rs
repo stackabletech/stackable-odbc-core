@@ -330,9 +330,17 @@ impl ConnectParams {
     /// `SQL_DRIVER_NOPROMPT`'s own clause in the spec says exactly that: "if the
     /// connection string contains enough information, the driver connects to
     /// the data source ... Otherwise, the driver returns SQL_ERROR."
+    ///
+    /// Owned rather than borrowed, because the prompter routinely outlives the
+    /// `connect` call it arrived on: an interactive flow hands it to the client
+    /// library that will present the URL, and a driver caching the resulting
+    /// credential keeps it for the process. A borrow ends with `connect` and
+    /// would force every such backend to substitute an equivalent of its own,
+    /// which is the same object by luck rather than by construction — and would
+    /// silently stop being the same the day core wraps what a driver declared.
     #[must_use]
-    pub fn prompter(&self) -> Option<&dyn Prompter> {
-        self.prompter.as_deref()
+    pub fn prompter(&self) -> Option<Arc<dyn Prompter>> {
+        self.prompter.clone()
     }
 
     /// Record the prompter this connect may use, just before

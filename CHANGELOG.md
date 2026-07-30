@@ -92,6 +92,11 @@ Everything a driver has to change for the catalog rework, in one place.
   does that in its own `connect`, which is already the call the application is
   blocked in.
 
+  `ConnectParams::prompter()` hands back an owned `Arc`, not a borrow, because
+  the prompter routinely outlives the `connect` it arrived on — an interactive
+  flow gives it to the client library that presents the URL, and a driver
+  caching the resulting credential keeps it for the process.
+
   Nothing existing changes: `Backend::prompter` is defaulted to `None`, so a
   driver that does not implement it behaves exactly as before, and
   `ConnectParams`' hand-written `Debug` and its `to_connection_string` are both
