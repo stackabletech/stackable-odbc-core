@@ -150,6 +150,15 @@ call `SQLCloseCursor` or `SQLFreeStmt(SQL_CLOSE)` first, as it already must for
 
 ### Added
 
+- `SQLGetDiagFieldW` answers `SQL_DIAG_CLASS_ORIGIN` and
+  `SQL_DIAG_SUBCLASS_ORIGIN` from the record's SQLSTATE. Both returned the empty
+  string, sharing a match arm with `SQL_DIAG_CONNECTION_NAME` and
+  `SQL_DIAG_SERVER_NAME`, the only two fields for which the spec sanctions an
+  empty value. The spec defines these two exactly: `"ISO 9075"` unless the
+  SQLSTATE class is `IM`, and, for the subclass, membership of a closed list of
+  forty-two ODBC-specific states. The Windows Driver Manager queries them after
+  `SQL_SUCCESS_WITH_INFO`.
+
 - `SQLGetDiagFieldW` answers the four statement-only header fields:
   `SQL_DIAG_ROW_COUNT`, `SQL_DIAG_CURSOR_ROW_COUNT`,
   `SQL_DIAG_DYNAMIC_FUNCTION` and `SQL_DIAG_DYNAMIC_FUNCTION_CODE`. All four

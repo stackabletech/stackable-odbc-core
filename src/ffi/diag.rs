@@ -31,6 +31,76 @@ const SQL_DIAG_CLASS_ORIGIN: i16 = HeaderDiagnosticIdentifier::ClassOrigin as i1
 const SQL_DIAG_SERVER_NAME: i16 = HeaderDiagnosticIdentifier::ServerName as i16;
 const SQL_DIAG_COLUMN_NUMBER: i16 = HeaderDiagnosticIdentifier::ColumnNumber as i16;
 const SQL_DIAG_ROW_NUMBER: i16 = HeaderDiagnosticIdentifier::RowNumber as i16;
+const SQL_DIAG_SUBCLASS_ORIGIN: i16 = HeaderDiagnosticIdentifier::SubclassOrigin as i16;
+const SQL_DIAG_CONNECTION_NAME: i16 = HeaderDiagnosticIdentifier::ConnectionName as i16;
+
+/// The `SQL_DIAG_CLASS_ORIGIN` / `SQL_DIAG_SUBCLASS_ORIGIN` value for a SQLSTATE
+/// the Open Group and ISO call-level interface define.
+const SQL_DIAG_ORIGIN_ISO: &str = "ISO 9075";
+
+/// The same, for an ODBC-specific SQLSTATE. The literal "ODBC 3.0" is the
+/// spec's, and does not track this driver's version.
+const SQL_DIAG_ORIGIN_ODBC: &str = "ODBC 3.0";
+
+/// The SQLSTATE class the spec calls ODBC-specific: "For ODBC-specific
+/// SQLSTATEs (all those whose SQLSTATE class is 'IM')".
+const ODBC_SPECIFIC_CLASS: &str = "IM";
+
+/// The SQLSTATEs whose *subclass* the spec attributes to ODBC rather than to
+/// ISO, transcribed verbatim from `SQL_DIAG_SUBCLASS_ORIGIN`'s row: "The
+/// ODBC-specific SQLSTATES for which 'ODBC 3.0' is returned include the
+/// following: …"
+///
+/// A closed list, and not a range: it skips `IM009`, and its `HY` entries are
+/// nine of the class's several dozen. Testing membership by pattern rather than
+/// by table would answer differently for both.
+const ODBC_SPECIFIC_SUBCLASS_STATES: &[&str] = &[
+    "01S00", "01S01", "01S02", "01S06", "01S07", "07S01", "08S01", "21S01", "21S02", "25S01",
+    "25S02", "25S03", "42S01", "42S02", "42S11", "42S12", "42S21", "42S22", "HY095", "HY097",
+    "HY098", "HY099", "HY100", "HY101", "HY105", "HY107", "HY109", "HY110", "HY111", "HYT00",
+    "HYT01", "IM001", "IM002", "IM003", "IM004", "IM005", "IM006", "IM007", "IM008", "IM010",
+    "IM011", "IM012",
+];
+
+/// The `SQL_DIAG_CLASS_ORIGIN` value for a record's SQLSTATE.
+///
+/// Spec: "Its value is 'ISO 9075' for all SQLSTATEs defined by Open Group and
+/// ISO call-level interface. For ODBC-specific SQLSTATEs (all those whose
+/// SQLSTATE class is 'IM'), its value is 'ODBC 3.0'."
+///
+/// Keys on the two-character class only, which is what makes this a different
+/// question from [`subclass_origin`] rather than a cheaper version of it.
+fn class_origin(sqlstate: &str) -> &'static str {
+    if sqlstate
+        .get(..2)
+        .is_some_and(|class| class.eq_ignore_ascii_case(ODBC_SPECIFIC_CLASS))
+    {
+        SQL_DIAG_ORIGIN_ODBC
+    } else {
+        SQL_DIAG_ORIGIN_ISO
+    }
+}
+
+/// The `SQL_DIAG_SUBCLASS_ORIGIN` value for a record's SQLSTATE.
+///
+/// Spec: "A string with the same format and valid values as
+/// SQL_DIAG_CLASS_ORIGIN, that identifies the defining portion of the subclass
+/// portion of the SQLSTATE code", against the closed list in
+/// [`ODBC_SPECIFIC_SUBCLASS_STATES`].
+///
+/// Independent of [`class_origin`]: `08S01` has an ISO class and an ODBC
+/// subclass, and `IM009` the reverse.
+fn subclass_origin(sqlstate: &str) -> &'static str {
+    if ODBC_SPECIFIC_SUBCLASS_STATES
+        .iter()
+        .any(|state| state.eq_ignore_ascii_case(sqlstate))
+    {
+        SQL_DIAG_ORIGIN_ODBC
+    } else {
+        SQL_DIAG_ORIGIN_ISO
+    }
+}
+
 const SQL_DIAG_ROW_COUNT: i16 = HeaderDiagnosticIdentifier::RowCount as i16;
 const SQL_DIAG_DYNAMIC_FUNCTION: i16 = HeaderDiagnosticIdentifier::DynamicFunction as i16;
 const SQL_DIAG_DYNAMIC_FUNCTION_CODE: i16 = HeaderDiagnosticIdentifier::DynamicFunctionCode as i16;
@@ -401,6 +471,20 @@ fn statement_header_field(diag_identifier: i16) -> Option<StatementHeaderField> 
 ///   headed "Unknown"; core parses no SQL and cannot classify the statement it
 ///   ran.
 ///
+/// # The origin fields
+///
+/// `SQL_DIAG_CLASS_ORIGIN` and `SQL_DIAG_SUBCLASS_ORIGIN` are derived from the
+/// record's own SQLSTATE, per the spec's two rules: `"ISO 9075"` unless the
+/// class is `IM` for the first, and membership of the spec's closed
+/// forty-two-state list for the second. They are independent: `08S01` has an ISO
+/// class and an ODBC subclass.
+///
+/// `SQL_DIAG_CONNECTION_NAME` and `SQL_DIAG_SERVER_NAME` are the empty string,
+/// which those two rows sanction by name ("this field is a zero-length string").
+/// Both are driver-defined, and answering `SQL_DIAG_SERVER_NAME` with the data
+/// source name would need it plumbed to a function that sees only a diagnostic
+/// record.
+///
 /// # Safety
 ///
 /// All pointer arguments must be valid or null.
@@ -610,12 +694,42 @@ pub unsafe fn sql_get_diag_field_w<B: Backend>(
                         string_length,
                     )
                 }
-                // SQL_DIAG_CLASS_ORIGIN, SQL_DIAG_SUBCLASS_ORIGIN (9),
-                // SQL_DIAG_CONNECTION_NAME (10), SQL_DIAG_SERVER_NAME
-                // Return empty strings (these are optional).
-                SQL_DIAG_CLASS_ORIGIN..=SQL_DIAG_SERVER_NAME => {
+                // Both derived from this record's own SQLSTATE. The spec defines
+                // exact values for them and marks neither optional; the empty
+                // string it does sanction belongs to the two below.
+                SQL_DIAG_CLASS_ORIGIN => {
                     // SAFETY: diag_info is either null (write_utf16 handles that) or a
                     // caller-allocated buffer of at least buffer_length/2 u16 values.
+                    write_diag_string_checked(
+                        class_origin(record.sqlstate.as_str()),
+                        diag_info,
+                        buffer_length,
+                        string_length,
+                    )
+                }
+                SQL_DIAG_SUBCLASS_ORIGIN => {
+                    // SAFETY: as above.
+                    write_diag_string_checked(
+                        subclass_origin(record.sqlstate.as_str()),
+                        diag_info,
+                        buffer_length,
+                        string_length,
+                    )
+                }
+                // SQL_DIAG_CONNECTION_NAME and SQL_DIAG_SERVER_NAME. These two
+                // really are allowed to be empty, and each says so in its own
+                // row: "For diagnostic data structures associated with the
+                // environment handle and for diagnostics that do not relate to
+                // any connection, this field is a zero-length string."
+                //
+                // Both are "driver-defined". Answering SQL_DIAG_SERVER_NAME
+                // ("the same as the value returned for a call to SQLGetInfo with
+                // the SQL_DATA_SOURCE_NAME option") would mean plumbing the
+                // connection's data source name to a function that is handed a
+                // diagnostic record and nothing else. That is a change with its
+                // own justification, not an oversight to be quietly inherited.
+                SQL_DIAG_CONNECTION_NAME..=SQL_DIAG_SERVER_NAME => {
+                    // SAFETY: as above.
                     write_diag_string_checked("", diag_info, buffer_length, string_length)
                 }
                 // An arm each, because the spec's Record Fields table types these
@@ -1380,6 +1494,117 @@ mod tests {
         assert_eq!(SQL_DIAG_DYNAMIC_FUNCTION_CODE, 12);
         assert_eq!(SQL_DIAG_CURSOR_ROW_COUNT, -1249);
         assert_eq!(SQL_DIAG_UNKNOWN_STATEMENT, 0);
+    }
+
+    /// Four combinations, and all four occur. The class rule keys on the
+    /// two-character class ("For ODBC-specific SQLSTATEs (all those whose
+    /// SQLSTATE class is 'IM'), its value is 'ODBC 3.0'") while the subclass
+    /// rule keys on the whole five-character state against a closed list, so the
+    /// two answers are independent and a single shared implementation would be
+    /// wrong for two of these rows.
+    #[test]
+    fn class_and_subclass_origin_are_independent_readings_of_the_sqlstate() {
+        // ISO class, ISO subclass: an ordinary Open Group state.
+        assert_eq!(
+            class_origin(sql_state::CONNECTION_NOT_OPEN),
+            SQL_DIAG_ORIGIN_ISO
+        );
+        assert_eq!(
+            subclass_origin(sql_state::CONNECTION_NOT_OPEN),
+            SQL_DIAG_ORIGIN_ISO
+        );
+
+        // ISO class, ODBC subclass: 08S01 is in the spec's enumerated list.
+        assert_eq!(
+            class_origin(sql_state::COMMUNICATION_LINK_FAILURE),
+            SQL_DIAG_ORIGIN_ISO
+        );
+        assert_eq!(
+            subclass_origin(sql_state::COMMUNICATION_LINK_FAILURE),
+            SQL_DIAG_ORIGIN_ODBC
+        );
+
+        // ODBC class, ODBC subclass: IM001 is both.
+        assert_eq!(class_origin("IM001"), SQL_DIAG_ORIGIN_ODBC);
+        assert_eq!(subclass_origin("IM001"), SQL_DIAG_ORIGIN_ODBC);
+
+        // ODBC class, ISO subclass: IM009 is class IM and is absent from the
+        // spec's list, which is closed and does not run consecutively.
+        assert_eq!(class_origin("IM009"), SQL_DIAG_ORIGIN_ODBC);
+        assert_eq!(subclass_origin("IM009"), SQL_DIAG_ORIGIN_ISO);
+    }
+
+    /// The enumerated list is transcribed from the spec and is closed. Pinning
+    /// its length and its two ends catches a paste that dropped or duplicated a
+    /// row, which no individual lookup above would notice.
+    #[test]
+    fn the_odbc_specific_subclass_list_matches_the_spec() {
+        assert_eq!(
+            ODBC_SPECIFIC_SUBCLASS_STATES.len(),
+            42,
+            "the spec lists forty-two ODBC-specific SQLSTATEs for this field"
+        );
+        assert_eq!(ODBC_SPECIFIC_SUBCLASS_STATES.first(), Some(&"01S00"));
+        assert_eq!(ODBC_SPECIFIC_SUBCLASS_STATES.last(), Some(&"IM012"));
+
+        let mut sorted = ODBC_SPECIFIC_SUBCLASS_STATES.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(
+            sorted.len(),
+            ODBC_SPECIFIC_SUBCLASS_STATES.len(),
+            "a duplicated entry means one of the spec's rows was pasted over"
+        );
+    }
+
+    /// End to end: the two fields answer from the record's own SQLSTATE, and the
+    /// two that the spec really does allow to be empty stay empty. The Windows
+    /// Driver Manager queries all four after SUCCESS_WITH_INFO, so these are read
+    /// in practice.
+    #[test]
+    fn diag_field_origin_fields_answer_from_the_record() {
+        unsafe {
+            let mut env: *mut c_void = std::ptr::null_mut();
+            let _ = sql_alloc_handle::<MockBackend>(
+                HandleType::Env as i16,
+                std::ptr::null_mut(),
+                &mut env,
+            );
+            with_handle::<MockBackend, EnvironmentHandle<MockBackend>, _>(env, |handle| {
+                handle.diagnostics.push(&crate::errors::OdbcError::general(
+                    "a driver-specific condition".to_string(),
+                    crate::types::SqlState::new("IM001"),
+                ));
+            });
+
+            let read = |field: i16| -> String {
+                let mut buf = [0u16; 16];
+                let mut str_len: i16 = -1;
+                assert_eq!(
+                    sql_get_diag_field_w::<MockBackend>(
+                        HandleType::Env as i16,
+                        env,
+                        1,
+                        field,
+                        buf.as_mut_ptr().cast::<c_void>(),
+                        (buf.len() * 2) as i16,
+                        &mut str_len,
+                    ),
+                    SqlReturn::SUCCESS
+                );
+                let units = (str_len / 2) as usize;
+                String::from_utf16_lossy(&buf[..units])
+            };
+
+            assert_eq!(read(SQL_DIAG_CLASS_ORIGIN), SQL_DIAG_ORIGIN_ODBC);
+            assert_eq!(read(SQL_DIAG_SUBCLASS_ORIGIN), SQL_DIAG_ORIGIN_ODBC);
+            // Sanctioned empty: "For diagnostic data structures associated with
+            // the environment handle ... this field is a zero-length string."
+            assert_eq!(read(SQL_DIAG_CONNECTION_NAME), "");
+            assert_eq!(read(SQL_DIAG_SERVER_NAME), "");
+
+            let _ = sql_free_handle::<MockBackend>(HandleType::Env as i16, env);
+        }
     }
 
     /// The spec tells applications to pass a negative `BufferLength` for a
