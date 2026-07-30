@@ -838,67 +838,109 @@ mod tests {
         }
     }
 
-    /// Every FALSE `config_dsn_w` returns must carry a posted installer error,
-    /// because the spec makes that buffer the function's only channel: "When
+    /// The `odbccp32` calls whose failure `ConfigDSNW` reports by returning
+    /// FALSE without posting an error of its own.
+    ///
+    /// Each of these posts its own before returning zero, and overwriting it
+    /// with `ODBC_ERROR_REQUEST_FAILED` would replace a specific cause with a
+    /// generic one. The list is checked in **both** directions against the
+    /// `installer_result` call sites, so it can neither miss a new exit nor keep
+    /// naming a call that has gone.
+    const ODBCCP32_POSTS_ITS_OWN: &[&str] = &[
+        // Registering the DSN name and its Driver value.
+        "SQLWriteDSNToIniW",
+        // Writing one of the data source's own keywords. Returning FALSE for it
+        // is the point: the name registered and the attributes did not, so the
+        // data source exists and cannot connect.
+        "SQLWritePrivateProfileStringW",
+        // Removing the data source. A tail expression, and therefore the exit
+        // that a whole-line pattern scan could not see at all.
+        "SQLRemoveDSNFromIniW",
+    ];
+
+    /// `ODBCCP32_POSTS_ITS_OWN` must name **exactly** the calls that reach
+    /// [`installer_result`], no more and no fewer.
+    ///
+    /// The list is the audit's claim about which exits carry an installer error
+    /// that this file did not post. Checking it in one direction only is how it
+    /// came to name one function while the doc comment named three: the third
+    /// exit was a tail expression (`ODBC_REMOVE_DSN => unsafe {
+    /// SQLRemoveDSNFromIniW(..) }`), which no whole-line pattern can match, so
+    /// it was never counted and the counts agreed anyway.
+    #[test]
+    fn the_installer_error_list_names_exactly_the_calls_that_post_their_own() {
+        let body = audited_source();
+
+        // Every `installer_result("Name"` in the audited functions.
+        let mut found: Vec<&str> = Vec::new();
+        for (offset, _) in body.match_indices("installer_result(\"") {
+            let rest = &body[offset + "installer_result(\"".len()..];
+            let end = rest
+                .find('"')
+                .expect("installer_result's first argument is a string literal");
+            found.push(&rest[..end]);
+        }
+        found.sort_unstable();
+        found.dedup();
+
+        let mut declared = ODBCCP32_POSTS_ITS_OWN.to_vec();
+        declared.sort_unstable();
+
+        assert_eq!(
+            found, declared,
+            "ODBCCP32_POSTS_ITS_OWN must name exactly the odbccp32 calls routed \
+             through installer_result. Anything found and not declared is an exit \
+             the audit is not covering; anything declared and not found is a call \
+             that no longer exists."
+        );
+        assert!(
+            !found.is_empty(),
+            "no installer_result call sites found at all; the audit is reading \
+             the wrong source"
+        );
+    }
+
+    /// Every FALSE `ConfigDSNW` returns carries a posted installer error.
+    ///
+    /// The spec makes that buffer the function's only channel: "When
     /// **ConfigDSN** returns FALSE, an associated *\*pfErrorCode* value is posted
     /// to the installer error buffer by a call to **SQLPostInstallerError**." A
-    /// bare `0` shows the ODBC Administrator a failure with no cause, which is
-    /// what this function did at every one of its own exits before.
+    /// bare `0` shows the ODBC Administrator a failure with no cause.
     ///
     /// Checked by reading the source rather than by calling the function, and
     /// that is the point: `config_dsn_w` is `#[cfg(windows)]` and links
     /// `odbccp32`, so **no test on Linux can execute it** and the Windows job
-    /// only compiles it. A source audit is the one guard that runs everywhere.
-    /// The crate's precedent is
+    /// only compiles it. The crate's precedent is
     /// `the_set_of_group_lock_acquisition_sites_is_closed`.
     ///
-    /// The rule: inside `config_dsn_w`, a falsey return either goes through
-    /// [`fail`] or is one of the sites where `odbccp32` has already posted its
-    /// own — and those are listed here by the call that precedes them, so
-    /// adding one is a deliberate act rather than an omission.
+    /// The rule: a falsey exit either goes through [`fail`], which posts, or is
+    /// the propagated result of an [`installer_result`] call, which is where
+    /// `odbccp32` already posted. Both halves are enumerable, so neither is
+    /// approximated by a pattern.
     #[test]
     fn every_false_return_from_config_dsn_w_posts_an_installer_error() {
-        const ODBCCP32_POSTS_ITS_OWN: &[&str] = &[
-            // SQLWriteDSNToIniW failing: the installer has already posted a
-            // specific cause, and overwriting it would generalise it away.
-            "SQLWriteDSNToIniW",
-            // Likewise a failed attribute write. Returning FALSE for it is the
-            // point: the DSN name registered and its attributes did not, so the
-            // data source exists and cannot connect.
-            "SQLWritePrivateProfileStringW",
-        ];
-
-        // `config_dsn_body` holds every failure path; `config_dsn_w` is the panic
-        // guard around it and has no falsey exit of its own.
         let body = audited_source();
-        let body = body.as_str();
 
-        // Falsey exits written as a bare literal, rather than through `fail`.
-        let bare: Vec<&str> = body
+        // A bare falsey exit is legitimate only immediately after an
+        // `installer_result(...) == 0` test, so their counts must agree. Written
+        // as `return 0;` (a guard) or as a trailing `0` (a helper's early exit).
+        let bare = body
             .lines()
             .map(str::trim)
             .filter(|l| !l.starts_with("//"))
-            .filter(|l| *l == "return 0;" || *l == "_ => 0," || *l == "0" || *l == "0,")
-            .collect();
-
+            .filter(|l| *l == "return 0;" || *l == "0" || *l == "0,")
+            .count();
+        let guards = body.matches("}) == 0").count();
         assert_eq!(
-            bare.len(),
-            ODBCCP32_POSTS_ITS_OWN.len(),
-            "config_dsn_w has {} bare falsey return(s) but {} documented as \
-             odbccp32's own. A new failure path must call `fail(code, why)` so the \
-             ODBC Administrator can say what went wrong; if odbccp32 really did \
-             post the error, add its call to ODBCCP32_POSTS_ITS_OWN. Found: {bare:?}",
-            bare.len(),
-            ODBCCP32_POSTS_ITS_OWN.len(),
+            bare, guards,
+            "found {bare} bare falsey exit(s) but {guards} installer_result guard(s). \
+             A failure path that is neither must call fail(code, why), so the ODBC \
+             Administrator can say what went wrong."
         );
 
-        for call in ODBCCP32_POSTS_ITS_OWN {
-            assert!(
-                body.contains(call),
-                "{call} is listed as posting its own installer error but is no \
-                 longer called in config_dsn_w"
-            );
-        }
+        // A tail-expression exit, the shape a line scan cannot see, is covered
+        // by the both-directions check in
+        // `the_installer_error_list_names_exactly_the_calls_that_post_their_own`.
 
         // And the posting path itself must still exist. `fail` lives outside the
         // audited functions, so this one needs the whole file.
