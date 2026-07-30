@@ -556,11 +556,35 @@ fn clamp_to_bound_buffer(byte_len: usize, buffer_length: isize) -> usize {
     byte_len
 }
 
+/// A parameter value, and the optional warning reading it raised.
+///
+/// The warning exists because the *C to SQL: Numeric* table's fractional
+/// truncation is a `SQL_SUCCESS_WITH_INFO` outcome rather than a failure: the
+/// value is still sent, so it cannot be an `Err`, and the application is still
+/// told, so it cannot be dropped. Every other conversion path produces
+/// `warning: None`, which the [`From`] impl below spells once instead of at
+/// forty call sites.
+pub(crate) struct ParamValue {
+    /// The value to hand the backend.
+    pub value: ColumnValue,
+    /// A diagnostic to post alongside it, without failing the call.
+    pub warning: Option<OdbcError>,
+}
+
+impl From<ColumnValue> for ParamValue {
+    fn from(value: ColumnValue) -> Self {
+        Self {
+            value,
+            warning: None,
+        }
+    }
+}
+
 /// # Safety
 ///
 /// `binding.value_ptr` and `binding.str_len_or_ind_ptr` must point to valid
 /// memory of the appropriate type and size.
-pub(crate) unsafe fn read_param_value(rec: ParamRecord<'_>) -> Result<ColumnValue, OdbcError> {
+pub(crate) unsafe fn read_param_value(rec: ParamRecord<'_>) -> Result<ParamValue, OdbcError> {
     use odbc_sys::CDataType;
 
     // The APD says where the value is and how it is laid out; the IPD says what
@@ -573,15 +597,15 @@ pub(crate) unsafe fn read_param_value(rec: ParamRecord<'_>) -> Result<ColumnValu
         // SAFETY: str_len_or_ind_ptr is non-null and the caller guarantees it points to a valid isize.
         let indicator = unsafe { std::ptr::read_unaligned(apd.indicator_ptr) };
         if indicator == SQL_NULL_DATA {
-            return Ok(ColumnValue::Null);
+            return Ok(ColumnValue::Null.into());
         }
     }
 
     if apd.data_ptr.is_null() {
-        return Ok(ColumnValue::Null);
+        return Ok(ColumnValue::Null.into());
     }
 
-    Ok(match apd.c_type()? {
+    Ok(ParamValue::from(match apd.c_type()? {
         // SAFETY for all integer/float reads below: value_ptr is non-null (guarded above) and the
         // caller guarantees it points to a valid value of the appropriate C type provided by the
         // ODBC caller via SQLBindParameter. `read_unaligned` tolerates the arbitrary offsets
@@ -649,7 +673,8 @@ pub(crate) unsafe fn read_param_value(rec: ParamRecord<'_>) -> Result<ColumnValu
                 ipd.sql_type(),
                 ipd.length,
                 ipd.scale,
-            );
+            )
+            .map(ParamValue::from);
         }
         CDataType::WChar => {
             let ptr = apd.data_ptr as *const u16;
@@ -664,7 +689,8 @@ pub(crate) unsafe fn read_param_value(rec: ParamRecord<'_>) -> Result<ColumnValu
                     ipd.sql_type(),
                     ipd.length,
                     ipd.scale,
-                );
+                )
+                .map(ParamValue::from);
             } else {
                 // SAFETY: str_len_or_ind_ptr is non-null and the caller guarantees it points
                 // to a valid isize provided by the ODBC caller.
@@ -679,7 +705,8 @@ pub(crate) unsafe fn read_param_value(rec: ParamRecord<'_>) -> Result<ColumnValu
                         ipd.sql_type(),
                         ipd.length,
                         ipd.scale,
-                    );
+                    )
+                    .map(ParamValue::from);
                 } else {
                     // Explicit byte length: ODBC reports lengths in bytes for WChar.
                     // Clamp before halving, because buffer_length is in bytes too.
@@ -700,7 +727,8 @@ pub(crate) unsafe fn read_param_value(rec: ParamRecord<'_>) -> Result<ColumnValu
                 ipd.sql_type(),
                 ipd.length,
                 ipd.scale,
-            );
+            )
+            .map(ParamValue::from);
         }
         CDataType::Binary => {
             let ptr = apd.data_ptr as *const u8;
@@ -728,7 +756,8 @@ pub(crate) unsafe fn read_param_value(rec: ParamRecord<'_>) -> Result<ColumnValu
                         bytes,
                         ipd.sql_type(),
                         ipd.length,
-                    );
+                    )
+                    .map(ParamValue::from);
                 }
                 None => {
                     tracing::warn!(
@@ -792,7 +821,7 @@ pub(crate) unsafe fn read_param_value(rec: ParamRecord<'_>) -> Result<ColumnValu
             );
             ColumnValue::Null
         }
-    })
+    }))
 }
 
 /// Render a `SQL_NUMERIC_STRUCT` as its exact decimal string.
@@ -877,13 +906,18 @@ pub(crate) fn unbound_parameter(number: u16) -> OdbcError {
 /// # Safety
 ///
 /// All APD value and indicator pointers must point to valid memory.
+/// Returns the values alongside any warnings the conversions raised. A warning
+/// is not a failure — the value it accompanies is in the `Vec` and is sent —
+/// so the caller posts each to the statement's diagnostic queue and returns
+/// `SQL_SUCCESS_WITH_INFO`. See [`ParamValue`].
 pub(crate) unsafe fn collect_params(
     records: ParamRecords<'_>,
     param_count: u16,
-) -> Result<Vec<ColumnValue>, OdbcError> {
+) -> Result<(Vec<ColumnValue>, Vec<OdbcError>), OdbcError> {
     use odbc_sys::ParamType;
 
     let mut params = Vec::with_capacity(param_count as usize);
+    let mut warnings = Vec::new();
     for i in 1..=param_count {
         match records.get(i)? {
             // `InputOutput` is read: it carries an input value the application
@@ -892,13 +926,15 @@ pub(crate) unsafe fn collect_params(
             Some(rec) if rec.ipd.parameter_type != ParamType::Output => {
                 // SAFETY: the caller guarantees all APD value and indicator
                 // pointers point to valid memory of the appropriate type.
-                params.push(unsafe { read_param_value(rec) }?);
+                let read = unsafe { read_param_value(rec) }?;
+                params.push(read.value);
+                warnings.extend(read.warning);
             }
             Some(_) => params.push(ColumnValue::Null),
             None => return Err(unbound_parameter(i)),
         }
     }
-    Ok(params)
+    Ok((params, warnings))
 }
 
 /// Write the values of OUTPUT / INOUT parameters produced by `Backend::execute`
@@ -1067,13 +1103,23 @@ fn dae_buffer_to_value(
     crate::param_convert::text_to_sql_type(&text, sql_type, col_size, decimal_digits)
 }
 
+/// What [`find_data_at_exec_params`] found: the values it could read now, the
+/// parameter numbers still owing data, and any warnings the reads raised.
+pub(crate) type DataAtExecScan = (
+    std::collections::HashMap<u16, crate::types::ColumnValue>,
+    Vec<u16>,
+    Vec<OdbcError>,
+);
+
 /// Scan bound parameters for data-at-execution indicators.
 ///
-/// Returns `(non_dae_values, dae_param_numbers)`:
+/// Returns `(non_dae_values, dae_param_numbers, warnings)`:
 /// - `non_dae_values`: HashMap mapping 1-based param number to ColumnValue
 ///   for parameters that are NOT data-at-execution.
 /// - `dae_param_numbers`: Ordered list of 1-based param numbers that ARE
 ///   data-at-execution, in ascending order.
+/// - `warnings`: diagnostics the conversions raised without failing, which the
+///   caller posts before returning `SQL_NEED_DATA`. See [`ParamValue`].
 ///
 /// # Safety
 ///
@@ -1081,15 +1127,10 @@ fn dae_buffer_to_value(
 pub(crate) unsafe fn find_data_at_exec_params(
     records: ParamRecords<'_>,
     param_count: u16,
-) -> Result<
-    (
-        std::collections::HashMap<u16, crate::types::ColumnValue>,
-        Vec<u16>,
-    ),
-    OdbcError,
-> {
+) -> Result<DataAtExecScan, OdbcError> {
     let mut non_dae = std::collections::HashMap::new();
     let mut dae_params = Vec::new();
+    let mut warnings = Vec::new();
 
     for i in 1..=param_count {
         if let Some(rec) = records.get(i)? {
@@ -1105,7 +1146,9 @@ pub(crate) unsafe fn find_data_at_exec_params(
                 dae_params.push(i);
             } else {
                 // SAFETY: caller guarantees all APD pointers are valid.
-                non_dae.insert(i, unsafe { read_param_value(rec) }?);
+                let read = unsafe { read_param_value(rec) }?;
+                warnings.extend(read.warning);
+                non_dae.insert(i, read.value);
             }
         } else {
             // The same 07002 `collect_params` reports. This is the other route
@@ -1115,7 +1158,7 @@ pub(crate) unsafe fn find_data_at_exec_params(
         }
     }
 
-    Ok((non_dae, dae_params))
+    Ok((non_dae, dae_params, warnings))
 }
 
 /// Generic implementation of SQLPutData.
@@ -1545,6 +1588,17 @@ mod tests {
     ///
     /// As [`read_param_value`]: the value and indicator pointers must be valid.
     unsafe fn read_bound_param(param: &BoundParam) -> Result<ColumnValue, OdbcError> {
+        // SAFETY: forwarded from this function's own contract.
+        unsafe { read_bound_param_full(param) }.map(|p| p.value)
+    }
+
+    /// As [`read_bound_param`], keeping the warning as well as the value, for
+    /// the conversions that raise one.
+    ///
+    /// # Safety
+    ///
+    /// As [`read_param_value`]: the value and indicator pointers must be valid.
+    unsafe fn read_bound_param_full(param: &BoundParam) -> Result<ParamValue, OdbcError> {
         let (apd, ipd) = param.split();
         // SAFETY: forwarded from this function's own contract.
         unsafe {
@@ -2618,7 +2672,7 @@ mod tests {
         let mut bindings = BoundParams::new();
         bindings.insert(1u16, binding);
 
-        let params = unsafe { collect_params(bindings.records(), 1) }.unwrap();
+        let (params, _) = unsafe { collect_params(bindings.records(), 1) }.unwrap();
 
         assert_eq!(
             params,
@@ -2647,7 +2701,7 @@ mod tests {
         let mut bindings = BoundParams::new();
         bindings.insert(1u16, binding);
 
-        let params = unsafe { collect_params(bindings.records(), 1) }.unwrap();
+        let (params, _) = unsafe { collect_params(bindings.records(), 1) }.unwrap();
 
         assert_eq!(params, vec![ColumnValue::I32(1234)]);
     }
@@ -2887,7 +2941,7 @@ mod tests {
             },
         );
 
-        let params = unsafe { collect_params(records.records(), 1) }
+        let (params, _) = unsafe { collect_params(records.records(), 1) }
             .expect("a NULL-valued parameter was reported as unbound");
 
         assert_eq!(params, vec![ColumnValue::Null]);
@@ -2914,7 +2968,7 @@ mod tests {
             },
         );
 
-        let (values, dae) = unsafe { find_data_at_exec_params(records.records(), 1) }
+        let (values, dae, _) = unsafe { find_data_at_exec_params(records.records(), 1) }
             .expect("a NULL-valued parameter was reported as unbound");
 
         assert!(
@@ -3012,7 +3066,7 @@ mod tests {
         let mut bindings = BoundParams::new();
         bindings.insert(1u16, binding);
 
-        let params = unsafe { collect_params(bindings.records(), 1) }.unwrap();
+        let (params, _) = unsafe { collect_params(bindings.records(), 1) }.unwrap();
 
         assert_eq!(params, vec![ColumnValue::Null]);
     }

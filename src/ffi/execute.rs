@@ -220,7 +220,9 @@ pub unsafe fn sql_exec_direct_w<B: Backend>(
             let param_count = crate::ffi::params::count_params(&sql, &dialect);
             if param_count > 0 {
                 // SAFETY: caller guarantees all bound buffer pointers remain valid.
-                let (non_dae_values, dae_params) =
+                // Warnings are posted in the following commit, which is also
+                // where the return value learns to become SUCCESS_WITH_INFO.
+                let (non_dae_values, dae_params, _warnings) =
                     crate::ffi::params::find_data_at_exec_params(records, param_count)?;
 
                 if !dae_params.is_empty() {
@@ -255,7 +257,7 @@ pub unsafe fn sql_exec_direct_w<B: Backend>(
             // backend and silently discard every bound value.
             let result = if param_count > 0 {
                 // SAFETY: caller guarantees all bound buffer pointers remain valid.
-                let params = crate::ffi::params::collect_params(records, param_count)?;
+                let (params, _warnings) = crate::ffi::params::collect_params(records, param_count)?;
                 let mut prepared =
                     timer.check::<B, _, _>(B::prepare(connection, cancel, &sql), cancel)?;
                 let executed = timer.check::<B, _, _>(
@@ -595,7 +597,9 @@ pub unsafe fn sql_execute<B: Backend>(statement_handle: *mut c_void) -> SqlRetur
 
             // Check for data-at-execution parameters.
             // SAFETY: caller guarantees all bound buffer pointers remain valid.
-            let (non_dae_values, dae_params) =
+            // Warnings are posted in the following commit, which is also
+            // where the return value learns to become SUCCESS_WITH_INFO.
+            let (non_dae_values, dae_params, _warnings) =
                 crate::ffi::params::find_data_at_exec_params(records, param_count)?;
 
             if !dae_params.is_empty() {
@@ -618,7 +622,7 @@ pub unsafe fn sql_execute<B: Backend>(statement_handle: *mut c_void) -> SqlRetur
 
             // No DAE params: collect all values normally and execute immediately.
             // SAFETY: caller guarantees all bound buffer pointers remain valid.
-            let params = crate::ffi::params::collect_params(records, param_count)?;
+            let (params, _warnings) = crate::ffi::params::collect_params(records, param_count)?;
 
             // Manual-commit mode: this call opens a transaction (or extends
             // the open one), which is what SQL_ATTR_TXN_ISOLATION's HY011 is
