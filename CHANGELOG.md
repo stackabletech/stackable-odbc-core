@@ -1270,6 +1270,35 @@ Everything a driver has to change for the catalog rework, in one place.
 
 ### Fixed
 
+- **A parameter bound to NULL is no longer reported as unbound.** Binding a
+  NULL with a null `ParameterValuePtr` and an indicator of `SQL_NULL_DATA` —
+  which is how every client sends one, and what pyodbc sends for `None` —
+  reported `07002` ("the number of parameters specified in `SQLBindParameter`
+  was less than the number of parameters in the SQL statement") at execute time.
+  Every NULL parameter failed, at any position, for any type, so
+  `WHERE col = ?` with a NULL, and any BI tool's optional filter, could not be
+  expressed at all. The diagnostic blamed the application for failing to bind a
+  parameter it had bound.
+
+  `ParamRecords::get` tested the APD's `SQL_DESC_DATA_PTR` alone to decide
+  whether a record was a binding. `SQLBindParameter`'s *ParameterValuePtr*
+  section allows exactly this shape: "An application can set the
+  *ParameterValuePtr* argument to a null pointer, as long as
+  `*StrLen_or_IndPtr` is `SQL_NULL_DATA` or `SQL_DATA_AT_EXEC`." The Driver
+  Manager's own `HY009` agrees, firing only when *both* pointers are null — and
+  so did `sql_bind_parameter`, which removes a binding on that same pair. The
+  read path was the one place that disagreed. A record now counts as a binding
+  when either pointer is non-null.
+
+  The spec scopes that allowance — "(This applies only to input or
+  input/output parameters.)" — so `write_output_params` keeps the stricter
+  test: writing an output value needs a real buffer, and `write_column_value`
+  declines a null target while still writing the length indicator, which would
+  otherwise report a length for a value it never stored.
+
+  `DescriptorRecord::is_bound` is deliberately unchanged. `SQLBindCol`'s column
+  path uses it, and there a null `TargetValuePtr` really does unbind.
+
 - **`SQLDriverConnect`'s *DriverCompletion* is no longer discarded.** The
   argument was accepted and ignored, and the doc comment said so outright. An
   application passing `SQL_DRIVER_NOPROMPT` — the spec's instruction that the

@@ -979,6 +979,17 @@ pub(crate) unsafe fn write_output_params(
             // Input-only binding: never write back through it.
             continue;
         }
+        if !rec.apd.is_bound() {
+            // No buffer to write into. `ParamRecords::get` counts a record
+            // with an indicator but no data pointer as a binding, because
+            // `SQLBindParameter` allows a null `ParameterValuePtr` alongside
+            // `SQL_NULL_DATA` — but that allowance is scoped: "(This applies
+            // only to input or input/output parameters.)" Writing needs a real
+            // buffer, and `write_column_value` declines the null target while
+            // still writing the length indicator, so a record admitted here
+            // would report a length for a value it never stored.
+            continue;
+        }
         // SAFETY: the caller guarantees this output binding's value and
         // indicator pointers are valid writable buffers of the bound size.
         //
@@ -2735,6 +2746,74 @@ mod tests {
             .expect_err("a record with a null data pointer was read as a binding");
 
         assert_eq!(err.sqlstate().as_str(), "07002");
+    }
+
+    /// A null `ParameterValuePtr` with an indicator of `SQL_NULL_DATA` is a
+    /// binding, and the value it binds is NULL.
+    ///
+    /// Spec, `SQLBindParameter`'s *ParameterValuePtr* argument: "An application
+    /// can set the *ParameterValuePtr* argument to a null pointer, as long as
+    /// *StrLen_or_IndPtr is SQL_NULL_DATA or SQL_DATA_AT_EXEC." The Driver
+    /// Manager's own `HY009` agrees, firing only when *both* pointers are null.
+    ///
+    /// This is how every client binds a NULL: pyodbc sends
+    /// `value_ptr=NULL, ind=SQL_NULL_DATA` for `None`. Reporting `07002` here
+    /// made `WHERE col = ?` with a NULL — an ordinary optional BI filter —
+    /// impossible to express, and the diagnostic blamed the application for
+    /// failing to bind a parameter it had bound.
+    #[test]
+    fn collect_params_accepts_a_null_data_pointer_with_a_null_data_indicator() {
+        let mut indicator: isize = SQL_NULL_DATA;
+        let mut records = BoundParams::new();
+        records.insert(
+            1,
+            BoundParam {
+                input_output_type: ParamType::Input,
+                c_type: CDataType::SLong,
+                sql_type: SqlDataType::INTEGER,
+                col_size: 10,
+                decimal_digits: 0,
+                value_ptr: std::ptr::null_mut(),
+                buffer_length: 4,
+                str_len_or_ind_ptr: std::ptr::from_mut(&mut indicator),
+            },
+        );
+
+        let params = unsafe { collect_params(records.records(), 1) }
+            .expect("a NULL-valued parameter was reported as unbound");
+
+        assert_eq!(params, vec![ColumnValue::Null]);
+    }
+
+    /// The data-at-execution route walks the same `1..=param_count` range, so
+    /// it must agree that this is a binding — otherwise a NULL parameter is
+    /// accepted by one path and rejected by the other.
+    #[test]
+    fn find_data_at_exec_params_accepts_a_null_data_pointer_with_an_indicator() {
+        let mut indicator: isize = SQL_NULL_DATA;
+        let mut records = BoundParams::new();
+        records.insert(
+            1,
+            BoundParam {
+                input_output_type: ParamType::Input,
+                c_type: CDataType::SLong,
+                sql_type: SqlDataType::INTEGER,
+                col_size: 10,
+                decimal_digits: 0,
+                value_ptr: std::ptr::null_mut(),
+                buffer_length: 4,
+                str_len_or_ind_ptr: std::ptr::from_mut(&mut indicator),
+            },
+        );
+
+        let (values, dae) = unsafe { find_data_at_exec_params(records.records(), 1) }
+            .expect("a NULL-valued parameter was reported as unbound");
+
+        assert!(
+            dae.is_empty(),
+            "SQL_NULL_DATA is not data-at-execution, got {dae:?}"
+        );
+        assert_eq!(values.get(&1), Some(&ColumnValue::Null));
     }
 
     /// The data-at-execution route walks the same range and must agree, or it

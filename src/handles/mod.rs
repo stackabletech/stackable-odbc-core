@@ -516,11 +516,28 @@ pub(crate) struct ParamRecords<'a> {
 impl<'a> ParamRecords<'a> {
     /// Both halves of parameter `number`, or `None` if it is not bound.
     ///
-    /// "Not bound" covers two shapes: no record at all, and a record whose
-    /// `SQL_DESC_DATA_PTR` is null. The second exists because
-    /// `SQLSetDescField` can create a record by setting any single field, so
-    /// the spec's own test — a null data pointer is the unbind — is the only
-    /// one left.
+    /// "Not bound" covers two shapes: no record at all, and a record carrying
+    /// neither a data pointer nor an indicator pointer. The second exists
+    /// because `SQLSetDescField` can create a record by setting any single
+    /// field, so presence in the map does not by itself mean a binding.
+    ///
+    /// A null data pointer alone is **not** the test, which is the one thing
+    /// to be careful of here. `SQLBindParameter`'s *ParameterValuePtr* section:
+    /// "An application can set the *ParameterValuePtr* argument to a null
+    /// pointer, as long as *StrLen_or_IndPtr is SQL_NULL_DATA or
+    /// SQL_DATA_AT_EXEC." The Driver Manager agrees — its `HY009` fires only
+    /// when *both* pointers are null — and so does `sql_bind_parameter`, which
+    /// removes a binding on that same pair. Every client binds a NULL this
+    /// way: pyodbc sends `value_ptr=NULL, *ind=SQL_NULL_DATA` for `None`.
+    ///
+    /// Testing the data pointer alone therefore reported `07002` — "the number
+    /// of parameters specified in SQLBindParameter was less than the number of
+    /// parameters in the SQL statement" — for a parameter the application had
+    /// bound, making `WHERE col = ?` with a NULL inexpressible.
+    ///
+    /// This is a parameter-side rule and deliberately not a change to
+    /// [`DescriptorRecord::is_bound`], which `SQLBindCol`'s column path uses,
+    /// and where a null `TargetValuePtr` really does unbind.
     ///
     /// `Err` is reserved for the one case that is neither: a parameter present
     /// in one descriptor and absent from the other. `SQLBindParameter` writes
@@ -530,10 +547,10 @@ impl<'a> ParamRecords<'a> {
     /// application pointers.
     pub(crate) fn get(&self, number: u16) -> Result<Option<ParamRecord<'a>>, OdbcError> {
         match (self.apd.get(&number), self.ipd.get(&number)) {
-            // A record with a null SQL_DESC_DATA_PTR exists but is not a
-            // binding. `SQLSetDescField` can create one by setting any single
-            // field, so presence in the map stopped answering this question.
-            (Some(apd), Some(_)) if !apd.is_bound() => Ok(None),
+            // A record carrying neither pointer exists but is not a binding.
+            // `SQLSetDescField` can create one by setting any single field, so
+            // presence in the map stopped answering this question.
+            (Some(apd), Some(_)) if !apd.is_bound() && apd.indicator_ptr.is_null() => Ok(None),
             (Some(apd), Some(ipd)) => Ok(Some(ParamRecord { apd, ipd })),
             (None, None) => Ok(None),
             (apd, _) => Err(OdbcError::general(
