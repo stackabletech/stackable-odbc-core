@@ -202,6 +202,13 @@ pub unsafe fn sql_driver_connect_w<B: Backend>(
                 return Err(e);
             }
 
+            // An abandoned browse leaves accumulated attributes on the handle,
+            // and `SQLBrowseConnectW` merges them into whatever the next browse
+            // supplies. Connecting by any route ends that sequence, so the state
+            // goes with it — `SQLBrowseConnectW` does the same on its own
+            // success path.
+            handle.browse_request = None;
+
             if !out_connection_string.is_null() {
                 let _ = write_utf16(
                     &conn_str,
@@ -401,6 +408,13 @@ pub unsafe fn sql_connect_w<B: Backend>(
                 }
                 return Err(e);
             }
+
+            // An abandoned browse leaves accumulated attributes on the handle,
+            // and `SQLBrowseConnectW` merges them into whatever the next browse
+            // supplies. Connecting by any route ends that sequence, so the state
+            // goes with it — `SQLBrowseConnectW` does the same on its own
+            // success path.
+            handle.browse_request = None;
 
             Ok(SqlReturn::SUCCESS)
         })
@@ -2122,6 +2136,115 @@ mod tests {
                 );
             });
 
+            let _ = sql_free_handle::<MockBrowseBackend>(HandleType::Dbc as i16, conn);
+            let _ = sql_free_handle::<MockBrowseBackend>(HandleType::Env as i16, env);
+        }
+    }
+
+    /// An abandoned browse must not contaminate a later one.
+    /// `SQLBrowseConnectW` clears the accumulated attributes on its own success,
+    /// but an ordinary connect used to leave them in place, so the next browse
+    /// on that handle started from the attributes of the one before it.
+    #[test]
+    fn sql_driver_connect_clears_abandoned_browse_state() {
+        unsafe {
+            let (env, conn) = alloc_env_and_conn_for::<MockBrowseBackend>();
+
+            let wide: Vec<u16> = "Host=localhost".encode_utf16().collect();
+            assert_eq!(
+                sql_browse_connect_w::<MockBrowseBackend>(
+                    conn,
+                    wide.as_ptr(),
+                    wide.len() as i16,
+                    std::ptr::null_mut(),
+                    0,
+                    std::ptr::null_mut(),
+                ),
+                SqlReturn::NEED_DATA,
+                "precondition: a browse is in progress",
+            );
+
+            assert_eq!(
+                sql_driver_connect_w::<MockBrowseBackend>(
+                    conn,
+                    std::ptr::null_mut(),
+                    wide.as_ptr(),
+                    wide.len() as i16,
+                    std::ptr::null_mut(),
+                    0,
+                    std::ptr::null_mut(),
+                    0,
+                ),
+                SqlReturn::SUCCESS,
+            );
+
+            crate::test_utils::with_handle::<
+                MockBrowseBackend,
+                ConnectionHandle<MockBrowseBackend>,
+                _,
+            >(conn, |h| {
+                assert!(
+                    h.browse_request.is_none(),
+                    "the abandoned browse attributes survived the connect",
+                );
+            });
+
+            let _ = sql_disconnect::<MockBrowseBackend>(conn);
+            let _ = sql_free_handle::<MockBrowseBackend>(HandleType::Dbc as i16, conn);
+            let _ = sql_free_handle::<MockBrowseBackend>(HandleType::Env as i16, env);
+        }
+    }
+
+    /// The same rule for the DSN entry point. Ignored under Miri for the reason
+    /// `sql_connect_has_no_completion_argument_and_so_permits_prompting` is:
+    /// `SQLConnectW` always resolves the DSN through the installer library, and
+    /// Miri interprets rather than links.
+    #[cfg_attr(miri, ignore = "calls the foreign SQLGetPrivateProfileStringW")]
+    #[test]
+    fn sql_connect_clears_abandoned_browse_state() {
+        unsafe {
+            let (env, conn) = alloc_env_and_conn_for::<MockBrowseBackend>();
+
+            let wide: Vec<u16> = "Host=localhost".encode_utf16().collect();
+            assert_eq!(
+                sql_browse_connect_w::<MockBrowseBackend>(
+                    conn,
+                    wide.as_ptr(),
+                    wide.len() as i16,
+                    std::ptr::null_mut(),
+                    0,
+                    std::ptr::null_mut(),
+                ),
+                SqlReturn::NEED_DATA,
+                "precondition: a browse is in progress",
+            );
+
+            let dsn: Vec<u16> = "nonexistent-dsn".encode_utf16().collect();
+            assert_eq!(
+                sql_connect_w::<MockBrowseBackend>(
+                    conn,
+                    dsn.as_ptr(),
+                    dsn.len() as i16,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                    0,
+                ),
+                SqlReturn::SUCCESS,
+            );
+
+            crate::test_utils::with_handle::<
+                MockBrowseBackend,
+                ConnectionHandle<MockBrowseBackend>,
+                _,
+            >(conn, |h| {
+                assert!(
+                    h.browse_request.is_none(),
+                    "the abandoned browse attributes survived the connect",
+                );
+            });
+
+            let _ = sql_disconnect::<MockBrowseBackend>(conn);
             let _ = sql_free_handle::<MockBrowseBackend>(HandleType::Dbc as i16, conn);
             let _ = sql_free_handle::<MockBrowseBackend>(HandleType::Env as i16, env);
         }

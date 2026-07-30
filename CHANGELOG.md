@@ -1482,6 +1482,11 @@ call `SQLCloseCursor` or `SQLFreeStmt(SQL_CLOSE)` first, as it already must for
   conversion the FFI boundary uses; `attr_odbc_version_from_raw` is unchanged and
   still cannot name `SQL_OV_ODBC2`.
 
+- `SQLDriverConnectW` and `SQLConnectW` clear any abandoned `SQLBrowseConnect`
+  state on success. `SQLBrowseConnectW` already did so on its own; without the
+  other two, an abandoned browse's accumulated attributes merged into the next
+  browse on the same handle.
+
 - `SQLSetConnectAttrW(SQL_ATTR_CURRENT_CATALOG, NULL)` returns `HY009` rather
   than quietly forgetting the stored catalog and reporting success. The spec's
   row — "the *Attribute* argument identified a connection attribute that
