@@ -340,6 +340,23 @@ pub unsafe fn sql_connect_w<B: Backend>(
             // The DM's odbcinst library reads ODBCINI/ODBCSYSINI env vars.
             let dsn_keys = read_dsn_keys(&dsn);
             let mut params: ConnectParams = dsn_keys.into_iter().collect();
+            // The DSN *name* is not among the DSN's keys. `read_dsn_keys`
+            // enumerates the odbc.ini section, and a section lists the keywords
+            // inside it, never its own heading — so without this the one
+            // parameter this entry point is named for was the one a backend
+            // could not see, and `ConnectParams::dsn()` answered `None` on the
+            // exact path where the spec makes the value load-bearing:
+            // `SQL_DATA_SOURCE_NAME` "is the value of the *ServerName* argument
+            // in SQLConnect". `SQLDriverConnectW` has always had it, because
+            // `merge_dsn_params` merges the file's keys *under* a connection
+            // string that already carried `DSN=`.
+            //
+            // Inserted after the section's keys, so a stray `DSN` keyword
+            // inside the section cannot displace the name the application
+            // actually connected with.
+            if !dsn.is_empty() {
+                params.insert("dsn", dsn.clone());
+            }
             params.declare_sensitive_keywords(B::sensitive_connect_keywords());
 
             // Override with user/password if provided
@@ -1286,6 +1303,61 @@ mod tests {
                 seen,
                 (true, Some("https://example.invalid/oauth".to_owned()))
             );
+        }
+    }
+
+    /// The DSN name reaches the backend on the `SQLConnect` path.
+    ///
+    /// `read_dsn_keys` enumerates the odbc.ini section, and a section lists the
+    /// keywords inside it rather than its own heading, so the DSN name is the
+    /// one connection parameter that is *not* among the keys it returns. Until
+    /// core inserted it, `ConnectParams::dsn()` was `None` here while being
+    /// `Some` for the same DSN through `SQLDriverConnectW` — and the spec makes
+    /// this the authoritative source for `SQL_DATA_SOURCE_NAME`, which "is the
+    /// value of the *ServerName* argument in SQLConnect".
+    ///
+    /// A nonexistent DSN is deliberate: it proves the name arrives on its own
+    /// rather than by being echoed back out of a section that happened to
+    /// contain it.
+    #[cfg_attr(miri, ignore = "calls the foreign SQLGetPrivateProfileStringW")]
+    #[test]
+    fn sql_connect_hands_the_backend_the_dsn_name_it_connected_with() {
+        type B = crate::test_utils::MockNoQueryTimeoutBackend;
+        unsafe {
+            let mut env: *mut c_void = std::ptr::null_mut();
+            let _ = sql_alloc_handle::<B>(HandleType::Env as i16, std::ptr::null_mut(), &mut env);
+            let mut conn: *mut c_void = std::ptr::null_mut();
+            let _ = sql_alloc_handle::<B>(HandleType::Dbc as i16, env, &mut conn);
+
+            let dsn: Vec<u16> = "nonexistent-dsn".encode_utf16().collect();
+            assert_eq!(
+                sql_connect_w::<B>(
+                    conn,
+                    dsn.as_ptr(),
+                    dsn.len() as i16,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                    0,
+                ),
+                SqlReturn::SUCCESS,
+            );
+
+            crate::test_utils::with_handle::<B, ConnectionHandle<B>, _>(conn, |c| {
+                assert_eq!(
+                    c.connection
+                        .as_ref()
+                        .expect("connected")
+                        .seen_dsn
+                        .as_deref(),
+                    Some("nonexistent-dsn"),
+                    "SQLConnect's ServerName argument never reached the backend",
+                );
+            });
+
+            let _ = sql_disconnect::<B>(conn);
+            let _ = sql_free_handle::<B>(HandleType::Dbc as i16, conn);
+            let _ = sql_free_handle::<B>(HandleType::Env as i16, env);
         }
     }
 

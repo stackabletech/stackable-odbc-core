@@ -1339,6 +1339,13 @@ pub struct MockAppliedConnection {
     /// because that call is the only place a backend ever sees them.
     pub seen_login_timeout: Option<u32>,
     pub seen_connection_timeout: Option<u32>,
+    /// What `ConnectParams::dsn()` reported at the moment `Backend::connect`
+    /// ran, for the same reason as the two timeouts above.
+    ///
+    /// The interesting case is `SQLConnectW`, whose only argument naming a data
+    /// source is the DSN name itself: it is not one of the DSN's keys, so
+    /// nothing puts it in the params unless core does.
+    pub seen_dsn: Option<String>,
 }
 
 /// Generates a `Backend` whose only interesting behaviour is the extra items
@@ -1378,6 +1385,7 @@ macro_rules! mock_applied_backend {
                     max_length_calls: crate::sync::Mutex::new(Vec::new()),
                     seen_login_timeout: params.login_timeout(),
                     seen_connection_timeout: params.connection_timeout(),
+                    seen_dsn: params.dsn().map(str::to_owned),
                 })
             }
             fn disconnect(_: &mut MockAppliedConnection) -> Result<(), $err> {

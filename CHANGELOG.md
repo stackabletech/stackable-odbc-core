@@ -1455,6 +1455,20 @@ Everything a driver has to change for the catalog rework, in one place.
   implements any of the three hooks should expect a call with `0` where it
   previously got none.
 
+- **`SQLConnectW` now hands the backend the DSN name it connected with.**
+  `ConnectParams` was built only from the keys `SQLGetPrivateProfileStringW`
+  enumerates out of the DSN's `odbc.ini` section, and a section lists the
+  keywords inside it rather than its own heading — so the DSN name, the one
+  parameter this entry point is named for, was the one a backend could not
+  see. `ConnectParams::dsn()` answered `None` here while answering `Some` for
+  the same DSN through `SQLDriverConnectW`, where `merge_dsn_params` merges
+  the file's keys underneath a connection string that already carried `DSN=`.
+  That asymmetry reaches applications through `SQLGetInfo`: the spec makes
+  `SQL_DATA_SOURCE_NAME` "the value of the *ServerName* argument in
+  SQLConnect", and a driver had nothing to answer it with. The name is
+  inserted after the section's keys, so a stray `DSN` keyword inside the
+  section cannot displace the name the application actually connected with.
+
 - **`SQL_ATTR_ROW_NUMBER` is no longer echoed back from the application.** The
   read-only attribute was stored verbatim by `SQLSetStmtAttr`'s catch-all and
   returned by `SQLGetStmtAttr`, so an application that wrote `42` read `42`
