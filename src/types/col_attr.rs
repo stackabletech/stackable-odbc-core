@@ -434,6 +434,58 @@ fn octet_length_for(desc: &ColumnDescriptor) -> isize {
     }
 }
 
+/// One column of a result set as a `DescriptorRecord`.
+///
+/// The IRD stores no records — reads are computed from [`ColumnDescriptor`] — so
+/// this is the only form in which one can leave its statement, which is what
+/// `SQLCopyDesc` needs to take an IRD as its source.
+///
+/// Every field goes through [`get_column_attribute`], the same function
+/// `SQLColAttributeW` and `SQLGetDescField`'s IRD path use, so a copied record
+/// cannot describe a column differently from a read one. The record fields absent
+/// here are the ones an IRD does not define: `SQL_DESC_DATA_PTR`,
+/// `SQL_DESC_INDICATOR_PTR` and `SQL_DESC_OCTET_LENGTH_PTR` are application-side
+/// addresses, and `SQL_DESC_PARAMETER_TYPE` is the IPD's. Their `Default` values
+/// are what a fresh record carries, which for the three pointers is null — an
+/// unbound record, correctly, since a copy carries no application buffer with it.
+pub(crate) fn record_from_column(
+    desc: &ColumnDescriptor,
+    column_count: i16,
+) -> Result<crate::descriptor::DescriptorRecord, OdbcError> {
+    let numeric = |field: Desc| -> Result<isize, OdbcError> {
+        match get_column_attribute(desc, column_count, field)? {
+            ColAttrValue::Numeric(n) => Ok(n),
+            // Unreachable for the fields below, each of which this module answers
+            // numerically; a wrong shape is core disagreeing with itself rather
+            // than anything the application did.
+            ColAttrValue::String(s) => Err(OdbcError::general(
+                format!(
+                    "Column attribute {field:?} answered the string {s:?} where a number was expected"
+                ),
+                crate::types::SqlState::general_error(),
+            )),
+        }
+    };
+    let name = match get_column_attribute(desc, column_count, Desc::Name)? {
+        ColAttrValue::String(s) => s,
+        ColAttrValue::Numeric(n) => n.to_string(),
+    };
+    let mut record = crate::descriptor::DescriptorRecord {
+        length: crate::types::ULen::try_from(numeric(Desc::Length)?).unwrap_or(0),
+        octet_length: numeric(Desc::OctetLength)?,
+        precision: i16::try_from(numeric(Desc::Precision)?).unwrap_or(i16::MAX),
+        scale: i16::try_from(numeric(Desc::Scale)?).unwrap_or(i16::MAX),
+        num_prec_radix: i32::try_from(numeric(Desc::NumPrecRadix)?).unwrap_or(0),
+        name,
+        unnamed: numeric(Desc::Unnamed)?,
+        ..crate::descriptor::DescriptorRecord::default()
+    };
+    // Last, and through `set_concise_type`: it is the only writer of the type
+    // trio, so setting it after the rest cannot be undone by them.
+    record.set_concise_type(i16::try_from(numeric(Desc::ConciseType)?).unwrap_or(0));
+    Ok(record)
+}
+
 /// Returns true if the SQL type is unsigned (or non-numeric).
 fn is_unsigned(sql_type: SqlDataType) -> bool {
     !is_numeric_type(sql_type)

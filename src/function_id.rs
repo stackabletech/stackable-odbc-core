@@ -281,6 +281,7 @@ pub const CORE_EXPORTED_FUNCTIONS: &[FunctionId] = &[
     FunctionId::SetConnectAttr,
     FunctionId::SetDescField,
     FunctionId::SetDescRec,
+    FunctionId::CopyDesc,
     FunctionId::SetEnvAttr,
     FunctionId::SetStmtAttr,
     FunctionId::FetchScroll,
@@ -315,11 +316,6 @@ pub const CORE_UNEXPORTED_FUNCTIONS: &[(FunctionId, &str)] = &[
     (
         FunctionId::BindParam,
         "superseded by SQLBindParameter, which is exported",
-    ),
-    (
-        FunctionId::CopyDesc,
-        "explicit descriptors are not implemented; the four accessors over a statement's own \
-         descriptors are",
     ),
     (
         FunctionId::CancelHandle,
@@ -556,19 +552,7 @@ mod tests {
         );
     }
 
-    /// `SQLCopyDesc` is the last descriptor function still unimplemented, and
-    /// it is neither exported nor advertised. The other four became real in D3;
-    /// this narrowed rather than being deleted, so the claim stays checked
-    /// while it is still a claim.
-    #[test]
-    fn copy_desc_is_not_advertised_as_supported() {
-        assert!(
-            !CORE_EXPORTED_FUNCTIONS.contains(&FunctionId::CopyDesc),
-            "SQLCopyDesc is advertised, but it is not implemented"
-        );
-    }
-
-    /// The four D3 implemented are reported supported, because they are. A
+    /// The five descriptor functions are reported supported, because they are. A
     /// function that works and is reported unsupported is the mirror of D1's
     /// defect: the Driver Manager answers `IM001` and the application never
     /// calls a function that would have worked.
@@ -579,6 +563,7 @@ mod tests {
             FunctionId::SetDescField,
             FunctionId::GetDescRec,
             FunctionId::SetDescRec,
+            FunctionId::CopyDesc,
         ] {
             assert!(
                 CORE_EXPORTED_FUNCTIONS.contains(&id),

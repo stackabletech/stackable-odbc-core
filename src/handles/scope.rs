@@ -1,23 +1,25 @@
 //! Access to handle contents, gated on holding the owning connection's lock.
 //!
 //! A `HandleScope` is the only way to obtain `&mut` to a handle. The only way
-//! to obtain one is through the three callers of the `pub(crate)`
+//! to obtain one is through the four callers of the `pub(crate)`
 //! `HandleScope::new` in this crate — [`panic_safe`], which builds the
 //! outermost scope for an FFI call; [`HandleScope::with_child_group`], which
 //! builds a nested scope for the one legitimate case of holding two groups at
-//! once; and `sql_cancel`, which builds one only on the branch where its own
-//! `try_lock` succeeded. All three lock the group immediately before
-//! constructing the scope and tie its lifetime to that lock (see
-//! [`HandleScope::new`]), which is what makes "the group lock is held" a fact
-//! the compiler checks rather than a rule a comment states.
+//! once; `sql_cancel`, which builds one only on the branch where its own
+//! `try_lock` succeeded; and `sql_copy_desc`, whose phase one holds the
+//! *source* descriptor's group while every diagnostic belongs to the target.
+//! All four lock the group immediately before constructing the scope and tie its
+//! lifetime to that lock (see [`HandleScope::new`]), which is what makes "the
+//! group lock is held" a fact the compiler checks rather than a rule a comment
+//! states.
 //!
 //! [`panic_safe`]: crate::panic::panic_safe
 
 use std::ffi::c_void;
 use std::marker::PhantomData;
 
-use crate::backend::Backend;
-use crate::descriptor::DescriptorRole;
+use crate::backend::{Backend, StatementBackend};
+use crate::descriptor::{DescriptorRole, DescriptorSnapshot};
 use crate::diagnostics::DiagnosticQueue;
 use crate::errors::OdbcError;
 use crate::handles::registry::{GroupLock, HandleKind, Registry, registry};
@@ -32,18 +34,20 @@ use odbc_sys::Desc;
 /// Proof that the caller holds one lock group, and the gateway to the handles
 /// inside it.
 ///
-/// `HandleScope::new` is `pub(crate)`, with exactly three callers in this
+/// `HandleScope::new` is `pub(crate)`, with exactly four callers in this
 /// crate: [`panic_safe`], which builds the outermost scope for an FFI call;
 /// [`Self::with_child_group`], which builds a nested scope for the one
-/// legitimate case of holding two groups at once; and `sql_cancel`
+/// legitimate case of holding two groups at once; `sql_cancel`
 /// (`ffi::cursor`), which builds one only on the branch where its own
 /// `try_lock` succeeded — never on the branch where another thread holds the
-/// group. All three lock the group immediately before constructing the scope
-/// and pass a borrow of that lock as `new`'s `guard` parameter, which is what
-/// ties the lifetime `'a` to it: a `HandleScope<'a>` cannot be constructed,
-/// returned, or used once its originating guard is gone, so a live
-/// `HandleScope` always corresponds to a held group lock — or, for a null
-/// handle, to nothing needing one.
+/// group; and `sql_copy_desc` (`ffi::desc`), which cannot use `panic_safe`
+/// because the lock it needs is the **source** descriptor's while every
+/// diagnostic it posts belongs to the target. All four lock the group
+/// immediately before constructing the scope and pass a borrow of that lock as
+/// `new`'s `guard` parameter, which is what ties the lifetime `'a` to it: a
+/// `HandleScope<'a>` cannot be constructed, returned, or used once its
+/// originating guard is gone, so a live `HandleScope` always corresponds to a
+/// held group lock — or, for a null handle, to nothing needing one.
 ///
 /// [`panic_safe`]: crate::panic::panic_safe
 pub struct HandleScope<'a> {
@@ -78,7 +82,7 @@ impl<'a> HandleScope<'a> {
     /// this scope reaches handles through the registry, not through the
     /// guard, so the parameter exists purely to carry the lifetime.
     ///
-    /// `pub(crate)` so that only this crate's three callers can claim to hold
+    /// `pub(crate)` so that only this crate's four callers can claim to hold
     /// a lock.
     pub(crate) fn new(
         group: Option<Arc<GroupLock>>,
@@ -403,6 +407,70 @@ impl<'a> HandleScope<'a> {
         // comment for why reborrowing `self` between the two lookups touches
         // nothing either pointer refers to.
         Ok(unsafe { (&mut *stmt_addr, &mut *desc_addr) })
+    }
+
+    /// Phase one of `SQLCopyDesc`: materialise a descriptor's contents.
+    ///
+    /// The caller holds only this descriptor's group and releases it before
+    /// touching the target. An IRD is materialised from the owning statement's
+    /// column metadata, which is why this resolves the parent; a source IRD on a
+    /// statement that has not been prepared or executed is `HY007`, per
+    /// `SQLCopyDesc`'s own row for it.
+    pub fn snapshot_descriptor<B: Backend>(
+        &mut self,
+        token: *mut c_void,
+    ) -> Result<DescriptorSnapshot, OdbcError> {
+        if self.descriptor(token)?.role == DescriptorRole::Ird {
+            return self.snapshot_ird::<B>(token);
+        }
+        let desc = self.descriptor(token)?;
+        Ok(DescriptorSnapshot {
+            records: desc.records.clone(),
+            attrs: desc.attrs.clone(),
+        })
+    }
+
+    /// [`Self::snapshot_descriptor`] for an IRD, whose records are computed
+    /// rather than stored.
+    ///
+    /// Built from `col_attr::get_column_attribute` — the same function
+    /// `SQLColAttributeW` and `SQLGetDescField`'s IRD path use, so the three
+    /// cannot disagree about one column.
+    fn snapshot_ird<B: Backend>(
+        &mut self,
+        token: *mut c_void,
+    ) -> Result<DescriptorSnapshot, OdbcError> {
+        let attrs = self.descriptor(token)?.attrs.clone();
+        // An IRD is always one of a statement's four, so a missing statement is
+        // unreachable rather than a case to answer for.
+        let Some(stmt_token) = self.descriptor_stmt(token) else {
+            return Err(OdbcError::general(
+                "An implementation row descriptor has no owning statement",
+                crate::types::SqlState::general_error(),
+            ));
+        };
+        let stmt: &mut StatementHandle<B> = self.get(stmt_token)?;
+        // Spec HY007, the same wording `read_ird_field` uses: "The fields of an
+        // IRD have a default value only after the statement has been prepared or
+        // executed and the IRD has been populated ... Until the IRD has been
+        // populated, any attempt to gain access to a field of an IRD will return
+        // an error."
+        let Some(statement) = stmt.statement.as_mut().filter(|s| s.column_count() > 0) else {
+            return Err(OdbcError::general(
+                "The IRD is not populated: the statement has not been prepared or executed",
+                crate::types::SqlState::associated_statement_not_prepared(),
+            ));
+        };
+        let column_count = statement.column_count();
+        let mut records = std::collections::HashMap::new();
+        for column in 1..=u16::try_from(column_count).unwrap_or(0) {
+            let described = statement.describe_col(column)?;
+            records.insert(
+                column,
+                crate::types::col_attr::record_from_column(&described, column_count)?,
+            );
+        }
+        Ok(DescriptorSnapshot { records, attrs })
     }
 
     /// A descriptor header field's stored value on one of a statement's
@@ -828,6 +896,49 @@ mod tests {
             );
             cleanup_env_conn_stmt(env, conn, stmt);
         }
+    }
+
+    /// A snapshot is an owned copy: the lock can be released before it is used,
+    /// which is what lets `SQLCopyDesc` span two connections without ever holding
+    /// two group locks.
+    #[test]
+    fn a_snapshot_outlives_the_lock_it_was_taken_under() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            let ard = with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+                handle.descriptor_token(DescriptorRole::Ard)
+            });
+            let snapshot = returning(stmt, |scope| {
+                scope
+                    .desc_of::<MockBackend>(stmt, DescriptorRole::Ard)?
+                    .records
+                    .insert(1, DescriptorRecord::default());
+                scope.snapshot_descriptor::<MockBackend>(ard)
+            })
+            .expect("the ARD is live");
+            // The lock is gone; the snapshot is still readable.
+            assert_eq!(snapshot.records.len(), 1);
+            cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
+    /// Run `f` under `token`'s group and hand back its value.
+    ///
+    /// [`panic_safe`] returns a `SqlReturn`, which is the wrong shape for a test
+    /// whose subject is the value a scope method produced. Modelled on
+    /// `panic_safe`'s first three lines.
+    ///
+    /// # Safety
+    ///
+    /// `token` must be a live handle.
+    unsafe fn returning<R>(
+        token: *mut c_void,
+        f: impl FnOnce(&mut HandleScope<'_>) -> Result<R, OdbcError>,
+    ) -> Result<R, OdbcError> {
+        let group = registry().group_of(token);
+        let guard = group.as_ref().map(|g| g.lock());
+        let mut scope = HandleScope::new(group.clone(), guard.as_ref());
+        f(&mut scope)
     }
 
     /// `desc_of` reaches the same storage the statement's own field does.

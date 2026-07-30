@@ -936,6 +936,15 @@ macro_rules! forward_ffi {
             }
         }
 
+        #[allow(non_snake_case, clippy::missing_safety_doc)]
+        #[unsafe(no_mangle)]
+        pub unsafe extern "system" fn SQLCopyDesc(
+            source: *mut ::std::ffi::c_void,
+            target: *mut ::std::ffi::c_void,
+        ) -> $crate::types::SqlReturn {
+            unsafe { $crate::ffi::desc::sql_copy_desc::<$B>(source, target) }
+        }
+
         // ---------------------------------------------------------------------------
         // Windows DM compatibility — ODBC 2.x option functions (non-W names)
         // ---------------------------------------------------------------------------
@@ -1309,6 +1318,7 @@ mod expansion {
             (FunctionId::SetConnectAttr, SQLSetConnectAttrW as *const ()),
             (FunctionId::SetDescField, SQLSetDescFieldW as *const ()),
             (FunctionId::SetDescRec, SQLSetDescRec as *const ()),
+            (FunctionId::CopyDesc, SQLCopyDesc as *const ()),
             (FunctionId::SetEnvAttr, SQLSetEnvAttr as *const ()),
             (FunctionId::SetStmtAttr, SQLSetStmtAttrW as *const ()),
             (FunctionId::FetchScroll, SQLFetchScroll as *const ()),

@@ -59,7 +59,7 @@ pub enum DescriptorRole {
 /// one before it is set is that the value is undefined, not that the read
 /// fails, so any value is conforming. The `Default` impl uses the spec's stated
 /// defaults where it gives one and a zero otherwise.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DescriptorRecord {
     /// `SQL_DESC_CONCISE_TYPE`. A C type on an ARD or APD, a SQL type on an
     /// IPD. Stored raw because it is one field with two readings; see
@@ -122,6 +122,31 @@ impl Default for DescriptorRecord {
             unnamed: crate::types::SQL_UNNAMED,
         }
     }
+}
+
+/// An owned copy of a descriptor's contents.
+///
+/// `SQLCopyDesc` may name descriptors on two different connections, and therefore
+/// in two different lock groups. Materialising the source under its own lock and
+/// releasing it before the target's is acquired is what keeps the crate's one
+/// lock-ordering rule (environment before connection) intact: no call ever holds
+/// two peer groups.
+///
+/// The IRD is materialised here too — its records are computed from column
+/// metadata rather than stored, so a snapshot is the only form in which it can
+/// leave its statement.
+///
+/// Two fields are deliberately absent. `SQL_DESC_ALLOC_TYPE` is the one field
+/// `SQLCopyDesc` never copies, because it belongs to the allocation rather than to
+/// its contents. And the *source's* role is not carried either: the consistency
+/// check runs under the **target's** role, and a snapshot that remembered where it
+/// came from would invite a later reader to check against the wrong one.
+#[derive(Debug)]
+pub struct DescriptorSnapshot {
+    /// Records by 1-based column or parameter number.
+    pub records: std::collections::HashMap<u16, DescriptorRecord>,
+    /// Header fields by `SQL_DESC_*` field identifier, as `Descriptor::attrs`.
+    pub attrs: std::collections::HashMap<u16, usize>,
 }
 
 /// A raw `SQL_DESC_CONCISE_TYPE` read as a C data type.

@@ -684,6 +684,18 @@ mod tests {
              it reads is the one panic_safe already holds for that same \
              connection, and no second group is acquired.",
         ),
+        (
+            "src/ffi/desc.rs",
+            1,
+            "SQLCopyDesc's phase one takes the *source's* group — which may be \
+             another connection's, since the spec permits a copy across \
+             connections and even across environments. It is the crate's one \
+             acquisition outside panic_safe that is not the called handle's own, \
+             and it deliberately does not nest: the guard is dropped before \
+             phase two takes the target's group under an ordinary panic_safe, so \
+             two copies in opposite directions cannot deadlock. Modelled by \
+             opposite_direction_copies_cannot_deadlock.",
+        ),
     ];
 
     /// The list above is complete: no other module acquires a group lock.

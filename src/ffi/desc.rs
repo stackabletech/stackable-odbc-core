@@ -42,9 +42,11 @@ use crate::descriptor::{
     header_attribute, header_default, set_record_field,
 };
 use crate::errors::OdbcError;
+use crate::handles::registry::{HandleKind, registry};
 use crate::handles::scope::HandleScope;
 use crate::handles::{Descriptor, HeaderOwner, StatementHandle};
 use crate::panic::panic_safe;
+use crate::sync::Arc;
 use crate::types::col_attr::{ColAttrValue, get_column_attribute};
 use crate::types::{SqlReturn, SqlState};
 
@@ -995,6 +997,161 @@ pub unsafe fn sql_set_desc_rec<B: Backend>(
         })
     };
     tracing::debug!("SQLSetDescRec -> {:?}", ret);
+    ret
+}
+
+/// Generic implementation of SQLCopyDesc.
+///
+/// Spec: <https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlcopydesc-function>
+///
+/// Copies one descriptor's contents onto another, in two phases that never hold
+/// two group locks at once. The spec permits a copy across connections and even
+/// across environments — "Descriptor handles can be copied across connections
+/// even if the connections are under different environments" — so source and
+/// target may be in two different lock groups, and a call holding both would be a
+/// second nested-lock site where the crate has exactly one (environment before
+/// connection). Instead:
+///
+/// 1. **Source group alone.** Materialise an owned `DescriptorSnapshot`. An IRD
+///    is materialised here, so `HY007` is decided here; the lock is released
+///    before phase 2 begins.
+/// 2. **Target group alone**, under an ordinary `panic_safe`, where every
+///    diagnostic this call posts belongs.
+///
+/// Two phases cannot deadlock in either direction by construction, which is the
+/// whole reason for the shape.
+///
+/// `SQL_DESC_ALLOC_TYPE` is never copied: the spec exempts it by name, and it
+/// belongs to the allocation rather than to its contents.
+///
+/// The source's diagnostic queue is deliberately **not** cleared. The spec's
+/// sentence about that describes the Driver Manager's cross-driver implementation
+/// via `SQLGetDescField`/`SQLSetDescField`, not an obligation on a driver that
+/// copies directly.
+///
+/// # Parameters
+///
+/// - `source_desc_handle`: the descriptor to copy from. May be any role,
+///   including an IRD.
+/// - `target_desc_handle`: the descriptor to copy onto. May not be an IRD.
+///
+/// # Spec compliance
+///
+/// Every SQLSTATE from this function's Diagnostics table:
+///
+/// - `01000` General warning — not produced here.
+/// - `08S01` Communication link failure — not returned; this call performs no
+///   I/O.
+/// - `HY000` General error — returned for a failure with no more specific code,
+///   including an internal panic caught by `panic_safe`.
+/// - `HY001` Memory allocation error — not returned; allocation here is an
+///   infallible `Box`/`HashMap` clone.
+/// - `HY007` Associated statement is not prepared — returned when the source is
+///   an IRD whose statement has produced no column metadata. Determined in phase
+///   one and posted in phase two, against the target, which is the handle the
+///   spec says to read this call's diagnostics with.
+/// - `HY010` Function sequence error — **(DM)** on all four of its clauses; not
+///   returned here.
+/// - `HY013` Memory management error — not returned.
+/// - `HY016` Cannot modify an implementation row descriptor — returned when
+///   `target_desc_handle` names an IRD: "TargetDescHandle cannot be set to a
+///   handle to an IRD."
+/// - `HY021` Inconsistent descriptor information — returned when a copied record
+///   fails the consistency check under the target's role. Core checks the
+///   *snapshot* before writing anything, so the target is left untouched; the
+///   spec permits it to be undefined, and an owned snapshot makes doing better
+///   free.
+/// - `HY092` Invalid attribute/option identifier — not returned. Core copies
+///   wholesale rather than field by field, as the spec's own "All fields of the
+///   descriptor, except SQL_DESC_ALLOC_TYPE ..., are copied, whether or not the
+///   field is defined for the destination descriptor" describes; this row
+///   describes the Driver Manager's field-by-field implementation.
+/// - `HY117` Connection is suspended — **(DM)**; not returned here.
+/// - `HYT01` Connection timeout expired — not returned; no I/O.
+/// - `IM001` Driver does not support this function — **(DM)**; not returned here.
+///
+/// An invalid `source_desc_handle` is `SQL_INVALID_HANDLE` with **no** diagnostic
+/// record, per the page's own sentence: "If an invalid SourceDescHandle was
+/// passed in the call, SQL_INVALID_HANDLE will be returned but no SQLSTATE will be
+/// returned." No queue is in reach at that point, which is exactly right.
+///
+/// # Safety
+///
+/// Both arguments must be null or tokens issued by `SQLAllocHandle` or by the
+/// implicit allocation a statement performs.
+pub unsafe fn sql_copy_desc<B: Backend>(
+    source_desc_handle: *mut c_void,
+    target_desc_handle: *mut c_void,
+) -> SqlReturn {
+    tracing::debug!(
+        "SQLCopyDesc(source={:?}, target={:?})",
+        source_desc_handle,
+        target_desc_handle
+    );
+    // Phase one: the source's group, alone. Released before phase two takes the
+    // target's, so this call never holds two peer groups — the crate's one
+    // ordering rule (environment before connection) stays the only one, and a
+    // copy in the opposite direction on another thread cannot deadlock.
+    let snapshot = {
+        let Some(group) = registry().group_of_kind(source_desc_handle, HandleKind::Desc) else {
+            tracing::debug!("SQLCopyDesc -> INVALID_HANDLE (source)");
+            return SqlReturn::INVALID_HANDLE;
+        };
+        let guard = group.lock();
+        let mut scope = HandleScope::new(Some(Arc::clone(&group)), Some(&guard));
+        let taken = scope.snapshot_descriptor::<B>(source_desc_handle);
+        drop(guard);
+        taken
+    };
+
+    // Phase two: the target's group. Every diagnostic this call posts goes to the
+    // target's queue, per the spec's own instruction to read them with a `Handle`
+    // of `TargetDescHandle` — including `HY007`, which phase one decided.
+    let ret = unsafe {
+        panic_safe::<B, _>(target_desc_handle, |scope| {
+            let target = scope.descriptor(target_desc_handle)?;
+            target.diagnostics.clear();
+            let target_role = target.role;
+
+            // Spec HY016: "TargetDescHandle cannot be set to a handle to an IRD."
+            // Before the snapshot is unwrapped, so an IRD target is reported as
+            // such even when the source also failed.
+            if target_role == DescriptorRole::Ird {
+                return Err(OdbcError::general(
+                    "SQLCopyDesc: the target is an implementation row descriptor",
+                    SqlState::cannot_modify_ird(),
+                ));
+            }
+
+            let snapshot = snapshot?;
+
+            // Spec: "When the SQL_DESC_DATA_PTR field is copied, a consistency
+            // check is performed on the target descriptor." Run against the
+            // snapshot, before anything is written, so HY021 leaves the target
+            // untouched.
+            for record in snapshot.records.values() {
+                if record.is_bound() {
+                    consistency_check(record, target_role)?;
+                }
+            }
+
+            // Spec: "All fields of the descriptor, except SQL_DESC_ALLOC_TYPE
+            // ..., are copied, whether or not the field is defined for the
+            // destination descriptor." So this is a wholesale replace rather than
+            // a field-by-field validated set — which is also why HY091 cannot
+            // arise here and HY092 is not core's.
+            let target = scope.descriptor(target_desc_handle)?;
+            target.records = snapshot.records;
+            target.attrs = snapshot.attrs;
+            tracing::debug!(
+                "SQLCopyDesc: copied {} record(s) onto the {:?}",
+                target.records.len(),
+                target_role
+            );
+            Ok(SqlReturn::SUCCESS)
+        })
+    };
+    tracing::debug!("SQLCopyDesc -> {:?}", ret);
     ret
 }
 
@@ -2004,5 +2161,355 @@ mod tests {
 
             cleanup_env_conn_stmt(env, conn, stmt);
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // SQLCopyDesc
+    // -----------------------------------------------------------------------
+
+    /// The documented use: copy one statement's ARD onto another's APD, so the
+    /// rows fetched by the first become the parameters of the second.
+    #[test]
+    fn copy_desc_copies_an_ard_onto_an_apd() {
+        unsafe {
+            let (env, conn, stmt_a) = alloc_env_conn_stmt();
+            let mut stmt_b: *mut c_void = std::ptr::null_mut();
+            assert_eq!(
+                crate::ffi::handle::sql_alloc_handle::<MockBackend>(
+                    HandleType::Stmt as i16,
+                    conn,
+                    &mut stmt_b
+                ),
+                SqlReturn::SUCCESS
+            );
+
+            let mut buf = [0u8; 8];
+            assert_eq!(
+                crate::ffi::bind::sql_bind_col::<MockBackend>(
+                    stmt_a,
+                    1,
+                    CDataType::SBigInt as i16,
+                    buf.as_mut_ptr().cast(),
+                    8,
+                    std::ptr::null_mut(),
+                ),
+                SqlReturn::SUCCESS
+            );
+
+            let source = ard_of(stmt_a);
+            let target = apd_of(stmt_b);
+            assert_eq!(
+                sql_copy_desc::<MockBackend>(source, target),
+                SqlReturn::SUCCESS
+            );
+
+            assert_eq!(read_numeric(target, 0, Desc::Count), 1);
+            assert_eq!(
+                read_numeric(target, 1, Desc::ConciseType),
+                CDataType::SBigInt as isize,
+                "the copied record does not describe what was bound"
+            );
+
+            let _ =
+                crate::ffi::handle::sql_free_handle::<MockBackend>(HandleType::Stmt as i16, stmt_b);
+            cleanup_env_conn_stmt(env, conn, stmt_a);
+        }
+    }
+
+    /// Across two connections under one environment, which the spec permits and
+    /// which is the case that puts source and target in different lock groups —
+    /// the whole reason for the two-phase shape.
+    #[test]
+    fn copy_desc_spans_two_connections() {
+        unsafe {
+            let (env, conn_a, stmt_a) = alloc_env_conn_stmt();
+            let mut conn_b: *mut c_void = std::ptr::null_mut();
+            assert_eq!(
+                crate::ffi::handle::sql_alloc_handle::<MockBackend>(
+                    HandleType::Dbc as i16,
+                    env,
+                    &mut conn_b
+                ),
+                SqlReturn::SUCCESS
+            );
+            let mut stmt_b: *mut c_void = std::ptr::null_mut();
+            assert_eq!(
+                crate::ffi::handle::sql_alloc_handle::<MockBackend>(
+                    HandleType::Stmt as i16,
+                    conn_b,
+                    &mut stmt_b
+                ),
+                SqlReturn::SUCCESS
+            );
+
+            let mut buf = [0u8; 4];
+            assert_eq!(
+                crate::ffi::bind::sql_bind_col::<MockBackend>(
+                    stmt_a,
+                    1,
+                    CDataType::SLong as i16,
+                    buf.as_mut_ptr().cast(),
+                    4,
+                    std::ptr::null_mut(),
+                ),
+                SqlReturn::SUCCESS
+            );
+
+            assert_eq!(
+                sql_copy_desc::<MockBackend>(ard_of(stmt_a), ard_of(stmt_b)),
+                SqlReturn::SUCCESS
+            );
+            assert_eq!(read_numeric(ard_of(stmt_b), 0, Desc::Count), 1);
+            assert_eq!(
+                read_numeric(ard_of(stmt_b), 1, Desc::ConciseType),
+                CDataType::SLong as isize
+            );
+
+            let _ =
+                crate::ffi::handle::sql_free_handle::<MockBackend>(HandleType::Stmt as i16, stmt_b);
+            let _ =
+                crate::ffi::handle::sql_free_handle::<MockBackend>(HandleType::Dbc as i16, conn_b);
+            cleanup_env_conn_stmt(env, conn_a, stmt_a);
+        }
+    }
+
+    /// Spec HY016: "TargetDescHandle cannot be set to a handle to an IRD."
+    #[test]
+    fn copy_desc_refuses_an_ird_target() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            let target = ird_of(stmt);
+
+            assert_eq!(
+                sql_copy_desc::<MockBackend>(ard_of(stmt), target),
+                SqlReturn::ERROR
+            );
+            assert_eq!(
+                first_sqlstate(target),
+                sql_state::CANNOT_MODIFY_IRD,
+                "the diagnostic must be read off the target"
+            );
+
+            cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
+    /// Spec HY007: an IRD source whose statement has not been prepared or
+    /// executed. Decided in phase one, posted against the target in phase two.
+    #[test]
+    fn copy_desc_refuses_an_unpopulated_ird_source() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            let target = apd_of(stmt);
+
+            assert_eq!(
+                sql_copy_desc::<MockBackend>(ird_of(stmt), target),
+                SqlReturn::ERROR
+            );
+            assert_eq!(
+                first_sqlstate(target),
+                sql_state::ASSOCIATED_STATEMENT_NOT_PREPARED
+            );
+
+            cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
+    /// An invalid source is `SQL_INVALID_HANDLE` with **no** SQLSTATE, per the
+    /// page's own sentence — phase one fails before any queue is in reach.
+    #[test]
+    fn copy_desc_refuses_an_invalid_source_without_a_diagnostic() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            let target = apd_of(stmt);
+
+            assert_eq!(
+                sql_copy_desc::<MockBackend>(std::ptr::without_provenance_mut(0x1234usize), target),
+                SqlReturn::INVALID_HANDLE
+            );
+            // Nothing was posted anywhere: the target's queue is untouched.
+            let mut state = [0u16; 6];
+            let mut native: i32 = 0;
+            let mut message = [0u16; 256];
+            let mut message_len: i16 = 0;
+            assert_eq!(
+                sql_get_diag_rec_w::<MockBackend>(
+                    HandleType::Desc as i16,
+                    target,
+                    1,
+                    state.as_mut_ptr(),
+                    &mut native,
+                    message.as_mut_ptr(),
+                    256,
+                    &mut message_len,
+                ),
+                SqlReturn::NO_DATA,
+                "an invalid SourceDescHandle must post no SQLSTATE"
+            );
+
+            cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
+    /// `HY021` leaves the target untouched: core checks the snapshot before it
+    /// writes, which is stricter than the spec's "contents are undefined".
+    #[test]
+    fn copy_desc_leaves_the_target_unchanged_when_the_check_fails() {
+        unsafe {
+            let (env, conn, stmt_a) = alloc_env_conn_stmt();
+            let mut stmt_b: *mut c_void = std::ptr::null_mut();
+            assert_eq!(
+                crate::ffi::handle::sql_alloc_handle::<MockBackend>(
+                    HandleType::Stmt as i16,
+                    conn,
+                    &mut stmt_b
+                ),
+                SqlReturn::SUCCESS
+            );
+
+            // A record that is consistent where it is written and inconsistent
+            // under the target's role. Clause 1 of the consistency check is the
+            // only role-dependent one — "SQL_DESC_CONCISE_TYPE is a valid ODBC C
+            // data type" applies to an ARD or APD and not to an IPD — so a concise
+            // type that is a valid SQL type and *not* a valid C type is exactly
+            // the case. `SQL_VARCHAR` (12) is one: `c_data_type_from_raw` has no
+            // entry for it.
+            //
+            // Written in this order deliberately. `SQLSetDescField` runs the check
+            // only when `SQL_DESC_DATA_PTR` is set, so setting the pointer first —
+            // while the record still carries the default C type — passes, and
+            // setting the concise type afterwards runs no check. The result is a
+            // *bound* record whose type only an IPD would accept, which is what
+            // makes the copy's own check the thing under test.
+            let source = ard_of(stmt_a);
+            let mut val: i64 = 0;
+            assert_eq!(
+                sql_set_desc_field_w::<MockBackend>(
+                    source,
+                    1,
+                    Desc::DataPtr as i16,
+                    std::ptr::from_mut(&mut val).cast(),
+                    0,
+                ),
+                SqlReturn::SUCCESS,
+                "a default record with a data pointer is consistent"
+            );
+            assert_eq!(
+                sql_set_desc_field_w::<MockBackend>(
+                    source,
+                    1,
+                    Desc::ConciseType as i16,
+                    std::ptr::without_provenance_mut(SqlDataType::VARCHAR.0 as usize),
+                    0,
+                ),
+                SqlReturn::SUCCESS,
+                "setting the concise type runs no check of its own"
+            );
+
+            // The target starts with one binding of its own, which must survive.
+            let mut buf = [0u8; 4];
+            assert_eq!(
+                crate::ffi::bind::sql_bind_col::<MockBackend>(
+                    stmt_b,
+                    7,
+                    CDataType::SLong as i16,
+                    buf.as_mut_ptr().cast(),
+                    4,
+                    std::ptr::null_mut(),
+                ),
+                SqlReturn::SUCCESS
+            );
+            let target = ard_of(stmt_b);
+            let before = read_numeric(target, 0, Desc::Count);
+
+            assert_eq!(
+                sql_copy_desc::<MockBackend>(source, target),
+                SqlReturn::ERROR
+            );
+            assert_eq!(
+                first_sqlstate(target),
+                sql_state::INCONSISTENT_DESCRIPTOR_INFORMATION
+            );
+            assert_eq!(
+                read_numeric(target, 0, Desc::Count),
+                before,
+                "a refused copy must leave the target untouched"
+            );
+            assert_eq!(
+                read_numeric(target, 7, Desc::ConciseType),
+                CDataType::SLong as isize,
+                "the target's own binding was overwritten by a refused copy"
+            );
+
+            let _ =
+                crate::ffi::handle::sql_free_handle::<MockBackend>(HandleType::Stmt as i16, stmt_b);
+            cleanup_env_conn_stmt(env, conn, stmt_a);
+        }
+    }
+
+    /// `SQL_DESC_ALLOC_TYPE` is never copied: the spec exempts it by name, and it
+    /// belongs to the allocation rather than to its contents.
+    #[test]
+    fn copy_desc_does_not_copy_the_alloc_type() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            let mut target: *mut c_void = std::ptr::null_mut();
+            assert_eq!(
+                crate::ffi::handle::sql_alloc_handle::<MockBackend>(
+                    HandleType::Desc as i16,
+                    conn,
+                    &mut target
+                ),
+                SqlReturn::SUCCESS
+            );
+
+            assert_eq!(
+                sql_copy_desc::<MockBackend>(ard_of(stmt), target),
+                SqlReturn::SUCCESS
+            );
+            assert_eq!(
+                read_numeric(target, 0, Desc::AllocType),
+                crate::types::SQL_DESC_ALLOC_USER,
+                "the source's SQL_DESC_ALLOC_AUTO was copied onto an explicit descriptor"
+            );
+
+            let _ =
+                crate::ffi::handle::sql_free_handle::<MockBackend>(HandleType::Desc as i16, target);
+            cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
+    /// The APD's token, as the application receives it.
+    unsafe fn apd_of(stmt: *mut c_void) -> *mut c_void {
+        let mut token: *mut c_void = std::ptr::null_mut();
+        let ret = unsafe {
+            sql_get_stmt_attr_w::<MockBackend>(
+                stmt,
+                StatementAttribute::AppParamDesc as i32,
+                std::ptr::from_mut(&mut token).cast::<c_void>(),
+                0,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(ret, SqlReturn::SUCCESS, "SQLGetStmtAttrW(APP_PARAM_DESC)");
+        assert!(!token.is_null(), "the APD token must not be null");
+        token
+    }
+
+    /// One numeric descriptor field, through `SQLGetDescFieldW`.
+    unsafe fn read_numeric(desc: *mut c_void, record: i16, field: Desc) -> isize {
+        let mut value: isize = -1;
+        let ret = unsafe {
+            sql_get_desc_field_w::<MockBackend>(
+                desc,
+                record,
+                field as i16,
+                std::ptr::from_mut(&mut value).cast(),
+                0,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(ret, SqlReturn::SUCCESS, "SQLGetDescFieldW({field:?})");
+        value
     }
 }
