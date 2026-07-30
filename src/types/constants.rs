@@ -113,6 +113,18 @@ pub const SQL_INTERVAL_HOUR_TO_SECOND: SqlDataType = SqlDataType(112);
 /// `SQL_INTERVAL_MINUTE_TO_SECOND`.
 pub const SQL_INTERVAL_MINUTE_TO_SECOND: SqlDataType = SqlDataType(113);
 
+/// Whether a declared SQL type is any of the thirteen interval types.
+///
+/// A general fact about the type family rather than any one table's rule, which
+/// is why it lives here: the *C to SQL: Numeric* conversion's interval row and
+/// the descriptor consistency check's fifth clause both ask it. Its sibling
+/// predicate — whether an interval's precision is a *single field* — stays with
+/// that conversion, because it is that table's footnote rather than a fact
+/// about the types.
+pub fn is_interval_sql_type(t: SqlDataType) -> bool {
+    (SQL_INTERVAL_YEAR.0..=SQL_INTERVAL_MINUTE_TO_SECOND.0).contains(&t.0)
+}
+
 /// `SQL_PARC_BATCH` — each parameter set in an array produces its own row count.
 pub const SQL_PARC_BATCH: u32 = 1;
 /// `SQL_PARC_NO_BATCH` — one row count covers the whole parameter array.

@@ -246,8 +246,10 @@ impl DescriptorRecord {
 ///    as clause 2.
 /// 5. **"If SQL_DESC_CONCISE_TYPE is an interval type,
 ///    SQL_DESC_DATETIME_INTERVAL_PRECISION is a valid interval leading
-///    precision."** **Not checked:** core supports no interval types, so there
-///    is no leading precision it could validate against.
+///    precision."** Checked: a leading precision is a digit count and cannot be
+///    negative. Zero passes, stating that the application declared none — the
+///    reading [`crate::numeric_convert`]'s interval row gives it when deciding
+///    whether to range-check a value against it.
 pub fn consistency_check(record: &DescriptorRecord, role: DescriptorRole) -> Result<(), OdbcError> {
     use crate::types::{
         SQL_CODE_DATE, SQL_CODE_TIME, SQL_CODE_TIMESTAMP, SQL_DATETIME, SQL_INTERVAL,
@@ -318,6 +320,20 @@ pub fn consistency_check(record: &DescriptorRecord, role: DescriptorRole) -> Res
         return Err(inconsistent(format!(
             "SQL_DESC_PRECISION {} is not a valid seconds precision",
             record.precision
+        )));
+    }
+
+    // Clause 5. A leading precision is a digit count, so it cannot be negative.
+    // Zero is permitted: it states that the application declared none, the same
+    // reading `check_declared_decimal_size` gives a zero `ColumnSize`, and the
+    // conversion in `crate::numeric_convert` treats it as "unspecified" rather
+    // than "a field with no digits".
+    if crate::types::is_interval_sql_type(SqlDataType(concise))
+        && record.datetime_interval_precision < 0
+    {
+        return Err(inconsistent(format!(
+            "SQL_DESC_DATETIME_INTERVAL_PRECISION {} is not a valid interval leading precision",
+            record.datetime_interval_precision
         )));
     }
 
@@ -1130,6 +1146,65 @@ mod tests {
             err.sqlstate().as_str(),
             crate::types::sql_state::INCONSISTENT_DESCRIPTOR_INFORMATION
         );
+    }
+
+    /// Clause 5: "If SQL_DESC_CONCISE_TYPE is an interval type,
+    /// SQL_DESC_DATETIME_INTERVAL_PRECISION is a valid interval leading
+    /// precision." A leading precision is a digit count, so a negative one is
+    /// not valid.
+    ///
+    /// This clause was documented as unenforceable — "core supports no interval
+    /// types, so there is no leading precision it could validate against" —
+    /// until the *C to SQL: Numeric* table's interval row started reading the
+    /// field.
+    #[test]
+    fn a_negative_interval_leading_precision_is_inconsistent() {
+        let record = DescriptorRecord {
+            concise_type: crate::types::SQL_INTERVAL_YEAR.0,
+            datetime_interval_precision: -1,
+            data_ptr: std::ptr::dangling_mut(),
+            ..Default::default()
+        };
+
+        let err = consistency_check(&record, DescriptorRole::Ipd)
+            .expect_err("a leading precision cannot be negative");
+
+        assert_eq!(
+            err.sqlstate().as_str(),
+            crate::types::sql_state::INCONSISTENT_DESCRIPTOR_INFORMATION
+        );
+    }
+
+    /// Zero passes: it states that the application declared no leading
+    /// precision, the same reading `check_declared_decimal_size` gives a zero
+    /// `ColumnSize`, and the conversion treats it as "unspecified".
+    #[test]
+    fn an_interval_leading_precision_of_zero_or_more_is_consistent() {
+        for precision in [0, 2, 9] {
+            let record = DescriptorRecord {
+                concise_type: crate::types::SQL_INTERVAL_YEAR.0,
+                datetime_interval_precision: precision,
+                data_ptr: std::ptr::dangling_mut(),
+                ..Default::default()
+            };
+            assert!(
+                consistency_check(&record, DescriptorRole::Ipd).is_ok(),
+                "precision {precision}"
+            );
+        }
+    }
+
+    /// The clause is scoped to interval types: a negative value in that field
+    /// on a non-interval record is not this check's business.
+    #[test]
+    fn a_negative_interval_precision_on_a_non_interval_type_is_ignored() {
+        let record = DescriptorRecord {
+            concise_type: SqlDataType::INTEGER.0,
+            datetime_interval_precision: -1,
+            data_ptr: std::ptr::dangling_mut(),
+            ..Default::default()
+        };
+        assert!(consistency_check(&record, DescriptorRole::Ipd).is_ok());
     }
 
     /// "The SQL_DESC_TYPE field must be one of the valid ODBC C or SQL types or

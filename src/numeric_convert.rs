@@ -44,25 +44,18 @@ use crate::{
     errors::OdbcError,
     param_convert::{DecimalLiteral, check_declared_char_size, parse_numeric_literal, truncation},
     types::{
-        ColumnValue, SQL_INTERVAL_MINUTE_TO_SECOND, SQL_INTERVAL_SECOND, SQL_INTERVAL_YEAR,
-        SqlState, ULen, interval_from_raw,
+        ColumnValue, SQL_INTERVAL_SECOND, SQL_INTERVAL_YEAR, SqlState, ULen, interval_from_raw,
+        is_interval_sql_type,
     },
 };
 
-/// Whether a declared SQL type is any of the thirteen interval types.
-///
-/// Lives here rather than beside the constants because both predicates are
-/// shaped by this table's footnote — the one below quotes it — and neither has
-/// a caller anywhere else.
-fn is_interval_sql_type(t: SqlDataType) -> bool {
-    (SQL_INTERVAL_YEAR.0..=SQL_INTERVAL_MINUTE_TO_SECOND.0).contains(&t.0)
-}
-
 /// Whether an interval's precision is a single field.
 ///
-/// This table converts an exact numeric only to these six: its footnote says
-/// exact numeric C types "cannot be converted to an interval SQL type whose
-/// interval precision is not a single field".
+/// Lives here rather than beside the constants because it is this table's
+/// footnote rather than a general fact: an exact numeric "cannot be converted
+/// to an interval SQL type whose interval precision is not a single field".
+/// Its sibling [`is_interval_sql_type`] *is* a general fact and lives with the
+/// constants, where the descriptor consistency check also reaches it.
 fn is_single_field_interval(t: SqlDataType) -> bool {
     (SQL_INTERVAL_YEAR.0..=SQL_INTERVAL_SECOND.0).contains(&t.0)
 }
@@ -609,7 +602,8 @@ mod tests {
     use crate::param_convert::parse_numeric_literal;
     use crate::types::{
         SQL_INTERVAL_DAY, SQL_INTERVAL_DAY_TO_HOUR, SQL_INTERVAL_DAY_TO_SECOND, SQL_INTERVAL_HOUR,
-        SQL_INTERVAL_MINUTE, SQL_INTERVAL_MONTH, SQL_INTERVAL_YEAR_TO_MONTH,
+        SQL_INTERVAL_MINUTE, SQL_INTERVAL_MINUTE_TO_SECOND, SQL_INTERVAL_MONTH,
+        SQL_INTERVAL_YEAR_TO_MONTH,
     };
 
     fn exact(text: &str) -> NumericParam {
