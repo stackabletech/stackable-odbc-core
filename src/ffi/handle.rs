@@ -3,9 +3,11 @@
 use crate::backend::{Backend, StatementBackend};
 use crate::descriptor::DescriptorRole;
 use crate::errors::OdbcError;
+use crate::handles::registry::{HandleKind, registry};
 use crate::handles::{
-    ConnectionHandle, StatementHandle, alloc_connection, alloc_environment, alloc_statement,
-    free_connection, free_environment, free_statement,
+    AllocType, ConnectionHandle, StatementHandle, alloc_connection, alloc_descriptor,
+    alloc_environment, alloc_statement, free_connection, free_descriptor, free_environment,
+    free_statement,
 };
 use crate::panic::panic_safe;
 use crate::types::{SqlReturn, free_stmt_option_from_raw, handle_type_from_raw};
@@ -19,7 +21,8 @@ use std::ffi::c_void;
 /// - `SQL_HANDLE_ENV` (1) — allocate an environment handle (`input_handle` must be null)
 /// - `SQL_HANDLE_DBC` (2) — allocate a connection handle (`input_handle` must be a valid env)
 /// - `SQL_HANDLE_STMT` (3) — allocate a statement handle (`input_handle` must be a valid conn)
-/// - `SQL_HANDLE_DESC` (4) — not implemented; returns `SQL_ERROR` with HYC00
+/// - `SQL_HANDLE_DESC` (4) — allocate an explicit descriptor handle
+///   (`input_handle` must be a valid connection)
 /// - `SQL_HANDLE_DBC_INFO_TOKEN` — not implemented; returns `SQL_ERROR` with HYC00
 ///
 /// # Spec compliance
@@ -45,12 +48,12 @@ use std::ffi::c_void;
 /// - HY117: Connection suspended due to unknown transaction state
 ///   (driver-manager-handled; not returned here).
 /// - HYC00: Optional feature not implemented. Returned, with this SQLSTATE
-///   posted, for `SQL_HANDLE_DESC` and `SQL_HANDLE_DBC_INFO_TOKEN` allocation.
-///   This is the only un-annotated code in this function's table covering an
-///   unimplemented handle type, and the spec names `SQL_HANDLE_DESC` in its
-///   description; `IM001`, the alternative, is (DM). Note `SQLFreeHandle`
-///   answers `HY000` for the same condition, because its table has no `HYC00`
-///   row at all — the asymmetry is what the two tables say.
+///   posted, for `SQL_HANDLE_DBC_INFO_TOKEN` allocation. This is the only
+///   un-annotated code in this function's table covering an unimplemented handle
+///   type; `IM001`, the alternative, is (DM). The spec's own description of the
+///   row names `SQL_HANDLE_DESC`, which core no longer refuses. Note
+///   `SQLFreeHandle` answers `HY000` for an unimplemented type, because its
+///   table has no `HYC00` row at all — the asymmetry is what the two tables say.
 /// - HYT01: Connection timeout expired (not returned here; allocation performs
 ///   no network I/O).
 /// - IM001: Driver does not support this function (driver-manager-handled; not
@@ -59,6 +62,13 @@ use std::ffi::c_void;
 /// Handle-specific rules:
 /// - For Env: `input_handle` must be `SQL_NULL_HANDLE` (null).
 /// - For Dbc/Stmt: `input_handle` must be non-null and a valid parent handle.
+/// - For Desc: `input_handle` must be a valid **connection**. An explicit
+///   descriptor belongs to a connection, not a statement, and joins that
+///   connection's lock group — the one every statement on it already shares, so
+///   a descriptor an application later associates with several statements adds no
+///   lock. A token that does not name a live connection is
+///   `SQL_INVALID_HANDLE`; `08003` ("connection not open") is (DM), so core does
+///   not check that the connection is open.
 ///
 /// # Safety
 ///
@@ -183,21 +193,43 @@ pub unsafe fn sql_alloc_handle<B: Backend>(
                     alloc_statement::<B>(input_handle, output_handle_ptr, inherited_metadata_id)
                 }
                 HandleType::Desc => {
-                    // Explicit descriptor handle allocation (SQL_HANDLE_DESC) is not yet implemented.
-                    // The Windows DM auto-allocates implicit descriptors; applications rarely call this directly.
-                    // Full implementation requires a descriptor handle registry. Deferred.
+                    // An explicit descriptor belongs to a **connection**, not a
+                    // statement, and joins that connection's lock group — which
+                    // every statement on it already shares, so a descriptor an
+                    // application later associates with several statements adds
+                    // no lock and no ordering rule.
                     //
-                    // HYC00 is the only un-annotated code this function's table
-                    // offers for an unimplemented handle type, and it names this
-                    // case directly; IM001, the alternative, is (DM). Note
-                    // SQLFreeHandle answers HY000 for the same condition, because
-                    // its table lists no HYC00 at all. The `*output_handle_ptr =
+                    // `08003` ("connection not open") is (DM), so core does not
+                    // check that the connection is open — only that `input_handle`
+                    // really names one, which `group_of_kind` answers without
+                    // dereferencing it. The `*output_handle_ptr =
                     // SQL_NULL_HANDLE` write above already ran, so the spec's
-                    // "set to SQL_NULL_HANDLE on error" still holds on this path.
-                    return Err(OdbcError::general(
-                        "SQLAllocHandle: SQL_HANDLE_DESC is not implemented",
-                        crate::types::SqlState::optional_feature_not_implemented(),
-                    ));
+                    // "set to SQL_NULL_HANDLE on error" holds on both exits here.
+                    let Some(group) = registry().group_of_kind(input_handle, HandleKind::Dbc)
+                    else {
+                        return Ok(SqlReturn::INVALID_HANDLE);
+                    };
+                    // Role `App`: the spec says "it is not known whether an
+                    // explicitly allocated application descriptor is an APD or ARD
+                    // until execute time".
+                    let Some(token) = alloc_descriptor(
+                        DescriptorRole::App,
+                        AllocType::User,
+                        &group,
+                        input_handle,
+                    ) else {
+                        return Err(OdbcError::general(
+                            "SQLAllocHandle: the handle registry is exhausted",
+                            crate::types::SqlState::general_error(),
+                        ));
+                    };
+                    tracing::debug!(
+                        "SQLAllocHandle: allocated explicit descriptor {:?} on connection {:?}",
+                        token,
+                        input_handle
+                    );
+                    std::ptr::write_unaligned(output_handle_ptr, token);
+                    SqlReturn::SUCCESS
                 }
                 HandleType::DbcInfoToken => {
                     // Only used between Driver Manager and drivers for connection pooling.
@@ -223,7 +255,9 @@ pub unsafe fn sql_alloc_handle<B: Backend>(
 /// - `SQL_HANDLE_ENV` (1) — free an environment handle
 /// - `SQL_HANDLE_DBC` (2) — free a connection handle
 /// - `SQL_HANDLE_STMT` (3) — free a statement handle
-/// - `SQL_HANDLE_DESC` (4) — not implemented; returns `SQL_ERROR` with HY000
+/// - `SQL_HANDLE_DESC` (4) — free an explicit descriptor handle, i.e. one this
+///   driver allocated against a **connection**. A statement's own descriptor is
+///   refused with `HY000`; see that SQLSTATE below
 /// - `SQL_HANDLE_DBC_INFO_TOKEN` — not implemented; returns `SQL_ERROR` with HY000
 ///
 /// Returns `SQL_INVALID_HANDLE` for unrecognized handle types — a value outside
@@ -238,11 +272,22 @@ pub unsafe fn sql_alloc_handle<B: Backend>(
 ///
 /// # Spec compliance
 ///
-/// - HY000: Returns `SQL_ERROR` with this SQLSTATE when `handle_type` is
-///   `SQL_HANDLE_DESC` or `SQL_HANDLE_DBC_INFO_TOKEN` — both valid handle types
-///   this driver does not implement. The spec's table for this function lists no
-///   `HYC00`, so the catch-all is the correct code here even though
-///   `SQLAllocHandle` answers `HYC00` for the same condition.
+/// - HY000: Returns `SQL_ERROR` with this SQLSTATE in two cases. First, when
+///   `handle_type` is `SQL_HANDLE_DBC_INFO_TOKEN` — a valid handle type this
+///   driver does not implement. The spec's table for this function lists no
+///   `HYC00`, so the catch-all is the correct code even though `SQLAllocHandle`
+///   answers `HYC00` for the same condition. Second, when `handle` names one of
+///   the four descriptors allocated implicitly with a statement: this function
+///   allocated only the descriptors whose parent is a connection, and retiring a
+///   statement's own slot would leave that statement pointing at nothing. The
+///   refusal is expressed as ownership rather than as a spec check, and borrows
+///   no (DM) code to say so — `HY017` is the spec's name for the condition and is
+///   (DM), so core does not return it (see below). Under a real Driver Manager
+///   that branch never fires, since the DM blocks the call first; its observers
+///   are core's own tests and an embedder linking core directly, and for those a
+///   general error naming the condition is as useful as `HY017`.
+/// - Returns `SQL_INVALID_HANDLE` for `SQL_HANDLE_DESC` with a token that is not
+///   a live descriptor at all, which is a different question from ownership.
 /// - HY001: Memory allocation error (driver-manager-handled; not returned here).
 /// - HY010: Returns `SQL_ERROR` if `handle_type` is `SQL_HANDLE_ENV` and at least one
 ///   connection handle is still allocated under it (`SQLFreeHandle` with `SQL_HANDLE_DBC`
@@ -305,9 +350,35 @@ pub unsafe fn sql_free_handle<B: Backend>(handle_type: i16, handle: *mut c_void)
                 // SAFETY: free_statement does its own registry validation; the
                 // `unsafe` here is covered by the outer `unsafe` block.
                 HandleType::Stmt => free_statement::<B>(handle),
-                HandleType::Desc | HandleType::DbcInfoToken => {
-                    // Explicit descriptor and DBC_INFO_TOKEN free: not implemented
-                    // (matching alloc). Deferred.
+                HandleType::Desc => {
+                    // Routed by ownership, not by inspecting the alloc type: this
+                    // function allocated the descriptors whose parent is a
+                    // connection, and only those. A statement's own descriptor
+                    // reaching here is a call core cannot perform — retiring that
+                    // slot would leave the owning statement pointing at nothing.
+                    //
+                    // HY000, not HY017: the spec's name for this condition is
+                    // (DM), and core returns no (DM) code. HY000 is the catch-all
+                    // this same function already answers for an unimplemented
+                    // handle type, whose table lists no HYC00. Under a real Driver
+                    // Manager this branch never fires.
+                    match registry().parent_kind_of(handle, HandleKind::Desc) {
+                        Some(HandleKind::Dbc) => {
+                            free_descriptor(handle);
+                            SqlReturn::SUCCESS
+                        }
+                        Some(_) => {
+                            return Err(OdbcError::general(
+                                "SQLFreeHandle: this descriptor was allocated implicitly with a \
+                                 statement and is freed with it",
+                                crate::types::SqlState::general_error(),
+                            ));
+                        }
+                        None => SqlReturn::INVALID_HANDLE,
+                    }
+                }
+                HandleType::DbcInfoToken => {
+                    // DBC_INFO_TOKEN: not implemented (matching alloc). Deferred.
                     //
                     // HY000, not HYC00: SQLFreeHandle's diagnostics table has no
                     // HYC00 row, while HY000 is listed and is the spec's catch-all
@@ -316,7 +387,7 @@ pub unsafe fn sql_free_handle<B: Backend>(handle_type: i16, handle: *mut c_void)
                     // equivalent arm differs — the asymmetry is what the two
                     // tables say, not an oversight.) Not SQL_INVALID_HANDLE
                     // either: the spec reserves that for a HandleType outside the
-                    // five valid values, and both of these are valid.
+                    // five valid values, and this one is valid.
                     //
                     // Returned as an error rather than logged so the record
                     // reaches the queue; `panic_safe` posts it and converts it to
@@ -564,8 +635,10 @@ mod tests {
         let ret = unsafe { sql_free_handle::<MockBackend>(99, std::ptr::null_mut()) };
         assert_eq!(ret, SqlReturn::INVALID_HANDLE);
     }
+    /// A descriptor is allocated against a **connection**, so a null input
+    /// handle names nothing to allocate it on.
     #[test]
-    fn alloc_handle_desc_returns_error() {
+    fn alloc_handle_desc_on_a_null_connection_is_refused() {
         let mut output: *mut c_void = std::ptr::null_mut();
         let ret = unsafe {
             sql_alloc_handle::<MockBackend>(
@@ -574,9 +647,168 @@ mod tests {
                 &mut output,
             )
         };
-        // Desc is not implemented; should return ERROR and set output to null
-        assert_eq!(ret, SqlReturn::ERROR);
+        assert_eq!(ret, SqlReturn::INVALID_HANDLE);
         assert!(output.is_null());
+    }
+
+    /// `SQLAllocHandle(SQL_HANDLE_DESC)` yields a usable descriptor handle whose
+    /// `SQL_DESC_ALLOC_TYPE` says the application allocated it.
+    #[test]
+    fn alloc_handle_allocates_an_explicit_descriptor() {
+        unsafe {
+            let (env, conn, stmt) = crate::test_utils::alloc_env_conn_stmt();
+            let mut desc: *mut c_void = std::ptr::null_mut();
+            let ret = sql_alloc_handle::<MockBackend>(HandleType::Desc as i16, conn, &mut desc);
+            assert_eq!(ret, SqlReturn::SUCCESS);
+            assert!(!desc.is_null());
+
+            let mut value: isize = 0;
+            let ret = crate::ffi::desc::sql_get_desc_field_w::<MockBackend>(
+                desc,
+                0,
+                odbc_sys::Desc::AllocType as i16,
+                std::ptr::from_mut(&mut value).cast(),
+                0,
+                std::ptr::null_mut(),
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+            assert_eq!(value, crate::types::SQL_DESC_ALLOC_USER);
+
+            // And a statement's own reads the other value, so the field really
+            // follows the allocation rather than being a constant either way.
+            let mut implicit: *mut c_void = std::ptr::null_mut();
+            assert_eq!(
+                crate::ffi::stmt_attr::sql_get_stmt_attr_w::<MockBackend>(
+                    stmt,
+                    odbc_sys::StatementAttribute::AppRowDesc as i32,
+                    std::ptr::from_mut(&mut implicit).cast(),
+                    0,
+                    std::ptr::null_mut(),
+                ),
+                SqlReturn::SUCCESS
+            );
+            let mut auto_value: isize = 0;
+            assert_eq!(
+                crate::ffi::desc::sql_get_desc_field_w::<MockBackend>(
+                    implicit,
+                    0,
+                    odbc_sys::Desc::AllocType as i16,
+                    std::ptr::from_mut(&mut auto_value).cast(),
+                    0,
+                    std::ptr::null_mut(),
+                ),
+                SqlReturn::SUCCESS
+            );
+            assert_eq!(auto_value, crate::types::SQL_DESC_ALLOC_AUTO);
+
+            assert_eq!(
+                sql_free_handle::<MockBackend>(HandleType::Desc as i16, desc),
+                SqlReturn::SUCCESS
+            );
+            crate::test_utils::cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
+    /// A statement's own descriptor is not this function's to free.
+    ///
+    /// `HY017` is the spec's name for the condition and is `(DM)`, so core
+    /// answers `HY000` instead — the same code this function already returns for
+    /// an unimplemented handle type, whose table lists no `HYC00` either. The
+    /// statement must be untouched afterwards.
+    #[test]
+    fn free_handle_refuses_a_statements_own_descriptor() {
+        unsafe {
+            let (env, conn, stmt) = crate::test_utils::alloc_env_conn_stmt();
+            let mut ard: *mut c_void = std::ptr::null_mut();
+            assert_eq!(
+                crate::ffi::stmt_attr::sql_get_stmt_attr_w::<MockBackend>(
+                    stmt,
+                    odbc_sys::StatementAttribute::AppRowDesc as i32,
+                    std::ptr::from_mut(&mut ard).cast(),
+                    0,
+                    std::ptr::null_mut(),
+                ),
+                SqlReturn::SUCCESS
+            );
+
+            assert_eq!(
+                sql_free_handle::<MockBackend>(HandleType::Desc as i16, ard),
+                SqlReturn::ERROR
+            );
+            assert_eq!(
+                first_sqlstate_of(ard),
+                crate::types::sql_state::GENERAL_ERROR,
+                "the refusal must be HY000, not a (DM) code"
+            );
+
+            // Still usable: the refusal must not have retired the slot.
+            let mut buf = [0u8; 4];
+            assert_eq!(
+                crate::ffi::bind::sql_bind_col::<MockBackend>(
+                    stmt,
+                    1,
+                    odbc_sys::CDataType::SLong as i16,
+                    buf.as_mut_ptr().cast(),
+                    4,
+                    std::ptr::null_mut(),
+                ),
+                SqlReturn::SUCCESS
+            );
+            crate::test_utils::cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
+    /// `SQLDisconnect` "drops any statements or descriptors open on the
+    /// connection", so an explicit descriptor left behind is freed with it —
+    /// which Miri's leak check is what actually enforces.
+    #[test]
+    fn disconnect_frees_the_connections_explicit_descriptors() {
+        unsafe {
+            let (env, conn, stmt) =
+                crate::test_utils::alloc_connected_env_conn_stmt::<MockBackend>();
+            let mut desc: *mut c_void = std::ptr::null_mut();
+            assert_eq!(
+                sql_alloc_handle::<MockBackend>(HandleType::Desc as i16, conn, &mut desc),
+                SqlReturn::SUCCESS
+            );
+
+            assert_eq!(
+                crate::ffi::connect::sql_disconnect::<MockBackend>(conn),
+                SqlReturn::SUCCESS
+            );
+            assert!(
+                crate::handles::registry::registry()
+                    .group_of(desc)
+                    .is_none(),
+                "the explicit descriptor's slot survived SQLDisconnect"
+            );
+
+            let _ = stmt;
+            crate::test_utils::cleanup_env_conn_stmt(env, conn, std::ptr::null_mut());
+        }
+    }
+
+    /// The first SQLSTATE on a handle's diagnostic queue, as `SQLGetDiagRec`
+    /// would report it.
+    fn first_sqlstate_of(handle: *mut c_void) -> String {
+        let mut state = [0u16; 6];
+        let mut native: i32 = 0;
+        let mut msg = [0u16; 256];
+        let mut msg_len: i16 = 0;
+        let ret = unsafe {
+            crate::ffi::diag::sql_get_diag_rec_w::<MockBackend>(
+                HandleType::Desc as i16,
+                handle,
+                1,
+                state.as_mut_ptr(),
+                &mut native,
+                msg.as_mut_ptr(),
+                256,
+                &mut msg_len,
+            )
+        };
+        assert_eq!(ret, SqlReturn::SUCCESS, "no diagnostic record was posted");
+        String::from_utf16_lossy(&state[..5])
     }
     #[test]
     fn free_null_handle_returns_invalid_handle() {
@@ -834,8 +1066,11 @@ mod tests {
     fn alloc_handle_unimplemented_type_posts_hyc00() {
         // HYC00, not the HY000 its SQLFreeHandle counterpart uses: unlike that
         // function's table, SQLAllocHandle's *does* list HYC00, un-annotated,
-        // for exactly this case ("The HandleType argument was SQL_HANDLE_DESC").
-        // IM001, the other candidate, is (DM).
+        // for an unimplemented handle type. IM001, the other candidate, is (DM).
+        //
+        // SQL_HANDLE_DBC_INFO_TOKEN is the only type left on this arm now that
+        // SQL_HANDLE_DESC is implemented; the spec's own wording for the row
+        // names SQL_HANDLE_DESC, which core no longer refuses.
         unsafe {
             let mut env: *mut c_void = std::ptr::null_mut();
             let _ = sql_alloc_handle::<MockBackend>(
@@ -846,11 +1081,12 @@ mod tests {
             let mut conn: *mut c_void = std::ptr::null_mut();
             let _ = sql_alloc_handle::<MockBackend>(HandleType::Dbc as i16, env, &mut conn);
 
-            let mut desc: *mut c_void = std::ptr::null_mut();
-            let ret = sql_alloc_handle::<MockBackend>(HandleType::Desc as i16, conn, &mut desc);
+            let mut token: *mut c_void = std::ptr::null_mut();
+            let ret =
+                sql_alloc_handle::<MockBackend>(HandleType::DbcInfoToken as i16, conn, &mut token);
             assert_eq!(ret, SqlReturn::ERROR);
             assert!(
-                desc.is_null(),
+                token.is_null(),
                 "spec: OutputHandlePtr is SQL_NULL_HANDLE on error"
             );
 
@@ -873,19 +1109,19 @@ mod tests {
 
     #[test]
     fn free_handle_unimplemented_type_posts_a_diagnostic() {
-        // SQL_HANDLE_DESC is a valid HandleType this driver does not implement,
-        // so SQL_ERROR is right but a bare SQL_ERROR is not: with no record on
-        // the queue, SQLGetDiagRec answers SQL_NO_DATA and the application has
-        // a failure it can neither report nor branch on.
+        // SQL_HANDLE_DBC_INFO_TOKEN is a valid HandleType this driver does not
+        // implement, so SQL_ERROR is right but a bare SQL_ERROR is not: with no
+        // record on the queue, SQLGetDiagRec answers SQL_NO_DATA and the
+        // application has a failure it can neither report nor branch on.
         //
         // HY000, not HYC00: SQLFreeHandle's diagnostics table has no HYC00 row,
         // while HY000 is listed and is the spec's catch-all. Not
         // SQL_INVALID_HANDLE either — the spec reserves that for a HandleType
-        // outside the five valid values, and SQL_HANDLE_DESC is one of them.
+        // outside the five valid values, and this is one of them.
         unsafe {
             let (env, conn, stmt) = crate::test_utils::alloc_env_conn_stmt();
 
-            let ret = sql_free_handle::<MockBackend>(HandleType::Desc as i16, stmt);
+            let ret = sql_free_handle::<MockBackend>(HandleType::DbcInfoToken as i16, stmt);
             assert_eq!(ret, SqlReturn::ERROR);
 
             with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
@@ -898,6 +1134,19 @@ mod tests {
                 assert_eq!(rec.sqlstate.as_str(), "HY000");
             });
 
+            crate::test_utils::cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
+    /// `SQLFreeHandle(SQL_HANDLE_DESC)` on a token that is not a descriptor at
+    /// all is `SQL_INVALID_HANDLE`, not the ownership refusal: there is no
+    /// descriptor here to decide the ownership of.
+    #[test]
+    fn free_handle_desc_refuses_a_statement_token_as_an_invalid_handle() {
+        unsafe {
+            let (env, conn, stmt) = crate::test_utils::alloc_env_conn_stmt();
+            let ret = sql_free_handle::<MockBackend>(HandleType::Desc as i16, stmt);
+            assert_eq!(ret, SqlReturn::INVALID_HANDLE);
             crate::test_utils::cleanup_env_conn_stmt(env, conn, stmt);
         }
     }

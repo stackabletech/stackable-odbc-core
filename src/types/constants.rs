@@ -114,11 +114,15 @@ pub const SQL_CODE_TIMESTAMP: i16 = 3;
 /// `SQL_DESC_ALLOC_AUTO` — the `SQL_DESC_ALLOC_TYPE` of a descriptor the driver
 /// allocated automatically with its statement.
 ///
-/// The value for all four of a statement's descriptors. Its counterpart
-/// `SQL_DESC_ALLOC_USER` belongs to a descriptor an application allocated with
-/// `SQLAllocHandle(SQL_HANDLE_DESC)`, which core refuses, so no descriptor it
-/// owns can carry it.
+/// The value for all four of a statement's own descriptors.
 pub const SQL_DESC_ALLOC_AUTO: isize = 1;
+
+/// `SQL_DESC_ALLOC_USER` — the `SQL_DESC_ALLOC_TYPE` of a descriptor the
+/// application allocated with `SQLAllocHandle(SQL_HANDLE_DESC)`.
+///
+/// Read-only on every role, and the one field `SQLCopyDesc` never copies: the
+/// answer belongs to the allocation rather than to its contents.
+pub const SQL_DESC_ALLOC_USER: isize = 2;
 
 /// `SQL_CASCADE` — referential action: propagate the change to dependent rows.
 /// Used in `UPDATE_RULE` / `DELETE_RULE` columns of `SQLForeignKeys`.

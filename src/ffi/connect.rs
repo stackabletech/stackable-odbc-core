@@ -773,6 +773,10 @@ pub unsafe fn sql_disconnect<B: Backend>(connection_handle: *mut c_void) -> SqlR
             // of them must now be refused. This also retires the four
             // descriptor slots each statement owns.
             crate::handles::free_connection_statements::<B>(connection_handle);
+            // The "and all descriptors that have been explicitly allocated on the
+            // connection" half of that sentence. Freed after the statements, so
+            // nothing is left holding one as an override.
+            crate::handles::free_connection_descriptors(connection_handle);
 
             Ok(SqlReturn::SUCCESS)
         })

@@ -305,9 +305,11 @@ fn read_desc_field<B: Backend>(
 fn read_header_field<B: Backend>(target: &mut DescTarget<'_, B>, field: Desc) -> Option<isize> {
     let role = target.role;
     match field {
-        // Every descriptor core owns is implicitly allocated; D4's explicit
-        // ones are what make this vary.
-        Desc::AllocType => Some(crate::types::SQL_DESC_ALLOC_AUTO),
+        // Follows the allocation: `SQL_DESC_ALLOC_USER` for a descriptor the
+        // application allocated, `SQL_DESC_ALLOC_AUTO` for the four a statement
+        // owns. Read-only on every role, and the one field `SQLCopyDesc` never
+        // copies.
+        Desc::AllocType => Some(target.desc.alloc_type.as_sql()),
         // Derived rather than stored, so it cannot disagree with the map. The
         // IRD's records are the result set's columns, which it does not store.
         Desc::Count => Some(match role {

@@ -374,6 +374,50 @@ impl Registry {
         Some(Arc::clone(&slot.group))
     }
 
+    /// The parent of `token`, if `token` is live and of `expected` kind.
+    ///
+    /// Deliberately group-independent: `SQLSetStmtAttr` must tell "a descriptor
+    /// on another connection" (`HY024`) apart from "not a descriptor at all", and
+    /// the answer lies in a group whose lock the caller does not hold. It reads
+    /// slot metadata only and never touches handle contents, so it needs no lock
+    /// of its own.
+    pub(crate) fn parent_of(
+        &self,
+        token: *mut c_void,
+        expected: HandleKind,
+    ) -> Option<*mut c_void> {
+        if token.is_null() {
+            return None;
+        }
+        let (index, generation) = decode_token(token);
+        let slots = self.read();
+        let slot = slots.get(index)?;
+        if slot.generation != generation || slot.kind != Some(expected) {
+            return None;
+        }
+        let parent = slot.parent? as *mut c_void;
+        // A parent whose slot has moved on is no parent: the token stored here is
+        // only meaningful while the generation it encodes is still live.
+        let (parent_index, parent_generation) = decode_token(parent);
+        let parent_slot = slots.get(parent_index)?;
+        (parent_slot.generation == parent_generation && parent_slot.kind.is_some())
+            .then_some(parent)
+    }
+
+    /// The kind of `token`'s parent, if `token` is live and of `expected` kind.
+    ///
+    /// [`Self::parent_of`] with one more slot read, sharing its one decode path
+    /// so the two cannot disagree about what counts as a live parent.
+    pub(crate) fn parent_kind_of(
+        &self,
+        token: *mut c_void,
+        expected: HandleKind,
+    ) -> Option<HandleKind> {
+        let parent = self.parent_of(token, expected)?;
+        let (index, _) = decode_token(parent);
+        self.read().get(index)?.kind
+    }
+
     /// Every live handle whose parent is `token`, as an owned snapshot.
     ///
     /// Owned, not borrowed: a caller iterating this while another call frees a
@@ -630,6 +674,15 @@ mod tests {
              locking, and with_child_group_in is the crate's one nested \
              acquisition — environment then connection, SQLEndTran's path. \
              Modelled by env_before_connection_cannot_deadlock.",
+        ),
+        (
+            "src/ffi/handle.rs",
+            1,
+            "SQLAllocHandle(SQL_HANDLE_DESC) takes the connection's group to \
+             *share* with the new explicit descriptor, exactly as \
+             alloc_statement does for a statement. It nests nothing: the group \
+             it reads is the one panic_safe already holds for that same \
+             connection, and no second group is acquired.",
         ),
     ];
 

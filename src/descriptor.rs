@@ -36,6 +36,20 @@ pub enum DescriptorRole {
     /// Implementation parameter descriptor — `SQLBindParameter`'s declared-type
     /// half.
     Ipd,
+    /// An explicitly allocated application descriptor whose role is not yet
+    /// known.
+    ///
+    /// The spec: "it is not known whether an explicitly allocated application
+    /// descriptor is an APD or ARD until execute time". Only application
+    /// descriptors can be explicit — "the application cannot specify alternate
+    /// implementation descriptors" — so the unknown is only ARD-versus-APD, and
+    /// the two field tables agree in every cell.
+    ///
+    /// This is what an unassociated descriptor answers *for itself*. The
+    /// consistency check always runs under the role a descriptor is being
+    /// **used as**: `Ard` or `Apd` through a bind, the target's role in
+    /// `SQLCopyDesc`.
+    App,
 }
 
 /// One descriptor record: every `SQL_DESC_*` record field, whatever the role.
@@ -216,9 +230,13 @@ pub fn consistency_check(record: &DescriptorRecord, role: DescriptorRole) -> Res
 
     let concise = record.concise_type;
 
-    // Clause 1.
-    if matches!(role, DescriptorRole::Ard | DescriptorRole::Apd)
-        && c_data_type_from_raw(concise).is_none()
+    // Clause 1. `App` counts as an application descriptor here for the same
+    // reason it answers as an ARD in `field_access`: it *is* one, only not yet
+    // known to be the row or the parameter half, and the clause applies to both.
+    if matches!(
+        role,
+        DescriptorRole::Ard | DescriptorRole::Apd | DescriptorRole::App
+    ) && c_data_type_from_raw(concise).is_none()
     {
         return Err(inconsistent(format!(
             "SQL_DESC_CONCISE_TYPE {concise} is not an ODBC C data type"
@@ -316,7 +334,7 @@ pub enum FieldAccess {
 /// as the record ones, because the caller decides *where* a field is stored and
 /// this decides whether it may be touched at all.
 pub fn field_access(role: DescriptorRole, field: Desc) -> FieldAccess {
-    use DescriptorRole::{Apd, Ard, Ipd, Ird};
+    use DescriptorRole::{Apd, App, Ard, Ipd, Ird};
     use FieldAccess::{ReadOnly, ReadWrite, Undefined};
 
     match field {
@@ -328,25 +346,25 @@ pub fn field_access(role: DescriptorRole, field: Desc) -> FieldAccess {
         // since all four are implicitly allocated; D4 makes the value vary.
         Desc::AllocType => ReadOnly,
         Desc::ArraySize => match role {
-            Ard | Apd => ReadWrite,
+            Ard | Apd | App => ReadWrite,
             Ird | Ipd => Undefined,
         },
         Desc::ArrayStatusPtr => match role {
-            Ard | Apd | Ird | Ipd => ReadWrite,
+            Ard | Apd | App | Ird | Ipd => ReadWrite,
         },
         Desc::BindOffsetPtr | Desc::BindType => match role {
-            Ard | Apd => ReadWrite,
+            Ard | Apd | App => ReadWrite,
             Ird | Ipd => Undefined,
         },
         // Writing it lower deletes the higher-numbered records; the IRD's is
         // the column count, which the application does not get to choose.
         Desc::Count => match role {
-            Ard | Apd | Ipd => ReadWrite,
+            Ard | Apd | App | Ipd => ReadWrite,
             Ird => ReadOnly,
         },
         Desc::RowsProcessedPtr => match role {
             Ird | Ipd => ReadWrite,
-            Ard | Apd => Undefined,
+            Ard | Apd | App => Undefined,
         },
 
         // ------------------------------------------------------------------
@@ -361,11 +379,11 @@ pub fn field_access(role: DescriptorRole, field: Desc) -> FieldAccess {
         | Desc::DatetimeIntervalCode
         | Desc::DatetimeIntervalPrecision
         | Desc::NumPrecRadix => match role {
-            Ard | Apd | Ipd => ReadWrite,
+            Ard | Apd | App | Ipd => ReadWrite,
             Ird => ReadOnly,
         },
         Desc::IndicatorPtr | Desc::OctetLengthPtr => match role {
-            Ard | Apd => ReadWrite,
+            Ard | Apd | App => ReadWrite,
             Ird | Ipd => Undefined,
         },
         // The IPD's is the documented oddity. The initialization table marks it
@@ -377,21 +395,21 @@ pub fn field_access(role: DescriptorRole, field: Desc) -> FieldAccess {
         // never overwritten — which is conforming, since the spec only says a
         // read is not *required* to return what was set.
         Desc::DataPtr => match role {
-            Ard | Apd | Ipd => ReadWrite,
+            Ard | Apd | App | Ipd => ReadWrite,
             Ird => Undefined,
         },
         Desc::ParameterType => match role {
             Ipd => ReadWrite,
-            Ard | Apd | Ird => Undefined,
+            Ard | Apd | App | Ird => Undefined,
         },
         Desc::Name | Desc::Unnamed => match role {
             Ipd => ReadWrite,
             Ird => ReadOnly,
-            Ard | Apd => Undefined,
+            Ard | Apd | App => Undefined,
         },
         Desc::Nullable | Desc::RowVer => match role {
             Ird | Ipd => ReadOnly,
-            Ard | Apd => Undefined,
+            Ard | Apd | App => Undefined,
         },
 
         // ------------------------------------------------------------------
@@ -424,7 +442,7 @@ pub fn field_access(role: DescriptorRole, field: Desc) -> FieldAccess {
         | Desc::TypeName
         | Desc::Unsigned => match role {
             Ird => ReadOnly,
-            Ard | Apd | Ipd => Undefined,
+            Ard | Apd | App | Ipd => Undefined,
         },
 
         // `SQL_DESC_MAXIMUM_SCALE` and `SQL_DESC_MINIMUM_SCALE` appear in
@@ -895,6 +913,95 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Every `SQL_DESC_*` identifier `field_access` names, for the tests that
+    /// must hold for all of them rather than for a chosen few.
+    ///
+    /// `Desc` is a fieldless enum with no iterator, so this is the list. The two
+    /// identifiers deliberately absent are `SQL_DESC_MAXIMUM_SCALE` and
+    /// `SQL_DESC_MINIMUM_SCALE`, which appear in `sqlext.h` but in neither of
+    /// `SQLSetDescField`'s tables — see `field_access`'s closing comment.
+    const ALL_DESC_FIELDS: &[Desc] = &[
+        Desc::AllocType,
+        Desc::ArraySize,
+        Desc::ArrayStatusPtr,
+        Desc::BindOffsetPtr,
+        Desc::BindType,
+        Desc::Count,
+        Desc::RowsProcessedPtr,
+        Desc::ConciseType,
+        Desc::Type,
+        Desc::OctetLength,
+        Desc::Length,
+        Desc::Precision,
+        Desc::Scale,
+        Desc::DatetimeIntervalCode,
+        Desc::DatetimeIntervalPrecision,
+        Desc::NumPrecRadix,
+        Desc::IndicatorPtr,
+        Desc::OctetLengthPtr,
+        Desc::DataPtr,
+        Desc::ParameterType,
+        Desc::Name,
+        Desc::Unnamed,
+        Desc::Nullable,
+        Desc::RowVer,
+        Desc::AutoUniqueValue,
+        Desc::BaseColumnName,
+        Desc::BaseTableName,
+        Desc::CatalogName,
+        Desc::DisplaySize,
+        Desc::Label,
+        Desc::LiteralPrefix,
+        Desc::LiteralSuffix,
+        Desc::SchemaName,
+        Desc::Searchable,
+        Desc::TableName,
+        Desc::Updatable,
+        Desc::CaseSensitive,
+        Desc::FixedPrecScale,
+        Desc::LocalTypeName,
+        Desc::TypeName,
+        Desc::Unsigned,
+    ];
+
+    /// The ARD and APD field tables are identical, which is what lets an
+    /// explicitly allocated descriptor answer for both before its role is known.
+    ///
+    /// The spec: "it is not known whether an explicitly allocated application
+    /// descriptor is an APD or ARD until execute time." If a future reading ever
+    /// splits the two tables, this fails rather than [`DescriptorRole::App`]
+    /// silently answering for the wrong one.
+    #[test]
+    fn the_ard_and_apd_field_tables_agree_everywhere() {
+        for &field in ALL_DESC_FIELDS {
+            assert_eq!(
+                field_access(DescriptorRole::Ard, field),
+                field_access(DescriptorRole::Apd, field),
+                "{field:?} differs between ARD and APD"
+            );
+            assert_eq!(
+                field_access(DescriptorRole::App, field),
+                field_access(DescriptorRole::Ard, field),
+                "{field:?} differs between App and ARD"
+            );
+        }
+    }
+
+    /// An IPD-only field is undefined on an explicit descriptor, which can only
+    /// ever be an ARD or an APD: "the application cannot specify alternate
+    /// implementation descriptors".
+    #[test]
+    fn an_ipd_only_field_is_undefined_on_an_explicit_descriptor() {
+        assert_eq!(
+            field_access(DescriptorRole::App, Desc::ParameterType),
+            FieldAccess::Undefined
+        );
+        assert_eq!(
+            field_access(DescriptorRole::App, Desc::Name),
+            FieldAccess::Undefined
+        );
     }
 
     /// Footnote [1] of the initialization table: these five "are defined only

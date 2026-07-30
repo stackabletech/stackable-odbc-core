@@ -53,6 +53,29 @@ use scope::HandleScope;
 /// SQL for escape sequences.
 const SQL_NOSCAN_ON: usize = 1;
 
+/// Whether a descriptor was allocated implicitly with its statement or
+/// explicitly by the application.
+///
+/// `SQL_DESC_ALLOC_TYPE`, which is read-only on every role and is the one field
+/// `SQLCopyDesc` never copies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AllocType {
+    /// `SQL_DESC_ALLOC_AUTO` — one of the four allocated with a statement.
+    Auto,
+    /// `SQL_DESC_ALLOC_USER` — allocated by `SQLAllocHandle(SQL_HANDLE_DESC)`.
+    User,
+}
+
+impl AllocType {
+    /// The `SQL_DESC_ALLOC_TYPE` value `SQLGetDescField` reports.
+    pub fn as_sql(self) -> isize {
+        match self {
+            Self::Auto => crate::types::SQL_DESC_ALLOC_AUTO,
+            Self::User => crate::types::SQL_DESC_ALLOC_USER,
+        }
+    }
+}
+
 /// One ODBC descriptor (`SQL_HANDLE_DESC`).
 ///
 /// A statement has four of these — the ARD, APD, IRD and IPD — and the ODBC
@@ -142,6 +165,13 @@ pub struct Descriptor {
     /// decided from: a field defined for an ARD may be undefined on an IPD, and
     /// `SQL_DESC_CONCISE_TYPE` names a C type on one and a SQL type on another.
     pub role: DescriptorRole,
+    /// Whether the application allocated this descriptor or a statement did.
+    ///
+    /// `SQL_DESC_ALLOC_TYPE` reads it. It is deliberately *not* what routes
+    /// `SQLFreeHandle`: that decides from the registry's parentage, so a wrong
+    /// value here cannot make the two disagree about which descriptors this
+    /// function allocated.
+    pub alloc_type: AllocType,
 }
 
 impl HasKind for Descriptor {
@@ -150,13 +180,14 @@ impl HasKind for Descriptor {
 
 impl Descriptor {
     /// An empty descriptor, before it is registered.
-    fn new(role: DescriptorRole) -> Self {
+    fn new(role: DescriptorRole, alloc_type: AllocType) -> Self {
         Self {
             header: HandleHeader::PLACEHOLDER,
             diagnostics: DiagnosticQueue::new(),
             records: std::collections::HashMap::new(),
             attrs: std::collections::HashMap::new(),
             role,
+            alloc_type,
         }
     }
 
@@ -182,10 +213,11 @@ impl Descriptor {
 /// rather than leaking it.
 pub(crate) fn alloc_descriptor(
     role: DescriptorRole,
+    alloc_type: AllocType,
     group: &Arc<GroupLock>,
     parent: *mut c_void,
 ) -> Option<*mut c_void> {
-    let ptr = Box::into_raw(Box::new(Descriptor::new(role)));
+    let ptr = Box::into_raw(Box::new(Descriptor::new(role, alloc_type)));
     let Some((token, slot, generation)) = registry().register(
         HandleKind::Desc,
         ptr as usize,
@@ -778,6 +810,18 @@ impl<B: Backend> StatementHandle<B> {
             DescriptorRole::Apd => self.apd_override.unwrap_or(self.implicit_desc[1]),
             DescriptorRole::Ird => self.implicit_desc[2],
             DescriptorRole::Ipd => self.implicit_desc[3],
+            // `App` is what an *explicit* descriptor answers for itself, so no
+            // statement has one under that role. A caller asking for it wants
+            // whichever application descriptor is in use, and the ARD is the
+            // arbitrary half of a question that should not have been asked —
+            // so say so rather than answer it.
+            DescriptorRole::App => {
+                tracing::error!(
+                    "descriptor_token(App): a statement has no descriptor under the \
+                     not-yet-known role; returning the ARD"
+                );
+                self.descriptor_token(DescriptorRole::Ard)
+            }
         }
     }
 
@@ -785,16 +829,25 @@ impl<B: Backend> StatementHandle<B> {
     /// ignoring any override. Statement teardown, and reverting a statement whose
     /// explicit descriptor was freed, are its only callers.
     ///
-    /// A `match` rather than `implicit_desc[role as usize]`: the array has four
-    /// elements and [`DescriptorRole`] will grow a fifth variant for an
-    /// explicitly allocated descriptor whose role is not yet known, which is
-    /// never one of these four.
+    /// A `match` rather than `implicit_desc[role as usize]`: [`DescriptorRole`]
+    /// has a fifth variant, `App`, for an explicitly allocated descriptor whose
+    /// role is not yet known, and an index would run off the end of a
+    /// four-element array rather than being refused.
     pub(crate) fn implicit_descriptor_token(&self, role: DescriptorRole) -> *mut c_void {
         match role {
             DescriptorRole::Ard => self.implicit_desc[0],
             DescriptorRole::Apd => self.implicit_desc[1],
             DescriptorRole::Ird => self.implicit_desc[2],
             DescriptorRole::Ipd => self.implicit_desc[3],
+            // No statement allocates a descriptor under the not-yet-known role;
+            // see `descriptor_token`.
+            DescriptorRole::App => {
+                tracing::error!(
+                    "implicit_descriptor_token(App): a statement allocates no descriptor \
+                     under the not-yet-known role; returning the ARD"
+                );
+                self.implicit_desc[0]
+            }
         }
     }
 
@@ -1031,7 +1084,7 @@ pub unsafe fn alloc_statement<B: Backend>(
     .into_iter()
     .enumerate()
     {
-        let Some(desc) = alloc_descriptor(role, &group, token) else {
+        let Some(desc) = alloc_descriptor(role, AllocType::Auto, &group, token) else {
             // Registry exhausted part-way: retire what this call created,
             // including the statement, so no half-built handle escapes.
             for created in implicit.iter().take(index) {
@@ -1298,6 +1351,36 @@ pub(crate) unsafe fn free_statement_allocation<B: Backend>(token: *mut c_void) -
 /// # Safety
 ///
 /// `conn_token` must be a live connection handle.
+/// Free every explicit descriptor allocated on a connection.
+///
+/// `SQLDisconnect` "drops any statements or descriptors open on the connection".
+/// Called alongside [`free_connection_statements`]; a descriptor whose parent is
+/// the connection is explicit by construction — an implicit one is parented to
+/// its statement — so no alloc type is inspected here either.
+///
+/// No statement is reverted first: `SQLDisconnect` frees the connection's
+/// statements too, so there is nothing left holding an override.
+///
+/// # Safety
+///
+/// `conn_token` must be a live connection handle.
+pub(crate) unsafe fn free_connection_descriptors(conn_token: *mut c_void) {
+    let mut freed = 0usize;
+    for token in registry().children_of(conn_token) {
+        // `parent_of` rather than `group_of_kind`: the only question here is
+        // whether this child is a descriptor, and the caller already holds the
+        // group — asking for it again would clone an `Arc` to drop it, and would
+        // read as a lock-acquisition site to the guard test that counts them.
+        if registry().parent_of(token, HandleKind::Desc).is_some() {
+            free_descriptor(token);
+            freed += 1;
+        }
+    }
+    if freed > 0 {
+        tracing::debug!("SQLDisconnect: freed {freed} explicit descriptor(s)");
+    }
+}
+
 pub(crate) unsafe fn free_connection_statements<B: Backend>(conn_token: *mut c_void) {
     for token in registry().children_of(conn_token) {
         // SAFETY: `children_of` returns live tokens registered by
