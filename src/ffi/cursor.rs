@@ -105,6 +105,34 @@ pub unsafe fn sql_num_result_cols<B: Backend>(
     ret
 }
 
+/// The row count `SQLRowCount` reports, as an `SQLLEN`.
+///
+/// Shared with `SQLGetDiagField`'s `SQL_DIAG_ROW_COUNT`, because the spec makes
+/// them one value: "The data in this field is also returned in the
+/// *RowCountPtr* argument of **SQLRowCount**." Two computations of one number
+/// is how the two come to disagree — the same reason the IRD reads through
+/// `col_attr::get_column_attribute` rather than through a second table.
+pub(crate) fn statement_row_count<B: Backend>(stmt: &StatementHandle<B>) -> isize {
+    match stmt.statement {
+        Some(ref statement) => match statement.row_count() {
+            // A backend that knows the count but cannot determine it reports
+            // `Some(SQL_NO_TOTAL)` itself; core does not second-guess a value it
+            // was given.
+            Some(n) => isize::try_from(n).unwrap_or_else(|_| {
+                tracing::warn!(
+                    "row count {n} does not fit SQLLEN on this target; \
+                     reporting -1 (not available)"
+                );
+                -1
+            }),
+            // Not applicable to this statement — distinct from the backend
+            // saying it could not work the count out.
+            None => -1,
+        },
+        None => 0, // no statement executed
+    }
+}
+
 /// Generic implementation of SQLRowCount.
 ///
 /// Spec: <https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlrowcount-function>
@@ -155,24 +183,7 @@ pub unsafe fn sql_row_count<B: Backend>(
             let stmt = scope.get::<StatementHandle<B>>(statement_handle)?;
             stmt.diagnostics.clear();
 
-            let row_count = match stmt.statement {
-                Some(ref statement) => match statement.row_count() {
-                    // A backend that knows the count but cannot determine it
-                    // reports `Some(SQL_NO_TOTAL)` itself; core does not
-                    // second-guess a value it was given.
-                    Some(n) => isize::try_from(n).unwrap_or_else(|_| {
-                        tracing::warn!(
-                            "SQLRowCount: row count {n} does not fit SQLLEN on this target; \
-                             reporting -1 (not available)"
-                        );
-                        -1
-                    }),
-                    // Not applicable to this statement — distinct from the
-                    // backend saying it could not work the count out.
-                    None => -1,
-                },
-                None => 0, // no statement executed
-            };
+            let row_count = statement_row_count::<B>(stmt);
 
             if !row_count_ptr.is_null() {
                 // SAFETY: row_count_ptr is non-null (checked above) and the

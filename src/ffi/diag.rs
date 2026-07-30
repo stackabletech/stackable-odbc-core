@@ -3,6 +3,7 @@
 use std::ffi::c_void;
 
 use crate::backend::Backend;
+use crate::handles::StatementHandle;
 use crate::panic::panic_safe;
 use crate::types::{SqlReturn, handle_type_from_raw};
 use crate::utf16::write_utf16;
@@ -30,6 +31,35 @@ const SQL_DIAG_CLASS_ORIGIN: i16 = HeaderDiagnosticIdentifier::ClassOrigin as i1
 const SQL_DIAG_SERVER_NAME: i16 = HeaderDiagnosticIdentifier::ServerName as i16;
 const SQL_DIAG_COLUMN_NUMBER: i16 = HeaderDiagnosticIdentifier::ColumnNumber as i16;
 const SQL_DIAG_ROW_NUMBER: i16 = HeaderDiagnosticIdentifier::RowNumber as i16;
+const SQL_DIAG_ROW_COUNT: i16 = HeaderDiagnosticIdentifier::RowCount as i16;
+const SQL_DIAG_DYNAMIC_FUNCTION: i16 = HeaderDiagnosticIdentifier::DynamicFunction as i16;
+const SQL_DIAG_DYNAMIC_FUNCTION_CODE: i16 = HeaderDiagnosticIdentifier::DynamicFunctionCode as i16;
+const SQL_DIAG_CURSOR_ROW_COUNT: i16 = HeaderDiagnosticIdentifier::CursorRowCount as i16;
+
+/// `SQL_DIAG_UNKNOWN_STATEMENT` (0), derived rather than restated.
+///
+/// The spec's "Values of the Dynamic Function Fields" table pairs it with an
+/// empty `SQL_DIAG_DYNAMIC_FUNCTION` on the row headed "Unknown", which is what
+/// a driver that parses no SQL can honestly report.
+const SQL_DIAG_UNKNOWN_STATEMENT: i32 =
+    odbc_sys::DynamicDiagnosticIdentifier::UnknownStatement as i32;
+
+/// The `SQL_DIAG_DYNAMIC_FUNCTION` half of that same row.
+const SQL_DIAG_DYNAMIC_FUNCTION_UNKNOWN: &str = "";
+
+/// `SQL_DIAG_CURSOR_ROW_COUNT` when no cursor row count is available.
+///
+/// Not a spec sentinel — the field has none. The field's own row makes its
+/// meaning conditional: "Its semantics depend on the **SQLGetInfo** information
+/// types … SQL_FORWARD_ONLY_CURSOR_ATTRIBUTES2 … (in the SQL_CA2_CRC_EXACT and
+/// SQL_CA2_CRC_APPROXIMATE bits)". Core sets neither of those two bits in that
+/// info type (`crate::backend::default_get_info`), so it has declared that no
+/// row count is available and zero is the consequence rather than a guess.
+/// Note the info type itself is not zero — it carries
+/// `SQL_CA2_READ_ONLY_CONCURRENCY` — so it is the two named bits that matter
+/// here, not the whole value.
+const CURSOR_ROW_COUNT_UNAVAILABLE: isize = 0;
+
 // Sentinels for the two fields above, from `sqlext.h`; `odbc-sys` has neither.
 // Private because only `SQLGetDiagField` produces them.
 const SQL_NO_COLUMN_NUMBER: i32 = -1;
@@ -231,6 +261,35 @@ pub unsafe fn sql_get_diag_rec_w<B: Backend>(
     ret
 }
 
+/// The four header fields the spec defines only for statement handles.
+///
+/// A typed enum rather than four comparisons at the call site, so the match
+/// that answers them is exhaustive and needs no unreachable arm — the `panic`
+/// lint is denied outside tests.
+#[derive(Clone, Copy)]
+enum StatementHeaderField {
+    /// `SQL_DIAG_ROW_COUNT`
+    RowCount,
+    /// `SQL_DIAG_CURSOR_ROW_COUNT`
+    CursorRowCount,
+    /// `SQL_DIAG_DYNAMIC_FUNCTION`
+    DynamicFunction,
+    /// `SQL_DIAG_DYNAMIC_FUNCTION_CODE`
+    DynamicFunctionCode,
+}
+
+/// Recognise a statement-only header field, following the crate's
+/// `*_from_raw` idiom for turning an ABI integer into a type.
+fn statement_header_field(diag_identifier: i16) -> Option<StatementHeaderField> {
+    match diag_identifier {
+        SQL_DIAG_ROW_COUNT => Some(StatementHeaderField::RowCount),
+        SQL_DIAG_CURSOR_ROW_COUNT => Some(StatementHeaderField::CursorRowCount),
+        SQL_DIAG_DYNAMIC_FUNCTION => Some(StatementHeaderField::DynamicFunction),
+        SQL_DIAG_DYNAMIC_FUNCTION_CODE => Some(StatementHeaderField::DynamicFunctionCode),
+        _ => None,
+    }
+}
+
 /// Generic implementation of SQLGetDiagFieldW.
 ///
 /// Spec: <https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlgetdiagfield-function>
@@ -273,13 +332,36 @@ pub unsafe fn sql_get_diag_rec_w<B: Backend>(
 ///     spec says SQL_ERROR but the DM handles unrecognised values itself).
 ///   - `diag_identifier` is SQL_DIAG_CURSOR_ROW_COUNT,
 ///     SQL_DIAG_DYNAMIC_FUNCTION, SQL_DIAG_DYNAMIC_FUNCTION_CODE, or
-///     SQL_DIAG_ROW_COUNT and `handle` is not a statement handle
-///     (driver-manager-handled; not returned here).
+///     SQL_DIAG_ROW_COUNT and `handle` is not a statement handle. **Returned by
+///     this driver.** The Diagnostics list marks the clause (DM), but the Header
+///     Fields table states it once per field without a marker, and the Comments
+///     section a fifth time — "except for SQL_DIAG_CURSOR_ROW_COUNT or
+///     SQL_DIAG_ROW_COUNT, which will return SQL_ERROR if *Handle* is not a
+///     statement handle."
 ///   - `rec_number` was negative or 0 for a record field (not a header field).
 ///   - `buffer_length` was less than zero for a character string field.
 ///   - Async-operation-not-complete case: not applicable (the `Backend` trait is synchronous).
 /// - `SQL_NO_DATA` — `rec_number` was greater than the number of diagnostic
 ///   records, or the handle has no diagnostic records.
+///
+/// # The statement-only header fields
+///
+/// All four are answered, and `RecNumber` is ignored for them as the spec
+/// requires ("*RecNumber* is ignored for header fields"):
+///
+/// - **SQL_DIAG_ROW_COUNT** — the same `SQLLEN` `SQLRowCount` reports, from the
+///   shared `crate::ffi::cursor::statement_row_count`. The spec's row: "The data
+///   in this field is also returned in the *RowCountPtr* argument of
+///   **SQLRowCount**."
+/// - **SQL_DIAG_CURSOR_ROW_COUNT** — `0`. Its semantics "depend on the
+///   **SQLGetInfo** information types … SQL_FORWARD_ONLY_CURSOR_ATTRIBUTES2 …
+///   (in the SQL_CA2_CRC_EXACT and SQL_CA2_CRC_APPROXIMATE bits)", and core
+///   sets neither of those bits, so no cursor row count is available.
+/// - **SQL_DIAG_DYNAMIC_FUNCTION** — the empty string, and
+///   **SQL_DIAG_DYNAMIC_FUNCTION_CODE** — `SQL_DIAG_UNKNOWN_STATEMENT`. Those
+///   are one row of the spec's "Values of the Dynamic Function Fields" table,
+///   headed "Unknown"; core parses no SQL and cannot classify the statement it
+///   ran.
 ///
 /// # Safety
 ///
@@ -353,6 +435,87 @@ pub unsafe fn sql_get_diag_field_w<B: Backend>(
                     std::ptr::write_unaligned(string_length, std::mem::size_of::<i16>() as i16);
                 }
                 return Ok(SqlReturn::SUCCESS);
+            }
+
+            // The four statement-only header fields. Placed here with
+            // SQL_DIAG_NUMBER and SQL_DIAG_RETURNCODE rather than in the
+            // record-field match below, because the spec ignores RecNumber for
+            // all six: "RecNumber is ignored for header fields." Reached from
+            // below, the spec-correct rec_number of 0 would answer SQL_ERROR and
+            // a positive one would fall through to the unknown-identifier arm.
+            if let Some(field) = statement_header_field(diag_identifier) {
+                // Spec, once per field in the Header Fields table: "Calling
+                // SQLGetDiagField with a DiagIdentifier of ... on other than a
+                // statement handle will return SQL_ERROR." The Diagnostics list
+                // marks the same clause (DM), but the table states it four times
+                // without a marker and the Comments section a fifth, so core
+                // answers it rather than relying on the Driver Manager.
+                let Ok(stmt) = scope.get::<StatementHandle<B>>(handle) else {
+                    return Ok(SqlReturn::ERROR);
+                };
+                return Ok(match field {
+                    StatementHeaderField::RowCount => {
+                        let count = crate::ffi::cursor::statement_row_count::<B>(stmt);
+                        if !diag_info.is_null() {
+                            // SAFETY: diag_info is non-null (checked above); the
+                            // spec types this field SQLLEN, so a whole isize is
+                            // written. Unaligned because the pointer is the
+                            // application's.
+                            std::ptr::write_unaligned(diag_info as *mut isize, count);
+                        }
+                        if !string_length.is_null() {
+                            // SAFETY: string_length is non-null (checked above)
+                            // and the caller guarantees a writable i16.
+                            std::ptr::write_unaligned(string_length, size_of::<isize>() as i16);
+                        }
+                        SqlReturn::SUCCESS
+                    }
+                    StatementHeaderField::CursorRowCount => {
+                        if !diag_info.is_null() {
+                            // SAFETY: as above; SQLLEN-wide for the same reason.
+                            std::ptr::write_unaligned(
+                                diag_info as *mut isize,
+                                CURSOR_ROW_COUNT_UNAVAILABLE,
+                            );
+                        }
+                        if !string_length.is_null() {
+                            // SAFETY: as above.
+                            std::ptr::write_unaligned(string_length, size_of::<isize>() as i16);
+                        }
+                        SqlReturn::SUCCESS
+                    }
+                    StatementHeaderField::DynamicFunction => {
+                        // A character field, so the spec's negative-BufferLength
+                        // rule applies: "The value requested was a character
+                        // string and BufferLength was less than zero."
+                        if buffer_length < 0 {
+                            return Ok(SqlReturn::ERROR);
+                        }
+                        // SAFETY: diag_info is either null (write_utf16 handles
+                        // that) or a buffer of at least buffer_length/2 u16s.
+                        write_diag_string(
+                            SQL_DIAG_DYNAMIC_FUNCTION_UNKNOWN,
+                            diag_info,
+                            buffer_length,
+                            string_length,
+                        )
+                    }
+                    StatementHeaderField::DynamicFunctionCode => {
+                        if !diag_info.is_null() {
+                            // SAFETY: diag_info is non-null (checked above); the
+                            // spec types this field SQLINTEGER.
+                            std::ptr::write_unaligned(
+                                diag_info as *mut i32,
+                                SQL_DIAG_UNKNOWN_STATEMENT,
+                            );
+                        }
+                        if !string_length.is_null() {
+                            // SAFETY: as above.
+                            std::ptr::write_unaligned(string_length, size_of::<i32>() as i16);
+                        }
+                        SqlReturn::SUCCESS
+                    }
+                });
             }
 
             // Record fields: need a valid record number.
@@ -465,8 +628,11 @@ mod tests {
 
     use crate::ffi::handle::{sql_alloc_handle, sql_free_handle};
     use crate::handles::{ConnectionHandle, EnvironmentHandle, StatementHandle};
-    use crate::test_utils::{MockBackend, with_handle};
+    use crate::test_utils::{
+        MockBackend, alloc_env_conn_stmt, cleanup_env_conn_stmt, synthetic_result_set, with_handle,
+    };
     use crate::types::sql_state;
+    use crate::types::{InfoType, InfoValue};
 
     #[test]
     fn diag_rec_returns_no_data_when_empty() {
@@ -1174,8 +1340,245 @@ mod tests {
         assert_eq!(SQL_DIAG_MESSAGE_TEXT, 6);
         assert_eq!(SQL_DIAG_CLASS_ORIGIN, 8);
         assert_eq!(SQL_DIAG_SERVER_NAME, 11);
+        assert_eq!(SQL_DIAG_ROW_COUNT, 3);
+        assert_eq!(SQL_DIAG_DYNAMIC_FUNCTION, 7);
         // The identifier the old SQL_DIAG_COLUMN_NUMBER collided with.
-        assert_eq!(HeaderDiagnosticIdentifier::DynamicFunctionCode as i16, 12);
+        assert_eq!(SQL_DIAG_DYNAMIC_FUNCTION_CODE, 12);
+        assert_eq!(SQL_DIAG_CURSOR_ROW_COUNT, -1249);
+        assert_eq!(SQL_DIAG_UNKNOWN_STATEMENT, 0);
+    }
+
+    /// `SQL_DIAG_ROW_COUNT` is the same number `SQLRowCount` reports — the
+    /// spec's row says so outright: "The data in this field is also returned in
+    /// the *RowCountPtr* argument of **SQLRowCount**." Asserting both in one
+    /// test is what stops the two computations drifting apart.
+    #[test]
+    fn diag_field_row_count_is_the_number_sql_row_count_reports() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+                handle.statement = Some(crate::handles::StatementData::Synthetic(
+                    synthetic_result_set(vec![
+                        vec![crate::types::ColumnValue::I32(1)],
+                        vec![crate::types::ColumnValue::I32(2)],
+                        vec![crate::types::ColumnValue::I32(3)],
+                    ]),
+                ));
+            });
+
+            let mut diag_count: isize = -999;
+            let mut str_len: i16 = 0;
+            assert_eq!(
+                sql_get_diag_field_w::<MockBackend>(
+                    HandleType::Stmt as i16,
+                    stmt,
+                    0, // header field: RecNumber is ignored
+                    SQL_DIAG_ROW_COUNT,
+                    std::ptr::from_mut(&mut diag_count).cast::<c_void>(),
+                    0,
+                    &mut str_len,
+                ),
+                SqlReturn::SUCCESS
+            );
+
+            let mut row_count: isize = -999;
+            assert_eq!(
+                crate::ffi::cursor::sql_row_count::<MockBackend>(stmt, &mut row_count),
+                SqlReturn::SUCCESS
+            );
+
+            assert_eq!(diag_count, 3);
+            assert_eq!(
+                diag_count, row_count,
+                "SQL_DIAG_ROW_COUNT and SQLRowCount must be one number"
+            );
+
+            cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
+    /// Spec: "*RecNumber* is ignored for header fields." Both the spec-correct 0
+    /// and a positive value must answer, which is precisely what the
+    /// `rec_number <= 0` guard and the unknown-identifier arm between them made
+    /// impossible before.
+    #[test]
+    fn diag_field_row_count_ignores_rec_number() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+                handle.statement = Some(crate::handles::StatementData::Synthetic(
+                    synthetic_result_set(vec![vec![crate::types::ColumnValue::I32(1)]]),
+                ));
+            });
+
+            for rec_number in [0i16, 1, 7, -1] {
+                let mut count: isize = -999;
+                assert_eq!(
+                    sql_get_diag_field_w::<MockBackend>(
+                        HandleType::Stmt as i16,
+                        stmt,
+                        rec_number,
+                        SQL_DIAG_ROW_COUNT,
+                        std::ptr::from_mut(&mut count).cast::<c_void>(),
+                        0,
+                        std::ptr::null_mut(),
+                    ),
+                    SqlReturn::SUCCESS,
+                    "rec_number {rec_number} must be ignored for a header field"
+                );
+                assert_eq!(count, 1);
+            }
+
+            cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
+    /// The Header Fields table says it four times, once per field: "Calling
+    /// **SQLGetDiagField** with a *DiagIdentifier* of … on other than a
+    /// statement handle will return SQL_ERROR." The Diagnostics list marks the
+    /// same clause (DM), but four unmarked statements plus the Comments
+    /// section's fifth outweigh it, so core answers rather than relying on the
+    /// Driver Manager to intercept.
+    #[test]
+    fn diag_field_statement_only_headers_reject_a_non_statement_handle() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+
+            for field in [
+                SQL_DIAG_ROW_COUNT,
+                SQL_DIAG_CURSOR_ROW_COUNT,
+                SQL_DIAG_DYNAMIC_FUNCTION,
+                SQL_DIAG_DYNAMIC_FUNCTION_CODE,
+            ] {
+                let mut buf = [0u16; DIAG_MSG_BUF_LEN];
+                for handle in [env, conn] {
+                    assert_eq!(
+                        sql_get_diag_field_w::<MockBackend>(
+                            HandleType::Env as i16,
+                            handle,
+                            0,
+                            field,
+                            buf.as_mut_ptr().cast::<c_void>(),
+                            (DIAG_MSG_BUF_LEN * 2) as i16,
+                            std::ptr::null_mut(),
+                        ),
+                        SqlReturn::ERROR,
+                        "field {field} must be SQL_ERROR on a non-statement handle"
+                    );
+                }
+            }
+
+            cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
+    /// `SQL_DIAG_CURSOR_ROW_COUNT`'s semantics "depend on the SQLGetInfo
+    /// information types … SQL_FORWARD_ONLY_CURSOR_ATTRIBUTES2 … (in the
+    /// SQL_CA2_CRC_EXACT and SQL_CA2_CRC_APPROXIMATE bits)". Core claims
+    /// neither bit, so no cursor row count is available and zero is the answer
+    /// rather than a guess. Both halves are asserted here so the coupling is
+    /// visible if either moves: a backend that starts claiming a CRC bit needs
+    /// this field to start answering.
+    ///
+    /// The assertion is against the two CRC bits, not against the whole info
+    /// value. That info type is *not* zero — it carries
+    /// `SQL_CA2_READ_ONLY_CONCURRENCY` — and a test written against the whole
+    /// value would fail the next time an unrelated capability bit is added while
+    /// still not noticing a CRC bit appearing inside a value that stayed
+    /// non-zero. The bits named by the spec's sentence are what this is about.
+    #[test]
+    fn diag_field_cursor_row_count_is_zero_because_core_claims_no_crc_bits() {
+        let Some(InfoValue::U32(attrs2)) = crate::backend::default_get_info::<MockBackend>(
+            None,
+            InfoType::ForwardOnlyCursorAttributes2,
+        ) else {
+            panic!("SQL_FORWARD_ONLY_CURSOR_ATTRIBUTES2 is a U32-shaped info type core answers");
+        };
+        assert_eq!(
+            attrs2 & (crate::types::SQL_CA2_CRC_EXACT | crate::types::SQL_CA2_CRC_APPROXIMATE),
+            0,
+            "core claims neither SQL_CA2_CRC_* bit, which is why the field below \
+             is 0; a backend that starts claiming one needs this field to answer"
+        );
+
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+                handle.statement = Some(crate::handles::StatementData::Synthetic(
+                    synthetic_result_set(vec![vec![crate::types::ColumnValue::I32(1)]]),
+                ));
+            });
+
+            let mut count: isize = !0;
+            assert_eq!(
+                sql_get_diag_field_w::<MockBackend>(
+                    HandleType::Stmt as i16,
+                    stmt,
+                    0,
+                    SQL_DIAG_CURSOR_ROW_COUNT,
+                    std::ptr::from_mut(&mut count).cast::<c_void>(),
+                    0,
+                    std::ptr::null_mut(),
+                ),
+                SqlReturn::SUCCESS
+            );
+            assert_eq!(
+                count, CURSOR_ROW_COUNT_UNAVAILABLE,
+                "a four-byte write would leave the high half of this SQLLEN standing"
+            );
+
+            cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
+    /// The spec's "Values of the Dynamic Function Fields" table has a row for a
+    /// driver that cannot classify the statement it ran: "Unknown | *empty
+    /// string* | SQL_DIAG_UNKNOWN_STATEMENT". Core parses no SQL, so that row is
+    /// the accurate answer rather than a placeholder.
+    #[test]
+    fn diag_field_dynamic_function_is_the_spec_unknown_statement_pair() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+                handle.statement = Some(crate::handles::StatementData::Synthetic(
+                    synthetic_result_set(vec![]),
+                ));
+            });
+
+            let mut name = [0xFFFFu16; 8];
+            let mut str_len: i16 = -1;
+            assert_eq!(
+                sql_get_diag_field_w::<MockBackend>(
+                    HandleType::Stmt as i16,
+                    stmt,
+                    0,
+                    SQL_DIAG_DYNAMIC_FUNCTION,
+                    name.as_mut_ptr().cast::<c_void>(),
+                    (name.len() * 2) as i16,
+                    &mut str_len,
+                ),
+                SqlReturn::SUCCESS
+            );
+            assert_eq!(str_len, 0, "the empty string is zero bytes");
+            assert_eq!(name[0], 0, "the buffer must be null-terminated");
+
+            let mut code: i32 = -999;
+            assert_eq!(
+                sql_get_diag_field_w::<MockBackend>(
+                    HandleType::Stmt as i16,
+                    stmt,
+                    0,
+                    SQL_DIAG_DYNAMIC_FUNCTION_CODE,
+                    std::ptr::from_mut(&mut code).cast::<c_void>(),
+                    0,
+                    std::ptr::null_mut(),
+                ),
+                SqlReturn::SUCCESS
+            );
+            assert_eq!(code, SQL_DIAG_UNKNOWN_STATEMENT);
+
+            cleanup_env_conn_stmt(env, conn, stmt);
+        }
     }
 
     #[test]
@@ -1237,13 +1640,12 @@ mod tests {
 
     #[test]
     fn diag_field_dynamic_function_code_is_not_answered_as_a_row_number() {
-        // Core does not implement SQL_DIAG_DYNAMIC_FUNCTION_CODE, so the honest
-        // answer is the unknown-field one. What makes it worth a test is the
-        // shape of the failure if a record-field constant ever collides with
-        // 12: the sentinel those fields write is -1, and -1 is a *valid*
-        // dynamic function code, SQL_DIAG_CREATE_INDEX. The application would
-        // be told every statement it ran was a CREATE INDEX, with no error
-        // anywhere to suggest otherwise.
+        // The handle here is an environment, so the answer is the spec's
+        // SQL_ERROR for a statement-only field rather than a value. What the
+        // test is really pinning is the buffer: the record fields' sentinel is
+        // -1, and -1 is a *valid* dynamic function code, SQL_DIAG_CREATE_INDEX.
+        // A constant collision would tell the application every statement it ran
+        // was a CREATE INDEX, with no error anywhere to suggest otherwise.
         unsafe {
             let mut env: *mut c_void = std::ptr::null_mut();
             let _ = sql_alloc_handle::<MockBackend>(
@@ -1268,8 +1670,11 @@ mod tests {
                 0,
                 &mut str_len,
             );
-            assert_eq!(ret, SqlReturn::NO_DATA);
-            assert_eq!(value, 0, "an unimplemented field wrote to the buffer");
+            assert_eq!(ret, SqlReturn::ERROR);
+            assert_eq!(
+                value, 0,
+                "a statement-only field wrote through a non-statement handle"
+            );
 
             let _ = sql_free_handle::<MockBackend>(HandleType::Env as i16, env);
         }

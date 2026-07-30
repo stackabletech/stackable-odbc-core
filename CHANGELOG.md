@@ -150,6 +150,25 @@ call `SQLCloseCursor` or `SQLFreeStmt(SQL_CLOSE)` first, as it already must for
 
 ### Added
 
+- `SQLGetDiagFieldW` answers the four statement-only header fields:
+  `SQL_DIAG_ROW_COUNT`, `SQL_DIAG_CURSOR_ROW_COUNT`,
+  `SQL_DIAG_DYNAMIC_FUNCTION` and `SQL_DIAG_DYNAMIC_FUNCTION_CODE`. All four
+  were unhandled — with the spec-correct `RecNumber` of 0 they returned
+  `SQL_ERROR`, and with a positive one they returned `SQL_NO_DATA` — although
+  the spec says "*RecNumber* is ignored for header fields".
+
+  `SQL_DIAG_ROW_COUNT` now shares `SQLRowCount`'s computation, which the spec
+  requires of it ("The data in this field is also returned in the *RowCountPtr*
+  argument of **SQLRowCount**"). `SQL_DIAG_CURSOR_ROW_COUNT` is `0`, derived
+  from core setting neither `SQL_CA2_CRC_*` bit in
+  `SQL_FORWARD_ONLY_CURSOR_ATTRIBUTES2`. The two dynamic-function fields report
+  the spec's own "Unknown" row: an empty string and `SQL_DIAG_UNKNOWN_STATEMENT`.
+  On a non-statement handle all four return `SQL_ERROR`, as the Header Fields
+  table states once per field.
+
+  `types::SQL_CA2_CRC_EXACT` and `types::SQL_CA2_CRC_APPROXIMATE` are new, so a
+  backend can state that coupling in its own cursor-attribute answer.
+
 - **`SQL_ASYNC_DBC_NOT_CAPABLE`, `SQL_ASYNC_DBC_CAPABLE` and
   `SQL_CA2_READ_ONLY_CONCURRENCY`** in `types::constants`. The first names the
   value `SQL_ASYNC_DBC_FUNCTIONS` was already answering as a bare `0`; the

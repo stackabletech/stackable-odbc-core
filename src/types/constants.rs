@@ -441,6 +441,20 @@ pub const SQL_CA1_NEXT: u32 = 0x0000_0001;
 /// `SQL_*_CURSOR_ATTRIBUTES2` info type describes.
 pub const SQL_CA2_READ_ONLY_CONCURRENCY: u32 = 0x0000_0001;
 
+/// `SQL_CA2_CRC_EXACT` — the cursor of the kind the enclosing
+/// `SQL_*_CURSOR_ATTRIBUTES2` info type describes reports an *exact* row count
+/// in `SQL_DIAG_CURSOR_ROW_COUNT`.
+///
+/// Paired with [`SQL_CA2_CRC_APPROXIMATE`]: `SQLGetDiagField`'s
+/// `SQL_DIAG_CURSOR_ROW_COUNT` row makes its own semantics conditional on these
+/// two bits, so a backend that sets neither has declared that no cursor row
+/// count is available.
+pub const SQL_CA2_CRC_EXACT: u32 = 0x0000_1000;
+
+/// `SQL_CA2_CRC_APPROXIMATE` — the same cursor reports an *approximate* row
+/// count in `SQL_DIAG_CURSOR_ROW_COUNT`. See [`SQL_CA2_CRC_EXACT`].
+pub const SQL_CA2_CRC_APPROXIMATE: u32 = 0x0000_2000;
+
 /// `SQL_ROWSET_SIZE` (9) — the ODBC 2.x statement option giving the rowset size
 /// `SQLExtendedFetch` uses.
 ///
