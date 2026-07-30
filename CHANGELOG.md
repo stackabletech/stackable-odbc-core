@@ -648,6 +648,22 @@ Everything a driver has to change for the catalog rework, in one place.
 
 ### Changed
 
+- **Breaking: `SQLSetCursorName` enforces the spec's cursor-name rules.** It
+  previously stored any non-empty name and checked nothing else, so three
+  unmarked (driver-owed) rows of its diagnostics table went unimplemented. Calls
+  that used to succeed can now return:
+
+  - `24000` — the name is set after the statement has executed. The spec allows
+    it only while the cursor is "in an allocated or prepared state".
+  - `34000` — the name is empty, longer than `SQL_MAX_CURSOR_NAME_LEN`, or starts
+    with `SQLCUR` or `SQL_CUR`, which are reserved for driver-generated names.
+  - `3C000` — the name is already used by another statement on the same
+    connection.
+
+  An empty name moves from `HY090` to `34000`: `HY090` is `(DM)`-marked and means
+  "`NameLength` was less than 0 but not equal to `SQL_NTS`", a different
+  condition.
+
 - **Breaking: the deprecated ODBC 2.x functions are no longer exported.**
   `SQLAllocConnect`, `SQLAllocEnv`, `SQLAllocStmt`, `SQLFreeConnect`,
   `SQLFreeEnv`, `SQLError`, `SQLTransact`, `SQLGetConnectOption(W)`,
