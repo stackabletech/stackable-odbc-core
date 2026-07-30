@@ -693,6 +693,19 @@ pub unsafe fn sql_get_cursor_name_w<B: Backend>(
 /// - 3C000 (duplicate cursor name): **returned by this driver**. "All cursor names within
 ///   the connection must be unique", so the check walks this connection's statements —
 ///   all of which already share the group lock this call holds.
+///
+///   Names are compared **byte-exactly**, so `C1` and `c1` are two cursors. The spec
+///   defines no notion of sameness for this row and states only the quoted half of the
+///   rule — "in ODBC 3.x, if a cursor name is a quoted identifier, it is treated in a
+///   case-sensitive manner" — which implies something about unquoted names without saying
+///   what. Reading the mature drivers settles it in an unexpected direction: psqlODBC
+///   (`PGAPI_SetCursorName`), MySQL Connector/ODBC (`MySQLSetCursorName`), FreeTDS
+///   (`SQLSetCursorName`) and unixODBC's Driver Manager
+///   (`DriverManager/SQLSetCursorName.c`) implement **no duplicate check at all**, and a
+///   search for `3C000` finds nothing in the first three. So there is no established
+///   folding rule to adopt, and case-folding here would be inference from the spec's
+///   silence rather than evidence. Pinned by
+///   `cursor_names_differing_only_in_case_are_distinct`.
 /// - HY000 (general error): returned via `OdbcError::general` for unexpected failures.
 /// - HY001 (memory allocation error): not applicable; Rust allocation panics are caught by
 ///   `panic_safe`.
@@ -831,6 +844,14 @@ pub unsafe fn sql_set_cursor_name_w<B: Backend>(
                     let Ok(other) = scope.get::<StatementHandle<B>>(sibling) else {
                         continue;
                     };
+                    // Byte-exact, deliberately: the spec defines no notion of
+                    // sameness here and states only that a *quoted* identifier
+                    // is case-sensitive. None of psqlODBC, MySQL
+                    // Connector/ODBC, FreeTDS or unixODBC's Driver Manager
+                    // implements this check at all, so no established practice
+                    // supplies a folding rule and case-folding would be
+                    // inference from the spec's silence. See the 3C000 row of
+                    // this function's doc comment for the citations.
                     if other.cursor_name.as_deref() == Some(name.as_str()) {
                         return Err(OdbcError::general(
                             format!("Cursor name {name:?} is already in use on this connection"),
@@ -1976,6 +1997,61 @@ mod tests {
             // Renaming a statement to the name it already holds is not a clash
             // with itself.
             assert_eq!(set_cursor_name(stmt_a, "shared"), SqlReturn::SUCCESS);
+
+            assert_eq!(
+                sql_free_handle::<MockBackend>(HandleType::Stmt as i16, stmt_b),
+                SqlReturn::SUCCESS
+            );
+            cleanup_env_conn_stmt(env, conn, stmt_a);
+        }
+    }
+
+    /// Names differing only in case are **not** the same name. This is a
+    /// deliberate ruling, not an oversight — do not "fix" it into a
+    /// case-insensitive comparison without new evidence.
+    ///
+    /// The spec's `3C000` row defines no notion of sameness, and the Comments
+    /// state only the quoted half of the rule: "in ODBC 3.x, if a cursor name is
+    /// a quoted identifier, it is treated in a case-sensitive manner". That
+    /// implies something about unquoted names without ever saying what, so this
+    /// crate's policy is to read a mature driver rather than infer from the
+    /// silence.
+    ///
+    /// Four were read, and none of them implements a duplicate-cursor-name
+    /// check at all, so none can supply a folding rule:
+    ///
+    /// - psqlODBC `PGAPI_SetCursorName` (`results.c`) — checks the length
+    ///   against `MAX_CURSOR_LEN` and stores; no search of sibling statements.
+    /// - MySQL Connector/ODBC `MySQLSetCursorName` (`driver/cursor.cc`) —
+    ///   length, plus `myodbc_casecmp` against the reserved `SQLCUR`/`SQL_CUR`
+    ///   prefixes, then stores.
+    /// - FreeTDS `SQLSetCursorName` (`src/odbc/odbc.c`) — `24000` if a cursor is
+    ///   already open, then copies the string.
+    /// - unixODBC's Driver Manager (`DriverManager/SQLSetCursorName.c`) —
+    ///   validates the handle, the name and the statement state, then forwards.
+    ///
+    /// A search for the literal `3C000` finds nothing in the first three, and in
+    /// unixODBC only a string-table entry in a bundled sample driver that no
+    /// code path raises. Core is therefore ahead of all four in performing the
+    /// check at all, and there is no established practice to match on how names
+    /// are compared. Byte-exact is what remains once inference from silence is
+    /// off the table.
+    #[test]
+    fn cursor_names_differing_only_in_case_are_distinct() {
+        unsafe {
+            let (env, conn, stmt_a) = alloc_env_conn_stmt();
+            let mut stmt_b: *mut c_void = std::ptr::null_mut();
+            assert_eq!(
+                sql_alloc_handle::<MockBackend>(HandleType::Stmt as i16, conn, &mut stmt_b),
+                SqlReturn::SUCCESS
+            );
+
+            assert_eq!(set_cursor_name(stmt_a, "C1"), SqlReturn::SUCCESS);
+            assert_eq!(
+                set_cursor_name(stmt_b, "c1"),
+                SqlReturn::SUCCESS,
+                "the comparison is byte-exact; no driver read supports folding",
+            );
 
             assert_eq!(
                 sql_free_handle::<MockBackend>(HandleType::Stmt as i16, stmt_b),
