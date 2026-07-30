@@ -1273,9 +1273,7 @@ mod tests {
                 Some("01S07")
             );
 
-            let _ = sql_free_handle::<MockRecordingBackend>(HandleType::Stmt as i16, stmt);
-            let _ = sql_free_handle::<MockRecordingBackend>(HandleType::Dbc as i16, conn);
-            let _ = sql_free_handle::<MockRecordingBackend>(HandleType::Env as i16, env);
+            cleanup_env_conn_stmt_for::<MockRecordingBackend>(env, conn, stmt);
         }
     }
 
@@ -1310,9 +1308,7 @@ mod tests {
                 Some("01S07")
             );
 
-            let _ = sql_free_handle::<MockRecordingBackend>(HandleType::Stmt as i16, stmt);
-            let _ = sql_free_handle::<MockRecordingBackend>(HandleType::Dbc as i16, conn);
-            let _ = sql_free_handle::<MockRecordingBackend>(HandleType::Env as i16, env);
+            cleanup_env_conn_stmt_for::<MockRecordingBackend>(env, conn, stmt);
         }
     }
 
@@ -1339,9 +1335,7 @@ mod tests {
             );
             assert_eq!(first_diag_state::<MockRecordingBackend>(stmt), None);
 
-            let _ = sql_free_handle::<MockRecordingBackend>(HandleType::Stmt as i16, stmt);
-            let _ = sql_free_handle::<MockRecordingBackend>(HandleType::Dbc as i16, conn);
-            let _ = sql_free_handle::<MockRecordingBackend>(HandleType::Env as i16, env);
+            cleanup_env_conn_stmt_for::<MockRecordingBackend>(env, conn, stmt);
         }
     }
 
