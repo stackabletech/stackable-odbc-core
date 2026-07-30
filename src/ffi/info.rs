@@ -856,14 +856,28 @@ mod tests {
         buf
     }
 
+    /// **Core exports none of these functions**, and this array must report them
+    /// present anyway. The two are not in conflict: the 2.x array answers "can an
+    /// ODBC 2.x application call this", and it can — the Driver Manager maps every
+    /// one of them onto the 3.x function core does export. The 3.x bitmap is the
+    /// one that must *not* claim them, because a claim there is what suppresses
+    /// that mapping.
+    ///
+    /// psqlODBC ships exactly this combination: `pfExists[SQL_API_SQLERROR] = TRUE`
+    /// in its `PGAPI_GetFunctions`, beside a commented-out `;;SQLError` in its
+    /// `.def`.
+    ///
+    /// So an entry here referring to a `FunctionId` absent from
+    /// `CORE_EXPORTED_FUNCTIONS` is correct and deliberate, not an oversight to
+    /// tidy away.
     #[test]
     fn all_functions_2x_marks_the_deprecated_equivalents_at_their_spec_ids() {
         use crate::function_id::FunctionId as F;
         let buf = all_functions_2x::<MockFunctionsBackend>();
 
-        // SQLGetConnectOption is 42. It was recorded at 30 — an unassigned
-        // slot — so the Windows DM, which dispatches from this array, was told
-        // a function the driver exports did not exist.
+        // SQLGetConnectOption is 42. It was once recorded at 30 — an unassigned
+        // slot — so the Windows DM, which dispatches from this array, was told a
+        // function it could reach did not exist.
         for (id, label) in [
             (F::GetConnectOption, "SQLGetConnectOption"),
             (F::SetConnectOption, "SQLSetConnectOption"),

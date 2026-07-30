@@ -614,10 +614,13 @@ pub const SQL_MAX_CURSOR_NAME_LEN: u16 = 128;
 /// large enough for practical VARCHAR values without implying unlimited length.
 pub const SQL_DEFAULT_PARAM_SIZE: u32 = 4000;
 
-/// Maximum byte length of a string value returned by a deprecated ODBC 2.x
-/// `SQLGetConnectOption` / `SQLGetStmtOption` call (`SQL_MAX_OPTION_STRING_VALUE`).
-/// The 2.x ABI provides no `buffer_length` parameter, so the spec fixes the limit at 256.
-pub const SQL_MAX_OPTION_STRING_VALUE: i32 = 256;
+// `SQL_MAX_OPTION_STRING_LENGTH` (256) is deliberately absent. It bounded the
+// string a deprecated `SQLGetConnectOption` / `SQLGetStmtOption` could return,
+// since the ODBC 2.x ABI carries no buffer-length argument. Core no longer
+// exports either function — the Driver Manager maps both — so nothing in the
+// crate needs the value, and it was spelled `..._VALUE` here against the
+// header's `..._LENGTH` (`sqlext.h:58`). Reintroduce it under the header's name
+// if a caller ever appears.
 
 /// `SQL_DATA_AT_EXEC` — indicator value signalling that parameter data will be
 /// sent via `SQLPutData` at execution time.

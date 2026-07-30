@@ -959,239 +959,6 @@ macro_rules! forward_ffi {
         }
 
         // ---------------------------------------------------------------------------
-        // Windows DM compatibility — ODBC 2.x option functions (non-W names)
-        // ---------------------------------------------------------------------------
-
-        #[allow(non_snake_case, clippy::missing_safety_doc)]
-        #[unsafe(no_mangle)]
-        pub unsafe extern "system" fn SQLGetConnectOptionW(
-            conn: *mut ::std::ffi::c_void,
-            option: u16,
-            value: *mut ::std::ffi::c_void,
-        ) -> $crate::types::SqlReturn {
-            unsafe {
-                // The ODBC 2.x ABI has no buffer_length or string_length_ptr
-                // parameters. The spec fixes the maximum string length at
-                // SQL_MAX_OPTION_STRING_VALUE (256). Passing null for
-                // string_length_ptr is safe because sql_get_connect_attr_w
-                // guards all writes with a null check.
-                $crate::ffi::connect_attr::sql_get_connect_attr_w::<$B>(
-                    conn,
-                    option as i32,
-                    value,
-                    $crate::types::SQL_MAX_OPTION_STRING_VALUE,
-                    ::std::ptr::null_mut(),
-                )
-            }
-        }
-
-        #[allow(non_snake_case, clippy::missing_safety_doc)]
-        #[unsafe(no_mangle)]
-        pub unsafe extern "system" fn SQLSetConnectOptionW(
-            conn: *mut ::std::ffi::c_void,
-            option: u16,
-            value: usize,
-        ) -> $crate::types::SqlReturn {
-            unsafe {
-                // The ODBC 2.x ABI encodes both integer and pointer values in a
-                // single SQLULEN (usize). For integer attributes the value IS the
-                // integer (no dereference); for string attributes it IS a pointer.
-                // sql_set_connect_attr_w interprets the pointer the same way, so
-                // the cast is a valid identity mapping required by the 2.x ABI.
-                $crate::ffi::connect_attr::sql_set_connect_attr_w::<$B>(
-                    conn,
-                    option as i32,
-                    value as *mut ::std::ffi::c_void,
-                    0,
-                )
-            }
-        }
-
-        // ---------------------------------------------------------------------------
-        // ODBC 2.x deprecated compat exports (non-W names)
-        // ---------------------------------------------------------------------------
-
-        #[allow(non_snake_case, clippy::missing_safety_doc)]
-        #[unsafe(no_mangle)]
-        pub unsafe extern "system" fn SQLAllocConnect(
-            env: *mut ::std::ffi::c_void,
-            conn: *mut *mut ::std::ffi::c_void,
-        ) -> $crate::types::SqlReturn {
-            unsafe {
-                $crate::ffi::handle::sql_alloc_handle::<$B>(
-                    $crate::types::HandleType::Dbc as i16,
-                    env,
-                    conn,
-                )
-            }
-        }
-
-        #[allow(non_snake_case, clippy::missing_safety_doc)]
-        #[unsafe(no_mangle)]
-        pub unsafe extern "system" fn SQLAllocEnv(
-            env: *mut *mut ::std::ffi::c_void,
-        ) -> $crate::types::SqlReturn {
-            unsafe {
-                $crate::ffi::handle::sql_alloc_handle::<$B>(
-                    $crate::types::HandleType::Env as i16,
-                    ::std::ptr::null_mut(),
-                    env,
-                )
-            }
-        }
-
-        #[allow(non_snake_case, clippy::missing_safety_doc)]
-        #[unsafe(no_mangle)]
-        pub unsafe extern "system" fn SQLAllocStmt(
-            conn: *mut ::std::ffi::c_void,
-            stmt: *mut *mut ::std::ffi::c_void,
-        ) -> $crate::types::SqlReturn {
-            unsafe {
-                $crate::ffi::handle::sql_alloc_handle::<$B>(
-                    $crate::types::HandleType::Stmt as i16,
-                    conn,
-                    stmt,
-                )
-            }
-        }
-
-        #[allow(non_snake_case, clippy::missing_safety_doc)]
-        #[unsafe(no_mangle)]
-        pub unsafe extern "system" fn SQLFreeConnect(
-            conn: *mut ::std::ffi::c_void,
-        ) -> $crate::types::SqlReturn {
-            unsafe {
-                $crate::ffi::handle::sql_free_handle::<$B>(
-                    $crate::types::HandleType::Dbc as i16,
-                    conn,
-                )
-            }
-        }
-
-        #[allow(non_snake_case, clippy::missing_safety_doc)]
-        #[unsafe(no_mangle)]
-        pub unsafe extern "system" fn SQLFreeEnv(
-            env: *mut ::std::ffi::c_void,
-        ) -> $crate::types::SqlReturn {
-            unsafe {
-                $crate::ffi::handle::sql_free_handle::<$B>(
-                    $crate::types::HandleType::Env as i16,
-                    env,
-                )
-            }
-        }
-
-        #[allow(non_snake_case, clippy::too_many_arguments, clippy::missing_safety_doc)]
-        #[unsafe(no_mangle)]
-        pub unsafe extern "system" fn SQLError(
-            _env: *mut ::std::ffi::c_void,
-            _conn: *mut ::std::ffi::c_void,
-            _stmt: *mut ::std::ffi::c_void,
-            _state: *mut u16,
-            _native: *mut i32,
-            _msg: *mut u16,
-            _buf_len: i16,
-            _msg_len: *mut i16,
-        ) -> $crate::types::SqlReturn {
-            // SQLError is the ODBC 2.x diagnostic function, deprecated in 3.x in
-            // favour of SQLGetDiagRec. ODBC 3.x Driver Managers intercept SQLError
-            // calls from 2.x applications and reroute them to SQLGetDiagRec, so a
-            // conforming DM never forwards SQLError to the driver. We export the
-            // symbol for completeness and return SQL_NO_DATA ("no more records"),
-            // which is a safe no-op: an old tool that reaches this code will see no
-            // error message, but will not crash or misinterpret a stale pointer.
-            $crate::types::SqlReturn::NO_DATA
-        }
-
-        #[allow(non_snake_case, clippy::missing_safety_doc)]
-        #[unsafe(no_mangle)]
-        pub unsafe extern "system" fn SQLSetConnectOption(
-            conn: *mut ::std::ffi::c_void,
-            option: u16,
-            value: usize,
-        ) -> $crate::types::SqlReturn {
-            unsafe {
-                // Same ABI as SQLSetConnectOptionW — see comment there.
-                $crate::ffi::connect_attr::sql_set_connect_attr_w::<$B>(
-                    conn,
-                    option as i32,
-                    value as *mut ::std::ffi::c_void,
-                    0,
-                )
-            }
-        }
-
-        #[allow(non_snake_case, clippy::missing_safety_doc)]
-        #[unsafe(no_mangle)]
-        pub unsafe extern "system" fn SQLGetConnectOption(
-            conn: *mut ::std::ffi::c_void,
-            option: u16,
-            value: *mut ::std::ffi::c_void,
-        ) -> $crate::types::SqlReturn {
-            unsafe {
-                // Same constraints as SQLGetConnectOptionW above.
-                $crate::ffi::connect_attr::sql_get_connect_attr_w::<$B>(
-                    conn,
-                    option as i32,
-                    value,
-                    $crate::types::SQL_MAX_OPTION_STRING_VALUE,
-                    ::std::ptr::null_mut(),
-                )
-            }
-        }
-
-        #[allow(non_snake_case, clippy::missing_safety_doc)]
-        #[unsafe(no_mangle)]
-        pub unsafe extern "system" fn SQLSetStmtOption(
-            stmt: *mut ::std::ffi::c_void,
-            option: u16,
-            value: usize,
-        ) -> $crate::types::SqlReturn {
-            unsafe {
-                $crate::ffi::stmt_attr::sql_set_stmt_attr_w::<$B>(
-                    stmt,
-                    option as i32,
-                    value as *mut ::std::ffi::c_void,
-                    0,
-                )
-            }
-        }
-
-        #[allow(non_snake_case, clippy::missing_safety_doc)]
-        #[unsafe(no_mangle)]
-        pub unsafe extern "system" fn SQLGetStmtOption(
-            stmt: *mut ::std::ffi::c_void,
-            option: u16,
-            value: *mut ::std::ffi::c_void,
-        ) -> $crate::types::SqlReturn {
-            unsafe {
-                // Same constraints as SQLGetConnectOption — see comment there.
-                $crate::ffi::stmt_attr::sql_get_stmt_attr_w::<$B>(
-                    stmt,
-                    option as i32,
-                    value,
-                    $crate::types::SQL_MAX_OPTION_STRING_VALUE,
-                    ::std::ptr::null_mut(),
-                )
-            }
-        }
-
-        #[allow(non_snake_case, clippy::missing_safety_doc)]
-        #[unsafe(no_mangle)]
-        pub unsafe extern "system" fn SQLTransact(
-            env: *mut ::std::ffi::c_void,
-            conn: *mut ::std::ffi::c_void,
-            completion: u16,
-        ) -> $crate::types::SqlReturn {
-            let (handle_type, handle) = if !conn.is_null() {
-                ($crate::types::HandleType::Dbc as i16, conn)
-            } else {
-                ($crate::types::HandleType::Env as i16, env)
-            };
-            unsafe { $crate::ffi::tran::sql_end_tran::<$B>(handle_type, handle, completion as i16) }
-        }
-
-        // ---------------------------------------------------------------------------
         // Setup (Windows only)
         // ---------------------------------------------------------------------------
 
@@ -1246,47 +1013,30 @@ mod expansion {
         use crate::function_id::{CORE_EXPORTED_FUNCTIONS, FunctionId};
 
         let pairs: &[(FunctionId, *const ())] = &[
-            (FunctionId::AllocConnect, SQLAllocConnect as *const ()),
-            (FunctionId::AllocEnv, SQLAllocEnv as *const ()),
-            (FunctionId::AllocStmt, SQLAllocStmt as *const ()),
             (FunctionId::BindCol, SQLBindCol as *const ()),
             (FunctionId::Cancel, SQLCancel as *const ()),
             (FunctionId::ColAttribute, SQLColAttributeW as *const ()),
             (FunctionId::Connect, SQLConnectW as *const ()),
             (FunctionId::DescribeCol, SQLDescribeColW as *const ()),
             (FunctionId::Disconnect, SQLDisconnect as *const ()),
-            (FunctionId::Error, SQLError as *const ()),
             (FunctionId::ExecDirect, SQLExecDirectW as *const ()),
             (FunctionId::Execute, SQLExecute as *const ()),
             (FunctionId::Fetch, SQLFetch as *const ()),
-            (FunctionId::FreeConnect, SQLFreeConnect as *const ()),
-            (FunctionId::FreeEnv, SQLFreeEnv as *const ()),
             (FunctionId::FreeStmt, SQLFreeStmt as *const ()),
             (FunctionId::GetCursorName, SQLGetCursorNameW as *const ()),
             (FunctionId::NumResultCols, SQLNumResultCols as *const ()),
             (FunctionId::Prepare, SQLPrepareW as *const ()),
             (FunctionId::RowCount, SQLRowCount as *const ()),
             (FunctionId::SetCursorName, SQLSetCursorNameW as *const ()),
-            (FunctionId::Transact, SQLTransact as *const ()),
             (FunctionId::BulkOperations, SQLBulkOperations as *const ()),
             (FunctionId::Columns, SQLColumnsW as *const ()),
             (FunctionId::DriverConnect, SQLDriverConnectW as *const ()),
-            (
-                FunctionId::GetConnectOption,
-                SQLGetConnectOption as *const (),
-            ),
             (FunctionId::GetData, SQLGetData as *const ()),
             (FunctionId::GetFunctions, SQLGetFunctions as *const ()),
             (FunctionId::GetInfo, SQLGetInfoW as *const ()),
-            (FunctionId::GetStmtOption, SQLGetStmtOption as *const ()),
             (FunctionId::GetTypeInfo, SQLGetTypeInfo as *const ()),
             (FunctionId::ParamData, SQLParamData as *const ()),
             (FunctionId::PutData, SQLPutData as *const ()),
-            (
-                FunctionId::SetConnectOption,
-                SQLSetConnectOption as *const (),
-            ),
-            (FunctionId::SetStmtOption, SQLSetStmtOption as *const ()),
             (FunctionId::SpecialColumns, SQLSpecialColumnsW as *const ()),
             (FunctionId::Statistics, SQLStatisticsW as *const ()),
             (FunctionId::Tables, SQLTablesW as *const ()),

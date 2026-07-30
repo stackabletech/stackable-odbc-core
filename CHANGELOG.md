@@ -648,6 +648,49 @@ Everything a driver has to change for the catalog rework, in one place.
 
 ### Changed
 
+- **Breaking: the deprecated ODBC 2.x functions are no longer exported.**
+  `SQLAllocConnect`, `SQLAllocEnv`, `SQLAllocStmt`, `SQLFreeConnect`,
+  `SQLFreeEnv`, `SQLError`, `SQLTransact`, `SQLGetConnectOption(W)`,
+  `SQLSetConnectOption(W)`, `SQLGetStmtOption` and `SQLSetStmtOption` are gone,
+  joining `SQLSetScrollOptions` below.
+
+  Appendix G, "Mapping Deprecated Functions", is explicit that a 3.x driver "does
+  not have to implement the ODBC 2.x functions", and that the mapping "is
+  triggered when the driver is an ODBC 3.x driver and **the driver does not
+  support the function that is being mapped**". An export therefore does not add
+  a capability — it removes the Driver Manager's, which is the better-informed of
+  the two. psqlODBC comments out every one of these in its `.def` for the same
+  reason.
+
+  Three of them were actively wrong, and are fixed by the removal rather than by
+  repair:
+
+  - `SQLError` returned `SQL_NO_DATA` unconditionally, so an ODBC 2.x application
+    saw **no diagnostics at all**. The mapping it suppressed routes to
+    `SQLGetDiagRec`, which core implements.
+  - `SQLSetConnectOption` passed `StringLength = 0` where the Driver Manager
+    passes `SQL_NTS`, so a string-valued attribute was set to the empty string —
+    `SQL_ATTR_CURRENT_CATALOG` silently became `""`.
+  - `SQLAllocEnv` skipped the Driver Manager's accompanying
+    `SQLSetEnvAttr(SQL_ATTR_ODBC_VERSION, SQL_OV_ODBC2)`, leaving a 2.x
+    application with 3.x SQLSTATEs and datetime type codes.
+
+  `SQLFreeStmt` is **kept**: it is an ODBC 3.x function, and its `SQL_DROP` option
+  is passed through by the Windows Driver Manager rather than mapped.
+
+  `SQLGetFunctions`' ODBC 2.x array still reports all of these as supported, and
+  that is correct: it answers "can a 2.x application call this", and it can,
+  through the mapping. Only the 3.x bitmap stops claiming them.
+
+  **Migration:** a driver whose `Backend::get_functions` names any of these must
+  remove them. A list built from `CORE_EXPORTED_FUNCTIONS`, as the docs
+  recommend, needs no change.
+
+- **Breaking: `SQL_MAX_OPTION_STRING_VALUE` is removed.** Its only callers were
+  the `SQLGetConnectOption` / `SQLGetStmtOption` shims above. It was also
+  misspelled against the header, which calls it `SQL_MAX_OPTION_STRING_LENGTH`
+  (`sqlext.h:58`).
+
 - **Breaking: `SQLSetScrollOptions` is no longer exported.** Its spec page
   defines no `Returns` section and no diagnostics table; its one substantive note
   documents what the Driver Manager does "for an application working with an ODBC

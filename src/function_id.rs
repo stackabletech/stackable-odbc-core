@@ -214,41 +214,30 @@ pub enum FunctionId {
 /// build its dispatch table, so naming a function whose symbol does not exist
 /// gives the DM a null pointer to call.
 pub const CORE_EXPORTED_FUNCTIONS: &[FunctionId] = &[
-    FunctionId::AllocConnect,
-    FunctionId::AllocEnv,
-    FunctionId::AllocStmt,
     FunctionId::BindCol,
     FunctionId::Cancel,
     FunctionId::ColAttribute,
     FunctionId::Connect,
     FunctionId::DescribeCol,
     FunctionId::Disconnect,
-    FunctionId::Error,
     FunctionId::ExecDirect,
     FunctionId::Execute,
     FunctionId::Fetch,
-    FunctionId::FreeConnect,
-    FunctionId::FreeEnv,
     FunctionId::FreeStmt,
     FunctionId::GetCursorName,
     FunctionId::NumResultCols,
     FunctionId::Prepare,
     FunctionId::RowCount,
     FunctionId::SetCursorName,
-    FunctionId::Transact,
     FunctionId::BulkOperations,
     FunctionId::Columns,
     FunctionId::DriverConnect,
-    FunctionId::GetConnectOption,
     FunctionId::GetData,
     FunctionId::GetFunctions,
     FunctionId::GetInfo,
-    FunctionId::GetStmtOption,
     FunctionId::GetTypeInfo,
     FunctionId::ParamData,
     FunctionId::PutData,
-    FunctionId::SetConnectOption,
-    FunctionId::SetStmtOption,
     FunctionId::SpecialColumns,
     FunctionId::Statistics,
     FunctionId::Tables,
@@ -325,6 +314,68 @@ pub const CORE_UNEXPORTED_FUNCTIONS: &[(FunctionId, &str)] = &[
         "mapped by the Driver Manager onto SQLSetStmtAttr; the DM dispatches to a \
          driver's own only when the driver exports it, so exporting one would \
          replace a capability-checked mapping with a refusal",
+    ),
+    // The rest of Appendix G's deprecated set. The appendix is explicit that a
+    // 3.x driver "does not have to implement the ODBC 2.x functions", and that
+    // the mapping "is triggered when the driver is an ODBC 3.x driver and the
+    // driver does not support the function that is being mapped" — so an export
+    // here does not add a capability, it *removes* the Driver Manager's, which is
+    // the better-informed of the two. psqlODBC comments out every one of these in
+    // its .def for the same reason.
+    //
+    // Note this is the ODBC *3.x* answer only. `SQLGetFunctions`' 2.x array still
+    // reports them supported, because that array answers "can a 2.x application
+    // call this" — and it can, through the mapping. psqlODBC ships exactly that
+    // combination: `pfExists[SQL_API_SQLERROR] = TRUE` beside a `;;SQLError` in
+    // the .def.
+    (
+        FunctionId::AllocConnect,
+        "mapped by the Driver Manager onto SQLAllocHandle(SQL_HANDLE_DBC)",
+    ),
+    (
+        FunctionId::AllocEnv,
+        "mapped by the Driver Manager onto SQLAllocHandle(SQL_HANDLE_ENV); the DM \
+         also sets SQL_ATTR_ODBC_VERSION to SQL_OV_ODBC2, which an export would skip",
+    ),
+    (
+        FunctionId::AllocStmt,
+        "mapped by the Driver Manager onto SQLAllocHandle(SQL_HANDLE_STMT)",
+    ),
+    (
+        FunctionId::FreeConnect,
+        "mapped by the Driver Manager onto SQLFreeHandle(SQL_HANDLE_DBC)",
+    ),
+    (
+        FunctionId::FreeEnv,
+        "mapped by the Driver Manager onto SQLFreeHandle(SQL_HANDLE_ENV)",
+    ),
+    (
+        FunctionId::Error,
+        "mapped by the Driver Manager onto SQLGetDiagRec, which core implements; an \
+         export suppressed that mapping and answered SQL_NO_DATA for every diagnostic",
+    ),
+    (
+        FunctionId::Transact,
+        "mapped by the Driver Manager onto SQLEndTran, by SQL_HANDLE_DBC when hdbc \
+         is not SQL_NULL_HDBC and SQL_HANDLE_ENV otherwise",
+    ),
+    (
+        FunctionId::GetConnectOption,
+        "mapped by the Driver Manager onto SQLGetConnectAttr",
+    ),
+    (
+        FunctionId::SetConnectOption,
+        "mapped by the Driver Manager onto SQLSetConnectAttr, with SQL_NTS for a \
+         string-valued attribute — a length an export cannot infer from the 2.x ABI",
+    ),
+    (
+        FunctionId::GetStmtOption,
+        "mapped by the Driver Manager onto SQLGetStmtAttr",
+    ),
+    (
+        FunctionId::SetStmtOption,
+        "mapped by the Driver Manager onto SQLSetStmtAttr, with SQL_NTS for a \
+         string-valued attribute",
     ),
 ];
 /// `SQLGetFunctions` special values.
