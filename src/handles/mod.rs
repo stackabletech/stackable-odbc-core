@@ -34,14 +34,17 @@ use std::ffi::c_void;
 // `Slot::cancel` for the full reason.
 use std::sync::Arc as StdArc;
 
-use odbc_sys::AttrOdbcVersion;
+use odbc_sys::{AttrOdbcVersion, Desc};
 
 use crate::backend::{Backend, StatementBackend};
 use crate::descriptor::{DescriptorRecord, DescriptorRole};
 use crate::diagnostics::DiagnosticQueue;
 use crate::errors::{IntoOdbc, OdbcError};
 use crate::sync::Arc;
-use crate::types::{ColumnDescriptor, ColumnValue, ConnectParams, FetchResult, SqlReturn};
+use crate::types::{
+    ColumnDescriptor, ColumnValue, ConnectParams, FetchResult, SqlReturn,
+    statement_attribute_from_raw,
+};
 
 pub(crate) mod registry;
 pub(crate) mod scope;
@@ -115,14 +118,23 @@ pub struct Descriptor {
     /// `SQL_DESC_COUNT` is derived from this map rather than stored beside it,
     /// so the two cannot disagree.
     pub records: std::collections::HashMap<u16, DescriptorRecord>,
-    /// The descriptor's header fields, keyed by raw attribute value.
+    /// The descriptor's header fields, keyed by `SQL_DESC_*` field identifier
+    /// (`field as u16`).
     ///
     /// Eight `SQL_ATTR_*` statement attributes **are** descriptor header
     /// fields, per `SQLSetStmtAttr`'s own mapping table, which states that
     /// setting one sets the other. They live here and not in
     /// [`StatementHandle::attrs`] for the same reason records do: one storage
     /// cannot disagree with itself.
-    pub attrs: std::collections::HashMap<i32, usize>,
+    ///
+    /// Keyed by the field rather than by the attribute that names it, because
+    /// the mapping is not one-to-one: `SQL_DESC_ARRAY_SIZE` is
+    /// `SQL_ATTR_ROW_ARRAY_SIZE` on an ARD and `SQL_ATTR_PARAMSET_SIZE` on an
+    /// APD, and one descriptor may be the ARD of one statement and the APD of
+    /// another. Two keys for one field would be two values for one field —
+    /// exactly the disagreement single storage exists to prevent. `Desc` has no
+    /// `Hash` impl in `odbc-sys`, so the discriminant is the key.
+    pub attrs: std::collections::HashMap<u16, usize>,
     /// Which of the four this descriptor is.
     ///
     /// Fixed at allocation for an implicit descriptor. It is what `HY091` is
@@ -659,6 +671,12 @@ impl<B: Backend> HasKind for StatementHandle<B> {
 /// which [`Descriptor`] does not back, and `SQL_ATTR_PARAM_STATUS_PTR` and
 /// `SQL_ATTR_PARAMS_PROCESSED_PTR` are the same two fields on the IPD, whose
 /// header D3 has yet to define. They stay in [`StatementHandle::attrs`].
+///
+/// Note the third column of that table is *not* one-to-one with the second:
+/// `SQL_DESC_ARRAY_SIZE` appears twice. So [`Self::of`] answers with the
+/// descriptor **and** the field, and the field is what keys the storage — one
+/// explicit descriptor may be the ARD of one statement and the APD of another,
+/// and keyed by attribute that one field would become two values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HeaderOwner {
     /// The application row descriptor.
@@ -668,53 +686,91 @@ pub(crate) enum HeaderOwner {
 }
 
 impl HeaderOwner {
-    /// The descriptor `attr` is a header field of, or `None` if it is an
+    /// The descriptor and the header field `attr` names, or `None` if it is an
     /// ordinary statement attribute.
+    ///
+    /// The field, not the attribute, is what keys
+    /// [`Descriptor::attrs`]: two attributes name `SQL_DESC_ARRAY_SIZE`, and
+    /// once a descriptor can be one statement's ARD and another's APD, two keys
+    /// for one field is two values for one field.
     ///
     /// `SQL_ATTR_PARAM_OPERATION_PTR` is spelled
     /// `StatementAttribute::ParamOpterationPtr` in `odbc-sys` — transposed
     /// letters, upstream. A grep for the correct spelling finds nothing here
     /// and reads as "core does not implement it", which is false.
-    pub(crate) fn of(attr: Option<odbc_sys::StatementAttribute>) -> Option<Self> {
+    pub(crate) fn of(attr: Option<odbc_sys::StatementAttribute>) -> Option<(Self, Desc)> {
         use odbc_sys::StatementAttribute as A;
-        match attr? {
-            A::RowArraySize | A::RowBindType | A::RowBindOffsetPtr | A::RowOperationPtr => {
-                Some(Self::Ard)
-            }
-            A::ParamsetSize | A::ParamBindType | A::ParamBindOffsetPtr | A::ParamOpterationPtr => {
-                Some(Self::Apd)
-            }
-            _ => None,
-        }
+        Some(match attr? {
+            A::RowArraySize => (Self::Ard, Desc::ArraySize),
+            A::RowBindType => (Self::Ard, Desc::BindType),
+            A::RowBindOffsetPtr => (Self::Ard, Desc::BindOffsetPtr),
+            A::RowOperationPtr => (Self::Ard, Desc::ArrayStatusPtr),
+            A::ParamsetSize => (Self::Apd, Desc::ArraySize),
+            A::ParamBindType => (Self::Apd, Desc::BindType),
+            A::ParamBindOffsetPtr => (Self::Apd, Desc::BindOffsetPtr),
+            A::ParamOpterationPtr => (Self::Apd, Desc::ArrayStatusPtr),
+            _ => return None,
+        })
     }
 }
 
 impl<B: Backend> StatementHandle<B> {
-    /// Where the value of `attr` is stored: a descriptor's header when ODBC
-    /// defines the attribute as one, this statement's own bag otherwise.
+    /// A descriptor header field's stored value, or `None` if never set.
     ///
-    /// Both the set and the get path go through this, so the two cannot
-    /// disagree about which map to look in.
-    pub(crate) fn attr_store(
-        &self,
-        attr: Option<odbc_sys::StatementAttribute>,
-    ) -> &std::collections::HashMap<i32, usize> {
-        match HeaderOwner::of(attr) {
-            Some(HeaderOwner::Ard) => &self.app_row_desc.attrs,
-            Some(HeaderOwner::Apd) => &self.app_param_desc.attrs,
-            None => &self.attrs,
+    /// Keyed by the `SQL_DESC_*` field rather than by the statement attribute
+    /// that names it — see [`Descriptor::attrs`] for why.
+    pub(crate) fn header_field_get(&self, owner: HeaderOwner, field: Desc) -> Option<usize> {
+        let desc = match owner {
+            HeaderOwner::Ard => &self.app_row_desc,
+            HeaderOwner::Apd => &self.app_param_desc,
+        };
+        desc.attrs.get(&(field as u16)).copied()
+    }
+
+    /// [`Self::header_field_get`], for writing.
+    pub(crate) fn header_field_set(&mut self, owner: HeaderOwner, field: Desc, value: usize) {
+        let desc = match owner {
+            HeaderOwner::Ard => &mut self.app_row_desc,
+            HeaderOwner::Apd => &mut self.app_param_desc,
+        };
+        desc.attrs.insert(field as u16, value);
+    }
+
+    /// A statement attribute that is *not* a descriptor header field.
+    ///
+    /// The four IRD- and IPD-side pairs (`SQL_ATTR_ROW_STATUS_PTR`,
+    /// `SQL_ATTR_ROWS_FETCHED_PTR`, `SQL_ATTR_PARAM_STATUS_PTR`,
+    /// `SQL_ATTR_PARAMS_PROCESSED_PTR`) live here with the ordinary attributes,
+    /// as they did before the header fields were re-keyed.
+    pub(crate) fn plain_attr_get(&self, attribute: i32) -> Option<usize> {
+        self.attrs.get(&attribute).copied()
+    }
+
+    /// [`Self::plain_attr_get`], for writing.
+    pub(crate) fn plain_attr_set(&mut self, attribute: i32, value: usize) {
+        self.attrs.insert(attribute, value);
+    }
+
+    /// Where the value of the statement attribute `attribute` is stored: a
+    /// descriptor's header when ODBC defines the attribute as one, this
+    /// statement's own bag otherwise.
+    ///
+    /// Both the set and the get path route through [`HeaderOwner::of`] here, so
+    /// the two cannot disagree about which map to look in. A caller that
+    /// already knows the descriptor field — `SQLGetDescField` and its siblings
+    /// — wants [`Self::header_field_get`] directly.
+    pub(crate) fn attr_get(&self, attribute: i32) -> Option<usize> {
+        match HeaderOwner::of(statement_attribute_from_raw(attribute)) {
+            Some((owner, field)) => self.header_field_get(owner, field),
+            None => self.plain_attr_get(attribute),
         }
     }
 
-    /// [`Self::attr_store`], for writing.
-    pub(crate) fn attr_store_mut(
-        &mut self,
-        attr: Option<odbc_sys::StatementAttribute>,
-    ) -> &mut std::collections::HashMap<i32, usize> {
-        match HeaderOwner::of(attr) {
-            Some(HeaderOwner::Ard) => &mut self.app_row_desc.attrs,
-            Some(HeaderOwner::Apd) => &mut self.app_param_desc.attrs,
-            None => &mut self.attrs,
+    /// [`Self::attr_get`], for writing.
+    pub(crate) fn attr_set(&mut self, attribute: i32, value: usize) {
+        match HeaderOwner::of(statement_attribute_from_raw(attribute)) {
+            Some((owner, field)) => self.header_field_set(owner, field, value),
+            None => self.plain_attr_set(attribute, value),
         }
     }
 
@@ -1805,5 +1861,26 @@ mod tests {
             assert_eq!(free_conn(conn), SqlReturn::SUCCESS);
             assert_eq!(free_env(env), SqlReturn::SUCCESS);
         }
+    }
+
+    /// One header field, one storage — whichever statement attribute names it.
+    ///
+    /// `SQL_DESC_ARRAY_SIZE` is `SQL_ATTR_ROW_ARRAY_SIZE` on an ARD and
+    /// `SQL_ATTR_PARAMSET_SIZE` on an APD. D4 lets one explicit descriptor be
+    /// both at once, so the two names must reach one value.
+    #[test]
+    fn a_header_field_has_one_key_whichever_attribute_names_it() {
+        use odbc_sys::StatementAttribute as A;
+        let (ard_owner, ard_field) = HeaderOwner::of(Some(A::RowArraySize))
+            .expect("SQL_ATTR_ROW_ARRAY_SIZE is a header field");
+        let (apd_owner, apd_field) = HeaderOwner::of(Some(A::ParamsetSize))
+            .expect("SQL_ATTR_PARAMSET_SIZE is a header field");
+        assert_eq!(ard_owner, HeaderOwner::Ard);
+        assert_eq!(apd_owner, HeaderOwner::Apd);
+        assert_eq!(
+            ard_field, apd_field,
+            "both name SQL_DESC_ARRAY_SIZE, so they must key the same storage"
+        );
+        assert_eq!(ard_field as u16, odbc_sys::Desc::ArraySize as u16);
     }
 }

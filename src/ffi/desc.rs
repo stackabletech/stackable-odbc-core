@@ -275,11 +275,14 @@ fn read_header_field<B: Backend>(
             _ => stmt.descriptor_mut(role).records.len() as isize,
         }),
         _ => {
+            // `header_attribute` still answers "is this field stored as a
+            // statement attribute on this role", which is what keeps the four
+            // IRD/IPD pairs on `StatementHandle::attrs`; `attr_get` then routes
+            // to the descriptor header or to that bag, keyed by the field in
+            // the first case.
             let attr = header_attribute(role, field)?;
             let stored = stmt
-                .attr_store(Some(attr))
-                .get(&(attr as i32))
-                .copied()
+                .attr_get(attr as i32)
                 .unwrap_or_else(|| header_default(field));
             Some(stored as isize)
         }
@@ -570,7 +573,7 @@ fn write_header_field<B: Backend>(
     } else {
         value
     };
-    stmt.attr_store_mut(Some(attr)).insert(attr as i32, stored);
+    stmt.attr_set(attr as i32, stored);
     if substituted {
         return crate::ffi::stmt_attr::substitution_warning(
             &mut stmt.descriptor_mut(role).diagnostics,

@@ -433,23 +433,28 @@ pub fn field_access(role: DescriptorRole, field: Desc) -> FieldAccess {
 /// or `None` if the field is not stored as one.
 ///
 /// `SQLSetStmtAttr`'s mapping table read in the other direction.
-/// [`HeaderOwner::of`] answers "which descriptor does this statement attribute
-/// live on"; this answers "which statement attribute is this header field of
-/// this descriptor". They must name the same storage, or the two doors onto one
-/// value disagree — which is the defect this whole milestone exists to remove.
+/// [`HeaderOwner::of`] answers "which descriptor and which field does this
+/// statement attribute name"; this answers "which statement attribute is this
+/// header field of this descriptor". They must name the same storage, or the two
+/// doors onto one value disagree — which is the defect this whole milestone
+/// exists to remove.
+///
+/// The role parameter survives the storage being keyed by *field*, because it is
+/// what decides **whether** a field is stored as a statement attribute at all:
+/// `SQL_DESC_ARRAY_STATUS_PTR` is an ARD/APD header field on those two roles and
+/// one of the four IRD/IPD pairs on the other two.
 ///
 /// The two header fields with no entry are the ones core computes rather than
 /// stores: `SQL_DESC_COUNT` is derived from the record map, and
-/// `SQL_DESC_ALLOC_TYPE` is [`SQL_DESC_ALLOC_AUTO`] for every descriptor core
-/// owns.
+/// `SQL_DESC_ALLOC_TYPE` follows the allocation rather than any stored value.
 ///
 /// The IRD and IPD rows are the four pairs D2 deliberately left on the
-/// statement rather than re-homing onto a descriptor header; `attr_store`
-/// routes them there, so a caller of this needs to know nothing about the
-/// split.
+/// statement rather than re-homing onto a descriptor header;
+/// [`StatementHandle::attr_get`] routes them there, so a caller of this needs to
+/// know nothing about the split.
 ///
 /// [`HeaderOwner::of`]: crate::handles::HeaderOwner::of
-/// [`SQL_DESC_ALLOC_AUTO`]: crate::types::SQL_DESC_ALLOC_AUTO
+/// [`StatementHandle::attr_get`]: crate::handles::StatementHandle::attr_get
 pub fn header_attribute(role: DescriptorRole, field: Desc) -> Option<StatementAttribute> {
     use DescriptorRole::{Apd, Ard, Ipd, Ird};
     use StatementAttribute as A;

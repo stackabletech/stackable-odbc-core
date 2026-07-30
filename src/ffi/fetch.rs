@@ -31,9 +31,7 @@ unsafe fn row_bind_offset<B: Backend>(stmt: &StatementHandle<B>) -> usize {
     // On the ARD's header, not `stmt.attrs`: `SQL_ATTR_ROW_BIND_OFFSET_PTR`
     // *is* `SQL_DESC_BIND_OFFSET_PTR` — see `HeaderOwner`.
     let raw = stmt
-        .attr_store(Some(odbc_sys::StatementAttribute::RowBindOffsetPtr))
-        .get(&(odbc_sys::StatementAttribute::RowBindOffsetPtr as i32))
-        .copied()
+        .attr_get(odbc_sys::StatementAttribute::RowBindOffsetPtr as i32)
         .unwrap_or(0);
     if raw == 0 {
         return 0;
