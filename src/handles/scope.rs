@@ -262,6 +262,53 @@ impl<'a> HandleScope<'a> {
         Ok(result)
     }
 
+    /// Run `f` holding `token`'s group, releasing it before returning.
+    ///
+    /// `SQLCopyDesc`'s phase one, and the crate's only acquisition outside
+    /// [`panic_safe`] that is not the called handle's own group: the lock it needs
+    /// belongs to the *source* descriptor while every diagnostic it posts belongs
+    /// to the target, so `panic_safe` — which locks the handle it is given — is
+    /// the wrong tool. Phase two is an ordinary `panic_safe` on the target.
+    ///
+    /// `None` when `token` is not a live handle of `kind`, which is
+    /// `SQLCopyDesc`'s `SQL_INVALID_HANDLE`-with-no-SQLSTATE case: nothing has
+    /// been resolved yet, so there is no queue to post to.
+    ///
+    /// The return type carries no guard. That is what makes "phase one does not
+    /// retain the lock" a fact this signature states rather than a comment — and
+    /// it is what the loom model relies on, since a version that handed the guard
+    /// back would not compile against it.
+    ///
+    /// [`panic_safe`]: crate::panic::panic_safe
+    pub(crate) fn with_group<R>(
+        token: *mut c_void,
+        kind: HandleKind,
+        f: impl FnOnce(&mut HandleScope<'_>) -> R,
+    ) -> Option<R> {
+        Self::with_group_in(registry(), token, kind, f)
+    }
+
+    /// The body of [`Self::with_group`], against an explicit registry.
+    ///
+    /// Split out for the same reason [`Self::with_child_group_in`] is: a loom
+    /// model cannot reach `registry()`, so a model restricted to the wrapper
+    /// could only lock `GroupLock`s of its own and would prove a property of
+    /// itself rather than of this function. `opposite_direction_copies_cannot_deadlock`
+    /// drives this.
+    pub(crate) fn with_group_in<R>(
+        reg: &Registry,
+        token: *mut c_void,
+        kind: HandleKind,
+        f: impl FnOnce(&mut HandleScope<'_>) -> R,
+    ) -> Option<R> {
+        let group = reg.group_of_kind(token, kind)?;
+        let guard = group.lock();
+        let mut scope = HandleScope::new(Some(Arc::clone(&group)), Some(&guard));
+        let result = f(&mut scope);
+        drop(guard);
+        Some(result)
+    }
+
     /// Push a diagnostic onto whichever handle `token` names.
     ///
     /// Used by `panic_safe` on the error path. Silently does nothing for
@@ -348,7 +395,7 @@ impl<'a> HandleScope<'a> {
     ///
     /// Sound as a plain [`Self::get`] because every descriptor is its own
     /// allocation carrying its own role — see [`Descriptor`]'s doc comment for
-    /// why D3's refusal of `HasKind` no longer applies.
+    /// why the earlier refusal of `HasKind` no longer applies.
     pub fn descriptor(&mut self, token: *mut c_void) -> Result<&mut Descriptor, OdbcError> {
         self.get::<Descriptor>(token)
     }
@@ -376,9 +423,9 @@ impl<'a> HandleScope<'a> {
     /// Sound for exactly the reason [`Self::stmt_with_parent`] is: neither is
     /// reachable from the other. The statement holds descriptor **tokens**
     /// (`*mut c_void`), not typed pointers the compiler could follow, and a
-    /// [`Descriptor`] holds no back-pointer to any statement. D3 forbade this
-    /// combinator because the four descriptors were `Box` fields of the statement
-    /// and therefore *were* reachable through its `&mut`; making each its own
+    /// [`Descriptor`] holds no back-pointer to any statement. This combinator was
+    /// forbidden while the four descriptors were `Box` fields of the statement and
+    /// therefore *were* reachable through its `&mut`; making each its own
     /// registered allocation is what removed that.
     ///
     /// Needed by the IRD, whose fields are computed from the statement's column
@@ -559,7 +606,7 @@ impl<'a> HandleScope<'a> {
     /// parameter count and data-at-execution state, and the two descriptors for
     /// the bindings. Resolving them one at a time is not possible while any is
     /// borrowed, and cloning the record maps per execution would make a second
-    /// copy of the one storage this milestone exists to keep single.
+    /// copy of the storage that is deliberately single.
     ///
     /// Sound for the same reason [`Self::stmt_with_parent`] and
     /// [`Self::stmt_with_desc`] are, applied to four allocations rather than two:

@@ -553,9 +553,9 @@ mod tests {
     }
 
     /// The five descriptor functions are reported supported, because they are. A
-    /// function that works and is reported unsupported is the mirror of D1's
-    /// defect: the Driver Manager answers `IM001` and the application never
-    /// calls a function that would have worked.
+    /// function that works and is reported unsupported is as bad as the reverse:
+    /// the Driver Manager answers `IM001` and the application never calls a
+    /// function that would have worked.
     #[test]
     fn the_implemented_descriptor_functions_are_advertised() {
         for id in [

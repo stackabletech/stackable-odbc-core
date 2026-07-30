@@ -5147,7 +5147,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // F1: a describe failure is the backend's error, not "column out of range"
+    // A describe failure is the backend's error, not "column out of range"
     // -----------------------------------------------------------------------
 
     /// Env + connection + statement with a cursor open, for an arbitrary
@@ -5255,8 +5255,8 @@ mod tests {
         }
     }
 
-    /// `HY008` reaching `SQLDescribeColW` at all is what M4 could not do: the
-    /// blanket `map_err` overwrote the SQLSTATE unconditionally, so
+    /// `HY008` reaching `SQLDescribeColW` at all is what a blanket `map_err` here
+    /// used to prevent: it overwrote the SQLSTATE unconditionally, so
     /// reclassifying a cancelled call was a no-op. `SQLCancel` from this thread
     /// signals the execution's token; the failing describe then reports the
     /// cancellation rather than the link failure that was its symptom.

@@ -88,8 +88,34 @@ Everything a driver has to change for the catalog rework, in one place.
   buffer, and the project exports every string-bearing function in its Wide form
   only.
 
-  `SQLCopyDesc` and `SQLAllocHandle(SQL_HANDLE_DESC)` remain unimplemented, so
-  **`SQL_OIC_CORE` is still not satisfied**.
+- **Explicit descriptor handles.** `SQLAllocHandle(SQL_HANDLE_DESC)` and
+  `SQLFreeHandle(SQL_HANDLE_DESC)` work; an application descriptor can be swapped
+  in through `SQL_ATTR_APP_ROW_DESC` / `SQL_ATTR_APP_PARAM_DESC`, which
+  `SQLGetStmtAttr` then reports; and one descriptor may be shared across several
+  statements on a connection. Because ODBC makes the descriptor *be* the binding,
+  two statements sharing one have one binding set between them — a bind through
+  either is visible through both, and `SQLFreeStmt(SQL_UNBIND)` on either clears
+  both.
+
+  Freeing an explicit descriptor reverts every statement that used it to its own
+  implicit one, as the spec requires, and `SQLDisconnect` frees any still open on
+  the connection.
+
+  `SQL_ATTR_APP_ROW_DESC` / `SQL_ATTR_APP_PARAM_DESC` given a descriptor that is
+  not on the statement's connection — or a value naming no live descriptor —
+  returns `HY024`. That row is not `(DM)`: it states the case verbatim and closes
+  with the general rule making it the driver's.
+
+- **`SQLCopyDesc`**, including between descriptors on different connections and
+  different environments, which the spec permits. It is exported and reported by
+  `SQLGetFunctions`. The copy runs in two phases that never hold two lock groups
+  at once, so two copies in opposite directions cannot deadlock; `HY021` is
+  checked before anything is written, so a refused copy leaves the target
+  untouched where the spec would permit it to be undefined.
+
+  With these, **`SQL_OIC_CORE` is satisfied**: Core-level conformance requires
+  allocating and freeing all handle types and manipulating descriptor fields
+  through all five descriptor functions.
 
 - **A guard test that the set of group-lock acquisition sites is closed**
   (`the_set_of_group_lock_acquisition_sites_is_closed`, `handles/registry.rs`).
@@ -517,6 +543,26 @@ Everything a driver has to change for the catalog rework, in one place.
   tables, while the identical sentence in the other two is not.
 
 ### Changed
+
+- **Descriptors are separately allocated handles rather than fields of a
+  statement.** Each has its own registry slot, parented to the statement for the
+  four implicit ones and to the connection for an explicit one, and all join the
+  connection's lock group — so no lock and no lock-ordering rule is added. No API
+  a driver calls changes. `SQL_ATTR_APP_ROW_DESC` and `SQL_ATTR_APP_PARAM_DESC`
+  now report an application-supplied descriptor when one has been set, where
+  before they always reported the statement's own.
+
+- **Descriptor header fields are keyed by `SQL_DESC_*` field rather than by the
+  statement attribute that names them,** so one field has one value however it is
+  reached. The mapping is not one-to-one — `SQL_DESC_ARRAY_SIZE` is
+  `SQL_ATTR_ROW_ARRAY_SIZE` on an ARD and `SQL_ATTR_PARAMSET_SIZE` on an APD —
+  and one explicit descriptor may be the ARD of one statement and the APD of
+  another, which is where two keys for one field would have become two values.
+
+- **`SQL_DESC_ALLOC_TYPE` now reports `SQL_DESC_ALLOC_USER` for an
+  application-allocated descriptor.** It was always `SQL_DESC_ALLOC_AUTO`, which
+  was correct only while every descriptor was implicit. It remains the one field
+  `SQLCopyDesc` never copies.
 
 - **One descriptor record type.** `ColumnBinding`, `ApdRecord` and `IpdRecord`
   become a single `DescriptorRecord` carrying every `SQL_DESC_*` record field,

@@ -102,9 +102,8 @@ fn substitute_stmt_attr<B: Backend>(
 /// same stored value through the other door — `SQL_DESC_ARRAY_SIZE` *is*
 /// `SQL_ATTR_ROW_ARRAY_SIZE` — but posts to the *descriptor's* queue rather
 /// than the statement's, since that is the handle the application named. A
-/// door that accepts what the other refuses is the disagreement this whole
-/// milestone exists to remove, so the two share the substitution rather than
-/// restating it.
+/// door that accepts what the other refuses is the disagreement single storage
+/// exists to remove, so the two share the substitution rather than restating it.
 pub(crate) fn substitution_warning(
     diagnostics: &mut crate::diagnostics::DiagnosticQueue,
     attr_name: &str,

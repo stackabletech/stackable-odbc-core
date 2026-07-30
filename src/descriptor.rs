@@ -367,8 +367,10 @@ pub fn field_access(role: DescriptorRole, field: Desc) -> FieldAccess {
         // Header fields
         // ------------------------------------------------------------------
 
-        // R on all four. `SQL_DESC_ALLOC_AUTO` for every descriptor core has,
-        // since all four are implicitly allocated; D4 makes the value vary.
+        // R on every role. The value follows the allocation —
+        // `SQL_DESC_ALLOC_USER` for one the application allocated,
+        // `SQL_DESC_ALLOC_AUTO` for the four a statement owns — and is the one
+        // field `SQLCopyDesc` never copies.
         Desc::AllocType => ReadOnly,
         Desc::ArraySize => match role {
             Ard | Apd | App => ReadWrite,
@@ -490,8 +492,7 @@ pub fn field_access(role: DescriptorRole, field: Desc) -> FieldAccess {
 /// [`HeaderOwner::of`] answers "which descriptor and which field does this
 /// statement attribute name"; this answers "which statement attribute is this
 /// header field of this descriptor". They must name the same storage, or the two
-/// doors onto one value disagree — which is the defect this whole milestone
-/// exists to remove.
+/// doors onto one value disagree — which single storage exists to prevent.
 ///
 /// The role parameter survives the storage being keyed by *field*, because it is
 /// what decides **whether** a field is stored as a statement attribute at all:
@@ -502,8 +503,8 @@ pub fn field_access(role: DescriptorRole, field: Desc) -> FieldAccess {
 /// stores: `SQL_DESC_COUNT` is derived from the record map, and
 /// `SQL_DESC_ALLOC_TYPE` follows the allocation rather than any stored value.
 ///
-/// The IRD and IPD rows are the four pairs D2 deliberately left on the
-/// statement rather than re-homing onto a descriptor header;
+/// The IRD and IPD rows are the four pairs deliberately left on the statement
+/// rather than re-homed onto a descriptor header;
 /// [`StatementHandle::attr_get`] routes them there, so a caller of this needs to
 /// know nothing about the split.
 ///
@@ -772,7 +773,7 @@ mod tests {
 
     /// A record exists as soon as any field is set, so "the key is present"
     /// stops meaning "bound". The spec makes a null `SQL_DESC_DATA_PTR` the
-    /// unbind, and that is the only test of boundness Task 2 leaves standing.
+    /// unbind, and that is the only test of boundness left standing.
     #[test]
     fn a_record_is_bound_only_when_its_data_pointer_is_set() {
         let mut record = DescriptorRecord::default();

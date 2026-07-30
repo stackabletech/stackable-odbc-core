@@ -669,11 +669,17 @@ mod tests {
         ),
         (
             "src/handles/scope.rs",
-            2,
+            3,
             "holds_in compares a token's group against the held one without \
-             locking, and with_child_group_in is the crate's one nested \
-             acquisition — environment then connection, SQLEndTran's path. \
-             Modelled by env_before_connection_cannot_deadlock.",
+             locking; with_child_group_in is the crate's one nested acquisition \
+             — environment then connection, SQLEndTran's path, modelled by \
+             env_before_connection_cannot_deadlock; and with_group_in is \
+             SQLCopyDesc's phase one, which takes the *source* descriptor's \
+             group and releases it before phase two takes the target's. That one \
+             is the crate's only acquisition of a group other than the called \
+             handle's own, and it deliberately does not nest — its return type \
+             carries no guard, so the release is structural. Modelled by \
+             opposite_direction_copies_cannot_deadlock.",
         ),
         (
             "src/ffi/handle.rs",
@@ -683,18 +689,6 @@ mod tests {
              alloc_statement does for a statement. It nests nothing: the group \
              it reads is the one panic_safe already holds for that same \
              connection, and no second group is acquired.",
-        ),
-        (
-            "src/ffi/desc.rs",
-            1,
-            "SQLCopyDesc's phase one takes the *source's* group — which may be \
-             another connection's, since the spec permits a copy across \
-             connections and even across environments. It is the crate's one \
-             acquisition outside panic_safe that is not the called handle's own, \
-             and it deliberately does not nest: the guard is dropped before \
-             phase two takes the target's group under an ordinary panic_safe, so \
-             two copies in opposite directions cannot deadlock. Modelled by \
-             opposite_direction_copies_cannot_deadlock.",
         ),
     ];
 
@@ -1272,6 +1266,79 @@ mod loom_tests {
                 thread::spawn(move || nest(&reg, &e))
             };
             nest(&reg, &env_group);
+            t.join().expect("thread panicked");
+        });
+    }
+
+    /// Two `SQLCopyDesc` calls in opposite directions cannot deadlock.
+    ///
+    /// Not because of an ordering rule — because neither ever holds two groups.
+    /// Phase one takes the source's group and releases it before phase two takes
+    /// the target's, and `HandleScope::with_group_in`'s return type carries no
+    /// guard, so that release is structural rather than remembered.
+    ///
+    /// This is what fails if a later change "optimises" the two phases into a
+    /// single nested acquisition. It drives the crate's own `with_group_in`
+    /// rather than locking two `GroupLock`s of its own, for the reason
+    /// `with_child_group_in` records: a model that re-implements what it is
+    /// testing proves a property of the test.
+    ///
+    /// The closures touch no handle contents. `HandleScope::get` resolves through
+    /// the process-wide registry, which a model cannot use — so what is modelled
+    /// is the lock sequence, which is the whole of the deadlock question.
+    #[test]
+    fn opposite_direction_copies_cannot_deadlock() {
+        use crate::handles::scope::HandleScope;
+
+        loom::model(|| {
+            let reg = Arc::new(Registry::new());
+            // Two connections, two groups, one descriptor registered in each —
+            // the cross-connection copy the spec permits.
+            let group_a = GroupLock::new();
+            let (conn_a, _, _) = reg
+                .register(HandleKind::Dbc, 0x1000, Arc::clone(&group_a), None)
+                .expect("conn a registered");
+            let (desc_a, _, _) = reg
+                .register(
+                    HandleKind::Desc,
+                    0x1100,
+                    Arc::clone(&group_a),
+                    Some(conn_a as usize),
+                )
+                .expect("desc a registered");
+            let group_b = GroupLock::new();
+            let (conn_b, _, _) = reg
+                .register(HandleKind::Dbc, 0x2000, Arc::clone(&group_b), None)
+                .expect("conn b registered");
+            let (desc_b, _, _) = reg
+                .register(
+                    HandleKind::Desc,
+                    0x2100,
+                    Arc::clone(&group_b),
+                    Some(conn_b as usize),
+                )
+                .expect("desc b registered");
+
+            // `sql_copy_desc`'s shape: phase one under the source's group through
+            // the crate's own helper, then phase two under the target's. Phase two
+            // is `panic_safe` in production, which locks the handle it is given
+            // and cannot run here; taking the target's group directly models the
+            // same acquisition.
+            let copy = move |reg: &Registry, source: *mut c_void, target: *mut c_void| {
+                let taken = HandleScope::with_group_in(reg, source, HandleKind::Desc, |_scope| ())
+                    .expect("the source is live");
+                let group = reg
+                    .group_of_kind(target, HandleKind::Desc)
+                    .expect("the target is live");
+                let _guard = group.lock();
+                taken
+            };
+
+            let t = {
+                let reg = Arc::clone(&reg);
+                thread::spawn(move || copy(&reg, desc_b, desc_a))
+            };
+            copy(&reg, desc_a, desc_b);
             t.join().expect("thread panicked");
         });
     }

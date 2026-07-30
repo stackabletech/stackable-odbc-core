@@ -1794,7 +1794,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // F2: SQLCloseCursor tells the backend its cursor is closing
+    // SQLCloseCursor tells the backend its cursor is closing
     // -----------------------------------------------------------------------
 
     /// Env + connection + statement with a cursor open, for an arbitrary

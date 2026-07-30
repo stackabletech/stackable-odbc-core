@@ -42,11 +42,10 @@ use crate::descriptor::{
     header_attribute, header_default, set_record_field,
 };
 use crate::errors::OdbcError;
-use crate::handles::registry::{HandleKind, registry};
+use crate::handles::registry::HandleKind;
 use crate::handles::scope::HandleScope;
 use crate::handles::{Descriptor, HeaderOwner, StatementHandle};
 use crate::panic::panic_safe;
-use crate::sync::Arc;
 use crate::types::col_attr::{ColAttrValue, get_column_attribute};
 use crate::types::{SqlReturn, SqlState};
 
@@ -603,9 +602,8 @@ fn truncate_records<B: Backend>(target: &mut DescTarget<'_, B>, count: usize) ->
 /// `SQL_ATTR_PARAMSET_SIZE` on the APD, and `SQLSetStmtAttr` substitutes any
 /// value but 1 with `01S02` because core rejects a multi-row rowset. The same
 /// value reached through the descriptor gets the same answer, or the two views
-/// disagree — which is the defect this milestone exists to remove. The
-/// warning lands on the *descriptor's* queue, since that is the handle the
-/// application named.
+/// disagree — which single storage exists to prevent. The warning lands on the
+/// *descriptor's* queue, since that is the handle the application named.
 fn write_header_field<B: Backend>(
     target: &mut DescTarget<'_, B>,
     field: Desc,
@@ -1092,16 +1090,15 @@ pub unsafe fn sql_copy_desc<B: Backend>(
     // target's, so this call never holds two peer groups — the crate's one
     // ordering rule (environment before connection) stays the only one, and a
     // copy in the opposite direction on another thread cannot deadlock.
-    let snapshot = {
-        let Some(group) = registry().group_of_kind(source_desc_handle, HandleKind::Desc) else {
-            tracing::debug!("SQLCopyDesc -> INVALID_HANDLE (source)");
-            return SqlReturn::INVALID_HANDLE;
-        };
-        let guard = group.lock();
-        let mut scope = HandleScope::new(Some(Arc::clone(&group)), Some(&guard));
-        let taken = scope.snapshot_descriptor::<B>(source_desc_handle);
-        drop(guard);
-        taken
+    //
+    // `HandleScope::with_group` is the acquisition, and its return type carries no
+    // guard — so that the lock is released before phase two is a fact its
+    // signature states rather than something this function has to remember.
+    let Some(snapshot) = HandleScope::with_group(source_desc_handle, HandleKind::Desc, |scope| {
+        scope.snapshot_descriptor::<B>(source_desc_handle)
+    }) else {
+        tracing::debug!("SQLCopyDesc -> INVALID_HANDLE (source)");
+        return SqlReturn::INVALID_HANDLE;
     };
 
     // Phase two: the target's group. Every diagnostic this call posts goes to the
@@ -1253,8 +1250,8 @@ mod tests {
     }
 
     /// Put `count` records into the ARD without going through
-    /// `SQLSetDescFieldW`, which is still unimplemented at this point. Task 7's
-    /// tests drive the real round trip.
+    /// `SQLSetDescFieldW`, so that a test of the *read* path does not depend on
+    /// the write path being right. The round-trip tests below drive both.
     unsafe fn seed_ard_records(stmt: *mut c_void, count: u16, concise_type: i16) {
         with_descriptor::<MockBackend, _>(stmt, DescriptorRole::Ard, |ard| {
             for column in 1..=count {
@@ -1614,8 +1611,8 @@ mod tests {
     /// `SQL_DESC_ARRAY_SIZE` is the ARD header field `SQL_ATTR_ROW_ARRAY_SIZE`
     /// aliases. Core substitutes any value but 1 with `01S02` through
     /// `SQLSetStmtAttr`, and must do the same here — the two are one value, and
-    /// a door that accepts what the other refuses is the disagreement this
-    /// milestone exists to remove.
+    /// a door that accepts what the other refuses is the disagreement single
+    /// storage exists to prevent.
     #[test]
     fn an_oversized_array_size_is_substituted_through_the_descriptor_too() {
         unsafe {
@@ -1699,7 +1696,7 @@ mod tests {
         }
     }
 
-    /// The payoff of the whole milestone: a binding built entirely through the
+    /// The payoff of one storage: a binding built entirely through the
     /// descriptor *is* a binding. If this passes, `SQLBindCol` and
     /// `SQLSetDescField` really are two doors onto one state rather than two
     /// states that happen to agree.

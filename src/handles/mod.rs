@@ -102,7 +102,8 @@ impl AllocType {
 ///
 /// # Why there *is* a `HasKind` impl
 ///
-/// D3 refused one, and both facts it depended on are now false. Its argument was
+/// It deliberately did not, and both facts that refusal depended on are now
+/// false. The argument was
 /// that [`HandleScope::get`] dispatches on [`HandleKind`] alone, and all four of
 /// a statement's descriptors register as `HandleKind::Desc` — so
 /// `get::<Descriptor>` would resolve any one of the four as any other and pass
@@ -734,7 +735,7 @@ impl<B: Backend> HasKind for StatementHandle<B> {
 /// `SQL_DESC_ARRAY_STATUS_PTR` and `SQL_DESC_ROWS_PROCESSED_PTR` on the **IRD**,
 /// which [`Descriptor`] does not back, and `SQL_ATTR_PARAM_STATUS_PTR` and
 /// `SQL_ATTR_PARAMS_PROCESSED_PTR` are the same two fields on the IPD, whose
-/// header D3 has yet to define. They stay in [`StatementHandle::attrs`].
+/// header defines neither. They stay in [`StatementHandle::attrs`].
 ///
 /// Note the third column of that table is *not* one-to-one with the second:
 /// `SQL_DESC_ARRAY_SIZE` appears twice. So [`Self::of`] answers with the
@@ -1096,7 +1097,7 @@ pub unsafe fn alloc_statement<B: Backend>(
     // their parent. Each shares the connection's group, which the statement
     // already joined, so a descriptor adds no lock.
     //
-    // A loop where D3 had four calls: the four are four elements of one array
+    // A loop rather than four calls: the four are four elements of one array
     // rather than four distinct fields.
     let mut implicit = [std::ptr::null_mut(); 4];
     for (index, role) in [
@@ -1724,7 +1725,7 @@ mod tests {
     /// statement-producing FFI entry points on the same statement must each
     /// get their **own** `Arc`.
     ///
-    /// This asserted the opposite until M4. See `mint_cancel_token`'s doc
+    /// This asserted the opposite once. See `mint_cancel_token`'s doc
     /// comment for the two spec sentences that overturned it — in short, a
     /// reused token stays signalled after `SQLCancel`, and the spec requires
     /// the next `SQLExecute` on that statement to work.
@@ -2049,8 +2050,8 @@ mod tests {
     /// One header field, one storage — whichever statement attribute names it.
     ///
     /// `SQL_DESC_ARRAY_SIZE` is `SQL_ATTR_ROW_ARRAY_SIZE` on an ARD and
-    /// `SQL_ATTR_PARAMSET_SIZE` on an APD. D4 lets one explicit descriptor be
-    /// both at once, so the two names must reach one value.
+    /// `SQL_ATTR_PARAMSET_SIZE` on an APD. One explicit descriptor can be both at
+    /// once, so the two names must reach one value.
     #[test]
     fn a_header_field_has_one_key_whichever_attribute_names_it() {
         use odbc_sys::StatementAttribute as A;

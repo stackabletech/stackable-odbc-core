@@ -1755,7 +1755,8 @@ mod tests {
     /// Keeping both halves in a single struct is what would make
     /// `SQLSetDescField` unimplementable — setting `SQL_DESC_DATA_PTR` on the
     /// APD would have to reach into a record that also claims to be the IPD's —
-    /// so the split is pinned here rather than left to D3 to discover.
+    /// so the split is pinned here rather than left to the descriptor accessors to
+    /// discover.
     #[test]
     fn a_bound_parameter_splits_across_the_apd_and_the_ipd() {
         unsafe {

@@ -1200,7 +1200,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // F2: SQLFreeStmt(SQL_CLOSE) is equivalent to SQLCloseCursor
+    // SQLFreeStmt(SQL_CLOSE) is equivalent to SQLCloseCursor
     // -----------------------------------------------------------------------
 
     /// The spec makes the two the same call bar the `24000`: "Calling

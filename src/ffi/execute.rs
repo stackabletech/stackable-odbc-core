@@ -1308,7 +1308,7 @@ mod tests {
     /// handle gets its own token, so a `SQLCancel` aimed at the first
     /// execution cannot reach into the second.
     ///
-    /// This test asserted the opposite until M4, on the reasoning that a stale
+    /// This test asserted the opposite, on the reasoning that a stale
     /// token would leave `SQLCancel` signalling a finished execution while the
     /// real one ran uncancelled. The spec makes that outcome correct rather
     /// than a bug: "In ODBC 3.5, a call to SQLCancel when no processing is
@@ -1548,8 +1548,8 @@ mod tests {
     /// execution reused, so every later call on that statement reported
     /// `HY008` forever. A token minted per execution cannot leak across that
     /// boundary. This is the end-to-end guard on `mint_cancel_token`, and it
-    /// only bites once a call site reclassifies — before Task 4 the second
-    /// execution succeeded whatever the token said.
+    /// only bites once a call site reclassifies: before any of them did, the
+    /// second execution succeeded whatever the token said.
     #[test]
     fn a_statement_is_reusable_after_being_cancelled() {
         unsafe {

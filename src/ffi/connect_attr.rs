@@ -2380,7 +2380,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // F3: 3D000 invalid catalog name
+    // 3D000 invalid catalog name
     // -----------------------------------------------------------------------
 
     /// Set `SQL_ATTR_CURRENT_CATALOG` to `catalog` on a connected handle and

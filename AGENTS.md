@@ -801,12 +801,16 @@ them the *definition* of a binding rather than a copy of one. `SQLBindCol`'s
 page: "when `SQLBindCol` is called, the driver sets fields in the ARD." So
 there is one storage, not a binding map beside a descriptor:
 
-| Descriptor | Field | Records | What they are |
+| Descriptor | Reached by | Records | What they are |
 |---|---|---|---|
-| ARD | `app_row_desc` | `DescriptorRecord` | what `SQLBindCol` set |
-| APD | `app_param_desc` | `DescriptorRecord` | `SQLBindParameter`'s C-side buffer |
-| IPD | `imp_param_desc` | `DescriptorRecord` | `SQLBindParameter`'s declared SQL type |
-| IRD | `imp_row_desc` | none stored | computed from `ColumnDescriptor` on read |
+| ARD | `desc_of(stmt, Ard)` | `DescriptorRecord` | what `SQLBindCol` set |
+| APD | `desc_of(stmt, Apd)` | `DescriptorRecord` | `SQLBindParameter`'s C-side buffer |
+| IPD | `desc_of(stmt, Ipd)` | `DescriptorRecord` | `SQLBindParameter`'s declared SQL type |
+| IRD | `desc_of(stmt, Ird)` | none stored | computed from `ColumnDescriptor` on read |
+
+Each is its own registered allocation rather than a field of the statement, and
+the two application descriptors may be replaced by one the application allocated
+— see "Reaching a descriptor" below.
 
 `Descriptor` carries a `role: DescriptorRole` rather than a type parameter,
 because ODBC has one record shape and four *readings* of it: `SQLSetDescField`
@@ -841,13 +845,18 @@ once:
   and `SQLColAttribute` cannot disagree about one column.
 - **Eight statement attributes are descriptor header fields**, per
   `SQLSetStmtAttr`'s own mapping table, which says setting one sets the other.
-  `HeaderOwner::of` names them and `StatementHandle::attr_store(_mut)` is the
-  only way to reach an attribute's storage, so `stmt.attrs` no longer holds
-  those keys at all. `descriptor::header_attribute` is the same table read in
-  the other direction, for `SQLGetDescField`. The four IRD- and IPD-side pairs
+  `HeaderOwner::of` names them and `HandleScope::attr_get`/`attr_set` is the only
+  way to reach an attribute's storage, so `stmt.attrs` no longer holds those keys
+  at all. `descriptor::header_attribute` is the same table read in the other
+  direction, for `SQLGetDescField`. The four IRD- and IPD-side pairs
   (`SQL_ATTR_ROW_STATUS_PTR`, `SQL_ATTR_ROWS_FETCHED_PTR`,
   `SQL_ATTR_PARAM_STATUS_PTR`, `SQL_ATTR_PARAMS_PROCESSED_PTR`) stay on
-  `stmt.attrs`, and `attr_store` routes them there so no caller needs to know.
+  `stmt.attrs`, and `attr_get` routes them there so no caller needs to know.
+  **The storage is keyed by the `SQL_DESC_*` field, not by the attribute**: the
+  mapping is not one-to-one — `SQL_DESC_ARRAY_SIZE` is `SQL_ATTR_ROW_ARRAY_SIZE`
+  on an ARD and `SQL_ATTR_PARAMSET_SIZE` on an APD — and one explicit descriptor
+  may be the ARD of one statement and the APD of another, so two keys for one
+  field would be two values for one field.
 - **`odbc-sys` misspells one of the eight.** `SQL_ATTR_PARAM_OPERATION_PTR` is
   `StatementAttribute::ParamOpterationPtr` — transposed letters, upstream. A
   grep for the correct spelling finds nothing and reads as "core does not
@@ -874,52 +883,106 @@ they are one value.
 
 #### Reaching a descriptor
 
-**Through the statement's own field, or resolved alone — never both at once.**
-There is no `stmt_with_desc` combinator and there must not be: the four
-`Box<Descriptor>` fields *are* reachable through `StatementHandle`'s `&mut`,
-so a combinator built like `stmt_with_parent` would alias under Stacked/Tree
-Borrows even though the two addresses differ (see `handles/scope.rs`).
+**Every descriptor is its own registered allocation.** A statement holds four
+tokens, not four `Box<Descriptor>` fields, plus two `Option` overrides for the
+application descriptors. An explicit descriptor is parented to the **connection**
+and an implicit one to its statement, and all of them join the connection's lock
+group — the one every statement on it already shares — so a descriptor adds no
+lock and no ordering rule.
 
-`Descriptor` therefore has **no `HasKind` impl**, and that is load-bearing
-rather than an omission. `HandleScope::get` dispatches on `HandleKind` alone and
-all four descriptors register as `HandleKind::Desc`, so `get::<Descriptor>` on a
-token would resolve any one of a statement's four as any other, passing every
-check the registry can make. Without the impl it does not compile.
+Three rules follow, and each was the opposite while the four were fields of a
+statement:
 
-What resolves a descriptor token instead is `HandleScope::descriptor_owner`,
-which reads `Slot::parent` for the owning statement and compares the token
-against its four fields, returning `(&mut StatementHandle<B>, DescriptorRole)`.
-Returning the *statement* is what makes the IRD-as-view workable — the column
-metadata and the descriptor are both fields of the one statement, so one borrow
-reaches both — and it is the only form the borrow rule permits.
-`descriptor_diagnostics` is a thin wrapper on it, and
-`StatementHandle::descriptor_mut` turns the role back into the field.
+- **`Descriptor` has a `HasKind` impl.** It deliberately did not, on the grounds
+  that `HandleScope::get` dispatches on `HandleKind` alone and all four of a
+  statement's descriptors register as `HandleKind::Desc`. That held only while
+  they were fields of one allocation: a token then named the *statement*. Now a
+  token names exactly one descriptor and the struct at that address carries its
+  own `role`, so `get` needs nothing the registry cannot check.
+- **`HandleScope::stmt_with_desc` is sound**, on the same footing as
+  `stmt_with_parent`: the statement holds opaque tokens the compiler cannot
+  follow, and a `Descriptor` holds no back-pointer, so neither is reachable from
+  the other. `stmt_with_parent_and_params` is the three-way form of the same
+  argument, for the calls that need a statement, its connection and both
+  parameter descriptors at once.
+- **`Drop` does not reclaim them.** `free_statement_allocation` frees the four
+  explicitly, `SQLFreeHandle` frees an explicit one, and `SQLDisconnect` frees any
+  left on the connection. Miri's leak check is what enforces all three.
 
-#### What is still missing
+`HandleScope::desc_of` is the single door onto descriptor storage: it applies the
+override, so no call site can read the implicit descriptor while the application
+believes its own is in use. A site that already resolved the statement should copy
+`descriptor_token(role)` out and use `HandleScope::descriptor` instead — going
+through `desc_of` there resolves the statement a second time, which
+`handle_lookup` measures.
 
-`SQLGetDescFieldW`, `SQLSetDescFieldW`, `SQLGetDescRecW` and `SQLSetDescRec` are
-implemented over the four descriptors a statement owns, and `SQLGetFunctions`
-reports all four supported. What remains is D4: **explicit** descriptors —
-`SQLAllocHandle(SQL_HANDLE_DESC)`, which still refuses with `HYC00`, and
-`SQLCopyDesc`, which is neither exported nor advertised.
+The rule that remains is that a `Descriptor` is never reached by casting an
+address; only through the registry, as every other handle kind is.
 
-D4 is the harder half, and the reason is architectural rather than clerical: an
-explicit descriptor is allocated against a **connection**, so it has no owning
-statement and `descriptor_owner`'s parent routing does not reach it. A statement
-must be able to use a descriptor it does not own, and several statements may
-share one, so `StatementHandle`'s four owned `Box` fields become a reference of
-some kind — which is the registry, lock-group and Stacked-Borrows work the
-D1/D2 design flagged.
+#### The explicit-descriptor rulings, and why
 
-`SQLSetStmtAttrW` accepts `SQL_ATTR_APP_ROW_DESC` / `SQL_ATTR_APP_PARAM_DESC`
-only as `SQL_NULL_DESC` (revert to the implicit descriptor, which is the only
-state core has) and answers `HYC00` otherwise. It does **not** check
-`SQL_ATTR_IMP_ROW_DESC` / `SQL_ATTR_IMP_PARAM_DESC`: `HY017` is `(DM)` on
-*both* of its clauses, so core adds neither check.
+Four questions a future reader would otherwise relitigate:
 
-**`SQL_OIC_CORE` is not satisfied yet** — Core-level conformance requires
-working descriptors, and a statement's own descriptors being real is not the
-whole of that. D4 is what closes it.
+- **`HY024` is core's; `HY017` is not.** `SQLSetStmtAttr`'s `HY024` row states
+  the cross-connection descriptor case verbatim and closes with the general rule
+  that makes it core's — "For all other connection and statement attributes, the
+  driver must verify the value specified in *ValuePtr*". `HY017` is `(DM)` on
+  *both* of its clauses, so core adds neither check; the second clause's "other
+  than the handle originally allocated" implies the original *is* allowed, and it
+  is accepted. The check core makes compares the parent **chain**, so a
+  descriptor of this connection and one of this connection's statements both
+  pass.
+- **`SQLFreeHandle` answers `HY000` on the ownership branch, never `HY017`.**
+  Routed by parentage rather than by alloc type: this function allocated the
+  descriptors whose parent is a connection and only those, and retiring a
+  statement's own slot would leave that statement pointing at nothing. The
+  refusal is ownership, not a spec check, and borrows no `(DM)` code to say so —
+  the same function already answers `HY000` for an unimplemented handle type,
+  whose table lists no `HYC00` either. A token that is not a descriptor at all is
+  `SQL_INVALID_HANDLE`, which is a different question.
+- **`SQLCopyDesc` never holds two group locks.** The spec permits a copy across
+  connections and even across environments, so source and target may be in two
+  groups. Phase one takes the source's group through `HandleScope::with_group`
+  and materialises an owned `DescriptorSnapshot`; that function's return type
+  carries no guard, so the release before phase two is structural rather than
+  remembered. Phase two is an ordinary `panic_safe` on the target, which is where
+  every diagnostic belongs — including the `HY007` phase one decided.
+  `opposite_direction_copies_cannot_deadlock` models it, and
+  `the_set_of_group_lock_acquisition_sites_is_closed` records the site.
+- **A shared descriptor means shared bindings.** Two statements pointed at one
+  explicit ARD have one binding set between them, so `SQLFreeStmt(SQL_UNBIND)` on
+  either clears both. That is spec-correct — the spec makes the descriptor *be*
+  the binding — and has a test rather than a workaround.
+
+Two smaller ones: `SQL_DESC_ALLOC_TYPE` follows the allocation and is the one
+field `SQLCopyDesc` never copies; and `DescriptorSnapshot` carries neither it nor
+the *source's* role, because the consistency check runs under the **target's**
+role and a snapshot that remembered where it came from would invite a check
+against the wrong one.
+
+#### What descriptors now support
+
+All five descriptor functions are implemented and reported by `SQLGetFunctions`:
+`SQLGetDescFieldW`, `SQLSetDescFieldW`, `SQLGetDescRecW`, `SQLSetDescRec` and
+`SQLCopyDesc`. `SQLAllocHandle(SQL_HANDLE_DESC)` and
+`SQLFreeHandle(SQL_HANDLE_DESC)` work, an application descriptor can be swapped
+in through `SQL_ATTR_APP_ROW_DESC` / `SQL_ATTR_APP_PARAM_DESC`, and one
+descriptor may be shared across statements on a connection.
+
+`DescriptorRole` has a fifth variant, `App`, for an explicitly allocated
+descriptor whose role is not yet known — the spec: "it is not known whether an
+explicitly allocated application descriptor is an APD or ARD until execute time".
+`field_access(App, f)` is defined as the ARD's cell, and
+`the_ard_and_apd_field_tables_agree_everywhere` is what makes that a derived fact
+rather than a fourth hand transcription.
+
+**`SQL_OIC_CORE` is satisfied.** Core-level conformance requires allocating and
+freeing all handle types and manipulating descriptor fields through all five
+functions, which is what the above closes.
+
+Still out of scope, deliberately: bookmark records (record 0), and automatic
+population of the IPD — `SQL_ATTR_AUTO_IPD` stays `SQL_FALSE`, so the five
+footnote-[1] fields stay `Undefined` on the IPD.
 
 ### Fuzzing
 
