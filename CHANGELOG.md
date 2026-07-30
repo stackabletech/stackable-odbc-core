@@ -1482,6 +1482,18 @@ call `SQLCloseCursor` or `SQLFreeStmt(SQL_CLOSE)` first, as it already must for
   conversion the FFI boundary uses; `attr_odbc_version_from_raw` is unchanged and
   still cannot name `SQL_OV_ODBC2`.
 
+- `SQLSetConnectAttrW(SQL_ATTR_CURRENT_CATALOG, NULL)` returns `HY009` rather
+  than quietly forgetting the stored catalog and reporting success. The spec's
+  row — "the *Attribute* argument identified a connection attribute that
+  required a string value, and the *ValuePtr* argument was a null pointer" —
+  carries no `(DM)` marker, and the spec defines no operation that unsets a
+  catalog. Checked against psqlODBC and MySQL Connector/ODBC: neither implements
+  null-as-clear.
+
+  **Migration:** an application that used a null pointer to drop core's stored
+  override now gets `SQL_ERROR`. There was never a corresponding change at the
+  data source, so nothing it relied on was real.
+
 - `SQLGetConnectAttrW` no longer fails with `HY000` when the application offers
   a buffer of 64 KB or more. Its *BufferLength* is `SQLINTEGER`, the spec
   defines no error for a large one, and a value that genuinely does not fit is

@@ -294,9 +294,12 @@ fn connection_has_result_set_pending<B: Backend>(
 ///   token exists for this call to observe — `SQLCancel` takes a statement handle and cannot
 ///   reach one. The asynchronous clause is likewise inapplicable: core never returns
 ///   `SQL_STILL_EXECUTING`.
-/// - HY009 Invalid use of null pointer: HY009 is not applicable here:
-///   `SQL_ATTR_CURRENT_CATALOG` is the only string attribute handled, and null
-///   means "clear the catalog" (a valid operation).
+/// - HY009 Invalid use of null pointer: returned when the *Attribute* argument
+///   is `SQL_ATTR_CURRENT_CATALOG` — the one string-valued attribute this
+///   function handles — and *ValuePtr* is null. The row carries no `(DM)`
+///   marker, so the check is the driver's. A null is not "clear the catalog":
+///   the spec defines no such operation, and the session's catalog is not
+///   something the driver can unset by forgetting a string.
 /// - HY010 Function sequence error: (driver-manager-handled; not returned here).
 /// - HY011 Attribute cannot be set now: returned for `SQL_ATTR_PACKET_SIZE`
 ///   once the connection is open, which the spec states directly — "if the
@@ -582,32 +585,44 @@ pub unsafe fn sql_set_connect_attr_w<B: Backend>(
                 // HYC00 from the default `set_current_catalog`, and nothing is
                 // stored.
                 _ if attr == ConnectionAttribute::CURRENT_CATALOG => {
+                    // Spec HY009, on a row with no (DM) marker: "The Attribute
+                    // argument identified a connection attribute that required a
+                    // string value, and the ValuePtr argument was a null
+                    // pointer." A null used to remove the stored override and
+                    // report success, which is an operation the spec does not
+                    // define: the session's catalog was untouched while the
+                    // application was told it had been cleared. Neither
+                    // psqlODBC (which ignores SQL_CURRENT_QUALIFIER on set) nor
+                    // MySQL Connector/ODBC (which measures the value with
+                    // strlen before looking at it) implements null-as-clear.
                     if value_ptr.is_null() {
-                        conn.attr_strings.remove(&attribute);
-                    } else {
-                        // string_length is in bytes; convert to UTF-16 code units.
-                        // SQL_NTS passes through; other negatives are invalid.
-                        let len_code_units = if string_length == SQL_NTS {
-                            SQL_NTS
-                        } else if string_length < 0 {
-                            return Err(OdbcError::general(
-                                format!("Invalid string length: {string_length}"),
-                                SqlState::invalid_string_or_buffer_length(),
-                            ));
-                        } else {
-                            string_length / 2
-                        };
-                        let s = utf16_to_string(value_ptr as *const u16, len_code_units)?;
-                        // Applied here when connected; a value set before the
-                        // connection exists is stored and applied by
-                        // `apply_pending_current_catalog` at connect, since the
-                        // spec lists this attribute as settable either side of
-                        // one.
-                        if let Some(connection) = conn.connection.as_ref() {
-                            B::set_current_catalog(connection, &s).into_odbc()?;
-                        }
-                        conn.attr_strings.insert(attribute, s);
+                        return Err(OdbcError::general(
+                            "SQL_ATTR_CURRENT_CATALOG requires a string value, \
+                             and ValuePtr was null",
+                            SqlState::invalid_use_of_null_pointer(),
+                        ));
                     }
+                    // string_length is in bytes; convert to UTF-16 code units.
+                    // SQL_NTS passes through; other negatives are invalid.
+                    let len_code_units = if string_length == SQL_NTS {
+                        SQL_NTS
+                    } else if string_length < 0 {
+                        return Err(OdbcError::general(
+                            format!("Invalid string length: {string_length}"),
+                            SqlState::invalid_string_or_buffer_length(),
+                        ));
+                    } else {
+                        string_length / 2
+                    };
+                    let s = utf16_to_string(value_ptr as *const u16, len_code_units)?;
+                    // Applied here when connected; a value set before the
+                    // connection exists is stored and applied by
+                    // `apply_pending_current_catalog` at connect, since the
+                    // spec lists this attribute as settable either side of one.
+                    if let Some(connection) = conn.connection.as_ref() {
+                        B::set_current_catalog(connection, &s).into_odbc()?;
+                    }
+                    conn.attr_strings.insert(attribute, s);
                     Ok(SqlReturn::SUCCESS)
                 }
 
@@ -1796,6 +1811,43 @@ mod tests {
             );
 
             cleanup_for::<MockAltBackend>(env, conn);
+        }
+    }
+
+    /// Spec, on a row carrying no `(DM)` marker: "The *Attribute* argument
+    /// identified a connection attribute that required a string value, and the
+    /// *ValuePtr* argument was a null pointer." So the check is the driver's.
+    ///
+    /// A null used to remove the stored override and report success, which told
+    /// the application it had cleared a catalog the session was still using —
+    /// and the spec defines no operation that unsets one. Neither psqlODBC nor
+    /// MySQL Connector/ODBC implements null-as-clear either.
+    #[test]
+    fn a_null_value_ptr_for_current_catalog_is_hy009() {
+        unsafe {
+            let (env, conn) = alloc_env_conn();
+
+            assert_eq!(
+                sql_set_connect_attr_w::<MockBackend>(
+                    conn,
+                    ConnectionAttribute::CURRENT_CATALOG.0,
+                    std::ptr::null_mut(),
+                    SQL_NTS,
+                ),
+                SqlReturn::ERROR,
+            );
+            with_handle::<MockBackend, ConnectionHandle<MockBackend>, _>(conn, |h| {
+                assert_eq!(
+                    h.diagnostics
+                        .get(0)
+                        .expect("a diagnostic record")
+                        .sqlstate
+                        .as_str(),
+                    "HY009",
+                );
+            });
+
+            cleanup(env, conn);
         }
     }
 
