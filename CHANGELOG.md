@@ -1482,6 +1482,16 @@ call `SQLCloseCursor` or `SQLFreeStmt(SQL_CLOSE)` first, as it already must for
   conversion the FFI boundary uses; `attr_odbc_version_from_raw` is unchanged and
   still cannot name `SQL_OV_ODBC2`.
 
+- `ConfigDSNW` no longer writes a `DRIVER=` attribute into the data source's
+  own section. The attribute-write loop skipped only the `DSN` keyword, so a
+  `DRIVER=` pair in `lpszAttributes` was written over the value
+  `SQLWriteDSNToIni` had just taken from the `lpszDriver` argument — repointing
+  the DSN at whatever DLL the attribute list named. The spec forbids it twice:
+  "(**ConfigDSN** does not accept the **DRIVER** keyword.)" and "**ConfigDSN**
+  may not delete or change the value of the **Driver** keyword." The pair is now
+  dropped with a `warn!`, matching the spec's "does not accept" wording, and the
+  driver the caller asked for still reaches the registry through `lpszDriver`.
+
 - `ConnectParams::to_connection_string` renders a value containing `}` so that
   it survives being parsed again: the value is brace-quoted and every `}` inside
   is doubled, and `ConnectParams::parse` un-doubles it. A single `}` used to end

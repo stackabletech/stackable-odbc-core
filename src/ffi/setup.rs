@@ -79,6 +79,70 @@ pub(crate) unsafe fn parse_attributes_w(ptr: *const u16) -> HashMap<String, Stri
     map
 }
 
+/// Attribute keys `ConfigDSN` must never write into a DSN's own section.
+///
+/// `DSN` names the section rather than a value inside it, and
+/// `SQLWriteDSNToIni` has already registered it.
+///
+/// `DRIVER` is forbidden outright, and the spec says so twice. Comments:
+/// "(**ConfigDSN** does not accept the **DRIVER** keyword.)" Modifying a Data
+/// Source: "**ConfigDSN** may not delete or change the value of the **Driver**
+/// keyword."
+///
+/// The second one is the one with teeth. `SQLWriteDSNToIni` writes `Driver`
+/// from the *lpszDriver* argument the Driver Manager supplied; a `DRIVER=` pair
+/// in `lpszAttributes` was written over it a few lines later, so an attribute
+/// list could repoint a data source at any DLL it named.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) const RESERVED_DSN_KEYS: &[&str] = &["DSN", "DRIVER"];
+
+/// True when `key` names a value `ConfigDSN` may not write to the DSN's
+/// section.
+///
+/// Case-insensitive, because the registry grammar is and because every other
+/// keyword comparison in this file already is. A case-sensitive check leaves
+/// `Driver=` open, which is the spelling a connection string actually uses.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn is_reserved_dsn_key(key: &str) -> bool {
+    RESERVED_DSN_KEYS
+        .iter()
+        .any(|reserved| key.eq_ignore_ascii_case(reserved))
+}
+
+/// The attributes `ConfigDSN` writes into the DSN's own section: everything
+/// [`is_reserved_dsn_key`] rejects, removed and logged, in a deterministic
+/// order.
+///
+/// Sorted because these become a sequence of `SQLWritePrivateProfileString`
+/// calls and a `HashMap` iterates arbitrarily: without it, two runs over one
+/// attribute list write in two different orders, and a failure part-way leaves
+/// two different half-configured data sources.
+///
+/// Not `#[cfg(windows)]`, deliberately. `config_dsn_w` links `odbccp32`, so no
+/// Linux test can execute it; keeping the decision out here is what makes it
+/// testable at all.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn dsn_section_attributes(attrs: &HashMap<String, String>) -> Vec<(&str, &str)> {
+    let mut kept: Vec<(&str, &str)> = Vec::new();
+    for (k, v) in attrs {
+        if is_reserved_dsn_key(k) {
+            // AGENTS.md: an intentional silent accept gets a `warn!`. Keyword
+            // name only -- a DSN attribute list routinely carries `PWD=`, and
+            // unlike `ConnectParams` this is a plain `HashMap` with no
+            // redacting `Debug`.
+            tracing::warn!(
+                "ConfigDSNW: ignoring the {k} keyword. ConfigDSN does not accept \
+                 DRIVER and may not change the Driver value, and DSN names the \
+                 section rather than a value in it"
+            );
+            continue;
+        }
+        kept.push((k.as_str(), v.as_str()));
+    }
+    kept.sort_unstable_by_key(|(a, _)| *a);
+    kept
+}
+
 #[cfg(windows)]
 #[link(name = "odbccp32", kind = "raw-dylib")]
 unsafe extern "system" {
@@ -202,6 +266,14 @@ fn to_wide_null(s: &str) -> Vec<u16> {
 ///   keyword carries. The spec asks for the latter check by name: "ConfigDSN
 ///   should call **SQLValidDSN** to check the length of the data source name and
 ///   to verify that no invalid characters are included in the name."
+///
+///   A `DRIVER=` pair in the attribute list is **not** reported this way. The
+///   spec's word is "does not accept" — "(**ConfigDSN** does not accept the
+///   **DRIVER** keyword.)" — so it is dropped with a `warn!` rather than made a
+///   failure, and the driver the caller actually asked for still reaches the
+///   registry through the *lpszDriver* argument. Refusing the call instead
+///   would make a data source unconfigurable whenever a setup tool round-trips
+///   a connection string carrying that keyword.
 /// - **ODBC_ERROR_INVALID_NAME** — **posted** when `lpszDriver` is null. A driver
 ///   name that is non-null but absent from the registry is `SQLWriteDSNToIniW`'s
 ///   to detect, and it posts its own error for that.
@@ -330,16 +402,10 @@ unsafe fn config_dsn_body(
                 tracing::error!("ConfigDSNW: SQLWriteDSNToIniW failed");
                 return 0;
             }
-            // Write each attribute under the DSN's section, excluding DSN itself
-            // (SQLWriteDSNToIni handles the name registration).
-            //
-            // Note: keys absent from this call that existed in a prior registration
-            // are NOT removed, so callers must always supply the full attribute set.
+            // Write each attribute under the DSN's section. `dsn_section_attributes`
+            // drops the keywords that must not appear there and logs each drop.
             let odbc_ini_w = to_wide_null("ODBC.INI");
-            for (k, v) in &attrs {
-                if k.eq_ignore_ascii_case("DSN") {
-                    continue;
-                }
+            for (k, v) in dsn_section_attributes(&attrs) {
                 let k_w = to_wide_null(k);
                 let v_w = to_wide_null(v);
                 // SAFETY: all four pointers are null-terminated UTF-16 strings
@@ -481,6 +547,68 @@ mod tests {
         let utf16_vec: Vec<u16> = s.encode_utf16().collect();
         let attrs = unsafe { parse_attributes_w(utf16_vec.as_ptr()) };
         assert!(attrs.is_empty());
+    }
+
+    /// A `DRIVER=` pair in `lpszAttributes` must never be written into the DSN's
+    /// section. `SQLWriteDSNToIni` has just written `Driver` from the
+    /// *lpszDriver* argument the Driver Manager supplied; writing the
+    /// attribute-list value over it repoints the data source at whatever DLL
+    /// the caller named, which is the whole trust boundary of a DSN.
+    ///
+    /// The spec forbids it twice: "(**ConfigDSN** does not accept the **DRIVER**
+    /// keyword.)" and "**ConfigDSN** may not delete or change the value of the
+    /// **Driver** keyword."
+    #[test]
+    fn a_driver_attribute_is_never_written_into_the_dsn_section() {
+        let mut attrs = HashMap::new();
+        attrs.insert("DSN".to_string(), "MyDSN".to_string());
+        attrs.insert("DRIVER".to_string(), "evil.dll".to_string());
+        attrs.insert("Host".to_string(), "example.com".to_string());
+
+        let written = dsn_section_attributes(&attrs);
+        assert_eq!(
+            written,
+            vec![("Host", "example.com")],
+            "only non-reserved keywords may reach SQLWritePrivateProfileString"
+        );
+    }
+
+    /// The registry grammar is case-insensitive and so is every other keyword
+    /// comparison in this file, so `Driver=`, `driver=` and `DrIvEr=` must all
+    /// be caught. A case-sensitive check is the same hole with an extra step.
+    #[test]
+    fn reserved_dsn_keys_are_matched_case_insensitively() {
+        for spelling in ["DRIVER", "Driver", "driver", "DrIvEr", "DSN", "dsn", "Dsn"] {
+            assert!(
+                is_reserved_dsn_key(spelling),
+                "{spelling} must be treated as reserved"
+            );
+        }
+        for spelling in ["DRIVERS", "MYDRIVER", "DSNName", "Host", "PWD", "UID"] {
+            assert!(
+                !is_reserved_dsn_key(spelling),
+                "{spelling} is an ordinary keyword and must be written"
+            );
+        }
+    }
+
+    /// Everything that is not reserved survives, in a deterministic order. The
+    /// order matters because these become a sequence of registry writes: a
+    /// `HashMap` iterates arbitrarily, so without the sort two runs over the
+    /// same attribute list write in two different orders, and a failure
+    /// half-way leaves two different half-configured data sources.
+    #[test]
+    fn dsn_section_attributes_keeps_everything_else_in_a_stable_order() {
+        let mut attrs = HashMap::new();
+        attrs.insert("DSN".to_string(), "MyDSN".to_string());
+        attrs.insert("Port".to_string(), "8443".to_string());
+        attrs.insert("Host".to_string(), "example.com".to_string());
+        attrs.insert("UID".to_string(), "smith".to_string());
+
+        assert_eq!(
+            dsn_section_attributes(&attrs),
+            vec![("Host", "example.com"), ("Port", "8443"), ("UID", "smith")]
+        );
     }
 
     #[test]
