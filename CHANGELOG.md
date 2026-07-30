@@ -711,6 +711,18 @@ call `SQLCloseCursor` or `SQLFreeStmt(SQL_CLOSE)` first, as it already must for
 
 ### Changed
 
+- `ConfigDSNW` reports a malformed `lpszAttributes` as
+  `ODBC_ERROR_INVALID_KEYWORD_VALUE` instead of proceeding with what it could
+  read. A segment with no `=` was skipped with no log at all, and a list missing
+  its double-null terminator produced a partial map the caller could not
+  distinguish from a complete one, so a data source could be written with
+  keywords silently missing. The spec's code says exactly this: "The
+  *lpszAttributes* argument contained a syntax error."
+
+  **Migration:** a setup application that passed a stray token in the attribute
+  list now gets FALSE with that code, where it previously got TRUE and a
+  partially configured data source.
+
 - **Breaking: `SQLSetCursorName` enforces the spec's cursor-name rules.** It
   previously stored any non-empty name and checked nothing else, so three
   unmarked (driver-owed) rows of its diagnostics table went unimplemented. Calls

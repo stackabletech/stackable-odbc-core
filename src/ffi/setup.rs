@@ -7,10 +7,54 @@ use std::collections::HashMap;
 /// attribute list missing its terminator walks memory until it faults.
 const MAX_ATTRIBUTE_SCAN: usize = i16::MAX as usize;
 
+/// What went wrong while reading an attribute list.
+///
+/// Both variants are the spec's `ODBC_ERROR_INVALID_KEYWORD_VALUE` ("The
+/// *lpszAttributes* argument contained a syntax error") but they are kept
+/// apart because they say different things to whoever reads the log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) enum AttributeSyntaxError {
+    /// A segment carried no `=`, so it is not a keyword-value pair. The spec
+    /// defines the argument as "a doubly null-terminated list of attributes in
+    /// the form of keyword-value pairs".
+    SegmentWithoutEquals,
+    /// A segment ran past [`MAX_ATTRIBUTE_SCAN`] with no null in it, so the list
+    /// has no terminator and the walk was abandoned. Whatever was read before
+    /// that point is arbitrary.
+    Unterminated,
+}
+
+/// What [`parse_attributes_w`] found, and what it could not read.
+///
+/// The parser is deliberately lenient and reports rather than refuses: a
+/// partial map is more useful to a caller than none, and the *policy* (that
+/// `ConfigDSN` treats any syntax error as a failure) belongs at the call site
+/// rather than in the parser. Before this carried a report, both malformed
+/// shapes were indistinguishable from a well-formed list at the call site,
+/// which is how a data source came to be written with keywords silently
+/// missing.
+#[derive(Debug, Default)]
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) struct AttributeList {
+    /// Every `Key=Value` pair the walk read, keys in their original case.
+    pub(crate) attributes: HashMap<String, String>,
+    /// The **first** problem encountered, if any. First rather than all,
+    /// because one is enough to reject the list and the rest are noise.
+    pub(crate) syntax_error: Option<AttributeSyntaxError>,
+}
+
 /// Parses a null-separated, double-null terminated ODBC UTF-16 attribute string.
 ///
 /// Each segment is a `Key=Value` pair encoded as UTF-16LE, separated by a single
 /// null `u16`, with the list terminated by a double null.
+///
+/// # Returns
+///
+/// An [`AttributeList`]: every pair the walk read, plus the first syntax error
+/// it hit. The walk is lenient by design (it skips what it cannot read and
+/// keeps going), so the report is the only way a caller can tell a partial map
+/// from a complete one.
 ///
 /// # Safety
 /// `ptr` must be either null or point to a valid double-null-terminated `u16` sequence.
@@ -18,10 +62,10 @@ const MAX_ATTRIBUTE_SCAN: usize = i16::MAX as usize;
 // suppressed on non-Windows targets only, on Windows a genuinely unused parser
 // still warns.
 #[cfg_attr(not(windows), allow(dead_code))]
-pub(crate) unsafe fn parse_attributes_w(ptr: *const u16) -> HashMap<String, String> {
-    let mut map = HashMap::new();
+pub(crate) unsafe fn parse_attributes_w(ptr: *const u16) -> AttributeList {
+    let mut parsed = AttributeList::default();
     if ptr.is_null() {
-        return map;
+        return parsed;
     }
     let mut pos = 0usize;
     loop {
@@ -52,6 +96,9 @@ pub(crate) unsafe fn parse_attributes_w(ptr: *const u16) -> HashMap<String, Stri
                 "ConfigDSNW: attribute segment exceeded {MAX_ATTRIBUTE_SCAN} code units \
                  with no terminator; abandoning the rest of the list"
             );
+            parsed
+                .syntax_error
+                .get_or_insert(AttributeSyntaxError::Unterminated);
             break;
         }
         if pos == start {
@@ -68,15 +115,29 @@ pub(crate) unsafe fn parse_attributes_w(ptr: *const u16) -> HashMap<String, Stri
             .collect();
         let segment = String::from_utf16_lossy(&code_units);
         if let Some(eq_pos) = segment.find('=') {
-            map.insert(
+            parsed.attributes.insert(
                 segment[..eq_pos].to_string(),
                 segment[eq_pos + 1..].to_string(),
             );
-            // Segments without '=' are silently skipped
+        } else {
+            // Skipped, but no longer silently. AGENTS.md requires a `warn!` for
+            // a silent accept, and the caller needs to know the list it handed
+            // over was not entirely readable: a partial map otherwise looks
+            // exactly like a complete one. The segment's text is not logged, as
+            // an attribute list routinely carries `PWD=` and a segment without
+            // `=` could be a password whose separator was mangled.
+            tracing::warn!(
+                "ConfigDSNW: attribute segment {} carries no '=' and is not a \
+                 keyword-value pair; skipping it",
+                parsed.attributes.len() + 1
+            );
+            parsed
+                .syntax_error
+                .get_or_insert(AttributeSyntaxError::SegmentWithoutEquals);
         }
         pos += 1; // skip the null u16
     }
-    map
+    parsed
 }
 
 /// Attribute keys `ConfigDSN` must never write into a DSN's own section.
@@ -432,6 +493,15 @@ fn write_dsn_attributes(dsn_w: &[u16], attrs: &std::collections::HashMap<String,
 ///   should call **SQLValidDSN** to check the length of the data source name and
 ///   to verify that no invalid characters are included in the name."
 ///
+///   Also **posted** when the attribute list itself is malformed: a segment
+///   with no `=`, or a list with no double-null terminator. The spec's wording
+///   is exactly that ("The *lpszAttributes* argument contained a syntax
+///   error") and the argument is "a doubly null-terminated list of attributes
+///   in the form of keyword-value pairs". Reported rather than skipped, because
+///   a skipped segment writes a data source with keywords silently missing,
+///   which surfaces later as a connection failure with nothing pointing back at
+///   the attribute list.
+///
 ///   A `DRIVER=` pair in the attribute list is **not** reported this way. The
 ///   spec's word is "does not accept" — "(**ConfigDSN** does not accept the
 ///   **DRIVER** keyword.)" — so it is dropped with a `warn!` rather than made a
@@ -547,15 +617,40 @@ unsafe fn config_dsn_body(
 
     // SAFETY: lpsz_attributes is null or a valid double-null-terminated UTF-16
     // attribute string as guaranteed by the function's safety contract.
-    let attrs = unsafe { parse_attributes_w(lpsz_attributes) };
+    let parsed = unsafe { parse_attributes_w(lpsz_attributes) };
     // Keyword names only. A DSN attribute list routinely carries `PWD=`, and
     // unlike `ConnectParams` this is a plain `HashMap` with no redacting `Debug`.
-    let attr_keys: Vec<&str> = attrs.keys().map(|k| k.as_str()).collect();
+    let attr_keys: Vec<&str> = parsed.attributes.keys().map(|k| k.as_str()).collect();
     tracing::debug!(
-        "ConfigDSNW: request={}, attr_keys={:?}",
-        f_request,
+        "ConfigDSNW: request={:?}, attr_keys={:?}",
+        request,
         attr_keys
     );
+
+    // Spec: ODBC_ERROR_INVALID_KEYWORD_VALUE is "The lpszAttributes argument
+    // contained a syntax error", and the argument is defined as "a doubly
+    // null-terminated list of attributes in the form of keyword-value pairs",
+    // so a segment that is not a pair, and a list with no terminator, are both
+    // it. Reported here, before the DSN keyword is looked for: a list too
+    // malformed to parse would otherwise be diagnosed as "no DSN keyword",
+    // which sends the caller looking in the wrong place.
+    if let Some(error) = parsed.syntax_error {
+        return fail(
+            ODBC_ERROR_INVALID_KEYWORD_VALUE,
+            match error {
+                AttributeSyntaxError::SegmentWithoutEquals => {
+                    "the attribute list carries a segment with no '=', so it is not \
+                     a list of keyword-value pairs"
+                }
+                AttributeSyntaxError::Unterminated => {
+                    "the attribute list has no double-null terminator, so only part \
+                     of it could be read"
+                }
+            },
+        );
+    }
+
+    let attrs = parsed.attributes;
 
     let Some((_, dsn_value)) = attrs.iter().find(|(k, _)| k.eq_ignore_ascii_case("DSN")) else {
         return fail(
@@ -796,7 +891,7 @@ mod tests {
         let s: &'static str = "DSN=MyDSN\0Host=example.com\0Port=8443\0\0";
         let utf16_vec: Vec<u16> = s.encode_utf16().collect();
 
-        let attrs = unsafe { parse_attributes_w(utf16_vec.as_ptr()) };
+        let attrs = unsafe { parse_attributes_w(utf16_vec.as_ptr()) }.attributes;
         assert_eq!(attrs.get("DSN").map(String::as_str), Some("MyDSN"));
         assert_eq!(attrs.get("Host").map(String::as_str), Some("example.com"));
         assert_eq!(attrs.get("Port").map(String::as_str), Some("8443"));
@@ -805,18 +900,26 @@ mod tests {
 
     #[test]
     fn null_pointer_returns_empty_map() {
-        let attrs = unsafe { parse_attributes_w(std::ptr::null()) };
+        let attrs = unsafe { parse_attributes_w(std::ptr::null()) }.attributes;
         assert!(attrs.is_empty());
     }
 
+    /// The parser skips a segment with no `=` rather than refusing the whole
+    /// list. That is still deliberate: the report on `AttributeList` is what
+    /// carries the problem to the caller, and `ConfigDSN` is what turns it into
+    /// a failure. Keeping the two apart means a future caller that wants a
+    /// best-effort parse can have one.
     #[test]
     #[allow(clippy::manual_c_str_literals)]
     fn segment_without_equals_is_skipped() {
         let s: &'static str = "BadToken\0DSN=MyDSN\0\0";
         let utf16_vec: Vec<u16> = s.encode_utf16().collect();
-        let attrs = unsafe { parse_attributes_w(utf16_vec.as_ptr()) };
-        assert_eq!(attrs.len(), 1);
-        assert_eq!(attrs.get("DSN").map(String::as_str), Some("MyDSN"));
+        let parsed = unsafe { parse_attributes_w(utf16_vec.as_ptr()) };
+        assert_eq!(parsed.attributes.len(), 1);
+        assert_eq!(
+            parsed.attributes.get("DSN").map(String::as_str),
+            Some("MyDSN")
+        );
     }
 
     #[test]
@@ -825,8 +928,110 @@ mod tests {
         // Double-null immediately = no attributes
         let s: &'static str = "\0";
         let utf16_vec: Vec<u16> = s.encode_utf16().collect();
-        let attrs = unsafe { parse_attributes_w(utf16_vec.as_ptr()) };
+        let attrs = unsafe { parse_attributes_w(utf16_vec.as_ptr()) }.attributes;
         assert!(attrs.is_empty());
+    }
+
+    /// A segment with no `=` is not a keyword-value pair, and the spec defines
+    /// `lpszAttributes` as "a doubly null-terminated list of attributes in the
+    /// form of keyword-value pairs". The parser still skips it (a partial map
+    /// is more useful to a caller than none) but it now says so, and
+    /// `ConfigDSN` turns that into `ODBC_ERROR_INVALID_KEYWORD_VALUE`.
+    #[test]
+    #[allow(clippy::manual_c_str_literals)]
+    fn a_segment_without_equals_is_reported_as_a_syntax_error() {
+        let s: &'static str = "BadToken\0DSN=MyDSN\0\0";
+        let utf16_vec: Vec<u16> = s.encode_utf16().collect();
+        let parsed = unsafe { parse_attributes_w(utf16_vec.as_ptr()) };
+
+        assert_eq!(
+            parsed.syntax_error,
+            Some(AttributeSyntaxError::SegmentWithoutEquals),
+            "a segment that is not a keyword-value pair is a syntax error"
+        );
+        // The parser stays lenient: everything it could read is still there.
+        assert_eq!(parsed.attributes.len(), 1);
+        assert_eq!(
+            parsed.attributes.get("DSN").map(String::as_str),
+            Some("MyDSN")
+        );
+    }
+
+    /// A list that runs past the scan bound has no terminator, so the map is
+    /// whatever happened to fit, indistinguishable to the caller from a
+    /// complete one. That is the case the report exists for.
+    #[test]
+    fn an_unterminated_attribute_list_is_reported_as_a_syntax_error() {
+        // One segment longer than MAX_ATTRIBUTE_SCAN with no null in it at all.
+        let mut units: Vec<u16> = vec![b'A' as u16; MAX_ATTRIBUTE_SCAN + 8];
+        // No terminator is written deliberately; the scan bound is what stops
+        // the walk, which is the condition under test.
+        units.push(0);
+        units.push(0);
+
+        let parsed = unsafe { parse_attributes_w(units.as_ptr()) };
+        assert_eq!(
+            parsed.syntax_error,
+            Some(AttributeSyntaxError::Unterminated),
+            "abandoning the scan must be reported, not just logged"
+        );
+        assert!(parsed.attributes.is_empty());
+    }
+
+    /// `AttributeList::syntax_error` documents itself as "the **first** problem
+    /// encountered", and this is what makes that true rather than incidental.
+    /// A bad segment followed by an unterminated one reports the bad segment:
+    /// swapping the parser's `get_or_insert` for a `replace` reports the
+    /// unterminated one instead and every other test in this file still passes,
+    /// so without this the doc comment would be an unchecked claim.
+    #[test]
+    #[allow(clippy::manual_c_str_literals)]
+    fn the_first_syntax_error_is_the_one_reported() {
+        // "BadToken" with no '=', then a segment with no null at all, so the
+        // scan bound is what ends the walk.
+        let mut units: Vec<u16> = "BadToken\0".encode_utf16().collect();
+        units.extend(std::iter::repeat_n(b'A' as u16, MAX_ATTRIBUTE_SCAN + 8));
+        units.push(0);
+        units.push(0);
+
+        let parsed = unsafe { parse_attributes_w(units.as_ptr()) };
+        assert_eq!(
+            parsed.syntax_error,
+            Some(AttributeSyntaxError::SegmentWithoutEquals),
+            "the bad segment came first, so it is the one reported"
+        );
+    }
+
+    /// A well-formed list reports nothing, so the flag cannot be a
+    /// permanently-set constant that happens to satisfy the two tests above.
+    #[test]
+    #[allow(clippy::manual_c_str_literals)]
+    fn a_well_formed_attribute_list_reports_no_syntax_error() {
+        let s: &'static str = "DSN=MyDSN\0Host=example.com\0\0";
+        let utf16_vec: Vec<u16> = s.encode_utf16().collect();
+        let parsed = unsafe { parse_attributes_w(utf16_vec.as_ptr()) };
+        assert_eq!(parsed.syntax_error, None);
+        assert_eq!(parsed.attributes.len(), 2);
+    }
+
+    /// `ConfigDSN` turns the report into the spec's own code, and does it before
+    /// the DSN keyword is looked for: a list too malformed to parse cannot be
+    /// diagnosed as "no DSN keyword", which is what it would otherwise be
+    /// reported as.
+    #[test]
+    fn a_syntax_error_is_reported_before_the_missing_dsn_keyword() {
+        let body = function_source("unsafe fn config_dsn_body(");
+        let syntax_check = body
+            .find("syntax_error")
+            .expect("config_dsn_body inspects the parser's report");
+        let dsn_lookup = body
+            .find("k.eq_ignore_ascii_case(\"DSN\")")
+            .expect("config_dsn_body looks for the DSN keyword");
+        assert!(
+            syntax_check < dsn_lookup,
+            "a malformed attribute list must be reported as a syntax error, not \
+             as a missing DSN keyword"
+        );
     }
 
     /// `ODBC_ADD_SYS_DSN` (4) and its neighbours are real `SQLConfigDataSource`
@@ -1029,7 +1234,7 @@ mod tests {
     fn keys_preserve_original_case() {
         let s: &'static str = "DSN=MyDSN\0Host=example.com\0\0";
         let utf16_vec: Vec<u16> = s.encode_utf16().collect();
-        let attrs = unsafe { parse_attributes_w(utf16_vec.as_ptr()) };
+        let attrs = unsafe { parse_attributes_w(utf16_vec.as_ptr()) }.attributes;
         // Keys are stored in original case
         assert!(attrs.contains_key("DSN"));
         assert!(attrs.contains_key("Host"));
