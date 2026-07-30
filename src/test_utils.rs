@@ -1325,6 +1325,15 @@ pub struct MockAppliedConnection {
     /// `None` ("core never called the hook") are exactly what an access-mode
     /// test has to tell apart, and a plain `bool` collapses them.
     pub access_mode: crate::sync::Mutex<Option<bool>>,
+    /// Every value core pushed through `set_max_rows` and `set_max_length`, in
+    /// order.
+    ///
+    /// A sequence rather than a latest-value slot because the fact under test
+    /// is that the *reset* arrived, and both attributes default to 0: a
+    /// `usize` initialised to 0 cannot tell "core called the hook with 0" from
+    /// "core never called it". `[10]` and `[10, 0]` can.
+    pub max_rows_calls: crate::sync::Mutex<Vec<usize>>,
+    pub max_length_calls: crate::sync::Mutex<Vec<usize>>,
     /// What `ConnectParams::login_timeout` / `connection_timeout` reported at
     /// the moment `Backend::connect` ran. Captured there rather than read later
     /// because that call is the only place a backend ever sees them.
@@ -1365,6 +1374,8 @@ macro_rules! mock_applied_backend {
                 Ok(MockAppliedConnection {
                     query_timeout: std::sync::atomic::AtomicUsize::new(0),
                     access_mode: crate::sync::Mutex::new(None),
+                    max_rows_calls: crate::sync::Mutex::new(Vec::new()),
+                    max_length_calls: crate::sync::Mutex::new(Vec::new()),
                     seen_login_timeout: params.login_timeout(),
                     seen_connection_timeout: params.connection_timeout(),
                 })
@@ -1590,13 +1601,20 @@ mock_applied_backend!(
 
 // A data source that can genuinely cap a result set and truncate wide columns
 // server-side, which is the only situation the spec sanctions either attribute
-// in.
+// in. It records what it was told so a test can tell "core called the hook"
+// from "core stored the value and told the application it worked".
 mock_applied_backend!(
     MockLimitsBackend,
-    fn set_max_rows(_conn: &MockAppliedConnection, _rows: usize) -> Result<(), MockError> {
+    fn set_max_rows(conn: &MockAppliedConnection, rows: usize) -> Result<(), MockError> {
+        if let Ok(mut calls) = conn.max_rows_calls.lock() {
+            calls.push(rows);
+        }
         Ok(())
     },
-    fn set_max_length(_conn: &MockAppliedConnection, _bytes: usize) -> Result<(), MockError> {
+    fn set_max_length(conn: &MockAppliedConnection, bytes: usize) -> Result<(), MockError> {
+        if let Ok(mut calls) = conn.max_length_calls.lock() {
+            calls.push(bytes);
+        }
         Ok(())
     }
 );

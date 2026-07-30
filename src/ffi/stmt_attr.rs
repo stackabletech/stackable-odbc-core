@@ -206,6 +206,71 @@ fn offer_to_data_source<B: Backend, T>(
     }
 }
 
+/// Offer the *default* value of a "reduce load at the data source" attribute
+/// to the backend, and store it.
+///
+/// The counterpart of [`offer_to_data_source`], for the value that withdraws
+/// the limit. Three things differ, and each follows from the value being the
+/// default rather than one core cannot honour:
+///
+/// - **There is nothing to substitute.** `01S02` says the driver "substituted
+///   a similar value", and the value it would substitute *is* the one the
+///   application asked for. Posting the warning would report a change that did
+///   not happen, and would put the attribute on the diagnostic queue of every
+///   application that resets it.
+/// - **A backend that does not implement the hook has nothing to undo.**
+///   `NotImplemented` is therefore success here rather than a fallback: such a
+///   backend never applied the limit in the first place, so the data source is
+///   already in the state being asked for.
+/// - **The value is always stored**, so `SQLGetStmtAttr` reports the default.
+///
+/// Without this path the default reached the store-only arm at the bottom of
+/// the match instead, which calls nothing — so a data source told to cap a
+/// result set at ten rows was never told to stop, and `SQLGetStmtAttr`
+/// reported no limit for a connection still enforcing one.
+///
+/// A *real* backend failure propagates rather than being swallowed, for the
+/// reason [`offer_to_data_source`] gives: "the connection is broken" is a
+/// different claim from "this driver capped your value".
+///
+/// Takes loose arguments rather than a [`Substitution`], deliberately: that
+/// struct exists because `requested` and `fallback` are both `usize` and
+/// swapping them compiles. There is one `usize` here — the default is the
+/// requested value — so there is nothing to transpose.
+fn reset_at_data_source<B: Backend, T>(
+    scope: &mut HandleScope<'_>,
+    stmt_token: *mut c_void,
+    attribute: i32,
+    name: &str,
+    default: usize,
+    apply: impl FnOnce(&B::Connection) -> Result<T, OdbcError>,
+) -> Result<SqlReturn, OdbcError> {
+    // The backend call runs inside its own borrow of the connection, which
+    // ends before the attribute is stored — same shape, and same reason, as
+    // `offer_to_data_source`.
+    let outcome = {
+        let (_stmt, conn) = scope.stmt_with_parent::<B>(stmt_token)?;
+        conn.connection.as_ref().map(apply)
+    };
+    match outcome {
+        None | Some(Err(OdbcError::NotImplemented { .. })) => {
+            tracing::debug!(
+                "SQLSetStmtAttrW: {} reset to its default; nothing to undo at the data source",
+                name
+            );
+        }
+        Some(Ok(_)) => {
+            tracing::debug!(
+                "SQLSetStmtAttrW: {} reset to its default at the data source",
+                name
+            );
+        }
+        Some(Err(e)) => return Err(e),
+    }
+    scope.attr_set::<B>(stmt_token, attribute, default)?;
+    Ok(SqlReturn::SUCCESS)
+}
+
 /// Generic implementation of SQLSetStmtAttrW.
 ///
 /// Spec: <https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlsetstmtattr-function>
@@ -251,6 +316,13 @@ fn offer_to_data_source<B: Backend, T>(
 ///   to). A backend that accepts gets `SQL_SUCCESS` and the requested value
 ///   stored. See `offer_to_data_source` for why all three go to the data source
 ///   rather than being emulated here.
+///
+///   Their **default** values — `0` for each, meaning no timeout, no row limit
+///   and no length limit — take a separate path and are never substituted, for
+///   the plain reason that the value core would substitute is the value the
+///   application asked for. They are still offered to the same three hooks, so
+///   a data source told to apply a limit is told to lift it; see
+///   `reset_at_data_source`.
 /// - 08S01 Communication link failure: not raised by core, but any of the three
 ///   data-source hooks above that fails while talking to the data source is
 ///   reported with whatever SQLSTATE the backend's error mapping produced, and
@@ -678,6 +750,21 @@ pub unsafe fn sql_set_stmt_attr_w<B: Backend>(
                     .map(|(_, ret)| ret)
                 }
 
+                // The application withdrew the row limit. The backend that was
+                // told to apply it is the only party that can lift it, so the
+                // reset goes to the same hook the cap did — see
+                // `reset_at_data_source` for why it carries no `01S02`.
+                Some(StatementAttribute::MaxRows) if int_val == SQL_MAX_ROWS_DEFAULT => {
+                    reset_at_data_source::<B, _>(
+                        scope,
+                        statement_handle,
+                        attribute,
+                        "SQL_ATTR_MAX_ROWS",
+                        SQL_MAX_ROWS_DEFAULT,
+                        |c| B::set_max_rows(c, SQL_MAX_ROWS_DEFAULT).into_odbc(),
+                    )
+                }
+
                 // The counterpart of SQL_ATTR_MAX_ROWS, one column over: no
                 // character or binary value is truncated to this limit on the
                 // way out, since neither `sql_fetch` nor `sql_get_data`
@@ -699,6 +786,21 @@ pub unsafe fn sql_set_stmt_attr_w<B: Backend>(
                         |c| B::set_max_length(c, int_val).into_odbc(),
                     )
                     .map(|(_, ret)| ret)
+                }
+
+                // As SQL_ATTR_MAX_ROWS above, one column over: a data source
+                // still truncating to 4096 bytes while SQLGetStmtAttr reports
+                // "all available data" is the same defect in the other
+                // attribute.
+                Some(StatementAttribute::MaxLength) if int_val == SQL_MAX_LENGTH_DEFAULT => {
+                    reset_at_data_source::<B, _>(
+                        scope,
+                        statement_handle,
+                        attribute,
+                        "SQL_ATTR_MAX_LENGTH",
+                        SQL_MAX_LENGTH_DEFAULT,
+                        |c| B::set_max_length(c, SQL_MAX_LENGTH_DEFAULT).into_odbc(),
+                    )
                 }
 
                 // A keyset is a keyset-driven cursor's window, and core has no
@@ -775,11 +877,9 @@ pub unsafe fn sql_set_stmt_attr_w<B: Backend>(
 
                 // The application withdrew the deadline. The spec's row for
                 // this attribute is explicit — "if the value is 0, there is
-                // no timeout" — and core has two pieces of state to keep in
-                // step with that, not one: the attribute `SQLGetStmtAttr`
-                // reports, and the deadline `core_query_timeout` arms the
-                // timer from at every statement-producing call and at
-                // `SQLFetch`.
+                // no timeout" — and there are two enforcers to tell, not one:
+                // the data source, which may be holding a server-side
+                // deadline, and core's own timer.
                 //
                 // Guarded on `==` rather than left to the store-only
                 // catch-all below, which is where this value used to land:
@@ -788,11 +888,23 @@ pub unsafe fn sql_set_stmt_attr_w<B: Backend>(
                 // query was cancelled with an `HYT00` the application had
                 // just opted out of.
                 Some(StatementAttribute::QueryTimeout) if int_val == SQL_QUERY_TIMEOUT_DEFAULT => {
-                    scope.attr_set::<B>(statement_handle, attribute, int_val)?;
+                    let ret = reset_at_data_source::<B, _>(
+                        scope,
+                        statement_handle,
+                        attribute,
+                        "SQL_ATTR_QUERY_TIMEOUT",
+                        SQL_QUERY_TIMEOUT_DEFAULT,
+                        |c| B::set_query_timeout(c, SQL_QUERY_TIMEOUT_DEFAULT).into_odbc(),
+                    )?;
+                    // Core's timer is armed from this field at every
+                    // statement-producing call and at `SQLFetch`, so a
+                    // deadline recorded by an earlier set has to go with the
+                    // attribute. Unconditionally `None`: 0 is "no timeout"
+                    // whatever the hook answered.
                     scope
                         .get::<StatementHandle<B>>(statement_handle)?
                         .core_query_timeout = None;
-                    Ok(SqlReturn::SUCCESS)
+                    Ok(ret)
                 }
 
                 // `sql_fetch` retrieves and writes bound columns
@@ -2874,6 +2986,110 @@ mod tests {
                 assert_eq!(state.as_deref(), Some("01S02"), "{attribute:?}");
                 assert_eq!(val, 0, "{attribute:?} must read back as no limit");
             }
+        }
+    }
+
+    /// A backend that was told to cap the result set has to be told to stop.
+    ///
+    /// The three attributes core offers to the data source were guarded on the
+    /// value not being the default, so a reset fell through to the store-only
+    /// catch-all and the hook was never called. `SQLGetStmtAttr` then reported "no
+    /// limit" for a data source still enforcing one, which is the read-back
+    /// contract broken in the direction that silently loses rows.
+    ///
+    /// The call *sequence* is asserted, not a latest value: `[10]` and `[10, 0]`
+    /// are what "the reset never arrived" and "it did" look like, and a
+    /// single-slot recorder initialised to 0 cannot tell the second from a hook
+    /// that was never called at all.
+    #[test]
+    fn resetting_a_limit_to_its_default_reaches_the_data_source() {
+        unsafe {
+            type B = crate::test_utils::MockLimitsBackend;
+            let (env, conn, stmt) = crate::test_utils::alloc_connected_env_conn_stmt::<B>();
+
+            for (attribute, capped, default) in [
+                (StatementAttribute::MaxRows, 10usize, SQL_MAX_ROWS_DEFAULT),
+                (
+                    StatementAttribute::MaxLength,
+                    4096usize,
+                    SQL_MAX_LENGTH_DEFAULT,
+                ),
+            ] {
+                for value in [capped, default] {
+                    assert_eq!(
+                        sql_set_stmt_attr_w::<B>(
+                            stmt,
+                            attribute as i32,
+                            std::ptr::without_provenance_mut::<c_void>(value),
+                            0,
+                        ),
+                        SqlReturn::SUCCESS,
+                        "{attribute:?} = {value} was refused",
+                    );
+                }
+            }
+
+            with_handle::<B, ConnectionHandle<B>, _>(conn, |c| {
+                let applied = c.connection.as_ref().expect("the helper connected");
+                assert_eq!(
+                    *applied.max_rows_calls.lock().expect("not poisoned"),
+                    vec![10, SQL_MAX_ROWS_DEFAULT],
+                    "the reset never reached Backend::set_max_rows",
+                );
+                assert_eq!(
+                    *applied.max_length_calls.lock().expect("not poisoned"),
+                    vec![4096, SQL_MAX_LENGTH_DEFAULT],
+                    "the reset never reached Backend::set_max_length",
+                );
+            });
+
+            crate::test_utils::cleanup_connected_env_conn_stmt::<B>(env, conn, stmt);
+        }
+    }
+
+    /// The third member of the family, whose reset has a second thing to do.
+    ///
+    /// Core clearing its own `core_query_timeout` is not enough when the data
+    /// source is the enforcer: `MockQueryTimeoutBackend` answers
+    /// `QueryTimeout::DataSource`, so the deadline lives at the data source and
+    /// only `Backend::set_query_timeout` can withdraw it. Asserting the recorded
+    /// value is 30 in between is what makes the final 0 proof the hook ran, rather
+    /// than proof it never did — the recorder starts at 0.
+    #[test]
+    fn withdrawing_a_query_timeout_reaches_the_data_source() {
+        unsafe {
+            type B = MockQueryTimeoutBackend;
+            let (env, conn, stmt) = crate::test_utils::alloc_connected_env_conn_stmt::<B>();
+
+            let applied_timeout = |conn: *mut c_void| {
+                with_handle::<B, ConnectionHandle<B>, _>(conn, |c| {
+                    c.connection
+                        .as_ref()
+                        .expect("the helper connected")
+                        .query_timeout
+                        .load(std::sync::atomic::Ordering::SeqCst)
+                })
+            };
+
+            for (value, expected) in [(30usize, 30usize), (SQL_QUERY_TIMEOUT_DEFAULT, 0usize)] {
+                assert_eq!(
+                    sql_set_stmt_attr_w::<B>(
+                        stmt,
+                        StatementAttribute::QueryTimeout as i32,
+                        std::ptr::without_provenance_mut::<c_void>(value),
+                        0,
+                    ),
+                    SqlReturn::SUCCESS,
+                    "SQL_ATTR_QUERY_TIMEOUT = {value} was refused",
+                );
+                assert_eq!(
+                    applied_timeout(conn),
+                    expected,
+                    "Backend::set_query_timeout was not called with {value}",
+                );
+            }
+
+            crate::test_utils::cleanup_connected_env_conn_stmt::<B>(env, conn, stmt);
         }
     }
 

@@ -1440,6 +1440,21 @@ Everything a driver has to change for the catalog rework, in one place.
   delegates enforcement to core was affected; one that answers
   `QueryTimeout::DataSource` never had the field set.
 
+- **Resetting `SQL_ATTR_MAX_ROWS`, `SQL_ATTR_MAX_LENGTH` or
+  `SQL_ATTR_QUERY_TIMEOUT` to its default now reaches the backend.** The three
+  arms that offer a value to the data source were guarded on the value not
+  being the default, so the reset fell through to the store-only catch-all and
+  `Backend::set_max_rows`, `Backend::set_max_length` and
+  `Backend::set_query_timeout` were never told. A data source told to cap a
+  result set at ten rows kept capping it while `SQLGetStmtAttr` reported no
+  limit — the spec's read-back contract, "`SQLGetStmtAttr` can be called to
+  determine the temporarily substituted value", describing a state that
+  existed only in core. The default is offered but never *substituted*: the
+  value core would substitute is the one the application asked for, so setting
+  it returns `SQL_SUCCESS` with no diagnostic, as it did before. A driver that
+  implements any of the three hooks should expect a call with `0` where it
+  previously got none.
+
 - **`ConfigDSNW` returned FALSE without saying why.** The spec makes the
   installer error buffer the function's only channel — "When **ConfigDSN**
   returns FALSE, an associated *\*pfErrorCode* value is posted to the installer
