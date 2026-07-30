@@ -1455,6 +1455,17 @@ Everything a driver has to change for the catalog rework, in one place.
   implements any of the three hooks should expect a call with `0` where it
   previously got none.
 
+- **`SQL_ATTR_ROW_NUMBER` is no longer echoed back from the application.** The
+  read-only attribute was stored verbatim by `SQLSetStmtAttr`'s catch-all and
+  returned by `SQLGetStmtAttr`, so an application that wrote `42` read `42`
+  back as the number of the current row. Nothing in core's fetch or cursor
+  code writes it. Refusing the write stays the Driver Manager's job —
+  `SQLSetStmtAttr`'s `HY092` row is `(DM)` for "the value specified for the
+  argument *Attribute* was a read-only attribute" — so core accepts the call
+  and discards the value, exactly as it already does for
+  `SQL_ATTR_IMP_ROW_DESC` and `SQL_ATTR_IMP_PARAM_DESC`. Reading the attribute
+  with a cursor open now always reports `0`.
+
 - **`ConfigDSNW` returned FALSE without saying why.** The spec makes the
   installer error buffer the function's only channel — "When **ConfigDSN**
   returns FALSE, an associated *\*pfErrorCode* value is posted to the installer

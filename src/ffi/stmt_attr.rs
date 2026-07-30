@@ -374,7 +374,15 @@ fn reset_at_data_source<B: Backend, T>(
 /// - HY090 Invalid string or buffer length: (driver-manager-handled; not
 ///   returned here).
 /// - HY092 Invalid attribute/option identifier: (driver-manager-handled; not
-///   returned here). Unknown attributes are accepted silently.
+///   returned here). The row covers two cases and both carry the marker: an
+///   identifier the driver does not recognise, and "the value specified for the
+///   argument *Attribute* was a read-only attribute". Unrecognised attributes
+///   are therefore accepted silently, and so are writes to the three read-only
+///   attributes that reach core — `SQL_ATTR_IMP_ROW_DESC`,
+///   `SQL_ATTR_IMP_PARAM_DESC` and `SQL_ATTR_ROW_NUMBER`. None of the three is
+///   stored: accepting a write is not honouring it, and a stored
+///   `SQL_ATTR_ROW_NUMBER` would be handed back by `SQLGetStmtAttr` as the
+///   number of a row nothing ever positioned on.
 /// - HY117 Connection is suspended due to unknown transaction state:
 ///   (driver-manager-handled; not returned here).
 /// - HYC00 Optional feature not implemented: returned for
@@ -604,6 +612,28 @@ pub unsafe fn sql_set_stmt_attr_w<B: Backend>(
                         "SQLSetStmtAttrW: {:?} reached the driver; HY017 is (DM), so it is \
                          accepted here",
                         attr
+                    );
+                    Ok(SqlReturn::SUCCESS)
+                }
+
+                // The third read-only attribute, on the same footing as the
+                // two implementation descriptors above: `SQLSetStmtAttr`'s
+                // HY092 row is (DM) for "the value specified for the argument
+                // Attribute was a read-only attribute", so refusing the write
+                // is the Driver Manager's job and core accepts what reaches
+                // it.
+                //
+                // Accepting is not storing. Nothing in `ffi/fetch.rs` or
+                // `ffi/cursor.rs` writes this attribute, so a stored value
+                // could only be the application's own, handed back by
+                // `SQLGetStmtAttr` as the number of a row no fetch ever
+                // positioned on. Discarding it keeps a direct-linked caller,
+                // which has no Driver Manager to refuse it, from poisoning the
+                // value.
+                Some(StatementAttribute::RowNumber) => {
+                    tracing::debug!(
+                        "SQLSetStmtAttrW: SQL_ATTR_ROW_NUMBER is read-only; HY092 is (DM), so \
+                         the write is accepted and discarded"
                     );
                     Ok(SqlReturn::SUCCESS)
                 }
@@ -1014,7 +1044,14 @@ pub unsafe fn sql_set_stmt_attr_w<B: Backend>(
 /// - 24000 Invalid cursor state: returned when `SQL_ATTR_ROW_NUMBER` is
 ///   requested and no cursor is open (`stmt.cursor_open` is `false`), which
 ///   includes a statement that is only prepared and one whose cursor
-///   `SQLEndTran` closed under `SQL_CB_CLOSE`.
+///   `SQLEndTran` closed under `SQL_CB_CLOSE`. The row's other clause — the
+///   cursor "was positioned before the start of the result set or after the end
+///   of the result set" — is deliberately answered with `0` instead, which the
+///   statement-attributes page sanctions in as many words: "If the number of
+///   the current row cannot be determined or there is no current row, the driver
+///   returns 0." Core tracks no row number at all and `SQLSetStmtAttr` discards
+///   any the application writes, so `0` is what this attribute reports whenever
+///   a cursor is open.
 /// - HY000 General error: returned for unexpected internal errors.
 /// - HY001 Memory allocation error: not returned; Rust panics on allocation
 ///   failure, which is caught by `panic_safe` and converted to `SQL_ERROR`/HY000.
@@ -2527,6 +2564,61 @@ mod tests {
                     "SQLGetStmtAttr({attr:?}) does not report a value"
                 );
             }
+            cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
+    /// `SQL_ATTR_ROW_NUMBER` is read-only, and core writes it nowhere: no fetch
+    /// and no cursor operation touches it. So a value that comes back out of
+    /// `SQLGetStmtAttr` can only be one the application put in, reported to it as
+    /// the number of a row nothing ever positioned on.
+    ///
+    /// Refusing the *set* stays the Driver Manager's job — `SQLSetStmtAttr`'s
+    /// `HY092` row is `(DM)` for "the value specified for the argument Attribute
+    /// was a read-only attribute" — so the call is accepted, exactly as
+    /// `SQL_ATTR_IMP_ROW_DESC` and `SQL_ATTR_IMP_PARAM_DESC` are, and exactly as
+    /// they are it is discarded.
+    #[test]
+    fn a_written_row_number_is_not_echoed_back() {
+        unsafe {
+            use crate::handles::StatementData;
+
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+
+            assert_eq!(
+                sql_set_stmt_attr_w::<MockBackend>(
+                    stmt,
+                    StatementAttribute::RowNumber as i32,
+                    std::ptr::without_provenance_mut::<c_void>(42),
+                    0,
+                ),
+                SqlReturn::SUCCESS,
+                "HY092 is (DM); a write that reaches core is accepted, not refused",
+            );
+
+            // Reading this attribute is 24000 while no cursor is open, so open one.
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+                handle.set_result_set(StatementData::Synthetic(
+                    crate::test_utils::synthetic_result_set(vec![]),
+                ));
+            });
+
+            let mut val: usize = usize::MAX;
+            assert_eq!(
+                sql_get_stmt_attr_w::<MockBackend>(
+                    stmt,
+                    StatementAttribute::RowNumber as i32,
+                    std::ptr::from_mut(&mut val).cast(),
+                    0,
+                    std::ptr::null_mut(),
+                ),
+                SqlReturn::SUCCESS,
+            );
+            assert_eq!(
+                val, 0,
+                "the driver reported a row number the application wrote, not one it fetched",
+            );
+
             cleanup_env_conn_stmt(env, conn, stmt);
         }
     }
