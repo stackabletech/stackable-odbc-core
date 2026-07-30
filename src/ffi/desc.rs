@@ -128,8 +128,10 @@ fn resolve_target<'s, B: Backend>(
 /// - `01004` String data, right truncated — returned when a character field does not fit
 ///   `value_ptr`
 /// - `07009` Invalid descriptor index — returned for a negative `record_number` on an ARD or
-///   an APD. Read the row's `(DM)` markers clause by clause: they precede only the bookmark
-///   clause, so the negative-`RecNumber` clause is the driver's
+///   an APD, and for a record field at `record_number` 0 on an IPD. Read the row's `(DM)`
+///   markers clause by clause: they precede only the bookmark clause, so both of these are
+///   the driver's. The IPD clause is not the bookmark record — bookmarks are an ARD and IRD
+///   concept, and record 0 on an IPD addresses no parameter
 /// - `08S01` Communication link failure — (not returned here; this function performs no I/O)
 /// - `HY000` General error — returned only for an internal panic caught by `panic_safe`
 /// - `HY001` Memory allocation error — (not returned here; nothing is allocated)
@@ -292,6 +294,21 @@ fn read_desc_field<B: Backend>(
         return read_ird_field(target, record_number, field).map(Some);
     }
 
+    // Spec 07009: "The FieldIdentifier argument was a record field, the
+    // RecNumber argument was 0, and the DescriptorHandle argument was an IPD
+    // handle." Unmarked, so it is the driver's. Placed *after* the header and
+    // IRD routing because the clause says "a record field" and a header field
+    // ignores `RecNumber` altogether.
+    //
+    // Not the bookmark record, which is an ARD and IRD concept: an IPD has no
+    // bookmark, so record 0 there addresses no parameter.
+    if record_number == 0 && role == DescriptorRole::Ipd {
+        return Err(OdbcError::general(
+            "Record number 0 does not address a parameter on an IPD",
+            SqlState::invalid_descriptor_index(),
+        ));
+    }
+
     let record_number = u16::try_from(record_number).unwrap_or(0);
     // Spec, Returns: `SQL_NO_DATA` when `RecNumber` is greater than
     // `SQL_DESC_COUNT`. Derived from the map, as everywhere.
@@ -411,8 +428,9 @@ fn read_ird_field<B: Backend>(
 ///   substitutes back to 1. It is the same value and the same substitution
 ///   `SQLSetStmtAttr(SQL_ATTR_ROW_ARRAY_SIZE)` applies, through the other door
 /// - `07009` Invalid descriptor index — returned for a negative `record_number` on an ARD or
-///   an APD. The `(DM)` markers on this row precede the `SQL_DESC_COUNT` and
-///   implicitly-allocated-APD clauses only; read them clause by clause
+///   an APD, and for a record field at `record_number` 0 on an IPD. The `(DM)` markers on
+///   this row precede the `SQL_DESC_COUNT` and implicitly-allocated-APD clauses only; read
+///   them clause by clause
 /// - `08S01` Communication link failure — (not returned here; this function performs no I/O)
 /// - `22001` String data, right truncated — (not returned here; `SQL_DESC_NAME` is stored as
 ///   given, and core imposes no length limit of its own on it)
@@ -551,6 +569,15 @@ unsafe fn write_desc_field<B: Backend>(
     }
     if let Some(attr) = header_attribute(role, field) {
         return Ok(write_header_field(target, field, attr, value_ptr as usize));
+    }
+
+    // Spec 07009, as in the read direction: a record field, `RecNumber` of 0,
+    // and an IPD. After the header routing for the same reason.
+    if record_number == 0 && role == DescriptorRole::Ipd {
+        return Err(OdbcError::general(
+            "Record number 0 does not address a parameter on an IPD",
+            SqlState::invalid_descriptor_index(),
+        ));
     }
 
     // A record field. `or_default` is what makes a record exist as soon as any
@@ -924,8 +951,10 @@ unsafe fn write_small_int(ptr: *mut i16, value: isize) {
 /// Diagnostics from the ODBC spec Diagnostics table:
 ///
 /// - `01000` General warning — (not returned here; core raises no general warning)
-/// - `07009` Invalid descriptor index — returned for a negative `record_number` on an ARD or
-///   an APD. No clause of this row is annotated `(DM)`
+/// - `07009` Invalid descriptor index — returned for a negative `record_number` on **any**
+///   role, and for `record_number` 0 on an IPD. No clause of this row is annotated `(DM)`,
+///   and the negative clause names no descriptor role — so it is reported ahead of the
+///   `HY016` an IRD would otherwise get
 /// - `08S01` Communication link failure — (not returned here; this function performs no I/O)
 /// - `HY000` General error — returned only for an internal panic caught by `panic_safe`
 /// - `HY001` Memory allocation error — (not returned here; nothing is allocated)
@@ -981,11 +1010,29 @@ pub unsafe fn sql_set_desc_rec<B: Backend>(
             // Spec: clear diagnostics at the start of each ODBC call.
             target.desc.diagnostics.clear();
 
-            // Spec 07009, as in the other three. No clause of this function's
-            // row is annotated `(DM)`.
-            if record_number < 0 && matches!(role, DescriptorRole::Ard | DescriptorRole::Apd) {
+            // Spec 07009, both clauses, neither annotated `(DM)`: "The
+            // RecNumber argument was set to 0, and the DescriptorHandle
+            // referred to an IPD handle. The RecNumber argument was less than
+            // 0."
+            //
+            // The negative clause names no descriptor role, unlike
+            // `SQLGetDescField`'s, so it is checked for all four — including an
+            // IRD, ahead of that role's `HY016`. The argument is wrong whichever
+            // descriptor it names, and "this index does not exist" is the more
+            // specific of the two answers.
+            //
+            // The record-0 clause is not the bookmark record: bookmarks are an
+            // ARD and IRD concept, and an IPD has none, so record 0 there is an
+            // index no parameter number can address.
+            if record_number < 0 {
                 return Err(OdbcError::general(
                     format!("Record number {record_number} is negative"),
+                    SqlState::invalid_descriptor_index(),
+                ));
+            }
+            if record_number == 0 && role == DescriptorRole::Ipd {
+                return Err(OdbcError::general(
+                    "Record number 0 does not address a parameter on an IPD",
                     SqlState::invalid_descriptor_index(),
                 ));
             }
@@ -1568,6 +1615,162 @@ mod tests {
 
             assert_eq!(ret, SqlReturn::ERROR);
             assert_eq!(first_sqlstate(ard), sql_state::INVALID_DESCRIPTOR_INDEX);
+
+            cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
+    /// Spec 07009, `SQLSetDescRec`: "The RecNumber argument was set to 0, and
+    /// the DescriptorHandle referred to an IPD handle." No clause of that row
+    /// is annotated `(DM)`. Without the check, record 0 is created like any
+    /// other and the parameter set silently gains a record no parameter number
+    /// can address.
+    #[test]
+    fn set_desc_rec_at_record_zero_on_an_ipd_reports_07009() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            let ipd = ipd_of(stmt);
+
+            let ret = sql_set_desc_rec::<MockBackend>(
+                ipd,
+                0,
+                SqlDataType::INTEGER.0,
+                0,
+                4,
+                0,
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            );
+
+            assert_eq!(ret, SqlReturn::ERROR);
+            assert_eq!(first_sqlstate(ipd), sql_state::INVALID_DESCRIPTOR_INDEX);
+
+            cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
+    /// The second clause of the same row: "The RecNumber argument was less than
+    /// 0." It names no descriptor role, unlike `SQLGetDescField`'s, so it holds
+    /// for an IPD too — where a negative number previously wrapped to record 0
+    /// through `u16::try_from(...).unwrap_or(0)` and wrote a record the caller
+    /// never asked for.
+    #[test]
+    fn set_desc_rec_with_a_negative_record_number_on_an_ipd_reports_07009() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            let ipd = ipd_of(stmt);
+
+            let ret = sql_set_desc_rec::<MockBackend>(
+                ipd,
+                -1,
+                SqlDataType::INTEGER.0,
+                0,
+                4,
+                0,
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            );
+
+            assert_eq!(ret, SqlReturn::ERROR);
+            assert_eq!(first_sqlstate(ipd), sql_state::INVALID_DESCRIPTOR_INDEX);
+
+            cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
+    /// The negative clause names no role, so it reaches an IRD as well, and it
+    /// is reported ahead of `HY016`: the argument is wrong whichever descriptor
+    /// it names, and "this index does not exist" is the more specific of the
+    /// two answers.
+    #[test]
+    fn set_desc_rec_with_a_negative_record_number_on_an_ird_reports_07009() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            let ird = ird_of(stmt);
+
+            let ret = sql_set_desc_rec::<MockBackend>(
+                ird,
+                -1,
+                SqlDataType::INTEGER.0,
+                0,
+                4,
+                0,
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            );
+
+            assert_eq!(ret, SqlReturn::ERROR);
+            assert_eq!(first_sqlstate(ird), sql_state::INVALID_DESCRIPTOR_INDEX);
+
+            cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
+    /// Spec 07009, `SQLGetDescField` and `SQLSetDescField` alike: "The
+    /// FieldIdentifier argument was a record field, the RecNumber argument was
+    /// 0, and the DescriptorHandle argument was an IPD handle." Unmarked on
+    /// both pages, so it is the driver's.
+    #[test]
+    fn a_record_field_at_record_zero_on_an_ipd_reports_07009_both_ways() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            let ipd = ipd_of(stmt);
+
+            let mut value: isize = 0;
+            let ret = sql_get_desc_field_w::<MockBackend>(
+                ipd,
+                0,
+                Desc::ConciseType as i16,
+                std::ptr::from_mut(&mut value).cast::<c_void>(),
+                0,
+                std::ptr::null_mut(),
+            );
+            assert_eq!(ret, SqlReturn::ERROR, "the read direction");
+            assert_eq!(first_sqlstate(ipd), sql_state::INVALID_DESCRIPTOR_INDEX);
+
+            let ret = sql_set_desc_field_w::<MockBackend>(
+                ipd,
+                0,
+                Desc::ConciseType as i16,
+                std::ptr::without_provenance_mut(SqlDataType::INTEGER.0 as usize),
+                0,
+            );
+            assert_eq!(ret, SqlReturn::ERROR, "the write direction");
+            assert_eq!(first_sqlstate(ipd), sql_state::INVALID_DESCRIPTOR_INDEX);
+
+            cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
+    /// The clause says "a **record** field", and a header field ignores
+    /// `RecNumber` entirely — the page: `SQLGetDescField` "does not retrieve
+    /// the values for header fields" by record. So record 0 must still answer
+    /// `SQL_DESC_COUNT` on an IPD, and a check placed ahead of the header
+    /// routing would break it.
+    #[test]
+    fn a_header_field_at_record_zero_on_an_ipd_still_answers() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            let ipd = ipd_of(stmt);
+
+            let mut value: isize = -1;
+            let ret = sql_get_desc_field_w::<MockBackend>(
+                ipd,
+                0,
+                Desc::Count as i16,
+                std::ptr::from_mut(&mut value).cast::<c_void>(),
+                0,
+                std::ptr::null_mut(),
+            );
+
+            assert_eq!(ret, SqlReturn::SUCCESS);
+            assert_eq!(value, 0, "no parameters are bound");
 
             cleanup_env_conn_stmt(env, conn, stmt);
         }

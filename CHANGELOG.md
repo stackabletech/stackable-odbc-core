@@ -2507,4 +2507,18 @@ Everything a driver has to change for the catalog rework, in one place.
   `SQLGetStmtAttr` alike. The two-phase locking is unchanged: phase one still
   holds only the source's group.
 
+- **`07009` was missing for an IPD record 0 and for a negative record number on
+  an IPD or IRD.** `SQLSetDescRec`'s row has no `(DM)` marker on either clause —
+  "The RecNumber argument was set to 0, and the DescriptorHandle referred to an
+  IPD handle. The RecNumber argument was less than 0" — and its negative clause
+  names no descriptor role, so it now holds for all four and is reported ahead
+  of an IRD's `HY016`. A negative record number on an IPD previously wrapped to
+  record 0 and wrote a record the caller never asked for.
+  `SQLGetDescFieldW` and `SQLSetDescFieldW` gained the corresponding clause,
+  "The FieldIdentifier argument was a record field, the RecNumber argument was
+  0, and the DescriptorHandle argument was an IPD handle" — a *record* field
+  only, so `SQL_DESC_COUNT` at record 0 still answers. This is unrelated to
+  bookmark records, which remain out of scope: bookmarks are an ARD and IRD
+  concept and an IPD has none.
+
 [Unreleased]: https://github.com/stackabletech/stackable-odbc-core/commits/HEAD
