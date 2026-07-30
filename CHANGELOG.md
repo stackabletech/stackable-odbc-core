@@ -1423,6 +1423,28 @@ Everything a driver has to change for the catalog rework, in one place.
 
 ### Fixed
 
+- **`ConfigDSNW` returned FALSE without saying why.** The spec makes the
+  installer error buffer the function's only channel — "When **ConfigDSN**
+  returns FALSE, an associated *\*pfErrorCode* value is posted to the installer
+  error buffer by a call to **SQLPostInstallerError**" — and core never called
+  `SQLPostInstallerError` at all, so the Windows ODBC Administrator showed a
+  failed DSN creation with no cause. Each of its own failure paths now posts:
+  `ODBC_ERROR_INVALID_NAME` for a null driver, `ODBC_ERROR_INVALID_KEYWORD_VALUE`
+  for a missing `DSN` keyword or a name `SQLValidDSN` rejects, and
+  `ODBC_ERROR_INVALID_REQUEST_TYPE` for an unknown request. A failure *inside*
+  `odbccp32` is left to it, which has already posted a more specific cause.
+
+  It also now calls `SQLValidDSN`, which the spec says `ConfigDSN` "should" call
+  to check the name's length and characters.
+
+- **`ConfigDSNW` had no panic guard.** It is an `extern "system"` boundary, so an
+  unwind across it reached the ODBC Administrator — a C++ process that cannot
+  receive a Rust panic. It now runs inside `panic_safe_unlocked`, which is also
+  what `SQLCancel` uses. `panic_safe`, which every `SQL*` entry point uses, is
+  inapplicable here rather than merely unnecessary: it needs a handle token to
+  lock a group by and a diagnostic queue to push through, and `ConfigDSN` is
+  handed no ODBC handle at all. A caught panic posts `ODBC_ERROR_REQUEST_FAILED`.
+
 - **Unsigned numeric parameters no longer wrap negative.** `SQL_C_UBIGINT` was
   read as a `u64` and cast to `i64`, so every value above `i64::MAX` reached the
   data source as a negative number; `SQL_C_USHORT` and `SQL_C_UTINYINT` had the

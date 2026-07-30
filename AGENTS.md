@@ -38,6 +38,21 @@ framework itself and, where relevant, how a downstream driver crate consumes it.
   the unixODBC dev libraries installed (`unixodbc-dev` on Debian/Ubuntu). No DSN
   or running Driver Manager is required. Miri is the exception — it interprets
   rather than links, so it needs no system libraries.
+- **`#[cfg(windows)]` code is compilable from Linux, and should be compiled
+  before it is pushed.** A plain `cargo check` does not look at it at all, so
+  `ffi/setup.rs` and `ConfigDSNW` can be edited into a state that builds and
+  tests clean locally and fails on the Windows runner:
+
+  ```bash
+  rustup target add x86_64-pc-windows-msvc          # once
+  cargo clippy --target x86_64-pc-windows-msvc --all-targets -- -D warnings
+  ```
+
+  This links nothing and needs no Windows host — `raw-dylib` resolves
+  `odbccp32` at link time, which a `check`/`clippy` run never reaches. It is not
+  a substitute for *running* the code, which only a Windows host with a Driver
+  Manager can do; it closes the compile-and-lint half, which is where the
+  regressions actually are.
 
 ### Changelog
 
@@ -1147,11 +1162,25 @@ ODBC Application (e.g. isql)
   the FFI boundary. Nothing may treat a `SQLHANDLE` as an address, or validate
   one by reading through it. See "Concurrency: the lock discipline" above for
   `group`, `parent` and `cancel`.
-- **`panic_safe`**: Wraps every FFI function except `SQLCancel` (which uses
-  `panic_safe_unlocked`, see the same section). Locks the target handle's
-  group, builds the `HandleScope` the closure operates through, and uses
-  `AssertUnwindSafe` + `catch_unwind`. On error, pushes to the handle's
+- **`panic_safe`**: Wraps every FFI function except the two below. Locks the
+  target handle's group, builds the `HandleScope` the closure operates through,
+  and uses `AssertUnwindSafe` + `catch_unwind`. On error, pushes to the handle's
   diagnostic queue and returns the appropriate `SqlReturn`.
+
+  **The two exceptions both use `panic_safe_unlocked`, and both because they have
+  no handle to work through** — which is the thing `panic_safe` needs, not merely
+  a convenience it offers. `SQLCancel` must not touch the diagnostic state
+  `panic_safe` clears and pushes, per the spec's carve-out for cancelling a call
+  running on another thread. `ConfigDSNW` is handed no ODBC handle at all: its
+  arguments are a window handle, a request code and two strings, so there is no
+  token to lock a group by and no queue to push to. It is still an
+  `extern "system"` boundary, and an unwind across it lands in the ODBC
+  Administrator.
+
+  **Every `extern "system"` export needs one of the two.** Neither is optional
+  for a new entry point, and "it takes no handle" is a reason to reach for
+  `panic_safe_unlocked`, not a reason to skip the guard — `ConfigDSNW` had no
+  guard at all until 2026-07-30 on exactly that reasoning.
 - **W-only for string-bearing functions**: every ODBC function that takes or
   returns a string is exported only in its Wide (`W`-suffix) form; the Driver
   Manager translates an ANSI application's calls into those. Functions with no

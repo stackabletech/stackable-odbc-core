@@ -467,38 +467,43 @@ pub unsafe fn sql_cancel<B: Backend>(statement_handle: *mut c_void) -> SqlReturn
     // returns — the same reasoning `panic_safe`'s own `_guard` relies on.
     let guard = group.try_lock();
 
-    let ret = panic_safe_unlocked(|| match &guard {
-        // Another thread holds the connection: signal only, per spec.
-        None => match signal_cancel::<B>(&token) {
-            Ok(()) => SqlReturn::SUCCESS,
-            Err(e) => {
-                tracing::warn!("SQLCancel: backend cancel failed while connection busy: {e}");
-                SqlReturn::ERROR
-            }
-        },
-        // Nobody else is here: the data-at-execution / no-processing case.
-        Some(guard) => {
-            let mut scope = HandleScope::new(Some(group.clone()), Some(guard));
-            match scope.get::<StatementHandle<B>>(statement_handle) {
-                Ok(stmt) => {
-                    stmt.diagnostics.clear();
-                    // Spec: after cancelling a statement that needed data,
-                    // the application may call SQLExecute/SQLExecDirect
-                    // again, so any pending data-at-execution state must be
-                    // discarded along with it.
-                    stmt.data_at_exec = None;
-                    match signal_cancel::<B>(&token) {
-                        Ok(()) => SqlReturn::SUCCESS,
-                        Err(e) => {
-                            stmt.diagnostics.push(&e);
-                            SqlReturn::ERROR
+    let ret = panic_safe_unlocked(
+        || match &guard {
+            // Another thread holds the connection: signal only, per spec.
+            None => match signal_cancel::<B>(&token) {
+                Ok(()) => SqlReturn::SUCCESS,
+                Err(e) => {
+                    tracing::warn!("SQLCancel: backend cancel failed while connection busy: {e}");
+                    SqlReturn::ERROR
+                }
+            },
+            // Nobody else is here: the data-at-execution / no-processing case.
+            Some(guard) => {
+                let mut scope = HandleScope::new(Some(group.clone()), Some(guard));
+                match scope.get::<StatementHandle<B>>(statement_handle) {
+                    Ok(stmt) => {
+                        stmt.diagnostics.clear();
+                        // Spec: after cancelling a statement that needed data,
+                        // the application may call SQLExecute/SQLExecDirect
+                        // again, so any pending data-at-execution state must be
+                        // discarded along with it.
+                        stmt.data_at_exec = None;
+                        match signal_cancel::<B>(&token) {
+                            Ok(()) => SqlReturn::SUCCESS,
+                            Err(e) => {
+                                stmt.diagnostics.push(&e);
+                                SqlReturn::ERROR
+                            }
                         }
                     }
+                    Err(_) => SqlReturn::INVALID_HANDLE,
                 }
-                Err(_) => SqlReturn::INVALID_HANDLE,
             }
-        }
-    });
+        },
+        // A bare SQL_ERROR and no diagnostic record: there is no scope to push
+        // one through, for the reason `panic_safe_unlocked`'s doc gives.
+        || SqlReturn::ERROR,
+    );
 
     tracing::debug!("SQLCancel -> {:?}", ret);
     ret

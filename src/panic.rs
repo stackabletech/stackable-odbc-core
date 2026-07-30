@@ -72,11 +72,22 @@ where
 /// guarantee stays a single implementation rather than growing a second copy
 /// with its own `catch_unwind`.
 ///
-/// `sql_cancel` is its only caller. Every other FFI entry point goes through
-/// [`panic_safe`], which additionally clears and pushes diagnostics under a
-/// held group lock — state `sql_cancel`'s cross-thread path must not touch,
-/// per the spec's own carve-out for cancelling a function running on another
-/// thread.
+/// Two callers, and both are here because they have no handle to work through:
+///
+/// - `sql_cancel`, whose cross-thread path must not touch the diagnostic state
+///   [`panic_safe`] clears and pushes under a held group lock, per the spec's
+///   own carve-out for cancelling a function running on another thread.
+/// - `config_dsn_w`, the `ConfigDSNW` installer entry point, which takes no
+///   ODBC handle at all — its arguments are a window handle, a request code and
+///   two strings. There is no token to lock a group by and no diagnostic queue
+///   to push to, so [`panic_safe`] is not merely unnecessary there but
+///   inapplicable. It is still an `extern "system"` boundary, and an unwind
+///   across it lands in the ODBC Administrator.
+///
+/// Generic over the return type for that second caller: `ConfigDSN` returns a
+/// `BOOL`, not a `SqlReturn`. `on_panic` is a closure rather than a value so a
+/// caller with its own error channel can use it — `config_dsn_w` posts an
+/// installer error there, which is the only way its FALSE says anything.
 ///
 /// Unlike `panic_safe`, a caught panic here pushes **no** diagnostic record —
 /// it returns a bare `SQL_ERROR` and nothing else. `panic_safe` can push
@@ -87,13 +98,14 @@ where
 /// time `catch_unwind` returns control here. A panicking `cancel` is
 /// therefore reported to the application only as `SQL_ERROR`, with no
 /// SQLSTATE a later `SQLGetDiagRec` could read back.
-pub(crate) fn panic_safe_unlocked<F>(f: F) -> SqlReturn
+pub(crate) fn panic_safe_unlocked<T, F, P>(f: F, on_panic: P) -> T
 where
-    F: FnOnce() -> SqlReturn,
+    F: FnOnce() -> T,
+    P: FnOnce() -> T,
 {
     match std::panic::catch_unwind(AssertUnwindSafe(f)) {
         Ok(ret) => ret,
-        Err(_panic) => SqlReturn::ERROR,
+        Err(_panic) => on_panic(),
     }
 }
 

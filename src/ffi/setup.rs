@@ -96,6 +96,12 @@ unsafe extern "system" {
         lpszString: *const u16,
         lpszFilename: *const u16,
     ) -> i32;
+    /// Posts an installer error, which the caller reads back with
+    /// `SQLInstallerError`. This is `ConfigDSN`'s only way to say *why* it
+    /// failed: the function returns a bare `BOOL`.
+    unsafe fn SQLPostInstallerErrorW(dwErrorCode: u32, lpszErrMsg: *const u16) -> i16;
+    /// Validates a data source name's length and characters (Unicode variant).
+    unsafe fn SQLValidDSNW(lpszDSN: *const u16) -> i32;
 }
 
 #[cfg(windows)]
@@ -104,6 +110,42 @@ const ODBC_ADD_DSN: u16 = 1;
 const ODBC_CONFIG_DSN: u16 = 2;
 #[cfg(windows)]
 const ODBC_REMOVE_DSN: u16 = 3;
+
+// `SQLInstallerError` codes, from `odbcinst.h`. Only the ones `ConfigDSN`'s own
+// diagnostics table lists are defined here; the header carries eighteen more
+// that belong to other installer entry points.
+/// `ODBC_ERROR_INVALID_REQUEST_TYPE` (5) — `fRequest` was not one of
+/// `ODBC_ADD_DSN`, `ODBC_CONFIG_DSN`, `ODBC_REMOVE_DSN`.
+#[cfg(windows)]
+const ODBC_ERROR_INVALID_REQUEST_TYPE: u32 = 5;
+/// `ODBC_ERROR_INVALID_NAME` (7) — the `lpszDriver` argument was invalid.
+#[cfg(windows)]
+const ODBC_ERROR_INVALID_NAME: u32 = 7;
+/// `ODBC_ERROR_INVALID_KEYWORD_VALUE` (8) — `lpszAttributes` contained a syntax
+/// error.
+#[cfg(windows)]
+const ODBC_ERROR_INVALID_KEYWORD_VALUE: u32 = 8;
+/// `ODBC_ERROR_REQUEST_FAILED` (11) — the operation `fRequest` asked for could
+/// not be performed.
+#[cfg(windows)]
+const ODBC_ERROR_REQUEST_FAILED: u32 = 11;
+
+/// Post an installer error and return `ConfigDSN`'s FALSE.
+///
+/// Every `return 0` in [`config_dsn_w`] goes through here. `ConfigDSN` returns a
+/// bare `BOOL`, so a bare `0` tells the ODBC Administrator that something failed
+/// and nothing about what — the spec's Diagnostics section exists precisely to
+/// close that gap: "When **ConfigDSN** returns FALSE, an associated
+/// *\*pfErrorCode* value is posted to the installer error buffer by a call to
+/// **SQLPostInstallerError**."
+#[cfg(windows)]
+fn fail(code: u32, message: &str) -> i32 {
+    tracing::error!("ConfigDSNW: {message} (installer error {code})");
+    let msg = to_wide_null(message);
+    // SAFETY: `msg` is a null-terminated UTF-16 buffer that outlives the call.
+    unsafe { SQLPostInstallerErrorW(code, msg.as_ptr()) };
+    0
+}
 
 /// Encodes a Rust string as a null-terminated UTF-16 vector.
 #[cfg(windows)]
@@ -137,32 +179,58 @@ fn to_wide_null(s: &str) -> Vec<u16> {
 ///
 /// # Returns
 ///
-/// Returns 1 (TRUE) on success, 0 (FALSE) on failure. On failure, error details are
-/// available via `SQLInstallerError` / `SQLPostInstallerError` in `odbccp32.dll`; however
-/// this implementation delegates error reporting to the underlying `odbccp32` calls and
-/// does not call `SQLPostInstallerError` directly.
+/// Returns 1 (TRUE) on success, 0 (FALSE) on failure.
+///
+/// **Every FALSE carries a posted installer error**, either this function's or
+/// `odbccp32`'s. The spec's Diagnostics section requires it: "When **ConfigDSN**
+/// returns FALSE, an associated *\*pfErrorCode* value is posted to the installer
+/// error buffer by a call to **SQLPostInstallerError** and can be obtained by
+/// calling **SQLInstallerError**." Because the function's own return type is a
+/// bare `BOOL`, that buffer is the only channel it has, and a FALSE that leaves
+/// it empty shows the user of the ODBC Administrator a failure with no cause.
 ///
 /// # Spec compliance
 ///
-/// The ConfigDSN spec does not define ODBC SQLSTATEs. Errors are reported through the
-/// ODBC installer error mechanism (`SQLInstallerError`). The relevant installer error
-/// codes and how this implementation handles them:
+/// The ConfigDSN spec defines no ODBC SQLSTATEs; errors go through the installer
+/// mechanism instead. Every code in its diagnostics table:
 ///
-/// - **ODBC_ERROR_INVALID_HWND** — `hwndParent` was invalid. Not checked; `hwnd_parent`
-///   is ignored entirely (headless implementation).
-/// - **ODBC_ERROR_INVALID_KEYWORD_VALUE** — `lpszAttributes` contained a syntax error.
-///   This implementation returns FALSE (0) early if the `DSN` key is absent; individual
-///   attribute syntax errors are not explicitly validated beyond key=value parsing.
-/// - **ODBC_ERROR_INVALID_NAME** — `lpszDriver` was invalid or not found in the registry.
-///   Checked implicitly by `SQLWriteDSNToIniW`; a zero return causes this function to
-///   return FALSE.
-/// - **ODBC_ERROR_INVALID_REQUEST_TYPE** — `fRequest` was not a valid request code.
-///   Implemented: the `_` match arm returns FALSE (0).
-/// - **ODBC_ERROR_REQUEST_FAILED** — The requested operation could not be performed.
-///   Surfaced through the return values of `SQLWriteDSNToIniW`,
-///   `SQLWritePrivateProfileStringW`, and `SQLRemoveDSNFromIniW`.
-/// - **ODBC_ERROR_DRIVER_SPECIFIC** — Driver-specific error. Not explicitly raised by
-///   this implementation.
+/// - **ODBC_ERROR_INVALID_HWND** — not returned. `hwnd_parent` is ignored
+///   entirely: this implementation is headless and shows no dialog, so there is
+///   no window handle for it to find invalid.
+/// - **ODBC_ERROR_INVALID_KEYWORD_VALUE** — **posted** when the attribute list
+///   carries no `DSN` keyword, and when `SQLValidDSN` rejects the name the `DSN`
+///   keyword carries. The spec asks for the latter check by name: "ConfigDSN
+///   should call **SQLValidDSN** to check the length of the data source name and
+///   to verify that no invalid characters are included in the name."
+/// - **ODBC_ERROR_INVALID_NAME** — **posted** when `lpszDriver` is null. A driver
+///   name that is non-null but absent from the registry is `SQLWriteDSNToIniW`'s
+///   to detect, and it posts its own error for that.
+/// - **ODBC_ERROR_INVALID_REQUEST_TYPE** — **posted** by the `_` match arm, for
+///   an `fRequest` outside the three defined values.
+/// - **ODBC_ERROR_REQUEST_FAILED** — **posted** when a panic is caught (see
+///   below). A failure *inside* `odbccp32` is left to it: `SQLWriteDSNToIniW`,
+///   `SQLWritePrivateProfileStringW` and `SQLRemoveDSNFromIniW` each post their
+///   own error before returning zero, and overwriting it here would replace a
+///   specific cause with a generic one.
+/// - **ODBC_ERROR_DRIVER_SPECIFIC** — not returned. Core is database-independent
+///   and has no driver-specific failure to report; a driver overriding this entry
+///   point is where one would originate.
+///
+/// # Panic safety
+///
+/// The body runs inside [`panic_safe_unlocked`], because this is an
+/// `extern "system"` boundary and an unwind across it lands in the ODBC
+/// Administrator — a C++ process that cannot receive a Rust panic.
+///
+/// [`crate::panic::panic_safe`], which every `SQL*` entry point uses, is not
+/// merely unnecessary here but **inapplicable**: it takes a handle token, locks
+/// that handle's group and pushes diagnostics through the resulting scope, and
+/// `ConfigDSN` is handed no ODBC handle at all. That makes this the second of
+/// the crate's two unlocked entry points, beside `SQLCancel`.
+///
+/// A caught panic posts `ODBC_ERROR_REQUEST_FAILED` and returns FALSE, so it
+/// reaches the user as a failure with a cause rather than as an empty error
+/// buffer — the same rule as every other exit here.
 ///
 /// # Safety
 /// - `lpsz_driver` must be null or a valid null-terminated UTF-16 string.
@@ -179,8 +247,38 @@ pub unsafe fn config_dsn_w(
         f_request,
         lpsz_driver
     );
+    let ret = crate::panic::panic_safe_unlocked(
+        // SAFETY: the caller's contract on `lpsz_driver` and `lpsz_attributes`
+        // is passed straight through to the body.
+        || unsafe { config_dsn_body(f_request, lpsz_driver, lpsz_attributes) },
+        || {
+            fail(
+                ODBC_ERROR_REQUEST_FAILED,
+                "a panic was caught at the ConfigDSNW boundary; the data source \
+                 was not changed",
+            )
+        },
+    );
+    tracing::debug!("ConfigDSNW -> {}", ret);
+    ret
+}
+
+/// The body of [`config_dsn_w`], separated so the panic guard wraps every path
+/// including the argument checks.
+///
+/// # Safety
+/// Same contract as [`config_dsn_w`].
+#[cfg(windows)]
+unsafe fn config_dsn_body(
+    f_request: u16,
+    lpsz_driver: *const u16,
+    lpsz_attributes: *const u16,
+) -> i32 {
     if lpsz_driver.is_null() {
-        return 0;
+        return fail(
+            ODBC_ERROR_INVALID_NAME,
+            "the lpszDriver argument was a null pointer",
+        );
     }
 
     // SAFETY: lpsz_attributes is null or a valid double-null-terminated UTF-16
@@ -196,10 +294,29 @@ pub unsafe fn config_dsn_w(
     );
 
     let Some((_, dsn_value)) = attrs.iter().find(|(k, _)| k.eq_ignore_ascii_case("DSN")) else {
-        return 0;
+        return fail(
+            ODBC_ERROR_INVALID_KEYWORD_VALUE,
+            "the attribute list carries no DSN keyword, so there is no data source to name",
+        );
     };
 
     let dsn_w = to_wide_null(dsn_value);
+
+    // Spec: "ConfigDSN should call SQLValidDSN to check the length of the data
+    // source name and to verify that no invalid characters are included in the
+    // name." Reported as an invalid keyword *value*, since it is the DSN
+    // keyword's value that is bad and that is the code ConfigDSN's own
+    // diagnostics table offers -- odbcinst.h's ODBC_ERROR_INVALID_DSN belongs to
+    // other installer entry points and is absent from this function's table.
+    //
+    // SAFETY: dsn_w is a null-terminated UTF-16 string constructed above.
+    if unsafe { SQLValidDSNW(dsn_w.as_ptr()) } == 0 {
+        return fail(
+            ODBC_ERROR_INVALID_KEYWORD_VALUE,
+            "SQLValidDSN rejected the data source name: too long, or it contains \
+             a character the registry grammar forbids",
+        );
+    }
 
     match f_request {
         ODBC_ADD_DSN | ODBC_CONFIG_DSN => {
@@ -207,6 +324,10 @@ pub unsafe fn config_dsn_w(
             // SAFETY: dsn_w and lpsz_driver are null-terminated UTF-16 strings;
             // lpsz_driver was validated non-null above, dsn_w was constructed here.
             if unsafe { SQLWriteDSNToIniW(dsn_w.as_ptr(), lpsz_driver) } == 0 {
+                // odbccp32 has posted its own error for this one, so overwriting
+                // it would replace a specific cause with a generic one. Return
+                // FALSE and leave the buffer as the installer set it.
+                tracing::error!("ConfigDSNW: SQLWriteDSNToIniW failed");
                 return 0;
             }
             // Write each attribute under the DSN's section, excluding DSN itself
@@ -236,14 +357,90 @@ pub unsafe fn config_dsn_w(
             1
         }
         // SAFETY: dsn_w is a null-terminated UTF-16 string constructed above.
+        // Likewise: a failure here is odbccp32's, and it has already said why.
         ODBC_REMOVE_DSN => unsafe { SQLRemoveDSNFromIniW(dsn_w.as_ptr()) },
-        _ => 0,
+        _ => fail(
+            ODBC_ERROR_INVALID_REQUEST_TYPE,
+            "fRequest was not ODBC_ADD_DSN, ODBC_CONFIG_DSN or ODBC_REMOVE_DSN",
+        ),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every FALSE `config_dsn_w` returns must carry a posted installer error,
+    /// because the spec makes that buffer the function's only channel: "When
+    /// **ConfigDSN** returns FALSE, an associated *\*pfErrorCode* value is posted
+    /// to the installer error buffer by a call to **SQLPostInstallerError**." A
+    /// bare `0` shows the ODBC Administrator a failure with no cause, which is
+    /// what this function did at every one of its own exits before.
+    ///
+    /// Checked by reading the source rather than by calling the function, and
+    /// that is the point: `config_dsn_w` is `#[cfg(windows)]` and links
+    /// `odbccp32`, so **no test on Linux can execute it** and the Windows job
+    /// only compiles it. A source audit is the one guard that runs everywhere.
+    /// The crate's precedent is
+    /// `the_set_of_group_lock_acquisition_sites_is_closed`.
+    ///
+    /// The rule: inside `config_dsn_w`, a falsey return either goes through
+    /// [`fail`] or is one of the sites where `odbccp32` has already posted its
+    /// own — and those are listed here by the call that precedes them, so
+    /// adding one is a deliberate act rather than an omission.
+    #[test]
+    fn every_false_return_from_config_dsn_w_posts_an_installer_error() {
+        const ODBCCP32_POSTS_ITS_OWN: &[&str] = &[
+            // SQLWriteDSNToIniW failing: the installer has already posted a
+            // specific cause, and overwriting it would generalise it away.
+            "SQLWriteDSNToIniW",
+        ];
+
+        let source = include_str!("setup.rs");
+        // `config_dsn_body` holds every failure path; `config_dsn_w` is the panic
+        // guard around it and has no falsey exit of its own.
+        let start = source
+            .find("unsafe fn config_dsn_body(")
+            .expect("config_dsn_body is defined in this file");
+        let body = &source[start..];
+        let end = body
+            .find("\n}\n")
+            .expect("config_dsn_body has a closing brace");
+        let body = &body[..end];
+
+        // Falsey exits written as a bare literal, rather than through `fail`.
+        let bare: Vec<&str> = body
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.starts_with("//"))
+            .filter(|l| *l == "return 0;" || *l == "_ => 0," || *l == "0" || *l == "0,")
+            .collect();
+
+        assert_eq!(
+            bare.len(),
+            ODBCCP32_POSTS_ITS_OWN.len(),
+            "config_dsn_w has {} bare falsey return(s) but {} documented as \
+             odbccp32's own. A new failure path must call `fail(code, why)` so the \
+             ODBC Administrator can say what went wrong; if odbccp32 really did \
+             post the error, add its call to ODBCCP32_POSTS_ITS_OWN. Found: {bare:?}",
+            bare.len(),
+            ODBCCP32_POSTS_ITS_OWN.len(),
+        );
+
+        for call in ODBCCP32_POSTS_ITS_OWN {
+            assert!(
+                body.contains(call),
+                "{call} is listed as posting its own installer error but is no \
+                 longer called in config_dsn_w"
+            );
+        }
+
+        // And the posting path itself must still exist.
+        assert!(
+            source.contains("SQLPostInstallerErrorW(code, msg.as_ptr())"),
+            "`fail` no longer posts an installer error"
+        );
+    }
 
     #[test]
     fn normal_input() {
