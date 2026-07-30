@@ -2494,4 +2494,17 @@ Everything a driver has to change for the catalog rework, in one place.
   `SQLGetDescFieldW` is unchanged and still answers `HY091`, which is its own
   table's row.
 
+- **`SQLCopyDesc` dropped two header fields whenever an IRD or IPD was
+  involved.** `SQL_DESC_ARRAY_STATUS_PTR` and `SQL_DESC_ROWS_PROCESSED_PTR` are
+  stored on the owning statement for those two roles — they are
+  `SQL_ATTR_ROW_STATUS_PTR`, `SQL_ATTR_ROWS_FETCHED_PTR`,
+  `SQL_ATTR_PARAM_STATUS_PTR` and `SQL_ATTR_PARAMS_PROCESSED_PTR` — and the copy
+  read and wrote only the descriptor's own header map. The spec is unqualified:
+  "All fields of the descriptor, except SQL_DESC_ALLOC_TYPE ..., are copied,
+  whether or not the field is defined for the destination descriptor." Both are
+  now snapshotted from the source's statement and routed to the target's, so a
+  copy onto an IPD is readable through `SQLGetDescField` and through
+  `SQLGetStmtAttr` alike. The two-phase locking is unchanged: phase one still
+  holds only the source's group.
+
 [Unreleased]: https://github.com/stackabletech/stackable-odbc-core/commits/HEAD

@@ -467,14 +467,62 @@ impl<'a> HandleScope<'a> {
         &mut self,
         token: *mut c_void,
     ) -> Result<DescriptorSnapshot, OdbcError> {
-        if self.descriptor(token)?.role == DescriptorRole::Ird {
-            return self.snapshot_ird::<B>(token);
+        let role = self.descriptor(token)?.role;
+        let mut snapshot = if role == DescriptorRole::Ird {
+            self.snapshot_ird::<B>(token)?
+        } else {
+            let desc = self.descriptor(token)?;
+            DescriptorSnapshot {
+                records: desc.records.clone(),
+                attrs: desc.attrs.clone(),
+            }
+        };
+        self.merge_statement_header_fields::<B>(token, role, &mut snapshot.attrs)?;
+        Ok(snapshot)
+    }
+
+    /// Fold the two header fields an IRD or IPD keeps on its owning
+    /// **statement** into a snapshot's `attrs`.
+    ///
+    /// `SQL_DESC_ARRAY_STATUS_PTR` and `SQL_DESC_ROWS_PROCESSED_PTR` are
+    /// `SQL_ATTR_ROW_STATUS_PTR` / `SQL_ATTR_ROWS_FETCHED_PTR` on an IRD and
+    /// `SQL_ATTR_PARAM_STATUS_PTR` / `SQL_ATTR_PARAMS_PROCESSED_PTR` on an IPD,
+    /// and those four deliberately stay in [`StatementHandle::attrs`] rather
+    /// than on a descriptor header — see [`HeaderOwner`]. A snapshot built from
+    /// `Descriptor::attrs` alone therefore drops them, and `SQLCopyDesc` is
+    /// explicit that it must not: "All fields of the descriptor, except
+    /// SQL_DESC_ALLOC_TYPE ..., are copied, whether or not the field is defined
+    /// for the destination descriptor."
+    ///
+    /// Keyed by the `SQL_DESC_*` field, as [`Descriptor::attrs`] is, so the
+    /// target side routes them by **its own** role rather than by the source's
+    /// — which is what lets an IRD's status pointer land on an APD's header and
+    /// an ARD's on an IPD's statement.
+    ///
+    /// No extra lock: a descriptor and its statement always share one group,
+    /// and the caller already holds it.
+    fn merge_statement_header_fields<B: Backend>(
+        &mut self,
+        token: *mut c_void,
+        role: DescriptorRole,
+        attrs: &mut std::collections::HashMap<u16, usize>,
+    ) -> Result<(), OdbcError> {
+        if !matches!(role, DescriptorRole::Ird | DescriptorRole::Ipd) {
+            return Ok(());
         }
-        let desc = self.descriptor(token)?;
-        Ok(DescriptorSnapshot {
-            records: desc.records.clone(),
-            attrs: desc.attrs.clone(),
-        })
+        let Some(stmt_token) = self.descriptor_stmt(token) else {
+            return Ok(());
+        };
+        let stmt: &mut StatementHandle<B> = self.get(stmt_token)?;
+        for field in [Desc::ArrayStatusPtr, Desc::RowsProcessedPtr] {
+            let Some(attr) = crate::descriptor::header_attribute(role, field) else {
+                continue;
+            };
+            if let Some(value) = stmt.plain_attr_get(attr as i32) {
+                attrs.insert(field as u16, value);
+            }
+        }
+        Ok(())
     }
 
     /// [`Self::snapshot_descriptor`] for an IRD, whose records are computed

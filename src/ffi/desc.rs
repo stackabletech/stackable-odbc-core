@@ -1167,8 +1167,8 @@ pub unsafe fn sql_copy_desc<B: Backend>(
     // of `TargetDescHandle` — including `HY007`, which phase one decided.
     let ret = unsafe {
         panic_safe::<B, _>(target_desc_handle, |scope| {
-            let target = scope.descriptor(target_desc_handle)?;
-            target.diagnostics.clear();
+            let mut target = resolve_target::<B>(scope, target_desc_handle)?;
+            target.desc.diagnostics.clear();
             let target_role = target.role;
 
             // Spec HY016: "TargetDescHandle cannot be set to a handle to an IRD."
@@ -1181,7 +1181,7 @@ pub unsafe fn sql_copy_desc<B: Backend>(
                 ));
             }
 
-            let snapshot = snapshot?;
+            let mut snapshot = snapshot?;
 
             // Spec: "When the SQL_DESC_DATA_PTR field is copied, a consistency
             // check is performed on the target descriptor." Run against the
@@ -1193,17 +1193,41 @@ pub unsafe fn sql_copy_desc<B: Backend>(
                 }
             }
 
+            // The header fields this role keeps on its owning statement rather
+            // than in its own header — `SQL_ATTR_PARAM_STATUS_PTR` and
+            // `SQL_ATTR_PARAMS_PROCESSED_PTR` for an IPD target. Written where
+            // this role *reads* them, or the copy would land in a map nothing
+            // consults and the spec's "all fields ... are copied" would hold
+            // only for the roles whose header lives on the descriptor.
+            for field in [Desc::ArrayStatusPtr, Desc::RowsProcessedPtr] {
+                let Some(attr) = header_attribute(target_role, field) else {
+                    continue;
+                };
+                // `Some` here means the field is on the descriptor's own header
+                // after all — the ARD and APD pairs — which the wholesale
+                // assignment below already carries.
+                if HeaderOwner::of(Some(attr)).is_some() {
+                    continue;
+                }
+                let Some(value) = snapshot.attrs.remove(&(field as u16)) else {
+                    continue;
+                };
+                let Some(stmt) = target.stmt.as_deref_mut() else {
+                    continue;
+                };
+                stmt.plain_attr_set(attr as i32, value);
+            }
+
             // Spec: "All fields of the descriptor, except SQL_DESC_ALLOC_TYPE
             // ..., are copied, whether or not the field is defined for the
             // destination descriptor." So this is a wholesale replace rather than
             // a field-by-field validated set — which is also why HY091 cannot
             // arise here and HY092 is not core's.
-            let target = scope.descriptor(target_desc_handle)?;
-            target.records = snapshot.records;
-            target.attrs = snapshot.attrs;
+            target.desc.records = snapshot.records;
+            target.desc.attrs = snapshot.attrs;
             tracing::debug!(
                 "SQLCopyDesc: copied {} record(s) onto the {:?}",
-                target.records.len(),
+                target.desc.records.len(),
                 target_role
             );
             Ok(SqlReturn::SUCCESS)
@@ -2670,6 +2694,147 @@ mod tests {
         }
     }
 
+    /// An IRD keeps `SQL_DESC_ARRAY_STATUS_PTR` on its owning statement, as
+    /// `SQL_ATTR_ROW_STATUS_PTR`, rather than in its own header. A snapshot
+    /// built from the descriptor's own map alone drops it, and the spec forbids
+    /// that: "All fields of the descriptor, except SQL_DESC_ALLOC_TYPE ..., are
+    /// copied, whether or not the field is defined for the destination
+    /// descriptor."
+    ///
+    /// `MockTypeInfoBackend` and `SQLGetTypeInfo` because the source IRD has to
+    /// be *populated*: an unpopulated one is `HY007` and the copy would fail
+    /// before reaching anything this test is about.
+    #[test]
+    fn copy_desc_carries_the_irds_statement_held_header_fields() {
+        unsafe {
+            let (env, conn, stmt_a) =
+                crate::test_utils::alloc_connected_env_conn_stmt::<MockTypeInfoBackend>();
+            let mut stmt_b: *mut c_void = std::ptr::null_mut();
+            assert_eq!(
+                crate::ffi::handle::sql_alloc_handle::<MockTypeInfoBackend>(
+                    HandleType::Stmt as i16,
+                    conn,
+                    &mut stmt_b
+                ),
+                SqlReturn::SUCCESS
+            );
+
+            assert_eq!(
+                crate::ffi::info::sql_get_type_info::<MockTypeInfoBackend>(
+                    stmt_a,
+                    crate::types::SqlDataType::UNKNOWN_TYPE.0,
+                ),
+                SqlReturn::SUCCESS,
+                "precondition: the IRD is populated"
+            );
+
+            let mut row_status: u16 = 0;
+            let status_ptr = std::ptr::from_mut(&mut row_status).cast::<c_void>();
+            assert_eq!(
+                crate::ffi::stmt_attr::sql_set_stmt_attr_w::<MockTypeInfoBackend>(
+                    stmt_a,
+                    StatementAttribute::RowStatusPtr as i32,
+                    status_ptr,
+                    0,
+                ),
+                SqlReturn::SUCCESS
+            );
+
+            let source =
+                desc_token_of::<MockTypeInfoBackend>(stmt_a, StatementAttribute::ImpRowDesc);
+            let target =
+                desc_token_of::<MockTypeInfoBackend>(stmt_b, StatementAttribute::AppParamDesc);
+            assert_eq!(
+                sql_copy_desc::<MockTypeInfoBackend>(source, target),
+                SqlReturn::SUCCESS
+            );
+
+            assert_eq!(
+                read_numeric_of::<MockTypeInfoBackend>(target, 0, Desc::ArrayStatusPtr),
+                status_ptr as isize,
+                "SQL_DESC_ARRAY_STATUS_PTR was not carried off the IRD"
+            );
+
+            let _ = crate::ffi::handle::sql_free_handle::<MockTypeInfoBackend>(
+                HandleType::Stmt as i16,
+                stmt_b,
+            );
+            crate::test_utils::cleanup_connected_env_conn_stmt::<MockTypeInfoBackend>(
+                env, conn, stmt_a,
+            );
+        }
+    }
+
+    /// The other direction: an IPD **target**. `SQL_DESC_ARRAY_STATUS_PTR` is
+    /// `SQL_ATTR_PARAM_STATUS_PTR` there and lives on the statement, so a copy
+    /// that wrote it into the descriptor's own map would land it where nothing
+    /// reads it — the value would be silently unreadable through either door.
+    #[test]
+    fn copy_desc_routes_the_ipds_statement_held_header_fields() {
+        unsafe {
+            let (env, conn, stmt_a) = alloc_env_conn_stmt();
+            let mut stmt_b: *mut c_void = std::ptr::null_mut();
+            assert_eq!(
+                crate::ffi::handle::sql_alloc_handle::<MockBackend>(
+                    HandleType::Stmt as i16,
+                    conn,
+                    &mut stmt_b
+                ),
+                SqlReturn::SUCCESS
+            );
+
+            // On an ARD this attribute *is* `SQL_DESC_ARRAY_STATUS_PTR`, stored
+            // on the descriptor's own header — so the source side needs no fix
+            // and only the target's routing is under test here.
+            let mut row_operation: u16 = 0;
+            let operation_ptr = std::ptr::from_mut(&mut row_operation).cast::<c_void>();
+            assert_eq!(
+                crate::ffi::stmt_attr::sql_set_stmt_attr_w::<MockBackend>(
+                    stmt_a,
+                    StatementAttribute::RowOperationPtr as i32,
+                    operation_ptr,
+                    0,
+                ),
+                SqlReturn::SUCCESS
+            );
+
+            let source = ard_of(stmt_a);
+            let target = desc_token_of::<MockBackend>(stmt_b, StatementAttribute::ImpParamDesc);
+            assert_eq!(
+                sql_copy_desc::<MockBackend>(source, target),
+                SqlReturn::SUCCESS
+            );
+
+            assert_eq!(
+                read_numeric(target, 0, Desc::ArrayStatusPtr),
+                operation_ptr as isize,
+                "SQL_DESC_ARRAY_STATUS_PTR is unreadable through the IPD"
+            );
+
+            // The same storage through the other door, which is the half that
+            // proves the routing rather than merely the copy.
+            let mut readback: *mut c_void = std::ptr::null_mut();
+            assert_eq!(
+                sql_get_stmt_attr_w::<MockBackend>(
+                    stmt_b,
+                    StatementAttribute::ParamStatusPtr as i32,
+                    std::ptr::from_mut(&mut readback).cast::<c_void>(),
+                    0,
+                    std::ptr::null_mut(),
+                ),
+                SqlReturn::SUCCESS
+            );
+            assert_eq!(
+                readback, operation_ptr,
+                "SQL_ATTR_PARAM_STATUS_PTR and SQL_DESC_ARRAY_STATUS_PTR are one value"
+            );
+
+            let _ =
+                crate::ffi::handle::sql_free_handle::<MockBackend>(HandleType::Stmt as i16, stmt_b);
+            cleanup_env_conn_stmt(env, conn, stmt_a);
+        }
+    }
+
     /// The APD's token, as the application receives it.
     unsafe fn apd_of(stmt: *mut c_void) -> *mut c_void {
         let mut token: *mut c_void = std::ptr::null_mut();
@@ -2692,6 +2857,49 @@ mod tests {
         let mut value: isize = -1;
         let ret = unsafe {
             sql_get_desc_field_w::<MockBackend>(
+                desc,
+                record,
+                field as i16,
+                std::ptr::from_mut(&mut value).cast(),
+                0,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(ret, SqlReturn::SUCCESS, "SQLGetDescFieldW({field:?})");
+        value
+    }
+
+    /// One of a statement's four descriptor tokens, for a test driving a
+    /// backend other than `MockBackend`.
+    ///
+    /// The type parameter is load-bearing for the same reason
+    /// [`first_sqlstate_of`]'s is: the statement is resolved as
+    /// `StatementHandle<B>`, so `MockBackend` here against another backend's
+    /// handle would be a type confusion rather than a failed assertion.
+    unsafe fn desc_token_of<B: Backend>(
+        stmt: *mut c_void,
+        attribute: StatementAttribute,
+    ) -> *mut c_void {
+        let mut token: *mut c_void = std::ptr::null_mut();
+        let ret = unsafe {
+            sql_get_stmt_attr_w::<B>(
+                stmt,
+                attribute as i32,
+                std::ptr::from_mut(&mut token).cast::<c_void>(),
+                0,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(ret, SqlReturn::SUCCESS, "SQLGetStmtAttrW({attribute:?})");
+        assert!(!token.is_null(), "the descriptor token must not be null");
+        token
+    }
+
+    /// [`read_numeric`] for a test driving a backend other than `MockBackend`.
+    unsafe fn read_numeric_of<B: Backend>(desc: *mut c_void, record: i16, field: Desc) -> isize {
+        let mut value: isize = -1;
+        let ret = unsafe {
+            sql_get_desc_field_w::<B>(
                 desc,
                 record,
                 field as i16,

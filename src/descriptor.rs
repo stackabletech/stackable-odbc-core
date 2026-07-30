@@ -141,6 +141,14 @@ impl Default for DescriptorRecord {
 /// its contents. And the *source's* role is not carried either: the consistency
 /// check runs under the **target's** role, and a snapshot that remembered where it
 /// came from would invite a later reader to check against the wrong one.
+///
+/// `attrs` is **not** a copy of `Descriptor::attrs`. For an IRD or IPD,
+/// `SQL_DESC_ARRAY_STATUS_PTR` and `SQL_DESC_ROWS_PROCESSED_PTR` live in the
+/// owning statement's attribute bag rather than on the descriptor, so
+/// `HandleScope::snapshot_descriptor` folds them in here under their
+/// `SQL_DESC_*` keys and `SQLCopyDesc` routes them back out by the target's
+/// role. Keying by field rather than by statement attribute is what makes that
+/// possible: the same field is a different attribute on each role.
 #[derive(Debug)]
 pub struct DescriptorSnapshot {
     /// Records by 1-based column or parameter number.
