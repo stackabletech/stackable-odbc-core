@@ -22,14 +22,28 @@
 //! SQLSTATE for each outcome — which is why the failures here are 22018 /
 //! 22001 / 22003 / 22008 rather than a single general error.
 //!
-//! [`check_declared_binary_size`] lives here and is shared with
-//! [`crate::binary_convert`], which is the [C to SQL: Binary] table. Both
-//! tables have a binary-target row asking the same question of the same thing:
-//! the byte string about to be sent must not exceed the declared column length.
+//! This module owns the size checks all three C-to-SQL tables share, because
+//! their rows ask one question of one thing and answering it twice is how two
+//! tables come to disagree about one bind.
+//!
+//! [`check_declared_binary_size`] is shared with [`crate::binary_convert`], the
+//! [C to SQL: Binary] table: both tables have a binary-target row asking that
+//! the byte string about to be sent not exceed the declared column length.
+//! [`check_declared_char_size`], [`check_declared_decimal_size`],
+//! [`parse_numeric_literal`] and [`DecimalLiteral`] are shared with
+//! [`crate::numeric_convert`], the [C to SQL: Numeric] table, whose character
+//! and exact-numeric rows are this module's own questions asked of a number
+//! rather than of text.
+//!
+//! The SQLSTATE is *not* shared along with the test. The numeric table answers
+//! `22003` where this one answers `22001` for whole-digit loss, so that caller
+//! re-labels the verdict. Sharing the check while diverging on the code is the
+//! point: the tables genuinely differ there, and the spec says so.
 //!
 //! [Converting Data from C to SQL Data Types]: https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/converting-data-from-c-to-sql-data-types
 //! [C to SQL: Character]: https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/c-to-sql-character
 //! [C to SQL: Binary]: https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/c-to-sql-binary
+//! [C to SQL: Numeric]: https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/c-to-sql-numeric
 
 use odbc_sys::SqlDataType;
 
@@ -54,7 +68,7 @@ fn not_a_literal(text: &str, sql_type: &str) -> OdbcError {
 /// "Data converted with truncation of fractional digits" / "loss of whole …
 /// digits" — the value is well formed but does not survive the conversion
 /// intact, so it is not sent.
-fn truncation(text: &str, what: &str) -> OdbcError {
+pub(crate) fn truncation(text: &str, what: &str) -> OdbcError {
     OdbcError::general(
         format!("Converting parameter value {text:?} would {what}"),
         SqlState::string_data_right_truncation(),
@@ -246,7 +260,7 @@ pub(crate) fn text_to_sql_type(
 /// `f64`'s 53 bits of mantissa. `scale` may be negative, which is how an
 /// exponent larger than the fraction's length is carried (`1.5e2` is digits
 /// `15` at scale `-1`).
-struct DecimalLiteral {
+pub(crate) struct DecimalLiteral {
     negative: bool,
     digits: String,
     scale: i32,
@@ -260,7 +274,11 @@ struct DecimalLiteral {
 /// Deliberately stricter than `str::parse::<f64>()`, which also accepts `inf`
 /// and `NaN` — neither is a numeric-literal, and neither is something to send
 /// to a data source as one.
-fn parse_numeric_literal(s: &str) -> Option<DecimalLiteral> {
+///
+/// Shared with [`crate::numeric_convert`], which canonicalises every numeric C
+/// type through a [`DecimalLiteral`] so its exact rows compare digits rather
+/// than a value already rounded through `f64`.
+pub(crate) fn parse_numeric_literal(s: &str) -> Option<DecimalLiteral> {
     let t = s.trim();
     let (negative, rest) = match t.strip_prefix('-') {
         Some(rest) => (true, rest),
@@ -299,19 +317,19 @@ fn parse_numeric_literal(s: &str) -> Option<DecimalLiteral> {
 
 impl DecimalLiteral {
     /// The significant digits with leading zeros removed, never empty.
-    fn significant(&self) -> &str {
+    pub(crate) fn significant(&self) -> &str {
         let trimmed = self.digits.trim_start_matches('0');
         if trimmed.is_empty() { "0" } else { trimmed }
     }
 
-    fn is_zero(&self) -> bool {
+    pub(crate) fn is_zero(&self) -> bool {
         self.digits.bytes().all(|b| b == b'0')
     }
 
     /// Render as a plain decimal literal, expanding any exponent. A backend
     /// renders `ColumnValue::Decimal` into SQL verbatim, and `1.5e2` is not
     /// something every data source accepts where `150` is.
-    fn to_decimal_string(&self) -> String {
+    pub(crate) fn to_decimal_string(&self) -> String {
         let sign = if self.negative && !self.is_zero() {
             "-"
         } else {
@@ -352,7 +370,7 @@ impl DecimalLiteral {
 
     /// The number of digits to the left of the decimal point. Zero has none, so
     /// it fits a `DECIMAL(2,2)` that has room for no whole digits at all.
-    fn whole_digits(&self) -> usize {
+    pub(crate) fn whole_digits(&self) -> usize {
         if self.is_zero() {
             return 0;
         }
@@ -366,7 +384,7 @@ impl DecimalLiteral {
 
     /// Whether every digit to the right of the decimal point is a zero, i.e.
     /// whether an integer target would lose anything.
-    fn fraction_is_zero(&self) -> bool {
+    pub(crate) fn fraction_is_zero(&self) -> bool {
         let Ok(scale) = usize::try_from(self.scale) else {
             // A negative scale is a whole number with trailing zeros appended.
             return true;
@@ -380,7 +398,7 @@ impl DecimalLiteral {
     }
 
     /// The value truncated toward zero, or `None` if it does not fit `i128`.
-    fn to_integer(&self) -> Option<i128> {
+    pub(crate) fn to_integer(&self) -> Option<i128> {
         let whole = if self.scale <= 0 {
             let zeros = "0".repeat(usize::try_from(-self.scale).ok()?);
             format!("{}{zeros}", self.significant())
@@ -415,7 +433,7 @@ fn decimal_literal(text: &str, sql_type: &str) -> Result<DecimalLiteral, OdbcErr
 /// application needs to fix its bind.
 ///
 /// [C to SQL: Character]: https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/c-to-sql-character
-fn oversized(actual: usize, unit: &str, declared: ULen) -> OdbcError {
+pub(crate) fn oversized(actual: usize, unit: &str, declared: ULen) -> OdbcError {
     OdbcError::general(
         format!(
             "Parameter value of {actual} {unit} exceeds the declared column size of {declared}"
@@ -435,7 +453,12 @@ fn oversized(actual: usize, unit: &str, declared: ULen) -> OdbcError {
 /// zero-length column, exactly as in [`check_declared_decimal_size`]: ODBC
 /// defines no sentinel for "size unknown", and reading 0 literally would reject
 /// every value an application that omits `ColumnSize` ever binds.
-fn check_declared_char_size(measured: usize, col_size: ULen) -> Result<(), OdbcError> {
+///
+/// Shared with [`crate::numeric_convert`], whose first two rows ask this of a
+/// rendered number: "Number of digits > Column byte length" and its wide
+/// counterpart. The caller picking the unit is what lets one function serve
+/// both tables' narrow and wide rows alike.
+pub(crate) fn check_declared_char_size(measured: usize, col_size: ULen) -> Result<(), OdbcError> {
     if col_size == 0 {
         return Ok(());
     }
@@ -489,7 +512,12 @@ pub(crate) fn check_declared_binary_size(len: usize, col_size: ULen) -> Result<(
 ///
 /// The two declared-size checks the spec's table still asks for and this does
 /// not are noted on [`text_to_sql_type`].
-fn check_declared_decimal_size(
+///
+/// Shared with [`crate::numeric_convert`]'s exact-numeric row, which asks the
+/// same question of the same thing. That table's row answers `22003` where this
+/// one answers `22001`, so the caller there re-labels the verdict rather than
+/// returning it unchanged — the *test* is shared, not the SQLSTATE.
+pub(crate) fn check_declared_decimal_size(
     literal: &DecimalLiteral,
     text: &str,
     col_size: ULen,
