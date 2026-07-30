@@ -217,6 +217,30 @@ fn to_wide_null(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
+/// Log and hand back an `odbccp32` BOOL.
+///
+/// The single place an installer call's result becomes something
+/// [`config_dsn_body`] acts on. Two things follow from that being one place
+/// rather than five:
+///
+/// - a discarded result is a compile-visible mistake rather than a silent one,
+///   and the source audit in this file's tests can enumerate the call sites;
+/// - the failure is logged under the name of the call that produced it, which
+///   the bare `BOOL` this function's callers return cannot carry.
+///
+/// It deliberately does **not** post an installer error. `SQLWriteDSNToIniW`,
+/// `SQLWritePrivateProfileStringW` and `SQLRemoveDSNFromIniW` each post their
+/// own before returning zero, and overwriting it with
+/// `ODBC_ERROR_REQUEST_FAILED` would replace a specific cause with a generic
+/// one.
+#[cfg(windows)]
+fn installer_result(call: &str, ret: i32) -> i32 {
+    if ret == 0 {
+        tracing::error!("ConfigDSNW: {call} failed; odbccp32 has posted its own installer error");
+    }
+    ret
+}
+
 /// Headless implementation of the ODBC setup library's `ConfigDSNW` entry point.
 ///
 /// Spec: <https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/configdsn-function>
@@ -283,7 +307,9 @@ fn to_wide_null(s: &str) -> Vec<u16> {
 ///   below). A failure *inside* `odbccp32` is left to it: `SQLWriteDSNToIniW`,
 ///   `SQLWritePrivateProfileStringW` and `SQLRemoveDSNFromIniW` each post their
 ///   own error before returning zero, and overwriting it here would replace a
-///   specific cause with a generic one.
+///   specific cause with a generic one. Their zero is **propagated**, not
+///   discarded — a posted error alongside a TRUE return is a diagnostic no
+///   caller has any reason to read.
 /// - **ODBC_ERROR_DRIVER_SPECIFIC** — not returned. Core is database-independent
 ///   and has no driver-specific failure to report; a driver overriding this entry
 ///   point is where one would originate.
@@ -395,11 +421,10 @@ unsafe fn config_dsn_body(
             // Register the DSN → driver mapping in ODBC.INI
             // SAFETY: dsn_w and lpsz_driver are null-terminated UTF-16 strings;
             // lpsz_driver was validated non-null above, dsn_w was constructed here.
-            if unsafe { SQLWriteDSNToIniW(dsn_w.as_ptr(), lpsz_driver) } == 0 {
-                // odbccp32 has posted its own error for this one, so overwriting
-                // it would replace a specific cause with a generic one. Return
-                // FALSE and leave the buffer as the installer set it.
-                tracing::error!("ConfigDSNW: SQLWriteDSNToIniW failed");
+            if installer_result("SQLWriteDSNToIniW", unsafe {
+                SQLWriteDSNToIniW(dsn_w.as_ptr(), lpsz_driver)
+            }) == 0
+            {
                 return 0;
             }
             // Write each attribute under the DSN's section. `dsn_section_attributes`
@@ -411,20 +436,29 @@ unsafe fn config_dsn_body(
                 // SAFETY: all four pointers are null-terminated UTF-16 strings
                 // allocated in this scope; they remain valid for the duration of
                 // the call.
-                unsafe {
+                if installer_result("SQLWritePrivateProfileStringW", unsafe {
                     SQLWritePrivateProfileStringW(
                         dsn_w.as_ptr(),
                         k_w.as_ptr(),
                         v_w.as_ptr(),
                         odbc_ini_w.as_ptr(),
-                    );
+                    )
+                }) == 0
+                {
+                    // A data source whose name registered but whose attributes
+                    // did not is not configured, and reporting TRUE for it hands
+                    // the caller a DSN that cannot connect. The spec pairs the
+                    // posted error with FALSE, so returning TRUE also leaves the
+                    // caller no reason to read it.
+                    return 0;
                 }
             }
             1
         }
         // SAFETY: dsn_w is a null-terminated UTF-16 string constructed above.
-        // Likewise: a failure here is odbccp32's, and it has already said why.
-        ODBC_REMOVE_DSN => unsafe { SQLRemoveDSNFromIniW(dsn_w.as_ptr()) },
+        ODBC_REMOVE_DSN => installer_result("SQLRemoveDSNFromIniW", unsafe {
+            SQLRemoveDSNFromIniW(dsn_w.as_ptr())
+        }),
         _ => fail(
             ODBC_ERROR_INVALID_REQUEST_TYPE,
             "fRequest was not ODBC_ADD_DSN, ODBC_CONFIG_DSN or ODBC_REMOVE_DSN",
@@ -435,6 +469,77 @@ unsafe fn config_dsn_body(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The source of one `fn` in this file, from its signature to the closing
+    /// brace at column 0.
+    ///
+    /// `config_dsn_w` is `#[cfg(windows)]` and links `odbccp32`, so **no test on
+    /// Linux can execute it** and the Windows job only compiles it. A source
+    /// audit is the one guard that runs everywhere; the crate's precedent is
+    /// `the_set_of_group_lock_acquisition_sites_is_closed`.
+    fn function_source(name: &str) -> &'static str {
+        let source = include_str!("setup.rs");
+        let start = source
+            .find(name)
+            .unwrap_or_else(|| panic!("{name} is defined in this file"));
+        let body = &source[start..];
+        let end = body
+            .find("\n}\n")
+            .unwrap_or_else(|| panic!("{name} has a closing brace"));
+        &body[..end]
+    }
+
+    /// Every function that can produce `ConfigDSNW`'s FALSE.
+    ///
+    /// A `return 0` moved into a helper is a `return 0` the audit stops seeing,
+    /// so this list has to grow with the code. Adding a helper that can fail
+    /// without adding it here silently narrows every audit below.
+    const AUDITED_FUNCTIONS: &[&str] = &["unsafe fn config_dsn_body("];
+
+    fn audited_source() -> String {
+        AUDITED_FUNCTIONS
+            .iter()
+            .map(|f| function_source(f))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Every `odbccp32` BOOL that can become `ConfigDSN`'s return value goes
+    /// through [`installer_result`].
+    ///
+    /// A call written without it discards the result, and the failure that
+    /// produces is not visible from the outside: the DSN name registers, an
+    /// attribute write fails, `odbccp32` posts its own error, and `ConfigDSN`
+    /// answers TRUE. The spec ties that buffer to the other answer — "When
+    /// **ConfigDSN** returns FALSE, an associated *\*pfErrorCode* value is
+    /// posted" — so an Administrator that got TRUE never reads it.
+    ///
+    /// Counted rather than merely searched for: `installer_result("X", unsafe {
+    /// X(..) })` names `X` twice, once as the literal and once as the call, so a
+    /// guarded site contributes 2 and an unguarded one contributes 1.
+    #[test]
+    fn every_odbccp32_bool_result_goes_through_installer_result() {
+        const BOOL_RETURNING: &[&str] = &[
+            "SQLWriteDSNToIniW",
+            "SQLWritePrivateProfileStringW",
+            "SQLRemoveDSNFromIniW",
+        ];
+
+        let body = audited_source();
+        for call in BOOL_RETURNING {
+            let mentions = body.matches(call).count();
+            let guarded = body
+                .matches(&format!("installer_result(\"{call}\""))
+                .count();
+            assert_eq!(
+                mentions,
+                2 * guarded,
+                "{call} is mentioned {mentions} time(s) in the audited functions \
+                 but only {guarded} go through installer_result(...). A call whose \
+                 BOOL is discarded turns a failed registry write into a TRUE return."
+            );
+        }
+    }
 
     /// Every FALSE `config_dsn_w` returns must carry a posted installer error,
     /// because the spec makes that buffer the function's only channel: "When
@@ -460,19 +565,16 @@ mod tests {
             // SQLWriteDSNToIniW failing: the installer has already posted a
             // specific cause, and overwriting it would generalise it away.
             "SQLWriteDSNToIniW",
+            // Likewise a failed attribute write. Returning FALSE for it is the
+            // point: the DSN name registered and its attributes did not, so the
+            // data source exists and cannot connect.
+            "SQLWritePrivateProfileStringW",
         ];
 
-        let source = include_str!("setup.rs");
         // `config_dsn_body` holds every failure path; `config_dsn_w` is the panic
         // guard around it and has no falsey exit of its own.
-        let start = source
-            .find("unsafe fn config_dsn_body(")
-            .expect("config_dsn_body is defined in this file");
-        let body = &source[start..];
-        let end = body
-            .find("\n}\n")
-            .expect("config_dsn_body has a closing brace");
-        let body = &body[..end];
+        let body = audited_source();
+        let body = body.as_str();
 
         // Falsey exits written as a bare literal, rather than through `fail`.
         let bare: Vec<&str> = body
@@ -501,7 +603,9 @@ mod tests {
             );
         }
 
-        // And the posting path itself must still exist.
+        // And the posting path itself must still exist. `fail` lives outside the
+        // audited functions, so this one needs the whole file.
+        let source = include_str!("setup.rs");
         assert!(
             source.contains("SQLPostInstallerErrorW(code, msg.as_ptr())"),
             "`fail` no longer posts an installer error"

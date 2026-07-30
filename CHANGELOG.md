@@ -1482,6 +1482,13 @@ call `SQLCloseCursor` or `SQLFreeStmt(SQL_CLOSE)` first, as it already must for
   conversion the FFI boundary uses; `attr_odbc_version_from_raw` is unchanged and
   still cannot name `SQL_OV_ODBC2`.
 
+- `ConfigDSNW` returns FALSE when a registry write fails. It discarded
+  `SQLWritePrivateProfileString`'s result, so a data source whose name
+  registered but whose attributes did not was reported as configured. The spec
+  pairs the installer error buffer with the other answer — "When **ConfigDSN**
+  returns FALSE, an associated *\*pfErrorCode* value is posted" — so the posted
+  cause was returned alongside TRUE and no caller had reason to read it.
+
 - `ConfigDSNW` no longer writes a `DRIVER=` attribute into the data source's
   own section. The attribute-write loop skipped only the `DSN` keyword, so a
   `DRIVER=` pair in `lpszAttributes` was written over the value
