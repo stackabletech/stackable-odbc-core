@@ -139,6 +139,9 @@ pub const ATTRIBUTE_CANNOT_BE_SET_NOW: &str = "HY011";
 /// Cannot modify an implementation row descriptor — HY016
 pub const CANNOT_MODIFY_IRD: &str = "HY016";
 
+/// Attempt to concatenate a null value — HY020
+pub const ATTEMPT_TO_CONCATENATE_A_NULL_VALUE: &str = "HY020";
+
 /// Inconsistent descriptor information — HY021
 pub const INCONSISTENT_DESCRIPTOR_INFORMATION: &str = "HY021";
 
@@ -387,6 +390,17 @@ impl SqlState {
     /// Cannot modify an implementation row descriptor — HY016
     pub fn cannot_modify_ird() -> Self {
         Self::new(CANNOT_MODIFY_IRD)
+    }
+
+    /// Attempt to concatenate a null value — HY020
+    ///
+    /// `SQLPutData`'s row, which carries no `(DM)` marker: "SQLPutData was
+    /// called more than once since the call that returned SQL_NEED_DATA, and in
+    /// one of those calls, the *StrLen_or_Ind* argument contained SQL_NULL_DATA
+    /// or SQL_DEFAULT_PARAM." A NULL is the whole value of a parameter, so it
+    /// can neither follow data nor be followed by it.
+    pub fn attempt_to_concatenate_a_null_value() -> Self {
+        Self::new(ATTEMPT_TO_CONCATENATE_A_NULL_VALUE)
     }
 
     /// Inconsistent descriptor information — HY021
