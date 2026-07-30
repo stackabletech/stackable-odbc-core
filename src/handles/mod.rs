@@ -535,9 +535,12 @@ impl<'a> ParamRecords<'a> {
     /// parameters in the SQL statement" — for a parameter the application had
     /// bound, making `WHERE col = ?` with a NULL inexpressible.
     ///
-    /// This is a parameter-side rule and deliberately not a change to
-    /// [`DescriptorRecord::is_bound`], which `SQLBindCol`'s column path uses,
-    /// and where a null `TargetValuePtr` really does unbind.
+    /// This is a parameter-side rule, and [`DescriptorRecord::is_bound`] is
+    /// deliberately left alone: it answers "is there a data buffer", which is
+    /// still exactly what a writer of column data needs to know. `SQLBindCol`
+    /// draws the same distinction on the column side — a null `TargetValuePtr`
+    /// unbinds the *data buffer* and keeps a live `StrLen_or_IndPtr` bound — so
+    /// both sides ask two questions of a record rather than one.
     ///
     /// `Err` is reserved for the one case that is neither: a parameter present
     /// in one descriptor and absent from the other. `SQLBindParameter` writes

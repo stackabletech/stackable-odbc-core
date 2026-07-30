@@ -2552,4 +2552,22 @@ Everything a driver has to change for the catalog rework, in one place.
   allocation. It now shares `utf16_to_string`'s `MAX_NTS_SCAN` bound, which was
   already applied everywhere else in the crate.
 
+- **`SQLBindCol` no longer destroys an indicator-only binding.** Passing a null
+  `TargetValuePtr` removed the column's ARD record outright, whatever
+  `StrLen_or_IndPtr` was, so the state the spec describes in as many words —
+  "An application can unbind the data buffer for a column but still have a
+  length/indicator buffer bound for the column, if the `TargetValuePtr`
+  argument in the call to `SQLBindCol` is a null pointer but the
+  `StrLen_or_IndPtr` argument is a valid value" — could not be reached. An
+  application asking only for a column's length got nothing and no diagnostic.
+  The record is now removed only when *both* pointers are null, which is the
+  pair `SQLBindParameter` already treated as an unbind, and `SQLFetch` writes
+  the length for such a column without touching the absent data buffer.
+
+  The mature drivers split on this and core follows the spec: MySQL
+  Connector/ODBC unbinds only when both pointers are null, while psqlODBC clears
+  the whole binding on a null `TargetValuePtr` regardless. The spec sentence is
+  unconditional, and an application that asked only for a length has no other
+  way to obtain one.
+
 [Unreleased]: https://github.com/stackabletech/stackable-odbc-core/commits/HEAD

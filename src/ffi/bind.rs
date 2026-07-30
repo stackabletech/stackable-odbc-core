@@ -16,7 +16,14 @@ use crate::types::SqlReturn;
 /// transfer happens in `SQLFetch` which calls `write_column_value` for each
 /// bound column.
 ///
-/// If `target_value_ptr` is null, the binding for that column is removed.
+/// If both `target_value_ptr` and `str_len_or_ind_ptr` are null, the binding for
+/// that column is removed. A null `target_value_ptr` with a live
+/// `str_len_or_ind_ptr` unbinds only the data buffer and keeps the
+/// length/indicator buffer bound, which the spec states in as many words: "An
+/// application can unbind the data buffer for a column but still have a
+/// length/indicator buffer bound for the column, if the `TargetValuePtr`
+/// argument in the call to `SQLBindCol` is a null pointer but the
+/// `StrLen_or_IndPtr` argument is a valid value."
 ///
 /// # Parameters
 ///
@@ -26,7 +33,8 @@ use crate::types::SqlReturn;
 ///   has no concept of stable row identifiers).
 /// - `target_type`: The C data type identifier (`SQL_C_*`) for the target buffer.
 /// - `target_value_ptr`: Pointer to the data buffer to bind to the column. If null, the
-///   existing binding for this column is removed.
+///   column's data buffer is unbound; the binding itself is removed only when
+///   `str_len_or_ind_ptr` is null as well.
 /// - `buffer_length`: Length of the `target_value_ptr` buffer in bytes.
 /// - `str_len_or_ind_ptr`: Pointer to a length/indicator buffer. May be null.
 ///
@@ -93,8 +101,24 @@ pub unsafe fn sql_bind_col<B: Backend>(
                 });
             }
 
-            if target_value_ptr.is_null() {
-                // Unbind the column
+            // Spec, *TargetValuePtr*: "An application can unbind the data
+            // buffer for a column but still have a length/indicator buffer
+            // bound for the column, if the TargetValuePtr argument in the call
+            // to SQLBindCol is a null pointer but the StrLen_or_IndPtr argument
+            // is a valid value." So a null data pointer alone is not an unbind:
+            // it is the removal of one of the two buffers. Only a call
+            // supplying neither removes the record, which is the same pair
+            // `SQLBindParameter` treats as an unbind.
+            //
+            // The two mature drivers disagree here, so this follows the spec
+            // rather than a majority. MySQL Connector/ODBC draws the same line
+            // — `if (!TargetValuePtr && !StrLen_or_IndPtr) /* Handling
+            // unbinding */` in its own `SQLBindCol` — while psqlODBC's
+            // `PGAPI_BindCol` clears the whole binding on a null `rgbValue`
+            // without consulting `pcbValue` at all. The spec sentence above is
+            // unconditional, and an application that asked only for a length
+            // has no other way to get one.
+            if target_value_ptr.is_null() && str_len_or_ind_ptr.is_null() {
                 tracing::debug!("SQLBindCol: col={} unbind", column_number);
                 scope.descriptor(ard_token)?.records.remove(&column_number);
             } else {
@@ -105,10 +129,20 @@ pub unsafe fn sql_bind_col<B: Backend>(
                     )
                 })?;
                 tracing::debug!(
-                    "SQLBindCol: col={}, c_type={:?}, buf_len={}",
+                    "SQLBindCol: col={}, c_type={:?}, buf_len={}, data={}, indicator={}",
                     column_number,
                     c_type,
-                    buffer_length
+                    buffer_length,
+                    if target_value_ptr.is_null() {
+                        "unbound"
+                    } else {
+                        "bound"
+                    },
+                    if str_len_or_ind_ptr.is_null() {
+                        "unbound"
+                    } else {
+                        "bound"
+                    },
                 );
                 let mut record = DescriptorRecord {
                     data_ptr: target_value_ptr,
@@ -158,6 +192,109 @@ mod tests {
                 std::ptr::null_mut(),
             );
             assert_eq!(ret, SqlReturn::ERROR);
+            cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
+    /// Spec, `SQLBindCol`'s *TargetValuePtr*: "An application can unbind the
+    /// data buffer for a column but still have a length/indicator buffer bound
+    /// for the column, if the TargetValuePtr argument in the call to
+    /// SQLBindCol is a null pointer but the StrLen_or_IndPtr argument is a
+    /// valid value."
+    ///
+    /// Removing the record on a null data pointer alone destroys that state
+    /// outright, so the application's indicator is never written again and it
+    /// has no way to learn a column's length without a buffer to hold it.
+    #[test]
+    fn bind_col_keeps_an_indicator_only_binding() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            let mut buf: i64 = 0;
+            let mut indicator: isize = 0;
+            let indicator_ptr = std::ptr::from_mut(&mut indicator);
+
+            assert_eq!(
+                sql_bind_col::<MockBackend>(
+                    stmt,
+                    1,
+                    CDataType::SBigInt as i16,
+                    std::ptr::from_mut(&mut buf).cast::<c_void>(),
+                    isize::try_from(std::mem::size_of::<i64>()).expect("small"),
+                    indicator_ptr,
+                ),
+                SqlReturn::SUCCESS,
+            );
+
+            // Unbind the data buffer only.
+            assert_eq!(
+                sql_bind_col::<MockBackend>(
+                    stmt,
+                    1,
+                    CDataType::SBigInt as i16,
+                    std::ptr::null_mut(),
+                    0,
+                    indicator_ptr,
+                ),
+                SqlReturn::SUCCESS,
+            );
+
+            with_descriptor::<MockBackend, _>(stmt, DescriptorRole::Ard, |ard| {
+                let record = ard
+                    .records
+                    .get(&1)
+                    .expect("the length/indicator buffer is still bound");
+                assert!(
+                    record.data_ptr.is_null(),
+                    "the data buffer was supposed to be unbound",
+                );
+                assert_eq!(record.indicator_ptr, indicator_ptr);
+                assert!(
+                    !record.is_bound(),
+                    "SQL_DESC_DATA_PTR is null, so this is not a data binding",
+                );
+            });
+
+            cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
+    /// The other half of the same rule, and the one that must not change: both
+    /// pointers null is still an unbind, exactly as `SQLBindParameter` treats
+    /// the pair.
+    #[test]
+    fn bind_col_removes_the_record_when_both_pointers_are_null() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            let mut buf: i64 = 0;
+            let mut indicator: isize = 0;
+
+            assert_eq!(
+                sql_bind_col::<MockBackend>(
+                    stmt,
+                    1,
+                    CDataType::SBigInt as i16,
+                    std::ptr::from_mut(&mut buf).cast::<c_void>(),
+                    isize::try_from(std::mem::size_of::<i64>()).expect("small"),
+                    std::ptr::from_mut(&mut indicator),
+                ),
+                SqlReturn::SUCCESS,
+            );
+            assert_eq!(
+                sql_bind_col::<MockBackend>(
+                    stmt,
+                    1,
+                    CDataType::SBigInt as i16,
+                    std::ptr::null_mut(),
+                    0,
+                    std::ptr::null_mut(),
+                ),
+                SqlReturn::SUCCESS,
+            );
+
+            with_descriptor::<MockBackend, _>(stmt, DescriptorRole::Ard, |ard| {
+                assert!(!ard.records.contains_key(&1), "both pointers null unbinds");
+            });
+
             cleanup_env_conn_stmt(env, conn, stmt);
         }
     }

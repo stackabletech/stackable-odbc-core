@@ -22,18 +22,35 @@ use crate::types::{ColumnValue, FetchResult, SqlReturn, SqlState, fetch_orientat
 /// and `24000` checks. Collecting is not checking.
 type Binding = (u16, i16, *mut c_void, isize, *mut isize);
 
-/// Every bound column of an ARD, in no particular order.
+/// Every binding of an ARD that this fetch must serve, in no particular order.
 ///
 /// Collected before the statement is borrowed, because the descriptor and the
 /// statement are separate allocations and the column reads below need `&mut` on
 /// the statement. A bind cannot happen in between: this call holds the
 /// connection's group throughout.
+///
+/// A record with a null `SQL_DESC_DATA_PTR` and a live `SQL_DESC_INDICATOR_PTR`
+/// **is** included. It is not a data binding — [`DescriptorRecord::is_bound`]
+/// says so, and `write_column_value` declines to write through the null target —
+/// but the spec makes it a legal state of `SQLBindCol` ("An application can
+/// unbind the data buffer for a column but still have a length/indicator buffer
+/// bound for the column"), and the length is the only thing such an application
+/// asked for.
+///
+/// The mature drivers split on this, so the evidence rather than the
+/// conclusion: MySQL Connector/ODBC's `SQLBindCol` unbinds only when both
+/// pointers are null and otherwise keeps the record with a null data pointer,
+/// while psqlODBC's `PGAPI_BindCol` clears the whole binding on a null
+/// `rgbValue` regardless of `pcbValue`. Core follows the spec sentence, which is
+/// unconditional.
+///
+/// A record carrying *neither* pointer is skipped. `SQLSetDescField` can create
+/// one by setting any single field, so presence in the map has never meant a
+/// binding.
 fn collect_bindings(ard: &Descriptor) -> Vec<Binding> {
     ard.records
         .iter()
-        // A record exists as soon as any one field is set, so presence does not
-        // mean bound; the spec makes a null `SQL_DESC_DATA_PTR` the unbind.
-        .filter(|(_, record)| record.is_bound())
+        .filter(|(_, record)| record.is_bound() || !record.indicator_ptr.is_null())
         .map(|(&col, r)| {
             (
                 col,
@@ -1746,31 +1763,38 @@ mod tests {
         }
     }
 
-    /// A record that exists with a null `SQL_DESC_DATA_PTR` is not a binding,
-    /// and `SQLFetch` must pass over it entirely.
+    /// A record that exists with neither `SQL_DESC_DATA_PTR` nor
+    /// `SQL_DESC_INDICATOR_PTR` is not a binding, and `SQLFetch` must pass over
+    /// it entirely.
     ///
-    /// The visible half of getting this wrong is the *indicator*, not the value
-    /// buffer: `write_column_value` declines to write through a null target
-    /// pointer, but it writes the length indicator unconditionally. So a record
-    /// treated as a binding stamps a length into the application's indicator
-    /// for a column it never bound — and, one layer up, `SQLFetch` calls
-    /// `SQLGetData` on that column for nothing.
+    /// `SQLSetDescField` creates such a record by setting any single field, so
+    /// presence in the map does not by itself mean a binding. The record with a
+    /// null data pointer *and* a live indicator is a different thing — the spec
+    /// makes it a legal `SQLBindCol` state and `SQLFetch` serves it; see
+    /// [`fetch_writes_the_indicator_of_an_indicator_only_binding`].
     ///
     /// Driven on `MockLongDataBackend` rather than `MockBackend`: the record is
     /// inserted for column 2, which really does carry a value, so a `SQLFetch`
     /// that treated the record as a binding would have something to write.
+    ///
+    /// This test cannot fail by mutating the filter, and that is a property of
+    /// the state rather than a weakness that can be tested away: a record with
+    /// neither pointer has nothing to write *through*, so admitting it costs a
+    /// wasted column read and produces no observable difference. It is kept as
+    /// a statement of the rule, and the filter's other half — the indicator-only
+    /// record — is what carries the mutation coverage.
     #[test]
-    fn fetch_skips_a_record_whose_data_pointer_is_null() {
+    fn fetch_skips_a_record_that_carries_neither_pointer() {
         unsafe {
             let (env, conn, stmt) = long_data_stmt_no_fetch();
 
             // Sentinel: no ODBC length is negative, so any write is visible.
+            // The pointer is kept out of the record on purpose — this test is
+            // about a record with no indicator at all — and used only to prove
+            // afterwards that nothing wrote through the neighbourhood.
             let mut indicator: isize = -99;
             let indicator_ptr = std::ptr::from_mut(&mut indicator);
 
-            // Inserted directly: no public call creates a record with a null
-            // data pointer until `SQLSetDescField` lands, and this test is what
-            // makes that arrival safe.
             with_descriptor::<MockLongDataBackend, _>(
                 stmt,
                 crate::descriptor::DescriptorRole::Ard,
@@ -1781,7 +1805,6 @@ mod tests {
                             concise_type: CDataType::SLong as i16,
                             verbose_type: CDataType::SLong as i16,
                             octet_length: 4,
-                            indicator_ptr,
                             ..Default::default()
                         },
                     );
@@ -1793,6 +1816,48 @@ mod tests {
                 std::ptr::read(indicator_ptr),
                 -99,
                 "SQLFetch wrote through a record that is not a binding"
+            );
+
+            cleanup_long_data(env, conn, stmt);
+        }
+    }
+
+    /// An indicator-only binding is what `SQLBindCol` leaves behind when the
+    /// application passes a null `TargetValuePtr` and a real `StrLen_or_IndPtr`,
+    /// and `SQLFetch` must serve it: the length is written, the value is not.
+    ///
+    /// `write_column_value` already declines the null target and writes the
+    /// indicator unconditionally, so the only thing that stood in the way was
+    /// `collect_bindings` filtering the record out before it got there.
+    #[test]
+    fn fetch_writes_the_indicator_of_an_indicator_only_binding() {
+        unsafe {
+            let (env, conn, stmt) = long_data_stmt_no_fetch();
+
+            // Sentinel: no ODBC length is negative, so any write is visible.
+            let mut indicator: isize = -99;
+            let indicator_ptr = std::ptr::from_mut(&mut indicator);
+
+            // Column 2 is the fixed-width i32 4242, so there is a length to
+            // report and a value that would be written if the null target were
+            // ignored.
+            assert_eq!(
+                crate::ffi::bind::sql_bind_col::<MockLongDataBackend>(
+                    stmt,
+                    2,
+                    CDataType::SLong as i16,
+                    std::ptr::null_mut(),
+                    0,
+                    indicator_ptr,
+                ),
+                SqlReturn::SUCCESS,
+            );
+
+            assert_eq!(sql_fetch::<MockLongDataBackend>(stmt), SqlReturn::SUCCESS);
+            assert_eq!(
+                std::ptr::read(indicator_ptr),
+                isize::try_from(std::mem::size_of::<i32>()).expect("small"),
+                "SQLFetch did not write the length of a data-unbound column",
             );
 
             cleanup_long_data(env, conn, stmt);

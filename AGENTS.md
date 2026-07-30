@@ -915,12 +915,22 @@ once:
   "Until the IRD has been populated, any attempt to gain access to a field of an
   IRD will return an error." A write is `HY016`, except the two header fields
   that row exempts by name.
-- **A binding is a non-null `SQL_DESC_DATA_PTR`, not a present key.** A record
-  exists as soon as any one field is set, so `records.contains_key` stopped
-  answering "is this bound". Every site that tests boundness calls
-  `DescriptorRecord::is_bound`. The visible half of getting this wrong is the
-  *indicator*: `write_column_value` declines to write through a null target but
-  writes the length indicator unconditionally.
+- **A binding is a non-null `SQL_DESC_DATA_PTR`, not a present key** — but that
+  answers "is there a data buffer", not "is there a binding". A record exists as
+  soon as any one field is set, so `records.contains_key` stopped answering
+  either question; every site that needs the first calls
+  `DescriptorRecord::is_bound`. The second has *two* pointers in it: the spec
+  lets `SQLBindCol` unbind a column's data buffer while keeping its
+  length/indicator buffer ("An application can unbind the data buffer for a
+  column but still have a length/indicator buffer bound for the column"), so
+  `collect_bindings` admits a record carrying either pointer and only a record
+  carrying neither is skipped. The mature drivers split on this — MySQL
+  Connector/ODBC keeps such a record, psqlODBC clears the whole binding — and
+  core follows the spec sentence, which is unconditional. The visible half of
+  getting this wrong is the *indicator*: `write_column_value` declines to write
+  through a null target but writes the length indicator unconditionally, which
+  is exactly what makes the indicator-only binding work and exactly what makes a
+  stray record visible.
 - **`set_concise_type` is the only writer of the type trio.** Setting
   `SQL_DESC_CONCISE_TYPE` also sets `SQL_DESC_TYPE` and
   `SQL_DESC_DATETIME_INTERVAL_CODE`, and the subcode is **not** the concise type
