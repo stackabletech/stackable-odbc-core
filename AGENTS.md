@@ -564,11 +564,46 @@ a driver to work on Windows — omitting any one can cause silent crashes,
   connecting, which is rare.
 
 - **`get_functions`**: List **every** exported FFI function, not just
-  query-related ones. The Windows DM uses the 3.x bitmap (`func_id=999`) to
-  build its dispatch table. Missing entries (e.g. `SetEnvAttr`, `GetStmtAttr`,
-  `BindCol`) cause NULL function pointer crashes. The 2.x array (`func_id=0`)
-  also needs correct entries — `stackable-odbc-core` maps 3.x IDs to their deprecated
-  2.x equivalents automatically, but only for IDs present in the list.
+  query-related ones — and **nothing core does not export**. The Windows DM uses
+  the 3.x bitmap (`func_id=999`) to build its dispatch table. Missing entries
+  (e.g. `SetEnvAttr`, `GetStmtAttr`, `BindCol`) cause NULL function pointer
+  crashes. Build the list from `CORE_EXPORTED_FUNCTIONS` and it cannot drift in
+  either direction.
+
+  The 2.x array (`func_id=0`) is a **different question with a different
+  answer**, and this is the part most easily got wrong. It asks "can an ODBC 2.x
+  application call this", so it reports the deprecated functions as supported
+  even though core exports none of them — the Driver Manager's mapping is what
+  makes that true. `stackable-odbc-core` derives those entries from their 3.x
+  counterparts automatically. An entry there naming a `FunctionId` absent from
+  `CORE_EXPORTED_FUNCTIONS` is correct and deliberate, not an oversight; psqlODBC
+  ships the same combination (`pfExists[SQL_API_SQLERROR] = TRUE` beside a
+  commented-out `;;SQLError` in its `.def`).
+
+#### A 3.x driver does not export the deprecated 2.x functions
+
+Appendix G, "Mapping Deprecated Functions": a 3.x driver "does not have to
+implement the ODBC 2.x functions", and the mapping "is triggered when the driver
+is an ODBC 3.x driver and **the driver does not support the function that is
+being mapped**."
+
+So exporting one does not *add* a capability — it **removes the Driver
+Manager's**, which is usually better informed. unixODBC's `SQLSetScrollOptions`
+mapping is 572 lines that check the requested concurrency against the driver's
+own `SQLGetInfo` answers before setting anything; core's export was a bare
+`SQL_ERROR` that replaced all of it. `SQLError`'s mapping routes to
+`SQLGetDiagRec`, which core implements properly; core's export answered
+`SQL_NO_DATA` and an ODBC 2.x application saw no diagnostics at all.
+
+Core therefore exports none of Appendix G's seventeen, and psqlODBC comments out
+every one of them in its `.def`. **One exception:** `SQLFreeStmt` is an ODBC 3.x
+function in its own right, and the Windows DM passes its deprecated `SQL_DROP`
+option through rather than mapping it.
+
+The generalisable trap: "we export it, so we should make it work" is backwards
+whenever the Driver Manager already maps the function. Check
+`CORE_UNEXPORTED_FUNCTIONS` — each entry records which 3.x function the DM maps
+it to — before implementing any deprecated entry point.
 
 - **`get_type_info`**: Include **both** ANSI and Unicode type variants.
   pyodbc queries `SQLGetTypeInfo(SQL_VARCHAR=12)` and
