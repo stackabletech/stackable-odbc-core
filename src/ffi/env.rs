@@ -38,9 +38,18 @@ use crate::types::{
 ///   allocation failure).
 /// - HY009: Returns `SQL_ERROR` if `value_ptr` is null for a string-valued attribute.
 ///   Not applicable — all supported attributes are integer-valued.
-/// - HY010: Returns `SQL_ERROR` if connection handles have already been allocated on
-///   this environment. (A second DM-handled condition: ODBC version not yet set,
-///   not returned here.)
+/// - HY010: Function sequence error. **Both** clauses of this row carry `(DM)` —
+///   "**(DM)** A connection handle has been allocated on *EnvironmentHandle*"
+///   and "**(DM)** SQL_ATTR_ODBC_VERSION has not been set" — so neither is the
+///   driver's by the spec's own marking. The first is nevertheless checked here
+///   as defence-in-depth for a caller that linked this driver directly: the
+///   spec's Comments section states the rule with no marker at all ("An
+///   application can call **SQLSetEnvAttr** only if no connection handle is
+///   allocated on the environment"), and unixODBC's Driver Manager enforces it
+///   before the call could reach any driver (`DriverManager/SQLSetEnvAttr.c`
+///   posts `ERROR_S1010` when `environment->connection_count > 0`). Under a real
+///   Driver Manager this branch never fires. The second clause is not checked
+///   here at all.
 /// - HY013: Memory management error (not returned here).
 /// - HY024: Returns `SQL_ERROR` for an invalid attribute value — for
 ///   `SQL_ATTR_ODBC_VERSION`, anything that is not one of the three `SQL_OV_*`
@@ -83,10 +92,13 @@ pub unsafe fn sql_set_env_attr<B: Backend>(
             // Spec: clear diagnostics at the start of each ODBC call.
             env.diagnostics.clear();
 
-            // Spec HY010: "An application can call SQLSetEnvAttr only if no
-            // connection handle is allocated on the environment." The
-            // registry, not a field of this handle, is the source of truth
-            // for whether any connection still names it as parent.
+            // Spec Comments, stated without a marker: "An application can call
+            // SQLSetEnvAttr only if no connection handle is allocated on the
+            // environment." The HY010 row marks this clause (DM) and unixODBC's
+            // Driver Manager does make the check, so this is defence-in-depth
+            // for a caller that linked the driver directly rather than a state
+            // core owes. The registry, not a field of this handle, is the source
+            // of truth for whether any connection still names it as parent.
             if !crate::handles::registry::registry()
                 .children_of(environment_handle)
                 .is_empty()
@@ -341,6 +353,52 @@ mod tests {
                 sql_set_env_attr::<MockBackend>(env, ENV_ATTR_ODBC_VERSION, 999 as *mut c_void, 0);
             assert_eq!(ret, SqlReturn::ERROR);
 
+            let _ = sql_free_handle::<MockBackend>(HandleType::Env as i16, env);
+        }
+    }
+
+    /// The check is defence-in-depth for a caller that linked this driver
+    /// directly, not a state core owes by the spec's rules: **both** clauses of
+    /// `SQLSetEnvAttr`'s `HY010` row carry `(DM)`, and unixODBC's Driver Manager
+    /// makes the check itself (`DriverManager/SQLSetEnvAttr.c` posts
+    /// `ERROR_S1010` when `environment->connection_count > 0`, without calling
+    /// the driver at all). The spec's Comments section states the rule with no
+    /// marker — "An application can call SQLSetEnvAttr only if no connection
+    /// handle is allocated on the environment" — so it is kept, and pinned here
+    /// so a future reader deletes it deliberately or not at all.
+    #[test]
+    fn setting_an_environment_attribute_with_a_connection_allocated_is_hy010() {
+        unsafe {
+            let mut env: *mut c_void = std::ptr::null_mut();
+            let _ = sql_alloc_handle::<MockBackend>(
+                HandleType::Env as i16,
+                std::ptr::null_mut(),
+                &mut env,
+            );
+            let mut conn: *mut c_void = std::ptr::null_mut();
+            let _ = sql_alloc_handle::<MockBackend>(HandleType::Dbc as i16, env, &mut conn);
+
+            assert_eq!(
+                sql_set_env_attr::<MockBackend>(
+                    env,
+                    ENV_ATTR_ODBC_VERSION,
+                    crate::types::SQL_OV_ODBC3 as usize as *mut c_void,
+                    0,
+                ),
+                SqlReturn::ERROR,
+            );
+            with_handle::<MockBackend, EnvironmentHandle<MockBackend>, _>(env, |h| {
+                assert_eq!(
+                    h.diagnostics
+                        .get(0)
+                        .expect("a diagnostic record")
+                        .sqlstate
+                        .as_str(),
+                    "HY010",
+                );
+            });
+
+            let _ = sql_free_handle::<MockBackend>(HandleType::Dbc as i16, conn);
             let _ = sql_free_handle::<MockBackend>(HandleType::Env as i16, env);
         }
     }
