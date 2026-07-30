@@ -857,16 +857,21 @@ macro_rules! forward_ffi {
             }
         }
 
-        #[allow(non_snake_case, clippy::missing_safety_doc)]
-        #[unsafe(no_mangle)]
-        pub unsafe extern "system" fn SQLSetScrollOptions(
-            _stmt: *mut ::std::ffi::c_void,
-            _concurrency: u16,
-            _keyset_size: isize,
-            _rowset_size: u16,
-        ) -> $crate::types::SqlReturn {
-            $crate::types::SqlReturn::ERROR
-        }
+        // SQLSetScrollOptions is deliberately not exported. Its spec page defines
+        // no diagnostics table at all, and documents what the Driver Manager does
+        // "for an application working with an ODBC 3.x driver that does not
+        // support SQLSetScrollOptions": it sets SQL_ROWSET_SIZE itself. unixODBC's
+        // DM implements that mapping in full -- SQLGetInfo to validate the
+        // requested concurrency, then SQLSetStmtAttr for SQL_ATTR_CONCURRENCY,
+        // SQL_ATTR_CURSOR_TYPE, SQL_ATTR_KEYSET_SIZE and SQL_ROWSET_SIZE -- and
+        // dispatches to the driver's own entry point only when the driver exports
+        // one. So exporting anything here replaces a capability-checked mapping,
+        // derived from this driver's own SQLGetInfo answers, with whatever the
+        // driver says instead. psqlODBC reaches the same conclusion: it never
+        // defines the symbol.
+        //
+        // See CORE_UNEXPORTED_FUNCTIONS in function_id.rs, which is what stops
+        // SQLGetFunctions claiming it.
 
         #[allow(non_snake_case, clippy::missing_safety_doc, clippy::too_many_arguments)]
         #[unsafe(no_mangle)]
@@ -1303,10 +1308,6 @@ mod expansion {
             ),
             (FunctionId::Procedures, SQLProceduresW as *const ()),
             (FunctionId::SetPos, SQLSetPos as *const ()),
-            (
-                FunctionId::SetScrollOptions,
-                SQLSetScrollOptions as *const (),
-            ),
             (
                 FunctionId::TablePrivileges,
                 SQLTablePrivilegesW as *const (),

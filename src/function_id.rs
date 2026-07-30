@@ -264,7 +264,6 @@ pub const CORE_EXPORTED_FUNCTIONS: &[FunctionId] = &[
     FunctionId::ProcedureColumns,
     FunctionId::Procedures,
     FunctionId::SetPos,
-    FunctionId::SetScrollOptions,
     FunctionId::TablePrivileges,
     FunctionId::BindParameter,
     FunctionId::AllocHandle,
@@ -320,6 +319,12 @@ pub const CORE_UNEXPORTED_FUNCTIONS: &[(FunctionId, &str)] = &[
     (
         FunctionId::CancelHandle,
         "not implemented; SQLCancel is exported instead",
+    ),
+    (
+        FunctionId::SetScrollOptions,
+        "mapped by the Driver Manager onto SQLSetStmtAttr; the DM dispatches to a \
+         driver's own only when the driver exports it, so exporting one would \
+         replace a capability-checked mapping with a refusal",
     ),
 ];
 /// `SQLGetFunctions` special values.
