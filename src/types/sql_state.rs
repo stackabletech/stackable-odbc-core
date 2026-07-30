@@ -50,6 +50,21 @@ pub const COMMUNICATION_LINK_FAILURE: &str = "08S01";
 /// SQL text itself.
 pub const INVALID_CATALOG_NAME: &str = "3D000";
 
+/// Invalid cursor name — 34000
+///
+/// `SQLSetCursorName`: the name "exceeded the maximum length as defined by the
+/// driver, or it started with `SQLCUR` or `SQL_CUR`". Those two prefixes are
+/// reserved for the driver's own generated names, which is why an application
+/// may not claim one.
+pub const INVALID_CURSOR_NAME: &str = "34000";
+
+/// Duplicate cursor name — 3C000
+///
+/// `SQLSetCursorName`: "the cursor name specified in \*CursorName already
+/// exists". The scope is the connection — "All cursor names within the
+/// connection must be unique."
+pub const DUPLICATE_CURSOR_NAME: &str = "3C000";
+
 /// Connection name in use — 08002
 pub const CONNECTION_IN_USE: &str = "08002";
 
@@ -270,6 +285,16 @@ impl SqlState {
     /// Invalid cursor state — 24000
     pub fn invalid_cursor_state() -> Self {
         Self::new(INVALID_CURSOR_STATE)
+    }
+
+    /// Invalid cursor name — 34000
+    pub fn invalid_cursor_name() -> Self {
+        Self::new(INVALID_CURSOR_NAME)
+    }
+
+    /// Duplicate cursor name — 3C000
+    pub fn duplicate_cursor_name() -> Self {
+        Self::new(DUPLICATE_CURSOR_NAME)
     }
 
     /// String data, right truncated — 01004

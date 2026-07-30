@@ -618,16 +618,34 @@ pub unsafe fn sql_get_cursor_name_w<B: Backend>(
 ///
 /// Diagnostics table from the ODBC spec:
 ///
-/// - 34000 (invalid cursor name): not returned; any non-empty name is accepted.
-/// - 3C000 (duplicate cursor name): not enforced; cursor name uniqueness across statements
-///   is not validated.
+/// - 01000 (general warning): not returned; driver-specific informational messages are
+///   not generated.
+/// - 01004 (string data, right truncated): not returned. The row describes a driver that
+///   accepts an over-long name and silently truncates it; this one refuses instead, with
+///   `34000`, which the same table provides for a name that "exceeded the maximum length
+///   as defined by the driver". Truncating would leave the application believing it had
+///   named a cursor it cannot then reference.
+/// - 24000 (invalid cursor state): **returned by this driver**. The row carries no (DM)
+///   marker, and the Comments state the rule in the positive direction — a cursor may be
+///   renamed "as long as the cursor is in an allocated or prepared state".
+/// - 34000 (invalid cursor name): **returned by this driver** for an empty name, for one
+///   longer than `SQL_MAX_CURSOR_NAME_LEN`, and for one starting with `SQLCUR` or
+///   `SQL_CUR` — prefixes reserved for the names [`sql_get_cursor_name_w`] generates.
+/// - 3C000 (duplicate cursor name): **returned by this driver**. "All cursor names within
+///   the connection must be unique", so the check walks this connection's statements —
+///   all of which already share the group lock this call holds.
 /// - HY000 (general error): returned via `OdbcError::general` for unexpected failures.
 /// - HY001 (memory allocation error): not applicable; Rust allocation panics are caught by
 ///   `panic_safe`.
 /// - HY009 (invalid use of null pointer): returned when `cursor_name` is a null pointer.
+///   The row is (DM)-marked, but a null reaching the driver is still refused rather than
+///   dereferenced.
 /// - HY010 (function sequence error): (driver-manager-handled; not returned here)
 /// - HY013 (memory management error): not applicable; Rust memory access cannot fail silently.
-/// - HY090 (invalid string or buffer length): returned when the cursor name is empty.
+/// - HY090 (invalid string or buffer length): not returned. The row is (DM)-marked and
+///   describes `NameLength` "less than 0 but not equal to SQL_NTS", which the Driver
+///   Manager rejects before the call arrives. An earlier revision returned it for an
+///   *empty* name, which is a different condition and is now `34000`.
 /// - HY117 (connection suspended): (driver-manager-handled; not returned here)
 /// - HYT01 (connection timeout): not applicable; the framework is in-process.
 /// - IM001 (driver does not support function): (driver-manager-handled; not returned here)
@@ -642,7 +660,7 @@ pub unsafe fn sql_set_cursor_name_w<B: Backend>(
     cursor_name: *const u16,
     name_length: i16,
 ) -> SqlReturn {
-    tracing::debug!(
+    tracing::trace!(
         "SQLSetCursorNameW(stmt={:?}, name_ptr={:?}, name_len={})",
         statement_handle,
         cursor_name,
@@ -654,8 +672,10 @@ pub unsafe fn sql_set_cursor_name_w<B: Backend>(
     // by utf16_to_string which handles null pointers by returning None.
     let ret = unsafe {
         panic_safe::<B, _>(statement_handle, |scope| {
-            let stmt = scope.get::<StatementHandle<B>>(statement_handle)?;
-            stmt.diagnostics.clear();
+            scope
+                .get::<StatementHandle<B>>(statement_handle)?
+                .diagnostics
+                .clear();
 
             // Spec HY009: null pointer.
             let name = utf16_to_string(cursor_name, i32::from(name_length)).map_err(|_| {
@@ -664,16 +684,93 @@ pub unsafe fn sql_set_cursor_name_w<B: Backend>(
                     SqlState::invalid_use_of_null_pointer(),
                 )
             })?;
+            tracing::debug!(
+                "SQLSetCursorNameW(stmt={:?}, name={:?})",
+                statement_handle,
+                name
+            );
 
-            // Spec HY090: empty name.
+            // Spec 34000: "the cursor name specified in *CursorName was invalid
+            // because it exceeded the maximum length as defined by the driver, or
+            // it started with 'SQLCUR' or 'SQL_CUR'". Those prefixes are reserved
+            // for the names `sql_get_cursor_name_w` generates, so an application
+            // taking one could collide with a cursor it does not own.
+            //
+            // An empty name is rejected here rather than with `HY090`, which the
+            // spec's table marks (DM) and defines as "NameLength was less than 0
+            // but not equal to SQL_NTS" — a different condition, and the Driver
+            // Manager's.
             if name.is_empty() {
                 return Err(OdbcError::general(
                     "Cursor name must not be empty",
-                    SqlState::invalid_string_or_buffer_length(),
+                    SqlState::invalid_cursor_name(),
+                ));
+            }
+            // Counted in characters against the very value `SQLGetInfo` reports
+            // for `SQL_MAX_CURSOR_NAME_LEN`, so the driver cannot advertise one
+            // limit and enforce another.
+            let chars = name.chars().count();
+            if chars > usize::from(crate::types::SQL_MAX_CURSOR_NAME_LEN) {
+                return Err(OdbcError::general(
+                    format!(
+                        "Cursor name is {chars} characters; this driver reports a \
+                         maximum of {} for SQL_MAX_CURSOR_NAME_LEN",
+                        crate::types::SQL_MAX_CURSOR_NAME_LEN
+                    ),
+                    SqlState::invalid_cursor_name(),
+                ));
+            }
+            let upper = name.to_uppercase();
+            if upper.starts_with("SQLCUR") || upper.starts_with("SQL_CUR") {
+                return Err(OdbcError::general(
+                    format!(
+                        "Cursor name {name:?} uses a prefix reserved for \
+                         driver-generated names (SQLCUR, SQL_CUR)"
+                    ),
+                    SqlState::invalid_cursor_name(),
                 ));
             }
 
-            stmt.cursor_name = Some(name);
+            // Spec 24000: "the statement corresponding to StatementHandle was
+            // already in an executed or cursor-positioned state". The Comments say
+            // the same in the positive direction — a cursor may be renamed "as long
+            // as the cursor is in an allocated or prepared state".
+            let stmt = scope.get::<StatementHandle<B>>(statement_handle)?;
+            if stmt.cursor_open || stmt.statement.is_some() {
+                return Err(OdbcError::general(
+                    "Cannot set a cursor name once the statement has been executed",
+                    SqlState::invalid_cursor_state(),
+                ));
+            }
+
+            // Spec 3C000: "All cursor names within the connection must be unique."
+            // Every statement on this connection shares the group lock this call
+            // already holds, so the walk adds no lock and no ordering rule — the
+            // same footing as `SQLEndTran`'s. An owned snapshot, for the reason
+            // given there: a statement freed mid-walk cannot shift it.
+            let registry = crate::handles::registry::registry();
+            if let Some(conn_token) = registry.parent_of(statement_handle, HandleKind::Stmt) {
+                for sibling in registry.children_of(conn_token) {
+                    if std::ptr::eq(sibling, statement_handle) {
+                        continue;
+                    }
+                    // A sibling retired between the snapshot and here is simply
+                    // gone, and holds no name to clash with.
+                    let Ok(other) = scope.get::<StatementHandle<B>>(sibling) else {
+                        continue;
+                    };
+                    if other.cursor_name.as_deref() == Some(name.as_str()) {
+                        return Err(OdbcError::general(
+                            format!("Cursor name {name:?} is already in use on this connection"),
+                            SqlState::duplicate_cursor_name(),
+                        ));
+                    }
+                }
+            }
+
+            scope
+                .get::<StatementHandle<B>>(statement_handle)?
+                .cursor_name = Some(name);
             Ok(SqlReturn::SUCCESS)
         })
     };
@@ -915,11 +1012,12 @@ pub unsafe fn sql_set_pos<B: Backend>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ffi::handle::{sql_alloc_handle, sql_free_handle};
     use crate::test_utils::{
         MockBackend, MockFailingCloseBackend, alloc_env_conn_stmt, cleanup_env_conn_stmt,
         with_handle,
     };
-    use odbc_sys::BulkOperation;
+    use odbc_sys::{BulkOperation, HandleType};
 
     #[test]
     fn num_result_cols_without_execute_returns_error() {
@@ -1621,6 +1719,160 @@ mod tests {
         }
     }
 
+    /// Reads the SQLSTATE of the statement's first diagnostic record.
+    unsafe fn first_sqlstate(stmt: *mut c_void) -> String {
+        let mut state = [0u16; 6];
+        let mut msg = [0u16; 256];
+        let mut native: i32 = 0;
+        let mut msg_len: i16 = 0;
+        let ret = unsafe {
+            crate::ffi::diag::sql_get_diag_rec_w::<MockBackend>(
+                HandleType::Stmt as i16,
+                stmt,
+                1,
+                state.as_mut_ptr(),
+                std::ptr::from_mut(&mut native),
+                msg.as_mut_ptr(),
+                256,
+                std::ptr::from_mut(&mut msg_len),
+            )
+        };
+        assert_eq!(ret, SqlReturn::SUCCESS, "no diagnostic record was posted");
+        String::from_utf16_lossy(&state[..5])
+    }
+
+    unsafe fn set_cursor_name(stmt: *mut c_void, name: &str) -> SqlReturn {
+        let utf16: Vec<u16> = name.encode_utf16().collect();
+        unsafe { sql_set_cursor_name_w::<MockBackend>(stmt, utf16.as_ptr(), utf16.len() as i16) }
+    }
+
+    /// `SQLCUR` and `SQL_CUR` are the prefixes `sql_get_cursor_name_w` draws its
+    /// generated names from, and the spec's `34000` row reserves them. An
+    /// application allowed to take one could name a cursor it does not own.
+    #[test]
+    fn set_cursor_name_rejects_the_driver_reserved_prefixes() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+
+            for name in ["SQLCUR_mine", "SQL_CURSOR1", "sqlcur_lowercase"] {
+                assert_eq!(
+                    set_cursor_name(stmt, name),
+                    SqlReturn::ERROR,
+                    "{name} must be refused"
+                );
+                assert_eq!(first_sqlstate(stmt), "34000", "{name}");
+            }
+
+            cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
+    /// An empty name was `HY090`, which the spec marks (DM) and defines as
+    /// `NameLength < 0 && != SQL_NTS` — a different condition entirely.
+    #[test]
+    fn set_cursor_name_rejects_an_empty_name_with_34000_not_hy090() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+
+            assert_eq!(set_cursor_name(stmt, ""), SqlReturn::ERROR);
+            assert_eq!(first_sqlstate(stmt), "34000");
+
+            cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
+    /// The limit enforced must be the one `SQLGetInfo` advertises, or the driver
+    /// contradicts itself.
+    #[test]
+    fn set_cursor_name_rejects_a_name_longer_than_the_advertised_maximum() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+
+            let max = usize::from(crate::types::SQL_MAX_CURSOR_NAME_LEN);
+            assert_eq!(
+                set_cursor_name(stmt, &"c".repeat(max)),
+                SqlReturn::SUCCESS,
+                "exactly the advertised maximum must be accepted"
+            );
+            assert_eq!(
+                set_cursor_name(stmt, &"c".repeat(max + 1)),
+                SqlReturn::ERROR
+            );
+            assert_eq!(first_sqlstate(stmt), "34000");
+
+            cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
+    /// "All cursor names within the connection must be unique." Two statements on
+    /// one connection may not share a name; the same name on a *different*
+    /// connection is fine, which is what makes the scope load-bearing.
+    #[test]
+    fn set_cursor_name_rejects_a_duplicate_on_the_same_connection() {
+        unsafe {
+            let (env, conn, stmt_a) = alloc_env_conn_stmt();
+            let mut stmt_b: *mut c_void = std::ptr::null_mut();
+            assert_eq!(
+                sql_alloc_handle::<MockBackend>(HandleType::Stmt as i16, conn, &mut stmt_b),
+                SqlReturn::SUCCESS
+            );
+
+            assert_eq!(set_cursor_name(stmt_a, "shared"), SqlReturn::SUCCESS);
+            assert_eq!(
+                set_cursor_name(stmt_b, "shared"),
+                SqlReturn::ERROR,
+                "a sibling statement must not reuse the name"
+            );
+            assert_eq!(first_sqlstate(stmt_b), "3C000");
+
+            // Renaming a statement to the name it already holds is not a clash
+            // with itself.
+            assert_eq!(set_cursor_name(stmt_a, "shared"), SqlReturn::SUCCESS);
+
+            assert_eq!(
+                sql_free_handle::<MockBackend>(HandleType::Stmt as i16, stmt_b),
+                SqlReturn::SUCCESS
+            );
+            cleanup_env_conn_stmt(env, conn, stmt_a);
+        }
+    }
+
+    /// The same name on a second connection is legal — the spec scopes uniqueness
+    /// to the connection, and a check that walked more would reject valid calls.
+    #[test]
+    fn set_cursor_name_allows_the_same_name_on_another_connection() {
+        unsafe {
+            let (env, conn_a, stmt_a) = alloc_env_conn_stmt();
+            let mut conn_b: *mut c_void = std::ptr::null_mut();
+            assert_eq!(
+                sql_alloc_handle::<MockBackend>(HandleType::Dbc as i16, env, &mut conn_b),
+                SqlReturn::SUCCESS
+            );
+            let mut stmt_b: *mut c_void = std::ptr::null_mut();
+            assert_eq!(
+                sql_alloc_handle::<MockBackend>(HandleType::Stmt as i16, conn_b, &mut stmt_b),
+                SqlReturn::SUCCESS
+            );
+
+            assert_eq!(set_cursor_name(stmt_a, "shared"), SqlReturn::SUCCESS);
+            assert_eq!(
+                set_cursor_name(stmt_b, "shared"),
+                SqlReturn::SUCCESS,
+                "uniqueness is scoped to the connection"
+            );
+
+            assert_eq!(
+                sql_free_handle::<MockBackend>(HandleType::Stmt as i16, stmt_b),
+                SqlReturn::SUCCESS
+            );
+            assert_eq!(
+                sql_free_handle::<MockBackend>(HandleType::Dbc as i16, conn_b),
+                SqlReturn::SUCCESS
+            );
+            cleanup_env_conn_stmt(env, conn_a, stmt_a);
+        }
+    }
+
     #[test]
     fn get_cursor_name_truncates_with_success_with_info() {
         unsafe {
@@ -1813,6 +2065,56 @@ mod tests {
                 "precondition: a cursor is open, so SQLCloseCursor has something to close",
             );
             (env, conn, stmt)
+        }
+    }
+
+    /// The spec's `24000` row carries no (DM) marker, and the Comments give the
+    /// rule in the positive direction: a cursor may be renamed "as long as the
+    /// cursor is in an allocated or prepared state". Renaming a cursor an
+    /// application is already fetching from would leave a `WHERE CURRENT OF` in
+    /// flight pointing at a name that no longer resolves.
+    ///
+    /// Driven through `sql_exec_direct_w` on a backend that really produces a
+    /// result set — asserting on a hand-set `cursor_open` would prove only that
+    /// the test can write a bool.
+    #[test]
+    fn set_cursor_name_is_refused_once_the_statement_has_executed() {
+        unsafe {
+            let (env, conn, stmt) = cursor_open_stmt_for::<MockFailingCloseBackend>();
+
+            let name: Vec<u16> = "TooLate".encode_utf16().collect();
+            assert_eq!(
+                sql_set_cursor_name_w::<MockFailingCloseBackend>(
+                    stmt,
+                    name.as_ptr(),
+                    name.len() as i16,
+                ),
+                SqlReturn::ERROR,
+                "a cursor name set after execution must be refused"
+            );
+
+            let mut state = [0u16; 6];
+            let mut msg = [0u16; 256];
+            let mut native: i32 = 0;
+            let mut msg_len: i16 = 0;
+            assert_eq!(
+                crate::ffi::diag::sql_get_diag_rec_w::<MockFailingCloseBackend>(
+                    HandleType::Stmt as i16,
+                    stmt,
+                    1,
+                    state.as_mut_ptr(),
+                    std::ptr::from_mut(&mut native),
+                    msg.as_mut_ptr(),
+                    256,
+                    std::ptr::from_mut(&mut msg_len),
+                ),
+                SqlReturn::SUCCESS
+            );
+            assert_eq!(String::from_utf16_lossy(&state[..5]), "24000");
+
+            crate::test_utils::cleanup_connected_env_conn_stmt::<MockFailingCloseBackend>(
+                env, conn, stmt,
+            );
         }
     }
 
