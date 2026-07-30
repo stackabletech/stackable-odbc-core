@@ -6,8 +6,8 @@
 pub use odbc_sys::{
     AttrOdbcVersion, CDataType, CompletionType, ConnectionAttribute, Date, Desc,
     DriverConnectOption, EnvironmentAttribute, FreeStmtOption, Guid, HandleType,
-    HeaderDiagnosticIdentifier, InfoType, Len, NO_TOTAL, Numeric, ParamType, Pointer, SqlDataType,
-    SqlReturn, StatementAttribute, Time, Timestamp, ULen, WChar,
+    HeaderDiagnosticIdentifier, InfoType, Interval, Len, NO_TOTAL, Numeric, ParamType, Pointer,
+    SqlDataType, SqlReturn, StatementAttribute, Time, Timestamp, ULen, WChar,
 };
 
 // ---------------------------------------------------------------------------

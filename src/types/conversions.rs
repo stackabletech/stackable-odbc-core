@@ -5,7 +5,7 @@
 
 use odbc_sys::{
     AttrOdbcVersion, CDataType, Desc, DriverConnectOption, EnvironmentAttribute, FetchOrientation,
-    FreeStmtOption, HandleType, InfoType, StatementAttribute,
+    FreeStmtOption, HandleType, InfoType, Interval, StatementAttribute,
 };
 use odbc_sys::{BulkOperation, CompletionType, ParamType};
 
@@ -197,6 +197,39 @@ pub fn info_type_from_raw(value: u16) -> Option<odbc_sys::InfoType> {
         10023 => Some(InfoType::AsyncDbcFunctions),
         10024 => Some(InfoType::DriverAwarePoolingSupported),
         10025 => Some(InfoType::AsyncNotification),
+        _ => None,
+    }
+}
+
+/// Convert a raw `SQL_IS_*` subcode into an `odbc_sys::Interval`.
+///
+/// Returns `None` for values that are not a recognised interval subcode.
+/// This is the safe alternative to `transmute` for the `#[repr(C)]` `Interval`
+/// enum, whose explicit discriminants 1..=13 let a converted value be cast back
+/// to the integer it came from — the round-trip that makes a conversion
+/// function the right answer here rather than a named constant.
+///
+/// **These are `SQL_DESC_DATETIME_INTERVAL_CODE`'s values, 1..=13, not the
+/// concise `SQL_INTERVAL_*` SQL types**, which are the same subcodes plus 100.
+/// The two numbering schemes are easy to conflate and mean different things:
+/// the subcode says *which* interval a verbose `SQL_INTERVAL` type is, and the
+/// concise type says the whole thing in one number.
+#[must_use]
+pub fn interval_from_raw(value: i16) -> Option<Interval> {
+    match value {
+        1 => Some(Interval::Year),
+        2 => Some(Interval::Month),
+        3 => Some(Interval::Day),
+        4 => Some(Interval::Hour),
+        5 => Some(Interval::Minute),
+        6 => Some(Interval::Second),
+        7 => Some(Interval::YearToMonth),
+        8 => Some(Interval::DayToHour),
+        9 => Some(Interval::DayToMinute),
+        10 => Some(Interval::DayToSecond),
+        11 => Some(Interval::HourToMinute),
+        12 => Some(Interval::HourToSecond),
+        13 => Some(Interval::MinuteToSecond),
         _ => None,
     }
 }
@@ -816,6 +849,37 @@ mod tests {
         // ODBC 2.x deprecated aliases must map to their 3.x equivalents
         assert_eq!(c_data_type_from_raw(4), Some(CDataType::SLong));
         assert_eq!(c_data_type_from_raw(5), Some(CDataType::SShort));
+    }
+
+    // --- interval_from_raw ---
+
+    #[test]
+    fn interval_from_raw_accepts_the_thirteen_subcodes() {
+        assert_eq!(interval_from_raw(1), Some(Interval::Year));
+        assert_eq!(interval_from_raw(6), Some(Interval::Second));
+        assert_eq!(interval_from_raw(13), Some(Interval::MinuteToSecond));
+    }
+
+    #[test]
+    fn interval_from_raw_rejects_everything_else() {
+        assert_eq!(interval_from_raw(0), None);
+        assert_eq!(interval_from_raw(14), None);
+        assert_eq!(interval_from_raw(-1), None);
+        // 101 is `SQL_INTERVAL_YEAR`, the *concise SQL type*, not a subcode.
+        // Accepting it here would silently conflate the two numbering schemes.
+        assert_eq!(interval_from_raw(101), None);
+    }
+
+    /// Every accepted value must return to the integer it came from. This is
+    /// the property AGENTS.md requires before a conversion is worth having:
+    /// `odbc_sys::Operation` and `Lock` fail it, which is why they are named
+    /// constants instead.
+    #[test]
+    fn interval_from_raw_round_trips() {
+        for raw in 1..=13_i16 {
+            let converted = interval_from_raw(raw).expect("1..=13 are all valid subcodes");
+            assert_eq!(converted as i16, raw);
+        }
     }
 
     /// `SQL_C_TINYINT` is the ODBC 2.x spelling of `SQL_C_STINYINT`, exactly as
