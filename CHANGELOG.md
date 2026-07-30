@@ -1487,6 +1487,15 @@ call `SQLCloseCursor` or `SQLFreeStmt(SQL_CLOSE)` first, as it already must for
   implements any of the three hooks should expect a call with `0` where it
   previously got none.
 
+- **`SQLExecDirect` and `SQLExecute` return `SQL_NO_DATA` for a searched DML
+  that affected no rows.** Both success paths could only answer `SQL_SUCCESS`
+  or `SQL_SUCCESS_WITH_INFO`, so the outcome both spec pages describe in the
+  same sentence was unreachable. Core decides it from
+  `StatementBackend::column_count` and `StatementBackend::row_count`: no
+  columns plus a counted zero rows. A `SELECT` with an empty result set is
+  unaffected, and a backend whose `row_count` returns `None` or `SQL_NO_TOTAL`
+  keeps `SQL_SUCCESS` — an absent count is not a count of zero.
+
 - **`SQLMoreResults` discards the result set it reports away.** It returned
   `SQL_NO_DATA` and left the cursor open, so a following `SQLFetch` re-read the
   same rows and a following `SQLExecDirect` was refused with `24000`. Appendix

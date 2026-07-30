@@ -2,7 +2,7 @@
 
 use std::ffi::c_void;
 
-use crate::backend::Backend;
+use crate::backend::{Backend, StatementBackend};
 use crate::errors::OdbcError;
 use crate::handles::StatementHandle;
 use crate::panic::panic_safe;
@@ -25,6 +25,36 @@ unsafe fn report_param_set<B: Backend>(stmt: &StatementHandle<B>, succeeded: boo
     unsafe { crate::ffi::params::report_params_processed(stmt, status) };
 }
 
+/// Whether the execution that just completed was a searched DML statement that
+/// affected no rows — the spec's `SQL_NO_DATA` case.
+///
+/// `SQLExecDirect`'s Comments, repeated verbatim on `SQLExecute`: "If
+/// SQLExecDirect executes a searched update, insert, or delete statement that
+/// doesn't affect any rows at the data source, the call to SQLExecDirect
+/// returns SQL_NO_DATA." Appendix B's footnote `[nf]` corroborates it from the
+/// other side, carving these functions out of its own definition of
+/// `SQL_NO_DATA` precisely because they return it here.
+///
+/// Two facts decide it, and both are already on the statement:
+///
+/// - **`column_count() == 0`** separates DML from a query. A `SELECT` matching
+///   nothing still declares its columns, and it is `SQL_SUCCESS` with an empty
+///   result set — reporting `SQL_NO_DATA` for it would send an application down
+///   its end-of-cursor path before it fetched anything.
+/// - **`row_count() == Some(0)`** is the backend saying it counted, and counted
+///   zero. `None` means "not applicable to this statement" and
+///   `Some(SQL_NO_TOTAL)` means "the driver cannot determine the count"; neither
+///   asserts that nothing was affected, so both keep `SQL_SUCCESS`. A backend
+///   that reports no row counts therefore never reaches `SQL_NO_DATA`, which is
+///   the right direction to be wrong in: under-reporting leaves the application
+///   on the path it already takes, while over-reporting makes a successful
+///   `CREATE TABLE` look like a miss.
+fn zero_row_searched_dml<B: Backend>(stmt: &StatementHandle<B>) -> bool {
+    stmt.statement
+        .as_ref()
+        .is_some_and(|s| s.column_count() == 0 && s.row_count() == Some(0))
+}
+
 /// Generic implementation of SQLExecDirectW.
 ///
 /// Spec: <https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlexecdirect-function>
@@ -38,6 +68,15 @@ unsafe fn report_param_set<B: Backend>(stmt: &StatementHandle<B>, succeeded: boo
 /// - `statement_text`: Pointer to the UTF-16 SQL statement text.
 /// - `text_length`: Length of `statement_text` in characters, or `SQL_NTS` (-3) if
 ///   null-terminated.
+///
+/// # Return values
+///
+/// `SQL_NO_DATA` is returned for a searched update, insert or delete that affected no rows
+/// — the Comments say so directly, and Appendix B's `[nf]` footnote carves this function out
+/// of its own `SQL_NO_DATA` definition for that reason. Core decides it from
+/// `StatementBackend::column_count` and `StatementBackend::row_count`; see
+/// `zero_row_searched_dml` for why a backend that reports no row count keeps
+/// `SQL_SUCCESS`.
 ///
 /// # Spec compliance
 ///
@@ -299,6 +338,15 @@ pub unsafe fn sql_exec_direct_w<B: Backend>(
             // Opens a cursor only if the statement actually returned columns.
             stmt.set_result_set(crate::handles::StatementData::Backend(result));
 
+            // A searched DML that affected nothing is SQL_NO_DATA, and it wins
+            // over SQL_SUCCESS_WITH_INFO: it is a completion the application has
+            // to branch on, while the parameter-conversion warning behind
+            // `converted_with_info` is already in the diagnostic queue and stays
+            // readable through SQLGetDiagRec either way.
+            if zero_row_searched_dml(stmt) {
+                return Ok(SqlReturn::NO_DATA);
+            }
+
             Ok(if converted_with_info {
                 SqlReturn::SUCCESS_WITH_INFO
             } else {
@@ -506,6 +554,15 @@ pub unsafe fn sql_prepare_w<B: Backend>(
 /// # Parameters
 ///
 /// - `statement_handle`: Statement handle (`SQLHSTMT`).
+///
+/// # Return values
+///
+/// `SQL_NO_DATA` is returned for a searched update, insert or delete that affected no rows
+/// — the Comments say so directly, and Appendix B's `[nf]` footnote carves this function out
+/// of its own `SQL_NO_DATA` definition for that reason. Core decides it from
+/// `StatementBackend::column_count` and `StatementBackend::row_count`; see
+/// `zero_row_searched_dml` for why a backend that reports no row count keeps
+/// `SQL_SUCCESS`.
 ///
 /// # Spec compliance
 ///
@@ -729,6 +786,12 @@ pub unsafe fn sql_execute<B: Backend>(statement_handle: *mut c_void) -> SqlRetur
             // Already inside the enclosing `unsafe` context, like collect_params above.
             crate::ffi::params::write_output_params(records, &outcome.output_params)?;
 
+            // As in `sql_exec_direct_w`: this page carries the same Comments
+            // sentence, so it answers the same way.
+            if zero_row_searched_dml(stmt) {
+                return Ok(SqlReturn::NO_DATA);
+            }
+
             Ok(if converted_with_info {
                 SqlReturn::SUCCESS_WITH_INFO
             } else {
@@ -749,8 +812,8 @@ mod tests {
     use crate::handles::StatementHandle;
     use crate::test_utils::{
         MockBackend, MockBlockingBackend, MockCancelAwareBackend, MockConnection,
-        MockCoreCancelsTimeoutBackend, MockRecordingBackend, alloc_env_conn_stmt, with_descriptor,
-        with_handle,
+        MockCoreCancelsTimeoutBackend, MockRecordingBackend, MockRowCountBackend,
+        alloc_env_conn_stmt, with_descriptor, with_handle,
     };
     use odbc_sys::{CDataType, HandleType, ParamType, SqlDataType};
 
@@ -1828,6 +1891,168 @@ mod tests {
             );
 
             cleanup_env_conn_stmt_for::<MockCoreCancelsTimeoutBackend>(env, conn, stmt);
+        }
+    }
+
+    /// Both spec pages state it in the same words: "If SQLExecDirect executes a
+    /// searched update, insert, or delete statement that doesn't affect any rows
+    /// at the data source, the call to SQLExecDirect returns SQL_NO_DATA."
+    /// Appendix B's footnote [nf] corroborates from the other side, carving
+    /// exactly these three functions out of its own definition of SQL_NO_DATA.
+    #[test]
+    fn exec_direct_reports_no_data_for_a_zero_row_searched_dml() {
+        unsafe {
+            let (env, conn, stmt) =
+                crate::test_utils::alloc_connected_env_conn_stmt::<MockRowCountBackend>();
+
+            let sql: Vec<u16> = "DELETE FROM t WHERE 1 = 0".encode_utf16().collect();
+            assert_eq!(
+                sql_exec_direct_w::<MockRowCountBackend>(
+                    stmt,
+                    sql.as_ptr(),
+                    i32::try_from(sql.len()).expect("the fixed test SQL is short"),
+                ),
+                SqlReturn::NO_DATA,
+                "no columns and a counted zero rows is the spec's SQL_NO_DATA case",
+            );
+
+            crate::test_utils::cleanup_connected_env_conn_stmt::<MockRowCountBackend>(
+                env, conn, stmt,
+            );
+        }
+    }
+
+    /// The distinction the discriminator exists to draw. A `SELECT` matching
+    /// nothing is `SQL_SUCCESS` with an empty result set, and reporting
+    /// `SQL_NO_DATA` for it would send every application down its
+    /// end-of-cursor path before it had fetched anything.
+    #[test]
+    fn exec_direct_reports_success_for_a_select_with_no_rows() {
+        unsafe {
+            let (env, conn, stmt) =
+                crate::test_utils::alloc_connected_env_conn_stmt::<MockRowCountBackend>();
+
+            let sql: Vec<u16> = "SELECT a FROM t WHERE 1 = 0".encode_utf16().collect();
+            assert_eq!(
+                sql_exec_direct_w::<MockRowCountBackend>(
+                    stmt,
+                    sql.as_ptr(),
+                    i32::try_from(sql.len()).expect("the fixed test SQL is short"),
+                ),
+                SqlReturn::SUCCESS,
+                "an empty result set is not the same as no result",
+            );
+
+            crate::test_utils::cleanup_connected_env_conn_stmt::<MockRowCountBackend>(
+                env, conn, stmt,
+            );
+        }
+    }
+
+    /// `row_count() == None` means "not applicable to this statement" and
+    /// `Some(SQL_NO_TOTAL)` means "the backend could not work it out". Neither
+    /// asserts that nothing was affected, so both keep SQL_SUCCESS — a backend
+    /// that reports no counts must not have every DDL statement reported as a
+    /// miss.
+    #[test]
+    fn exec_direct_reports_success_when_the_backend_gives_no_row_count() {
+        unsafe {
+            let (env, conn, stmt) =
+                crate::test_utils::alloc_connected_env_conn_stmt::<MockRowCountBackend>();
+
+            let sql: Vec<u16> = "CREATE TABLE unknown_count (a INT)"
+                .encode_utf16()
+                .collect();
+            assert_eq!(
+                sql_exec_direct_w::<MockRowCountBackend>(
+                    stmt,
+                    sql.as_ptr(),
+                    i32::try_from(sql.len()).expect("the fixed test SQL is short"),
+                ),
+                SqlReturn::SUCCESS,
+                "an absent row count is not a count of zero",
+            );
+
+            crate::test_utils::cleanup_connected_env_conn_stmt::<MockRowCountBackend>(
+                env, conn, stmt,
+            );
+        }
+    }
+
+    /// A searched DML that did affect rows is an ordinary success.
+    #[test]
+    fn exec_direct_reports_success_for_a_dml_that_affected_rows() {
+        unsafe {
+            let (env, conn, stmt) =
+                crate::test_utils::alloc_connected_env_conn_stmt::<MockRowCountBackend>();
+
+            let sql: Vec<u16> = "DELETE FROM many WHERE a > 0".encode_utf16().collect();
+            assert_eq!(
+                sql_exec_direct_w::<MockRowCountBackend>(
+                    stmt,
+                    sql.as_ptr(),
+                    i32::try_from(sql.len()).expect("the fixed test SQL is short"),
+                ),
+                SqlReturn::SUCCESS
+            );
+
+            crate::test_utils::cleanup_connected_env_conn_stmt::<MockRowCountBackend>(
+                env, conn, stmt,
+            );
+        }
+    }
+
+    /// `SQLExecute`'s page carries the same sentence as `SQLExecDirect`'s, so
+    /// the prepared path answers the same way. Covered separately because the
+    /// two functions have separate success paths.
+    #[test]
+    fn execute_reports_no_data_for_a_zero_row_searched_dml() {
+        unsafe {
+            let (env, conn, stmt) =
+                crate::test_utils::alloc_connected_env_conn_stmt::<MockRowCountBackend>();
+
+            let sql: Vec<u16> = "UPDATE t SET a = 1 WHERE 1 = 0".encode_utf16().collect();
+            assert_eq!(
+                sql_prepare_w::<MockRowCountBackend>(
+                    stmt,
+                    sql.as_ptr(),
+                    i32::try_from(sql.len()).expect("the fixed test SQL is short"),
+                ),
+                SqlReturn::SUCCESS
+            );
+            assert_eq!(
+                sql_execute::<MockRowCountBackend>(stmt),
+                SqlReturn::NO_DATA,
+                "SQLExecute carries the same Comments sentence as SQLExecDirect",
+            );
+
+            crate::test_utils::cleanup_connected_env_conn_stmt::<MockRowCountBackend>(
+                env, conn, stmt,
+            );
+        }
+    }
+
+    /// `SQLExecute`'s half of the SELECT distinction.
+    #[test]
+    fn execute_reports_success_for_a_select_with_no_rows() {
+        unsafe {
+            let (env, conn, stmt) =
+                crate::test_utils::alloc_connected_env_conn_stmt::<MockRowCountBackend>();
+
+            let sql: Vec<u16> = "SELECT a FROM t WHERE 1 = 0".encode_utf16().collect();
+            assert_eq!(
+                sql_prepare_w::<MockRowCountBackend>(
+                    stmt,
+                    sql.as_ptr(),
+                    i32::try_from(sql.len()).expect("the fixed test SQL is short"),
+                ),
+                SqlReturn::SUCCESS
+            );
+            assert_eq!(sql_execute::<MockRowCountBackend>(stmt), SqlReturn::SUCCESS);
+
+            crate::test_utils::cleanup_connected_env_conn_stmt::<MockRowCountBackend>(
+                env, conn, stmt,
+            );
         }
     }
 }

@@ -3205,6 +3205,170 @@ impl Backend for MockLongDataBackend {
 }
 
 // ---------------------------------------------------------------------------
+// MockRowCountBackend — column and row counts chosen from the SQL text
+// ---------------------------------------------------------------------------
+
+/// A statement whose `column_count` and `row_count` are fixed at construction,
+/// so one mock covers every case `SQLExecDirect` and `SQLExecute` weigh when
+/// deciding `SQL_NO_DATA`.
+///
+/// No other mock can express them: `MockStatement` takes the trait defaults
+/// (`0` columns and `None` rows) and `MockLongDataStatement` is fixed at three
+/// columns.
+pub struct MockRowCountStatement {
+    columns: i16,
+    rows: Option<i64>,
+}
+
+impl StatementBackend for MockRowCountStatement {
+    type Error = OdbcError;
+
+    fn column_count(&self) -> i16 {
+        self.columns
+    }
+
+    fn row_count(&self) -> Option<i64> {
+        self.rows
+    }
+
+    fn fetch(&mut self) -> Result<crate::types::FetchResult, OdbcError> {
+        Ok(crate::types::FetchResult::NoData)
+    }
+}
+
+/// Hands out [`MockRowCountStatement`]s shaped by the SQL text, so a test picks
+/// a case by the statement it executes rather than by reaching into a handle:
+///
+/// - text containing `SELECT` — one column, zero rows. A query with an empty
+///   result set, which is `SQL_SUCCESS`, not `SQL_NO_DATA`.
+/// - text containing `MANY` — no columns, three rows. DML that affected rows.
+/// - text containing `UNKNOWN` — no columns, no row count. A backend that
+///   cannot say, where `SQL_SUCCESS` stands.
+/// - anything else — no columns, zero rows. The searched DML the spec answers
+///   with `SQL_NO_DATA`.
+pub struct MockRowCountBackend;
+
+fn row_count_statement_for(sql: &str) -> MockRowCountStatement {
+    let upper = sql.to_uppercase();
+    if upper.contains("SELECT") {
+        MockRowCountStatement {
+            columns: 1,
+            rows: Some(0),
+        }
+    } else if upper.contains("MANY") {
+        MockRowCountStatement {
+            columns: 0,
+            rows: Some(3),
+        }
+    } else if upper.contains("UNKNOWN") {
+        MockRowCountStatement {
+            columns: 0,
+            rows: None,
+        }
+    } else {
+        MockRowCountStatement {
+            columns: 0,
+            rows: Some(0),
+        }
+    }
+}
+
+impl Backend for MockRowCountBackend {
+    type Connection = MockConnection;
+    type Statement = MockRowCountStatement;
+    type Error = OdbcError;
+    type CancelToken = MockCancelToken;
+
+    fn connect(_: &ConnectParams) -> Result<MockConnection, OdbcError> {
+        Ok(MockConnection)
+    }
+    fn disconnect(_: &mut MockConnection) -> Result<(), OdbcError> {
+        Ok(())
+    }
+    fn cancel_token(_conn: &Self::Connection) -> Self::CancelToken {
+        MockCancelToken::default()
+    }
+    fn exec_direct(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        sql: &str,
+    ) -> Result<MockRowCountStatement, OdbcError> {
+        Ok(row_count_statement_for(sql))
+    }
+    fn prepare(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        sql: &str,
+    ) -> Result<MockRowCountStatement, OdbcError> {
+        Ok(row_count_statement_for(sql))
+    }
+    fn execute(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: &mut MockRowCountStatement,
+        _: &[crate::types::ColumnValue],
+    ) -> Result<crate::types::ExecuteOutcome, OdbcError> {
+        Ok(crate::types::ExecuteOutcome::default())
+    }
+    fn get_info(_: &MockConnection, _: crate::types::InfoType) -> Result<InfoValue, OdbcError> {
+        Err(OdbcError::NotImplemented {
+            feature: "get_info".into(),
+        })
+    }
+    fn get_functions() -> Cow<'static, [crate::function_id::FunctionId]> {
+        Cow::Borrowed(&[])
+    }
+    fn get_type_info(_conn: &Self::Connection) -> Cow<'static, [TypeInfoRow]> {
+        Cow::Borrowed(&[])
+    }
+    fn tables(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: &[String],
+    ) -> Result<Vec<TableRow>, OdbcError> {
+        Err(OdbcError::NotImplemented {
+            feature: "tables".into(),
+        })
+    }
+    fn columns(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+    ) -> Result<Vec<ColumnRow>, OdbcError> {
+        Err(OdbcError::NotImplemented {
+            feature: "columns".into(),
+        })
+    }
+
+    fn supports_catalogs(_conn: &Self::Connection) -> bool {
+        false
+    }
+    fn supports_schemas(_conn: &Self::Connection) -> bool {
+        false
+    }
+    fn alter_table_support(_conn: &Self::Connection) -> u32 {
+        0
+    }
+    fn outer_join_capabilities(_conn: &Self::Connection) -> u32 {
+        0
+    }
+    fn default_txn_isolation(_conn: &Self::Connection) -> u32 {
+        crate::types::SQL_TXN_SERIALIZABLE
+    }
+    fn txn_isolation_options(_conn: &Self::Connection) -> u32 {
+        crate::types::SQL_TXN_SERIALIZABLE
+    }
+
+    minimal_capability_decls!();
+}
+
+// ---------------------------------------------------------------------------
 // MockRecordingBackend — proves a statement-producing call gets its own token
 // ---------------------------------------------------------------------------
 
