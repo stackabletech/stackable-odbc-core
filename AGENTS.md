@@ -1155,9 +1155,11 @@ ODBC Application (e.g. isql)
 - **W-only for string-bearing functions**: every ODBC function that takes or
   returns a string is exported only in its Wide (`W`-suffix) form; the Driver
   Manager translates an ANSI application's calls into those. Functions with no
-  strings in their signature — `SQLAllocHandle`, `SQLFetch`, `SQLBindCol` and 37
-  others — have one spelling and are exported unsuffixed. 32 of the 72 `SQL*`
-  entry points are `W` forms.
+  strings in their signature — `SQLAllocHandle`, `SQLFetch`, `SQLBindCol` and
+  the rest — have one spelling and are exported unsuffixed.
+  `CORE_EXPORTED_FUNCTIONS` in `src/function_id.rs` is the authoritative list,
+  and a guard test pins every entry to a symbol that exists; a count written
+  here would only go stale.
 - **No async in the trait**: `Backend` is synchronous. A driver that wraps an async client library is expected to bridge to it internally (e.g. a current-thread tokio runtime + `block_on`).
 
 ### Crate layout
@@ -1222,7 +1224,7 @@ Generic framework. Zero database-specific code.
 | `ffi/tran.rs` | `sql_end_tran<B>` |
 | `ffi/setup.rs` | `config_dsn_w` (ODBC installer entry point) |
 | `ffi/mod.rs` | `ffi` submodule declarations |
-| `forward_ffi.rs` | `forward_ffi!` macro — generates the C ABI entry points for a backend (72 `SQL*`, plus `ConfigDSNW` on Windows) |
+| `forward_ffi.rs` | `forward_ffi!` macro — generates the C ABI entry points for a backend (the `SQL*` functions, plus `ConfigDSNW` on Windows) |
 | `test_utils.rs` | Shared test infrastructure (`MockBackend` and the purpose-built mocks listed under Testing) |
 
 ### What a driver crate contains

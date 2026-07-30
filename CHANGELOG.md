@@ -118,6 +118,22 @@ Everything a driver has to change for the catalog rework, in one place.
 
 ### Added
 
+- **`SQLExtendedFetch` is implemented.** It was a bare `SQL_ERROR` inside the
+  `forward_ffi!` macro — no handle validation, no diagnostic, no logging, no
+  test — so an ODBC 2.x application, or the Driver Manager mapping a 2.x
+  application's `SQLFetchScroll` onto it, saw a failure with an empty diagnostic
+  queue and `SQLGetDiagRec` answering `SQL_NO_DATA`. `SQL_FETCH_NEXT` now
+  fetches; every other orientation reports `HY106`, and an invalid handle now
+  reports `SQL_INVALID_HANDLE` rather than `SQL_ERROR`.
+
+  Per spec the row count and status go to the `RowCountPtr` and `RowStatusArray`
+  **arguments**, not to `SQL_ATTR_ROWS_FETCHED_PTR` / `SQL_ATTR_ROW_STATUS_PTR`:
+  that buffer "is used only by **SQLExtendedFetch**", and the status array's
+  address "is not stored in the `SQL_DESC_STATUS_ARRAY_PTR` field in the IRD".
+- **`SQL_FETCH_BOOKMARK`**, which `odbc-sys` lacks — its `FetchOrientation` stops
+  at `Relative`. A driver rejecting the orientation needs a name for it.
+- **`SQL_ROWSET_SIZE`**, likewise absent from `odbc-sys`, whose
+  `StatementAttribute` models only the ODBC 3.x `SQL_ATTR_ROW_ARRAY_SIZE`.
 - **The *C to SQL: Numeric* conversion table.** Core now implements all three of
   the spec's C-to-SQL tables. See the migration note above for what changes for
   a driver.
@@ -631,6 +647,30 @@ Everything a driver has to change for the catalog rework, in one place.
   tables, while the identical sentence in the other two is not.
 
 ### Changed
+
+- **Breaking: `SQLSetScrollOptions` is no longer exported.** Its spec page
+  defines no `Returns` section and no diagnostics table; its one substantive note
+  documents what the Driver Manager does "for an application working with an ODBC
+  3.x driver that does not support **SQLSetScrollOptions**" — it sets
+  `SQL_ROWSET_SIZE` itself. unixODBC's DM implements that mapping in full
+  (`SQLGetInfo` to validate the requested concurrency, then `SQLSetStmtAttr` for
+  `SQL_ATTR_CONCURRENCY`, `SQL_ATTR_CURSOR_TYPE`, `SQL_ATTR_KEYSET_SIZE` and
+  `SQL_ROWSET_SIZE`) and dispatches to the driver's own entry point *only when
+  the driver exports one*. Core exported a bare `SQL_ERROR`, which suppressed a
+  capability-checked mapping derived from core's own `SQLGetInfo` answers and
+  replaced it with a silent failure. psqlODBC ships the same arrangement: it
+  never defines the symbol.
+
+  **Migration:** a driver whose `Backend::get_functions` names
+  `FunctionId::SetScrollOptions` must remove it. A list built from
+  `CORE_EXPORTED_FUNCTIONS`, as the docs recommend, needs no change.
+
+- **`SQL_ROWSET_SIZE` other than 1 now returns `01S02` and substitutes 1**, where
+  it was previously accepted silently as an unrecognised attribute. It is the
+  rowset `SQLExtendedFetch` reads, so accepting a larger value would return one
+  row under `SQL_SUCCESS`. `SQLGetStmtAttr` reports the substituted value, as
+  that warning's own text requires. Identical treatment to
+  `SQL_ATTR_ROW_ARRAY_SIZE` and `SQL_DESC_ARRAY_SIZE`.
 
 - **Descriptors are separately allocated handles rather than fields of a
   statement.** Each has its own registry slot, parented to the statement for the
