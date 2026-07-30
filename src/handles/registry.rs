@@ -692,6 +692,55 @@ mod tests {
         ),
     ];
 
+    /// The production half of one source file: everything before its unit tests.
+    ///
+    /// Test code is excluded from the audit below because the models and unit
+    /// tests take group locks freely and legitimately, and it is production
+    /// nesting the rule is about. Every file in the crate puts its tests behind
+    /// this exact two-line sequence, so it is a reliable cut.
+    ///
+    /// **Line endings are normalised first, and that is load-bearing.** A Windows
+    /// checkout has CRLF — GitHub's `windows-latest` runners default to
+    /// `core.autocrlf=true`, and this repository has no `.gitattributes` forcing
+    /// LF — so the pattern would not match, `split` would hand back the whole
+    /// file, and every acquisition inside the test modules would be counted. That
+    /// failed the audit on Windows alone, with inflated counts naming files whose
+    /// production code takes no group lock at all.
+    fn production_source(source: &str) -> String {
+        const TEST_MODULE: &str = "#[cfg(test)]\nmod tests {";
+
+        let normalised = source.replace("\r\n", "\n");
+        normalised
+            .split(TEST_MODULE)
+            .next()
+            .unwrap_or(&normalised)
+            .to_owned()
+    }
+
+    /// [`production_source`] cuts at the test module whichever line endings the
+    /// checkout used.
+    ///
+    /// The bug this pins was invisible on Linux and failed only on Windows, so a
+    /// test that feeds it both is the only thing that keeps it fixed.
+    #[test]
+    fn the_production_cut_is_independent_of_line_endings() {
+        let lf = "fn a() { x.group_of(t); }\n#[cfg(test)]\nmod tests {\n    fn b() { y.group_of(u); }\n}\n";
+        let crlf = lf.replace('\n', "\r\n");
+
+        for (label, source) in [("LF", lf.to_owned()), ("CRLF", crlf)] {
+            let production = production_source(&source);
+            assert_eq!(
+                production.matches(".group_of(").count(),
+                1,
+                "{label}: the cut counted the test module's acquisition too"
+            );
+            assert!(
+                !production.contains("mod tests"),
+                "{label}: the cut did not remove the test module"
+            );
+        }
+    }
+
     /// The list above is complete: no other module acquires a group lock.
     ///
     /// This guards the failure mode a loom model structurally cannot catch. A
@@ -708,17 +757,15 @@ mod tests {
     /// the ordering rule in AGENTS.md; if it does not, it needs a line in the
     /// list above saying so.
     ///
+    /// Which half of each file counts is [`production_source`]'s business, and a
+    /// wrong cut there fails this with counts that look like new sites — see that
+    /// function on why a Windows checkout used to do exactly that.
+    ///
     /// Not run under Miri: it reads the source tree, which is slow under
     /// interpretation and contains no `unsafe` for Miri to check.
     #[test]
     #[cfg_attr(miri, ignore = "reads the source tree; no unsafe to check")]
     fn the_set_of_group_lock_acquisition_sites_is_closed() {
-        // Test code is excluded: the models and unit tests take group locks
-        // freely and legitimately, and it is production nesting the rule is
-        // about. Every file in the crate puts its unit tests behind this exact
-        // two-line sequence, so it is a reliable cut.
-        const TEST_MODULE: &str = "#[cfg(test)]\nmod tests {";
-
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut found: Vec<(String, usize)> = Vec::new();
         let mut stack = vec![root.clone()];
@@ -733,7 +780,7 @@ mod tests {
                     continue;
                 }
                 let source = std::fs::read_to_string(&path).expect("readable source");
-                let production = source.split(TEST_MODULE).next().unwrap_or(&source);
+                let production = production_source(&source);
                 let count = production.matches(".group_of(").count()
                     + production.matches(".group_of_kind(").count();
                 if count > 0 {
