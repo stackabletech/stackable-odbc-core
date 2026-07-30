@@ -1482,6 +1482,12 @@ call `SQLCloseCursor` or `SQLFreeStmt(SQL_CLOSE)` first, as it already must for
   conversion the FFI boundary uses; `attr_odbc_version_from_raw` is unchanged and
   still cannot name `SQL_OV_ODBC2`.
 
+- `SQLNativeSqlW` reports `01004` and `SQL_SUCCESS_WITH_INFO` when
+  *OutStatementText* is non-null and *BufferLength* is zero. Total truncation
+  returned plain `SQL_SUCCESS`, so an application sizing its buffer from the
+  first call saw success and an empty output. A null *OutStatementText* is
+  unchanged: that is a length query, not a truncation.
+
 - `SQLDriverConnectW` and `SQLConnectW` clear any abandoned `SQLBrowseConnect`
   state on success. `SQLBrowseConnectW` already did so on its own; without the
   other two, an abandoned browse's accumulated attributes merged into the next

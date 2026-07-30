@@ -1047,24 +1047,35 @@ pub unsafe fn sql_native_sql_w<B: Backend>(
                 std::ptr::write_unaligned(text_length2_ptr, wide.len() as i32);
             }
 
-            if !out_statement_text.is_null() && buffer_length > 0 {
-                // Copy at most buffer_length-1 code units, then null-terminate.
-                let copy_len = wide.len().min((buffer_length - 1) as usize);
-                // SAFETY: out_statement_text is non-null (checked above) and the caller
-                // guarantees it points to a buffer of at least buffer_length u16 elements.
-                // copy_len <= buffer_length - 1 < buffer_length, so add(copy_len) is in bounds.
-                // Byte-wise, and unaligned for the terminator: the
-                // application's pointer carries no alignment guarantee.
-                std::ptr::copy_nonoverlapping(
-                    wide.as_ptr().cast::<u8>(),
-                    out_statement_text.cast::<u8>(),
-                    copy_len * size_of::<u16>(),
-                );
-                std::ptr::write_unaligned(out_statement_text.add(copy_len), 0);
-                if copy_len < wide.len() {
-                    // The 01004 record the SUCCESS_WITH_INFO refers to: an
-                    // application that sees it calls SQLGetDiagRec to find out
-                    // what happened.
+            if !out_statement_text.is_null() {
+                if buffer_length > 0 {
+                    // Copy at most buffer_length-1 code units, then null-terminate.
+                    let copy_len = wide.len().min((buffer_length - 1) as usize);
+                    // SAFETY: out_statement_text is non-null (checked above) and the caller
+                    // guarantees it points to a buffer of at least buffer_length u16 elements.
+                    // copy_len <= buffer_length - 1 < buffer_length, so add(copy_len) is in bounds.
+                    // Byte-wise, and unaligned for the terminator: the
+                    // application's pointer carries no alignment guarantee.
+                    std::ptr::copy_nonoverlapping(
+                        wide.as_ptr().cast::<u8>(),
+                        out_statement_text.cast::<u8>(),
+                        copy_len * size_of::<u16>(),
+                    );
+                    std::ptr::write_unaligned(out_statement_text.add(copy_len), 0);
+                    if copy_len < wide.len() {
+                        // The 01004 record the SUCCESS_WITH_INFO refers to: an
+                        // application that sees it calls SQLGetDiagRec to find out
+                        // what happened.
+                        conn.diagnostics.push(&OdbcError::StringTruncated);
+                        return Ok(SqlReturn::SUCCESS_WITH_INFO);
+                    }
+                } else if !wide.is_empty() {
+                    // A buffer the application declared empty is the extreme
+                    // case of the spec's "not large enough": nothing fits, not
+                    // even the null terminator, so nothing is written — but the
+                    // truncation is real and must be reported. The required
+                    // length has already gone to TextLength2Ptr above, which is
+                    // what lets the application retry with a real buffer.
                     conn.diagnostics.push(&OdbcError::StringTruncated);
                     return Ok(SqlReturn::SUCCESS_WITH_INFO);
                 }
@@ -1890,6 +1901,100 @@ mod tests {
             assert_eq!(out_len as usize, in_wide.len());
             // output is null-terminated after 3 chars
             assert_eq!(out_buf[3], 0);
+
+            let _ = sql_disconnect::<MockBackend>(conn);
+            let _ = sql_free_handle::<MockBackend>(HandleType::Dbc as i16, conn);
+            let _ = sql_free_handle::<MockBackend>(HandleType::Env as i16, env);
+        }
+    }
+
+    /// Spec 01004: "The buffer \*OutStatementText was not large enough to return
+    /// the entire SQL string, so truncation occurred. (Function returns
+    /// SQL_SUCCESS_WITH_INFO.)" A buffer the application declared empty is the
+    /// extreme case of not large enough, and it used to report plain
+    /// SQL_SUCCESS with no diagnostic at all.
+    #[test]
+    fn native_sql_w_zero_length_buffer_reports_truncation() {
+        use crate::ffi::diag::sql_get_diag_rec_w;
+
+        unsafe {
+            let (env, conn) = alloc_env_and_conn();
+            assert_eq!(connect_handle(conn), SqlReturn::SUCCESS);
+
+            let sql = "SELECT 1";
+            let in_wide: Vec<u16> = sql.encode_utf16().collect();
+            let mut out_buf = [0u16; 1];
+            let mut out_len: i32 = 0;
+
+            let ret = sql_native_sql_w::<MockBackend>(
+                conn,
+                in_wide.as_ptr(),
+                in_wide.len() as i32,
+                out_buf.as_mut_ptr(),
+                0, // a real buffer the application declared empty
+                &mut out_len,
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS_WITH_INFO);
+            assert_eq!(
+                out_len as usize,
+                in_wide.len(),
+                "the required length must still be reported",
+            );
+            assert_eq!(
+                out_buf[0], 0,
+                "nothing may be written into a zero-length buffer",
+            );
+
+            let mut state = [0u16; 6];
+            let mut native_err: i32 = 0;
+            let mut msg_buf = [0u16; 256];
+            let mut msg_len: i16 = 0;
+            assert_eq!(
+                sql_get_diag_rec_w::<MockBackend>(
+                    HandleType::Dbc as i16,
+                    conn,
+                    1,
+                    state.as_mut_ptr(),
+                    &mut native_err,
+                    msg_buf.as_mut_ptr(),
+                    msg_buf.len() as i16,
+                    &mut msg_len,
+                ),
+                SqlReturn::SUCCESS,
+                "SQL_SUCCESS_WITH_INFO with no record leaves the application \
+                 unable to tell truncation from anything else",
+            );
+            assert_eq!(String::from_utf16_lossy(&state[..5]), "01004");
+
+            let _ = sql_disconnect::<MockBackend>(conn);
+            let _ = sql_free_handle::<MockBackend>(HandleType::Dbc as i16, conn);
+            let _ = sql_free_handle::<MockBackend>(HandleType::Env as i16, env);
+        }
+    }
+
+    /// Nothing was truncated when there was nothing to write, so this stays
+    /// plain SQL_SUCCESS. Without it, reporting 01004 for every zero-length
+    /// buffer would pass the test above.
+    #[test]
+    fn native_sql_w_zero_length_buffer_and_empty_statement_is_plain_success() {
+        unsafe {
+            let (env, conn) = alloc_env_and_conn();
+            assert_eq!(connect_handle(conn), SqlReturn::SUCCESS);
+
+            let in_wide: Vec<u16> = vec![0u16];
+            let mut out_buf = [0u16; 1];
+            let mut out_len: i32 = 0;
+
+            let ret = sql_native_sql_w::<MockBackend>(
+                conn,
+                in_wide.as_ptr(),
+                0, // an empty statement
+                out_buf.as_mut_ptr(),
+                0,
+                &mut out_len,
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+            assert_eq!(out_len, 0);
 
             let _ = sql_disconnect::<MockBackend>(conn);
             let _ = sql_free_handle::<MockBackend>(HandleType::Dbc as i16, conn);
