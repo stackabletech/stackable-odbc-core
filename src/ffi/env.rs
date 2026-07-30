@@ -9,7 +9,7 @@ use crate::errors::OdbcError;
 use crate::handles::EnvironmentHandle;
 use crate::panic::panic_safe;
 use crate::types::{
-    SQL_TRUE, SqlReturn, attr_odbc_version_from_raw, environment_attribute_from_raw,
+    SQL_TRUE, SqlReturn, declared_odbc_version_from_raw, environment_attribute_from_raw,
 };
 
 /// Generic implementation of SQLSetEnvAttr.
@@ -17,7 +17,7 @@ use crate::types::{
 /// Spec: <https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlsetenvattr-function>
 ///
 /// Supported attributes:
-/// - `SQL_ATTR_ODBC_VERSION`: `SQL_OV_ODBC3` (3), `SQL_OV_ODBC3_80` (380)
+/// - `SQL_ATTR_ODBC_VERSION`: `SQL_OV_ODBC2` (2), `SQL_OV_ODBC3` (3), `SQL_OV_ODBC3_80` (380)
 /// - `SQL_ATTR_OUTPUT_NTS`: `SQL_TRUE` only (HYC00 for `SQL_FALSE`)
 ///
 /// # Parameters
@@ -42,8 +42,12 @@ use crate::types::{
 ///   this environment. (A second DM-handled condition: ODBC version not yet set,
 ///   not returned here.)
 /// - HY013: Memory management error (not returned here).
-/// - HY024: Returns `SQL_ERROR` for an invalid attribute value (e.g. unrecognized ODBC
-///   version for `SQL_ATTR_ODBC_VERSION`).
+/// - HY024: Returns `SQL_ERROR` for an invalid attribute value — for
+///   `SQL_ATTR_ODBC_VERSION`, anything that is not one of the three `SQL_OV_*`
+///   values the spec defines. `SQL_OV_ODBC2` is one of them: unixODBC forwards
+///   it to the driver verbatim at connect time
+///   (`DriverManager/SQLConnect.c`), and a driver that refuses it is recorded
+///   by that Driver Manager as an ODBC 2.x driver.
 /// - HY090: Returns `SQL_ERROR` if string length is invalid for a string attribute.
 ///   Not applicable — all supported attributes are integer-valued.
 /// - HY092: Invalid attribute/option identifier (driver-manager-handled; unsupported
@@ -96,13 +100,26 @@ pub unsafe fn sql_set_env_attr<B: Backend>(
             match attr {
                 Some(EnvironmentAttribute::OdbcVersion) => {
                     let version_value = value_ptr as usize as i32;
-                    let version = attr_odbc_version_from_raw(version_value).ok_or_else(|| {
-                        // Spec HY024: Invalid attribute value.
-                        OdbcError::general(
-                            format!("Invalid ODBC version value: {version_value}"),
-                            crate::types::SqlState::invalid_attribute_value(),
-                        )
-                    })?;
+                    let version =
+                        declared_odbc_version_from_raw(version_value).ok_or_else(|| {
+                            // Spec HY024: Invalid attribute value.
+                            OdbcError::general(
+                                format!("Invalid ODBC version value: {version_value}"),
+                                crate::types::SqlState::invalid_attribute_value(),
+                            )
+                        })?;
+                    if version.is_odbc_2() {
+                        // Accepted, and recorded, but core answers nothing
+                        // differently for it: the spec's 2.x behaviours are the
+                        // Driver Manager's mapping, which unixODBC drives from
+                        // the application's requested version rather than from
+                        // the driver's.
+                        tracing::warn!(
+                            "SQLSetEnvAttr: application declared SQL_OV_ODBC2; the version is \
+                             recorded and reported back, but core's own SQLSTATEs and datetime \
+                             type codes stay 3.x and the Driver Manager maps them"
+                        );
+                    }
                     env.odbc_version = version;
                     Ok(SqlReturn::SUCCESS)
                 }
@@ -202,7 +219,7 @@ pub unsafe fn sql_get_env_attr<B: Backend>(
                     if !value_ptr.is_null() {
                         // SAFETY: non-null checked above; caller guarantees writable i32
                         let out = value_ptr as *mut i32;
-                        std::ptr::write_unaligned(out, env.odbc_version as i32);
+                        std::ptr::write_unaligned(out, env.odbc_version.raw());
                     }
                     // Spec: for integer attributes, write byte size to StringLengthPtr.
                     if !string_length_ptr.is_null() {
@@ -266,8 +283,12 @@ mod tests {
             );
 
             // Set ODBC version to V3 (SQL_ATTR_ODBC_VERSION, value SQL_OV_ODBC3)
-            let ret =
-                sql_set_env_attr::<MockBackend>(env, ENV_ATTR_ODBC_VERSION, 3 as *mut c_void, 0);
+            let ret = sql_set_env_attr::<MockBackend>(
+                env,
+                ENV_ATTR_ODBC_VERSION,
+                crate::types::SQL_OV_ODBC3 as usize as *mut c_void,
+                0,
+            );
             assert_eq!(ret, SqlReturn::SUCCESS);
 
             // Get ODBC version back
@@ -280,11 +301,15 @@ mod tests {
                 std::ptr::null_mut(),
             );
             assert_eq!(ret, SqlReturn::SUCCESS);
-            assert_eq!(version, 3);
+            assert_eq!(version, crate::types::SQL_OV_ODBC3);
 
             // Set to V3_80 (380) and verify
-            let ret =
-                sql_set_env_attr::<MockBackend>(env, ENV_ATTR_ODBC_VERSION, 380 as *mut c_void, 0);
+            let ret = sql_set_env_attr::<MockBackend>(
+                env,
+                ENV_ATTR_ODBC_VERSION,
+                crate::types::SQL_OV_ODBC3_80 as usize as *mut c_void,
+                0,
+            );
             assert_eq!(ret, SqlReturn::SUCCESS);
 
             let mut version: i32 = 0;
@@ -296,7 +321,7 @@ mod tests {
                 std::ptr::null_mut(),
             );
             assert_eq!(ret, SqlReturn::SUCCESS);
-            assert_eq!(version, 380);
+            assert_eq!(version, crate::types::SQL_OV_ODBC3_80);
 
             let _ = sql_free_handle::<MockBackend>(HandleType::Env as i16, env);
         }
@@ -315,6 +340,56 @@ mod tests {
             let ret =
                 sql_set_env_attr::<MockBackend>(env, ENV_ATTR_ODBC_VERSION, 999 as *mut c_void, 0);
             assert_eq!(ret, SqlReturn::ERROR);
+
+            let _ = sql_free_handle::<MockBackend>(HandleType::Env as i16, env);
+        }
+    }
+
+    /// `SQL_OV_ODBC2` is one of the three values `SQL_ATTR_ODBC_VERSION`
+    /// defines, and unixODBC's Driver Manager forwards it to the driver
+    /// verbatim at connect time (`DriverManager/SQLConnect.c`, which passes
+    /// `environment->requested_version` to the driver's `SQLSetEnvAttr`
+    /// whenever the driver exports `SQLAllocHandle`). Rejecting it makes that
+    /// DM record the driver as `SQL_OV_ODBC2` and take its 2.x handle-allocation
+    /// path — the opposite of what a 3.x driver wants.
+    #[test]
+    fn sql_ov_odbc2_is_accepted_and_reads_back_unchanged() {
+        unsafe {
+            let mut env: *mut c_void = std::ptr::null_mut();
+            let _ = sql_alloc_handle::<MockBackend>(
+                HandleType::Env as i16,
+                std::ptr::null_mut(),
+                &mut env,
+            );
+
+            assert_eq!(
+                sql_set_env_attr::<MockBackend>(
+                    env,
+                    ENV_ATTR_ODBC_VERSION,
+                    crate::types::SQL_OV_ODBC2 as usize as *mut c_void,
+                    0,
+                ),
+                SqlReturn::SUCCESS,
+                "SQL_OV_ODBC2 is a spec-defined value the Driver Manager forwards",
+            );
+
+            let mut version: i32 = 0;
+            assert_eq!(
+                sql_get_env_attr::<MockBackend>(
+                    env,
+                    ENV_ATTR_ODBC_VERSION,
+                    std::ptr::from_mut(&mut version).cast::<c_void>(),
+                    0,
+                    std::ptr::null_mut(),
+                ),
+                SqlReturn::SUCCESS,
+            );
+            assert_eq!(
+                version,
+                crate::types::SQL_OV_ODBC2,
+                "the Driver Manager reads the version back to decide how to treat \
+                 this driver, so it must be the value the application declared",
+            );
 
             let _ = sql_free_handle::<MockBackend>(HandleType::Env as i16, env);
         }

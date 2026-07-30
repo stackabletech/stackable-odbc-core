@@ -10,7 +10,7 @@ use odbc_sys::{
 use odbc_sys::{BulkOperation, CompletionType, ParamType};
 
 use crate::types::constants::*;
-use crate::types::{IdentifierType, Nullable, Scope};
+use crate::types::{DeclaredOdbcVersion, IdentifierType, Nullable, Scope};
 
 /// Convert a raw `i16` from the ODBC ABI into an `odbc_sys::HandleType`.
 ///
@@ -336,11 +336,32 @@ pub fn environment_attribute_from_raw(value: i32) -> Option<EnvironmentAttribute
 ///
 /// Returns `None` for values that are not a recognised ODBC version.
 /// This is the safe alternative to `transmute` for the `#[repr(i32)]` `AttrOdbcVersion` enum.
+///
+/// `SQL_OV_ODBC2` is `None` here because `odbc-sys` has no variant for it, not
+/// because core rejects it. `SQLSetEnvAttr` uses
+/// [`declared_odbc_version_from_raw`], which accepts all three spec values.
 #[must_use]
 pub fn attr_odbc_version_from_raw(value: i32) -> Option<AttrOdbcVersion> {
     match value {
         3 => Some(AttrOdbcVersion::Odbc3),
         380 => Some(AttrOdbcVersion::Odbc3_80),
+        _ => None,
+    }
+}
+
+/// Convert a raw `i32` from the ODBC ABI into a [`DeclaredOdbcVersion`].
+///
+/// Returns `None` for values that are not a recognised `SQL_OV_*` version.
+///
+/// This is the conversion `SQLSetEnvAttr` uses, and it differs from
+/// [`attr_odbc_version_from_raw`] in exactly one way: it accepts
+/// `SQL_OV_ODBC2`, which [`odbc_sys::AttrOdbcVersion`] has no variant for.
+#[must_use]
+pub fn declared_odbc_version_from_raw(value: i32) -> Option<DeclaredOdbcVersion> {
+    match value {
+        SQL_OV_ODBC2 => Some(DeclaredOdbcVersion::Odbc2),
+        SQL_OV_ODBC3 => Some(DeclaredOdbcVersion::Odbc3),
+        SQL_OV_ODBC3_80 => Some(DeclaredOdbcVersion::Odbc3_80),
         _ => None,
     }
 }
@@ -980,11 +1001,50 @@ mod tests {
         );
     }
 
+    /// `AttrOdbcVersion` has no `SQL_OV_ODBC2` variant — `odbc-sys` omits it
+    /// deliberately, with `// Not supported by this crate` above a
+    /// commented-out `SQL_OV_ODBC2 = 2` in its `attributes.rs` — so this
+    /// function cannot name it and answers `None`. That is a fact about the
+    /// *type*, not a ruling that core rejects ODBC 2.x: `SQLSetEnvAttr` goes
+    /// through `declared_odbc_version_from_raw`, which accepts all three.
     #[test]
-    fn attr_odbc_version_invalid() {
+    fn attr_odbc_version_rejects_the_values_odbc_sys_cannot_name() {
         assert_eq!(attr_odbc_version_from_raw(0), None);
-        assert_eq!(attr_odbc_version_from_raw(2), None);
+        assert_eq!(attr_odbc_version_from_raw(SQL_OV_ODBC2), None);
         assert_eq!(attr_odbc_version_from_raw(4), None);
+    }
+
+    // --- declared_odbc_version_from_raw ---
+
+    #[test]
+    fn declared_odbc_version_accepts_all_three_spec_values() {
+        assert_eq!(
+            declared_odbc_version_from_raw(SQL_OV_ODBC2),
+            Some(DeclaredOdbcVersion::Odbc2)
+        );
+        assert_eq!(
+            declared_odbc_version_from_raw(SQL_OV_ODBC3),
+            Some(DeclaredOdbcVersion::Odbc3)
+        );
+        assert_eq!(
+            declared_odbc_version_from_raw(SQL_OV_ODBC3_80),
+            Some(DeclaredOdbcVersion::Odbc3_80)
+        );
+        assert_eq!(declared_odbc_version_from_raw(0), None);
+        assert_eq!(declared_odbc_version_from_raw(4), None);
+    }
+
+    /// The value the Driver Manager reads back must be the one it set, so the
+    /// pair has to round-trip for every variant.
+    #[test]
+    fn declared_odbc_version_round_trips_through_its_raw_value() {
+        for version in [
+            DeclaredOdbcVersion::Odbc2,
+            DeclaredOdbcVersion::Odbc3,
+            DeclaredOdbcVersion::Odbc3_80,
+        ] {
+            assert_eq!(declared_odbc_version_from_raw(version.raw()), Some(version));
+        }
     }
 
     // --- free_stmt_option_from_raw ---

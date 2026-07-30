@@ -10,7 +10,23 @@
 //! value to be wrong, and a value that only one of the two places corrects is
 //! how a spec-compliance fix silently fails to take effect.
 
-use odbc_sys::{InfoType, SqlDataType};
+use odbc_sys::{AttrOdbcVersion, InfoType, SqlDataType};
+
+/// `SQL_ATTR_ODBC_VERSION` value `SQL_OV_ODBC2`: the application declares ODBC
+/// 2.x behaviour.
+///
+/// Written out rather than derived, because `odbc-sys` deliberately has no
+/// variant for it — its `attributes.rs` carries `// Not supported by this crate`
+/// above a commented-out `SQL_OV_ODBC2 = 2`. The value is in `sqlext.h` and in
+/// `SQLSetEnvAttr`'s own attribute table.
+pub const SQL_OV_ODBC2: i32 = 2;
+
+/// `SQL_ATTR_ODBC_VERSION` value `SQL_OV_ODBC3`. Derived from `odbc-sys`, which
+/// carries this one.
+pub const SQL_OV_ODBC3: i32 = AttrOdbcVersion::Odbc3 as i32;
+
+/// `SQL_ATTR_ODBC_VERSION` value `SQL_OV_ODBC3_80`. Derived from `odbc-sys`.
+pub const SQL_OV_ODBC3_80: i32 = AttrOdbcVersion::Odbc3_80 as i32;
 
 /// SQL_ATTR_AUTOCOMMIT: manual-commit mode — the application commits or rolls
 /// back explicitly with `SQLEndTran`.

@@ -1467,6 +1467,27 @@ call `SQLCloseCursor` or `SQLFreeStmt(SQL_CLOSE)` first, as it already must for
 
 ### Fixed
 
+- `SQLSetEnvAttr(SQL_ATTR_ODBC_VERSION, SQL_OV_ODBC2)` is accepted rather than
+  rejected with `HY024`. It is one of the three values the attribute's table
+  defines, and unixODBC's Driver Manager forwards it to the driver verbatim at
+  connect time — a driver that refuses it is recorded by that Driver Manager as
+  an ODBC 2.x driver, which is the opposite of the intent. The version is stored
+  and reported back through `SQLGetEnvAttr`; core answers nothing else
+  differently, because the spec's 2.x SQLSTATE and datetime-type mapping is the
+  Driver Manager's and is driven by what the *application* requested.
+
+  `EnvironmentHandle::odbc_version` is now a `DeclaredOdbcVersion` rather than an
+  `odbc_sys::AttrOdbcVersion`, because `odbc-sys` deliberately has no
+  `SQL_OV_ODBC2` variant. `types::declared_odbc_version_from_raw` is the
+  conversion the FFI boundary uses; `attr_odbc_version_from_raw` is unchanged and
+  still cannot name `SQL_OV_ODBC2`.
+
+- `SQLDisconnect` cancels an in-progress `SQLBrowseConnect` sequence rather than
+  reporting `08003`. `handle.connection` is `None` for the whole of a browse, so
+  the `08003` guard answered the one call the spec names as the way out of one.
+  The accumulated browse attributes are taken rather than read, so an abandoned
+  browse cannot contaminate the next one on that handle.
+
 - **Withdrawing `SQL_ATTR_QUERY_TIMEOUT` disarms core's timer.** Setting the
   attribute back to `0` — the spec's "there is no timeout" — took the
   store-only path, so `SQLGetStmtAttr` reported `0` while the deadline

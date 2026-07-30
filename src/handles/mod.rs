@@ -34,7 +34,7 @@ use std::ffi::c_void;
 // `Slot::cancel` for the full reason.
 use std::sync::Arc as StdArc;
 
-use odbc_sys::{AttrOdbcVersion, Desc};
+use odbc_sys::Desc;
 
 use crate::backend::{Backend, StatementBackend};
 use crate::descriptor::{DescriptorRecord, DescriptorRole};
@@ -302,7 +302,7 @@ pub trait HasKind {
 #[repr(C)]
 pub struct EnvironmentHandle<B: Backend> {
     header: HandleHeader,
-    pub odbc_version: AttrOdbcVersion,
+    pub odbc_version: crate::types::DeclaredOdbcVersion,
     /// No field names `B`, since child handles are tokens rather than typed
     /// pointers, but the struct must stay generic: the registry resolves a
     /// token against the concrete `HasKind` type a caller asks for, and an
@@ -1010,7 +1010,7 @@ impl<B: Backend> StatementHandle<B> {
 pub unsafe fn alloc_environment<B: Backend>(output: *mut *mut c_void) -> SqlReturn {
     let handle = Box::new(EnvironmentHandle::<B> {
         header: HandleHeader::PLACEHOLDER,
-        odbc_version: AttrOdbcVersion::Odbc3,
+        odbc_version: crate::types::DeclaredOdbcVersion::Odbc3,
         diagnostics: DiagnosticQueue::new(),
         _backend: std::marker::PhantomData,
     });
