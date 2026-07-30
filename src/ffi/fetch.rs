@@ -565,27 +565,34 @@ pub unsafe fn sql_fetch_scroll<B: Backend>(
         orientation,
         fetch_offset
     );
-    if orientation == Some(FetchOrientation::Next) {
-        // Forward-only: delegate to sql_fetch.
-        // SAFETY: same preconditions as this function: statement_handle is null or
-        // a valid StatementHandle<B> allocated by sql_alloc_handle.
-        return unsafe { sql_fetch::<B>(statement_handle) };
-    }
-    // SAFETY: statement_handle is null or a valid StatementHandle<B> allocated by
-    // sql_alloc_handle; kind and group are validated by scope.get inside the closure.
-    let ret = unsafe {
-        panic_safe::<B, _>(statement_handle, |scope| {
-            let stmt = scope.get::<StatementHandle<B>>(statement_handle)?;
-            // Spec: clear diagnostics at the start of each ODBC call. The
-            // SQL_FETCH_NEXT branch above already cleared via sql_fetch, so
-            // only this non-delegating branch needs its own clear.
-            stmt.diagnostics.clear();
+    let ret = if orientation == Some(FetchOrientation::Next) {
+        // Forward-only: the one orientation this driver's cursors serve. Routed
+        // through the shared body rather than through `sql_fetch`, so the exit
+        // log below names this function — `sql_fetch` logs under its own name,
+        // and a `return` through it left a trace claiming a `SQLFetch` the
+        // application never called. Same reasoning, and the same shape, as
+        // `sql_extended_fetch`.
+        //
+        // SAFETY: same preconditions as this function: statement_handle is null
+        // or a valid StatementHandle<B> allocated by sql_alloc_handle.
+        unsafe { fetch_with_report::<B>(statement_handle, RowReport::Attributes) }
+    } else {
+        // SAFETY: statement_handle is null or a valid StatementHandle<B> allocated by
+        // sql_alloc_handle; kind and group are validated by scope.get inside the closure.
+        unsafe {
+            panic_safe::<B, _>(statement_handle, |scope| {
+                let stmt = scope.get::<StatementHandle<B>>(statement_handle)?;
+                // Spec: clear diagnostics at the start of each ODBC call. The
+                // SQL_FETCH_NEXT branch above clears inside the shared body, so
+                // only this non-delegating branch needs its own clear.
+                stmt.diagnostics.clear();
 
-            Err(OdbcError::general(
-                format!("SQLFetchScroll: unsupported fetch orientation {fetch_orientation}"),
-                SqlState::fetch_type_out_of_range(),
-            ))
-        })
+                Err(OdbcError::general(
+                    format!("SQLFetchScroll: unsupported fetch orientation {fetch_orientation}"),
+                    SqlState::fetch_type_out_of_range(),
+                ))
+            })
+        }
     };
     tracing::debug!("SQLFetchScroll -> {:?}", ret);
     ret
@@ -1205,6 +1212,71 @@ mod tests {
             let _ = sql_free_handle::<MockLongDataBackend>(HandleType::Dbc as i16, conn);
             let _ = sql_free_handle::<MockLongDataBackend>(HandleType::Env as i16, env);
         }
+    }
+
+    /// A delegating entry point must still log under its own name. The
+    /// `SQL_FETCH_NEXT` branch used to `return` through `sql_fetch`, so the only
+    /// branch that actually fetches never reached `SQLFetchScroll`'s own exit
+    /// log and a trace read `SQLFetch -> SUCCESS` for a call the application
+    /// never made. `fetch_with_report` exists precisely so this cannot happen.
+    #[test]
+    fn fetch_scroll_logs_its_own_return_value() {
+        use crate::sync::{Arc, Mutex};
+        use tracing::field::{Field, Visit};
+        use tracing_subscriber::layer::{Context, Layer};
+        use tracing_subscriber::prelude::*;
+
+        /// Collects the `message` field of every event, so the test can assert
+        /// on which function name the exit log carried.
+        struct MessageCollector(Arc<Mutex<Vec<String>>>);
+
+        struct MessageVisitor<'a>(&'a mut Option<String>);
+
+        impl Visit for MessageVisitor<'_> {
+            fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+                if field.name() == "message" {
+                    *self.0 = Some(format!("{value:?}"));
+                }
+            }
+        }
+
+        impl<S: tracing::Subscriber> Layer<S> for MessageCollector {
+            fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+                let mut message = None;
+                event.record(&mut MessageVisitor(&mut message));
+                if let Some(m) = message {
+                    self.0.lock().expect("collector mutex").push(m);
+                }
+            }
+        }
+
+        let messages: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_subscriber::filter::LevelFilter::TRACE)
+            .with(MessageCollector(Arc::clone(&messages)));
+
+        unsafe {
+            let (env, conn, stmt) = long_data_stmt_no_fetch();
+
+            tracing::subscriber::with_default(subscriber, || {
+                assert_eq!(
+                    sql_fetch_scroll::<MockLongDataBackend>(stmt, FetchOrientation::Next as i16, 0,),
+                    SqlReturn::SUCCESS
+                );
+            });
+
+            cleanup_long_data(env, conn, stmt);
+        }
+
+        let messages = messages.lock().expect("collector mutex");
+        assert!(
+            messages.iter().any(|m| m.contains("SQLFetchScroll -> ")),
+            "SQLFetchScroll never logged its own return value: {messages:?}",
+        );
+        assert!(
+            !messages.iter().any(|m| m.contains("SQLFetch -> ")),
+            "the exit log named the delegate rather than the caller: {messages:?}",
+        );
     }
 
     /// One `SQLGetData` call for `col` into a `buf_len`-byte `SQL_C_CHAR`

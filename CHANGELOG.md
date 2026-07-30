@@ -1487,6 +1487,12 @@ call `SQLCloseCursor` or `SQLFreeStmt(SQL_CLOSE)` first, as it already must for
   implements any of the three hooks should expect a call with `0` where it
   previously got none.
 
+- **`SQLFetchScroll` logs its own return value.** The `SQL_FETCH_NEXT` branch —
+  the only one that fetches — returned through `sql_fetch`, so the exit log read
+  `SQLFetch -> ...` and `SQLFetchScroll`'s own `debug!` never ran. It now calls
+  the shared fetch body directly, as `SQLExtendedFetch` already did. No
+  behaviour change beyond the log.
+
 - **`SQLExecute` refuses to re-execute over an open cursor.** `SQLExecDirect`
   already returned `24000` for it; `SQLExecute` executed anyway and recomputed
   the cursor state afterwards. The spec's Comments are direct — "to execute a
