@@ -149,6 +149,9 @@ pub const DATETIME_FIELD_OVERFLOW: &str = "22008";
 /// Invalid datetime format — 22007
 pub const INVALID_DATETIME_FORMAT: &str = "22007";
 
+/// Interval field overflow — 22015
+pub const INTERVAL_FIELD_OVERFLOW: &str = "22015";
+
 /// Fractional truncation — 01S07
 pub const FRACTIONAL_TRUNCATION: &str = "01S07";
 
@@ -446,6 +449,16 @@ impl SqlState {
         Self::new(INVALID_DATETIME_FORMAT)
     }
 
+    /// Interval field overflow — 22015
+    ///
+    /// The *C to SQL: Numeric* table's interval row: an exact numeric value
+    /// whose magnitude exceeds the target interval's leading precision, or
+    /// which carries a fraction an interval field cannot hold. The row's test
+    /// is "data truncated", and this is the state it names.
+    pub fn interval_field_overflow() -> Self {
+        Self::new(INTERVAL_FIELD_OVERFLOW)
+    }
+
     /// Fractional truncation — 01S07
     pub fn fractional_truncation() -> Self {
         Self::new(FRACTIONAL_TRUNCATION)
@@ -573,5 +586,14 @@ mod tests {
         );
         assert_eq!(INVALID_CHARACTER_VALUE_FOR_CAST, "22018");
         assert_eq!(INVALID_DATETIME_FORMAT, "22007");
+    }
+
+    #[test]
+    fn interval_field_overflow_is_22015() {
+        assert_eq!(
+            SqlState::interval_field_overflow().as_str(),
+            INTERVAL_FIELD_OVERFLOW
+        );
+        assert_eq!(INTERVAL_FIELD_OVERFLOW, "22015");
     }
 }
