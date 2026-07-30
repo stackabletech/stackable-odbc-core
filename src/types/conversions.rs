@@ -221,12 +221,18 @@ pub fn c_data_type_from_raw(value: i16) -> Option<CDataType> {
         -11 => Some(CDataType::Guid),
         -8 => Some(CDataType::WChar),
         -7 => Some(CDataType::Bit),
+        // SQL_C_TINYINT (-6), SQL_C_LONG (4) and SQL_C_SHORT (5) are the
+        // deprecated ODBC 2.x spellings of SQL_C_STINYINT (-26), SQL_C_SLONG
+        // (-16) and SQL_C_SSHORT (-15). All three default to signed.
+        // Applications still emit them — pyodbc among them — so they are
+        // accepted and normalised here, which is why no code past this boundary
+        // has to know they exist. `odbc-sys` models none of the three, carrying
+        // them only as commented-out lines; that is a gap in the binding, not
+        // in the ABI this crate accepts.
+        -6 => Some(CDataType::STinyInt),
         -2 => Some(CDataType::Binary),
         1 => Some(CDataType::Char),
         2 => Some(CDataType::Numeric),
-        // SQL_C_LONG (4) and SQL_C_SHORT (5) are deprecated ODBC 2.x aliases for
-        // SQL_C_SLONG (-16) and SQL_C_SSHORT (-15). Many drivers (e.g. pyodbc) still
-        // emit these values, so we accept them and treat them as their modern equivalents.
         4 => Some(CDataType::SLong),
         5 => Some(CDataType::SShort),
         7 => Some(CDataType::Float),
@@ -808,6 +814,17 @@ mod tests {
         assert_eq!(c_data_type_from_raw(93), Some(CDataType::TypeTimestamp));
         assert_eq!(c_data_type_from_raw(99), Some(CDataType::Default));
         // ODBC 2.x deprecated aliases must map to their 3.x equivalents
+        assert_eq!(c_data_type_from_raw(4), Some(CDataType::SLong));
+        assert_eq!(c_data_type_from_raw(5), Some(CDataType::SShort));
+    }
+
+    /// `SQL_C_TINYINT` is the ODBC 2.x spelling of `SQL_C_STINYINT`, exactly as
+    /// `SQL_C_LONG` and `SQL_C_SHORT` are of their signed counterparts. All
+    /// three default to signed, and an application still emitting one must not
+    /// be refused. Pinned together so the asymmetry cannot come back.
+    #[test]
+    fn the_deprecated_unsuffixed_integer_spellings_normalise_to_signed() {
+        assert_eq!(c_data_type_from_raw(-6), Some(CDataType::STinyInt));
         assert_eq!(c_data_type_from_raw(4), Some(CDataType::SLong));
         assert_eq!(c_data_type_from_raw(5), Some(CDataType::SShort));
     }
