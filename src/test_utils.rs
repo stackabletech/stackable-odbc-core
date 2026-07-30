@@ -4301,6 +4301,117 @@ impl Backend for MockCatalogRejectingBackend {
 }
 
 // ---------------------------------------------------------------------------
+// MockBrowseBackend — requires one attribute, so SQLBrowseConnectW actually
+// reaches its SQL_NEED_DATA branch
+// ---------------------------------------------------------------------------
+
+/// A backend that will not connect until the connection string carries `UID`.
+///
+/// Every other mock leaves `browse_connect_attrs` defaulted to an empty slice,
+/// which makes the very first `SQLBrowseConnectW` call connect outright. None
+/// of them can therefore reach the `SQL_NEED_DATA` branch, and none can leave a
+/// half-finished browse on a handle — which is the state the browse-cancellation
+/// and browse-hygiene tests are about.
+pub struct MockBrowseBackend;
+
+impl Backend for MockBrowseBackend {
+    type Connection = MockConnection;
+    type Statement = MockStatement;
+    type Error = MockError;
+    type CancelToken = MockCancelToken;
+
+    /// `Cow::Owned`, not `Cow::Borrowed(&[Cow::Borrowed("uid")])`: a slice
+    /// literal holding a `Cow` cannot be promoted to `'static`, because `Cow`
+    /// has a `Drop` impl. The defaulted method gets away with `Cow::Borrowed`
+    /// only because its slice is empty.
+    fn browse_connect_attrs() -> Cow<'static, [Cow<'static, str>]> {
+        Cow::Owned(vec![Cow::Borrowed("uid")])
+    }
+
+    fn connect(_: &ConnectParams) -> Result<MockConnection, MockError> {
+        Ok(MockConnection)
+    }
+    fn disconnect(_: &mut MockConnection) -> Result<(), MockError> {
+        Ok(())
+    }
+    fn cancel_token(_conn: &Self::Connection) -> Self::CancelToken {
+        MockCancelToken::default()
+    }
+    fn exec_direct(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: &str,
+    ) -> Result<MockStatement, MockError> {
+        Err(MockError)
+    }
+    fn prepare(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: &str,
+    ) -> Result<MockStatement, MockError> {
+        Err(MockError)
+    }
+    fn execute(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: &mut MockStatement,
+        _: &[crate::types::ColumnValue],
+    ) -> Result<crate::types::ExecuteOutcome, MockError> {
+        Err(MockError)
+    }
+    fn get_info(_: &MockConnection, _: crate::types::InfoType) -> Result<InfoValue, MockError> {
+        Err(MockError)
+    }
+    fn get_functions() -> Cow<'static, [crate::function_id::FunctionId]> {
+        Cow::Borrowed(&[])
+    }
+    fn get_type_info(_conn: &Self::Connection) -> Cow<'static, [TypeInfoRow]> {
+        Cow::Borrowed(&[])
+    }
+    fn tables(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: &[String],
+    ) -> Result<Vec<TableRow>, MockError> {
+        Err(MockError)
+    }
+    fn columns(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+    ) -> Result<Vec<ColumnRow>, MockError> {
+        Err(MockError)
+    }
+
+    fn supports_catalogs(_conn: &Self::Connection) -> bool {
+        false
+    }
+    fn supports_schemas(_conn: &Self::Connection) -> bool {
+        false
+    }
+    fn alter_table_support(_conn: &Self::Connection) -> u32 {
+        0
+    }
+    fn outer_join_capabilities(_conn: &Self::Connection) -> u32 {
+        0
+    }
+    fn default_txn_isolation(_conn: &Self::Connection) -> u32 {
+        0
+    }
+    fn txn_isolation_options(_conn: &Self::Connection) -> u32 {
+        0
+    }
+
+    minimal_capability_decls!();
+}
+
+// ---------------------------------------------------------------------------
 // MockPrompterBackend — declares a `Prompter`, and records whether one arrived
 // ---------------------------------------------------------------------------
 

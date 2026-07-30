@@ -801,6 +801,10 @@ fn read_dsn_keys(dsn: &str) -> Vec<(String, String)> {
 /// Calls `B::disconnect` on the active connection and clears it from the handle.
 /// On success, frees all statements and descriptors allocated on this connection.
 ///
+/// During a `SQLBrowseConnect` sequence there is no connection to close, and
+/// this function cancels the browse instead: the spec makes it the only way out
+/// of one.
+///
 /// # Parameters
 ///
 /// - `connection_handle`: Connection handle.
@@ -811,8 +815,12 @@ fn read_dsn_keys(dsn: &str) -> Vec<(String, String)> {
 /// - 01002: Disconnect error (warning: error during disconnect but disconnect succeeded) — not
 ///   returned here; the backend `disconnect` API is all-or-nothing (either succeeds or returns
 ///   an error). Returning 01002 would require a two-phase disconnect API. Deferred.
-/// - 08003: Connection not open — returned when `handle.connection` is `None`. Note: spec marks
-///   this as `(DM)`, but it is also checked here as a defence-in-depth guard.
+/// - 08003: Connection not open — returned when the handle holds neither a
+///   connection nor an in-progress browse. Note: spec marks this as `(DM)`, but
+///   it is also checked here as a defence-in-depth guard. It is deliberately
+///   **not** returned during a browse: the spec's Comments section requires this
+///   function to cancel the browse and return the connection to an unconnected
+///   state, and `SQLBrowseConnect` names it as the only way to do so.
 /// - 25000: Invalid transaction state — not returned here.
 ///   Returning 25000 would require a `has_active_transaction` flag on `ConnectionHandle`,
 ///   which is not currently tracked. Deferred.
@@ -847,8 +855,28 @@ pub unsafe fn sql_disconnect<B: Backend>(connection_handle: *mut c_void) -> SqlR
             let handle = scope.get::<ConnectionHandle<B>>(connection_handle)?;
             handle.diagnostics.clear();
 
-            // Spec 08003: Connection not open.
+            // Spec 08003: Connection not open — except during a browse.
             let Some(ref mut conn) = handle.connection else {
+                // Spec (Comments): "If an application calls SQLDisconnect after
+                // SQLBrowseConnect returns SQL_NEED_DATA and before it returns
+                // a different return code, the driver cancels the connection
+                // browsing process and returns the connection to an unconnected
+                // state." SQLBrowseConnect's own page makes this the only exit:
+                // "an application must use SQLDisconnect to cancel the browse
+                // process." `handle.connection` is None for the whole of a
+                // browse, so without this branch the call the spec names is the
+                // one call that cannot be made. The 08003 row carries (DM), and
+                // the Driver Manager passes the call through during a browse for
+                // exactly this reason.
+                //
+                // `take()` rather than a read: the accumulated attributes must
+                // not survive into the next browse sequence on this handle.
+                if handle.browse_request.take().is_some() {
+                    tracing::debug!(
+                        "SQLDisconnect: cancelled an in-progress SQLBrowseConnectW sequence"
+                    );
+                    return Ok(SqlReturn::SUCCESS);
+                }
                 return Err(OdbcError::NotConnected);
             };
 
@@ -1036,17 +1064,32 @@ mod tests {
     use odbc_sys::HandleType;
 
     use crate::ffi::handle::{sql_alloc_handle, sql_free_handle};
-    use crate::test_utils::MockBackend;
+    use crate::test_utils::{MockBackend, MockBrowseBackend};
 
-    /// Helper: allocate env + connection handles, returning both raw pointers.
-    unsafe fn alloc_env_and_conn() -> (*mut c_void, *mut c_void) {
+    /// Helper: allocate env + connection handles **for the backend the test
+    /// then calls through**, returning both raw pointers.
+    ///
+    /// The type parameter is load-bearing, not decoration. A handle is a
+    /// `ConnectionHandle<B>`, whose `connection: Option<B::Connection>` field
+    /// has a different layout for every backend, while validation is a registry
+    /// slot, generation and kind compare that never dereferences the caller's
+    /// value. Allocating as one backend and calling as another therefore passes
+    /// that compare and then reads memory laid out for a different type —
+    /// undefined behaviour Miri catches and a plain `cargo test` does not.
+    unsafe fn alloc_env_and_conn_for<B: Backend>() -> (*mut c_void, *mut c_void) {
         let mut env: *mut c_void = std::ptr::null_mut();
         let _ = unsafe {
-            sql_alloc_handle::<MockBackend>(HandleType::Env as i16, std::ptr::null_mut(), &mut env)
+            sql_alloc_handle::<B>(HandleType::Env as i16, std::ptr::null_mut(), &mut env)
         };
         let mut conn: *mut c_void = std::ptr::null_mut();
-        let _ = unsafe { sql_alloc_handle::<MockBackend>(HandleType::Dbc as i16, env, &mut conn) };
+        let _ = unsafe { sql_alloc_handle::<B>(HandleType::Dbc as i16, env, &mut conn) };
         (env, conn)
+    }
+
+    /// [`alloc_env_and_conn_for`] for [`MockBackend`], which is what most tests
+    /// in this module want.
+    unsafe fn alloc_env_and_conn() -> (*mut c_void, *mut c_void) {
+        unsafe { alloc_env_and_conn_for::<MockBackend>() }
     }
 
     // -----------------------------------------------------------------------
@@ -2028,6 +2071,93 @@ mod tests {
             assert!(out_len > 0);
 
             let _ = sql_disconnect::<MockBackend>(conn);
+            let _ = sql_free_handle::<MockBackend>(HandleType::Dbc as i16, conn);
+            let _ = sql_free_handle::<MockBackend>(HandleType::Env as i16, env);
+        }
+    }
+
+    /// Spec (`SQLDisconnect`, Comments): "If an application calls
+    /// **SQLDisconnect** after **SQLBrowseConnect** returns SQL_NEED_DATA and
+    /// before it returns a different return code, the driver cancels the
+    /// connection browsing process and returns the connection to an unconnected
+    /// state." `SQLBrowseConnect` states the other half: "an application must
+    /// use **SQLDisconnect** to cancel the browse process."
+    ///
+    /// `handle.connection` is `None` for the whole of a browse, so the `08003`
+    /// guard used to answer this call and an application had no way to abandon
+    /// a browse at all.
+    #[test]
+    fn disconnect_during_a_browse_cancels_it_instead_of_reporting_08003() {
+        unsafe {
+            let (env, conn) = alloc_env_and_conn_for::<MockBrowseBackend>();
+
+            let wide: Vec<u16> = "Host=localhost".encode_utf16().collect();
+            assert_eq!(
+                sql_browse_connect_w::<MockBrowseBackend>(
+                    conn,
+                    wide.as_ptr(),
+                    wide.len() as i16,
+                    std::ptr::null_mut(),
+                    0,
+                    std::ptr::null_mut(),
+                ),
+                SqlReturn::NEED_DATA,
+                "precondition: the backend requires UID, so the first call asks for it",
+            );
+
+            assert_eq!(
+                sql_disconnect::<MockBrowseBackend>(conn),
+                SqlReturn::SUCCESS,
+                "SQLDisconnect must cancel the browse, not report 08003",
+            );
+
+            crate::test_utils::with_handle::<
+                MockBrowseBackend,
+                ConnectionHandle<MockBrowseBackend>,
+                _,
+            >(conn, |h| {
+                assert!(
+                    h.browse_request.is_none(),
+                    "the accumulated browse attributes must not survive the cancel",
+                );
+            });
+
+            let _ = sql_free_handle::<MockBrowseBackend>(HandleType::Dbc as i16, conn);
+            let _ = sql_free_handle::<MockBrowseBackend>(HandleType::Env as i16, env);
+        }
+    }
+
+    /// The other side of the same line. A handle that never connected and never
+    /// browsed is genuinely not open, and `08003` is still the answer — the
+    /// browse carve-out must not swallow it.
+    #[test]
+    fn disconnect_with_no_connection_and_no_browse_is_still_08003() {
+        use crate::ffi::diag::sql_get_diag_rec_w;
+
+        unsafe {
+            let (env, conn) = alloc_env_and_conn();
+
+            assert_eq!(sql_disconnect::<MockBackend>(conn), SqlReturn::ERROR);
+
+            let mut state = [0u16; 6];
+            let mut native_err: i32 = 0;
+            let mut msg_buf = [0u16; 256];
+            let mut msg_len: i16 = 0;
+            assert_eq!(
+                sql_get_diag_rec_w::<MockBackend>(
+                    HandleType::Dbc as i16,
+                    conn,
+                    1,
+                    state.as_mut_ptr(),
+                    &mut native_err,
+                    msg_buf.as_mut_ptr(),
+                    msg_buf.len() as i16,
+                    &mut msg_len,
+                ),
+                SqlReturn::SUCCESS,
+            );
+            assert_eq!(String::from_utf16_lossy(&state[..5]), "08003");
+
             let _ = sql_free_handle::<MockBackend>(HandleType::Dbc as i16, conn);
             let _ = sql_free_handle::<MockBackend>(HandleType::Env as i16, env);
         }
