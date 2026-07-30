@@ -1534,7 +1534,12 @@ mod tests {
                 Ok(SqlReturn::SUCCESS)
             })
         };
-        debug_assert_eq!(
+        // `assert_eq!`, not `debug_assert_eq!`: this is test code, and a
+        // `debug_assert` is compiled out of a `--release` test build, which is
+        // precisely the build where a `panic_safe` returning non-`SUCCESS` for
+        // some reason other than the closure — a caught panic — would otherwise
+        // pass unnoticed and leave `error` silently `None`.
+        assert_eq!(
             ret,
             SqlReturn::SUCCESS,
             "the closure above never returns Err"
