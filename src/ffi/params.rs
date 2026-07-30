@@ -1252,6 +1252,15 @@ pub(crate) unsafe fn find_data_at_exec_params(
 /// binary value containing a zero byte cannot be sent with `SQL_NTS` at all,
 /// under any reading of the spec: the terminator is the only length there is.
 ///
+/// Both mature drivers dispatch on the C type here, which is the evidence
+/// rather than the conclusion. psqlODBC's `PGAPI_PutData` (`execute.c`):
+/// `putlen = WCLEN * ucs2strlen((SQLWCHAR *) rgbValue)` under
+/// `SQL_C_WCHAR == ctype`, and `putlen = strlen(rgbValue)` under
+/// `SQL_C_CHAR == ctype`. MySQL Connector/ODBC's `SQLPutData` (`execute.cc`):
+/// `cbValue = sqlwcharlen((SQLWCHAR *)rgbValue) * sizeof(SQLWCHAR)` when
+/// `aprec->concise_type == SQL_C_WCHAR`, `strlen((const char*)rgbValue)`
+/// otherwise. Neither scans bytes for a wide parameter.
+///
 /// # Safety
 ///
 /// `data_ptr` must be non-null and satisfy [`crate::utf16::nts_byte_len`]'s
