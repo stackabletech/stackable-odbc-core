@@ -646,6 +646,55 @@ fn write_header_field<B: Backend>(
 /// other name.
 const SQL_DESC_ARRAY_SIZE_SUPPORTED: usize = 1;
 
+/// The value [`sql_get_desc_rec_w`] reports for a field this descriptor's role
+/// leaves undefined.
+///
+/// The spec permits leaving the application's buffer as it was — the value "is
+/// undefined". A defined value is written instead: an output the application
+/// can read is strictly more useful than one it cannot, and it is the half of
+/// the behaviour a test can assert on.
+fn undefined_placeholder(field: Desc) -> DescFieldValue {
+    match field {
+        // The one character field of the seven. An empty name writes a
+        // terminator and a length of zero rather than leaving the buffer as it
+        // was found.
+        Desc::Name => DescFieldValue::String(String::new()),
+        // "Nullability is unknown" — the same answer `get_record_field` gives
+        // for the IPD's `SQL_DESC_NULLABLE`, which core never auto-populates.
+        Desc::Nullable => {
+            DescFieldValue::Numeric(crate::types::Nullable::SqlNullableUnknown as isize)
+        }
+        _ => DescFieldValue::Numeric(0),
+    }
+}
+
+/// [`read_desc_field`] as `SQLGetDescRec` reads it.
+///
+/// The one difference is the [`FieldAccess::Undefined`] cell, and it is a
+/// difference between two spec pages rather than a correction to one.
+/// `SQLGetDescField` lists `HY091` in its diagnostics table and answers with it
+/// for a field its role does not define. `SQLGetDescRec`'s table has **no
+/// `HY091` row at all**, and its Comments section says what happens instead,
+/// naming this exact case: "calling SQLGetDescRec for the SQL_DESC_NAME or
+/// SQL_DESC_NULLABLE field of an APD or ARD will return SQL_SUCCESS but an
+/// undefined value for the field."
+///
+/// So the divergence lives here, at the one call site the spec exempts, and
+/// [`read_desc_field`]'s contract is unchanged for every other caller.
+///
+/// `SQL_DESC_TYPE` is defined on all four roles, so the placeholder can never
+/// stand in for the `None` that [`sql_get_desc_rec_w`] reads as `SQL_NO_DATA`.
+fn read_desc_rec_field<B: Backend>(
+    target: &mut DescTarget<'_, B>,
+    record_number: i16,
+    field: Desc,
+) -> Result<Option<DescFieldValue>, OdbcError> {
+    if field_access(target.role, field) == FieldAccess::Undefined {
+        return Ok(Some(undefined_placeholder(field)));
+    }
+    read_desc_field(target, record_number, field)
+}
+
 /// Generic implementation of SQLGetDescRecW.
 ///
 /// Spec: <https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlgetdescrec-function>
@@ -686,6 +735,16 @@ const SQL_DESC_ARRAY_SIZE_SUPPORTED: usize = 1;
 /// and its own page says why: it reads seven fixed fields and takes no field
 /// identifier to be wrong about, so there is no `HY091`, `HY092`, `HY016` or
 /// `HY021` row at all.
+///
+/// The missing `HY091` row is load-bearing rather than incidental. Two of the
+/// seven fields — `SQL_DESC_NAME` and `SQL_DESC_NULLABLE` — are undefined on an
+/// ARD and an APD, and the Comments section states what this function does
+/// about it: "When an application calls SQLGetDescRec to retrieve the value of
+/// a field that is undefined for a particular descriptor type, the function
+/// returns SQL_SUCCESS but the value returned for the field is undefined."
+/// `SQLGetDescField` on the same field still answers `HY091`, because that is a
+/// different function whose table lists it. `read_desc_rec_field` is where the
+/// two part company.
 ///
 /// - `01000` General warning — (not returned here; core raises no general warning)
 /// - `01004` String data, right truncated — returned when `SQL_DESC_NAME` does not fit `name`
@@ -748,12 +807,14 @@ pub unsafe fn sql_get_desc_rec_w<B: Backend>(
             // `SQL_NO_DATA` from any one of them is `SQL_NO_DATA` for the call:
             // they all address the same record.
             let mut numeric = |field: Desc| -> Result<Option<isize>, OdbcError> {
-                Ok(match read_desc_field(&mut target, record_number, field)? {
-                    Some(DescFieldValue::Numeric(n)) => Some(n),
-                    // A string where a number was expected cannot happen
-                    // for these six, and `None` is `SQL_NO_DATA`.
-                    Some(DescFieldValue::String(_)) | None => None,
-                })
+                Ok(
+                    match read_desc_rec_field(&mut target, record_number, field)? {
+                        Some(DescFieldValue::Numeric(n)) => Some(n),
+                        // A string where a number was expected cannot happen
+                        // for these six, and `None` is `SQL_NO_DATA`.
+                        Some(DescFieldValue::String(_)) | None => None,
+                    },
+                )
             };
 
             let Some(verbose_type) = numeric(Desc::Type)? else {
@@ -778,7 +839,7 @@ pub unsafe fn sql_get_desc_rec_w<B: Backend>(
             // `SQL_DESC_NAME` is a character field, and its buffer is optional
             // like every other output here.
             let Some(DescFieldValue::String(field_name)) =
-                read_desc_field(&mut target, record_number, Desc::Name)?
+                read_desc_rec_field(&mut target, record_number, Desc::Name)?
             else {
                 return Ok(SqlReturn::SUCCESS);
             };
@@ -2068,6 +2129,139 @@ mod tests {
             );
 
             assert_eq!(ret, SqlReturn::NO_DATA);
+
+            cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
+    /// `SQLGetDescRec` on an ARD must succeed, even though `SQL_DESC_NULLABLE`
+    /// and `SQL_DESC_NAME` are undefined there.
+    ///
+    /// Spec, Comments: "When an application calls SQLGetDescRec to retrieve the
+    /// value of a field that is undefined for a particular descriptor type, the
+    /// function returns SQL_SUCCESS but the value returned for the field is
+    /// undefined. For example, calling SQLGetDescRec for the SQL_DESC_NAME or
+    /// SQL_DESC_NULLABLE field of an APD or ARD will return SQL_SUCCESS but an
+    /// undefined value for the field."
+    ///
+    /// Every other test of this function drives the IPD, which defines both.
+    /// That is why an unconditional `HY091` here survived: the one descriptor
+    /// role it cannot happen on was the only one under test.
+    #[test]
+    fn get_desc_rec_on_an_ard_reports_the_undefined_fields_without_failing() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            let ard = ard_of(stmt);
+
+            let mut buf = [0u8; 8];
+            assert_eq!(
+                crate::ffi::bind::sql_bind_col::<MockBackend>(
+                    stmt,
+                    1,
+                    CDataType::SBigInt as i16,
+                    buf.as_mut_ptr().cast(),
+                    8,
+                    std::ptr::null_mut(),
+                ),
+                SqlReturn::SUCCESS
+            );
+
+            // A sentinel the call must overwrite: "undefined" in the spec's
+            // sense would permit leaving these as they are, and core writes a
+            // defined value instead so the application has something to read.
+            let mut name = [0xFFFFu16; 32];
+            let mut name_len: i16 = -1;
+            let mut type_out: i16 = -1;
+            let mut sub_type: i16 = -1;
+            let mut length: isize = -1;
+            let mut precision: i16 = -1;
+            let mut scale: i16 = -1;
+            let mut nullable: i16 = -1;
+            let ret = sql_get_desc_rec_w::<MockBackend>(
+                ard,
+                1,
+                name.as_mut_ptr(),
+                i16::try_from(name.len() * 2).expect("short"),
+                &mut name_len,
+                &mut type_out,
+                &mut sub_type,
+                &mut length,
+                &mut precision,
+                &mut scale,
+                &mut nullable,
+            );
+
+            assert_eq!(ret, SqlReturn::SUCCESS, "an ARD read must not fail");
+            assert_eq!(type_out, CDataType::SBigInt as i16, "SQL_DESC_TYPE");
+            assert_eq!(length, 8, "SQL_DESC_OCTET_LENGTH, from SQLBindCol");
+            assert_eq!(
+                nullable,
+                crate::types::Nullable::SqlNullableUnknown as i16,
+                "SQL_DESC_NULLABLE is undefined on an ARD, and must still be written"
+            );
+            assert_eq!(name_len, 0, "SQL_DESC_NAME is undefined on an ARD");
+            assert_eq!(name[0], 0, "the name buffer must be left terminated");
+            assert_eq!(sub_type, 0, "SQL_DESC_DATETIME_INTERVAL_CODE");
+            assert_eq!(precision, 0, "SQL_DESC_PRECISION");
+            assert_eq!(scale, 0, "SQL_DESC_SCALE");
+
+            cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
+    /// The same for an APD, reached through `SQLBindParameter` rather than
+    /// `SQLBindCol`. The two application descriptors share the undefined cells,
+    /// so a fix that special-cased only the ARD would leave this one failing.
+    #[test]
+    fn get_desc_rec_on_an_apd_reports_the_undefined_fields_without_failing() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            let apd = apd_of(stmt);
+
+            let mut val: i32 = 0;
+            assert_eq!(
+                crate::ffi::params::sql_bind_parameter::<MockBackend>(
+                    stmt,
+                    1,
+                    ParamType::Input as i16,
+                    CDataType::SLong as i16,
+                    SqlDataType::DECIMAL.0,
+                    9,
+                    2,
+                    std::ptr::from_mut(&mut val).cast::<c_void>(),
+                    4,
+                    std::ptr::null_mut(),
+                ),
+                SqlReturn::SUCCESS
+            );
+
+            let mut type_out: i16 = -1;
+            let mut nullable: i16 = -1;
+            let ret = sql_get_desc_rec_w::<MockBackend>(
+                apd,
+                1,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                &mut type_out,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut nullable,
+            );
+
+            assert_eq!(ret, SqlReturn::SUCCESS, "an APD read must not fail");
+            assert_eq!(
+                type_out,
+                CDataType::SLong as i16,
+                "SQL_DESC_TYPE on an APD is the C type"
+            );
+            assert_eq!(
+                nullable,
+                crate::types::Nullable::SqlNullableUnknown as i16,
+                "SQL_DESC_NULLABLE is undefined on an APD"
+            );
 
             cleanup_env_conn_stmt(env, conn, stmt);
         }

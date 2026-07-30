@@ -2482,4 +2482,16 @@ Everything a driver has to change for the catalog rework, in one place.
     moves to whichever call reads diagnostics next, bounded by the backend's
     own cancel latency.
 
+- **`SQLGetDescRecW` failed on every ARD and APD.** It read `SQL_DESC_NULLABLE`
+  and `SQL_DESC_NAME` through the same path `SQLGetDescField` uses, which
+  answers `HY091` for a field the descriptor's role leaves undefined — and both
+  are undefined on an application descriptor, so the call could not succeed at
+  all. `SQLGetDescRec`'s diagnostics table lists no `HY091` row, and its
+  Comments section names this exact case: "calling SQLGetDescRec for the
+  SQL_DESC_NAME or SQL_DESC_NULLABLE field of an APD or ARD will return
+  SQL_SUCCESS but an undefined value for the field." Both now come back as
+  `SQL_NULLABLE_UNKNOWN` and an empty name with `SQL_SUCCESS`.
+  `SQLGetDescFieldW` is unchanged and still answers `HY091`, which is its own
+  table's row.
+
 [Unreleased]: https://github.com/stackabletech/stackable-odbc-core/commits/HEAD
