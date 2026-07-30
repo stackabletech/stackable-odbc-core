@@ -103,6 +103,7 @@ mod forward_ffi;
 pub mod function_id;
 pub(crate) mod handles;
 pub mod logging;
+pub(crate) mod numeric_convert;
 pub(crate) mod panic;
 pub(crate) mod param_convert;
 pub mod prompt;
