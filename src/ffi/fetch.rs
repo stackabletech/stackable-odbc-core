@@ -7,10 +7,44 @@ use odbc_sys::FetchOrientation;
 use crate::backend::{Backend, StatementBackend};
 use crate::cancel::reclassify_cancelled_opt;
 use crate::column_value::{write_column_value, write_column_value_at};
+use crate::descriptor::{DescriptorRole, c_type_of};
 use crate::errors::OdbcError;
-use crate::handles::{GetDataCursor, StatementHandle};
+use crate::handles::{Descriptor, GetDataCursor, StatementHandle};
 use crate::panic::panic_safe;
 use crate::types::{ColumnValue, FetchResult, SqlReturn, SqlState, fetch_orientation_from_raw};
+
+/// One bound column, as `SQLFetch` needs it: the column number, its raw
+/// `SQL_DESC_CONCISE_TYPE`, and the three application addresses before the
+/// row-bind offset is applied.
+///
+/// The concise type stays **raw**, not parsed to a `CDataType`: reading it as a C
+/// type can fail, and the spec orders that failure *after* this call's `HY010`
+/// and `24000` checks. Collecting is not checking.
+type Binding = (u16, i16, *mut c_void, isize, *mut isize);
+
+/// Every bound column of an ARD, in no particular order.
+///
+/// Collected before the statement is borrowed, because the descriptor and the
+/// statement are separate allocations and the column reads below need `&mut` on
+/// the statement. A bind cannot happen in between: this call holds the
+/// connection's group throughout.
+fn collect_bindings(ard: &Descriptor) -> Vec<Binding> {
+    ard.records
+        .iter()
+        // A record exists as soon as any one field is set, so presence does not
+        // mean bound; the spec makes a null `SQL_DESC_DATA_PTR` the unbind.
+        .filter(|(_, record)| record.is_bound())
+        .map(|(&col, r)| {
+            (
+                col,
+                r.concise_type,
+                r.data_ptr,
+                r.octet_length,
+                r.indicator_ptr,
+            )
+        })
+        .collect()
+}
 
 /// `SQL_ROW_SUCCESS` — the row-status value for a row fetched without warning.
 const SQL_ROW_SUCCESS: u16 = 0;
@@ -27,11 +61,13 @@ const SQL_ROW_SUCCESS_WITH_INFO: u16 = 6;
 ///
 /// The stored attribute must be null or a pointer to a valid `usize`, which is
 /// the application's undertaking when it sets the attribute.
-unsafe fn row_bind_offset<B: Backend>(stmt: &StatementHandle<B>) -> usize {
-    // On the ARD's header, not `stmt.attrs`: `SQL_ATTR_ROW_BIND_OFFSET_PTR`
+unsafe fn row_bind_offset(ard: &Descriptor) -> usize {
+    // On the ARD's own header, not `stmt.attrs`: `SQL_ATTR_ROW_BIND_OFFSET_PTR`
     // *is* `SQL_DESC_BIND_OFFSET_PTR` — see `HeaderOwner`.
-    let raw = stmt
-        .attr_get(odbc_sys::StatementAttribute::RowBindOffsetPtr as i32)
+    let raw = ard
+        .attrs
+        .get(&(odbc_sys::Desc::BindOffsetPtr as u16))
+        .copied()
         .unwrap_or(0);
     if raw == 0 {
         return 0;
@@ -171,8 +207,31 @@ pub unsafe fn sql_fetch<B: Backend>(statement_handle: *mut c_void) -> SqlReturn 
     // sql_alloc_handle; kind and group are validated by scope.get inside the closure.
     let ret = unsafe {
         panic_safe::<B, _>(statement_handle, |scope| {
+            scope
+                .get::<StatementHandle<B>>(statement_handle)?
+                .diagnostics
+                .clear();
+
+            // Everything this call needs from the ARD, read before the statement
+            // is borrowed: the descriptor is its own allocation, and a bind
+            // cannot happen while this call holds the connection's group, so one
+            // read up front is the same answer as one read later.
+            //
+            // `SQL_ATTR_ROW_BIND_OFFSET_PTR` points at an `SQLULEN` the
+            // application may change between fetches; the spec has the driver add
+            // that value to every bound address rather than fold it into the
+            // binding once. Read once per fetch so one row uses one offset
+            // throughout.
+            //
+            // SAFETY: `row_bind_offset`'s contract — the stored attribute is null
+            // or a pointer to a valid `SQLULEN`, which is the application's
+            // undertaking when it sets the attribute.
+            let (bind_offset, bindings) = {
+                let ard = scope.desc_of::<B>(statement_handle, DescriptorRole::Ard)?;
+                (row_bind_offset(ard), collect_bindings(ard))
+            };
+
             let stmt = scope.get::<StatementHandle<B>>(statement_handle)?;
-            stmt.diagnostics.clear();
 
             // Read before the mutable borrow of `stmt.statement` below.
             let cursor_open = stmt.cursor_open;
@@ -212,13 +271,6 @@ pub unsafe fn sql_fetch<B: Backend>(statement_handle: *mut c_void) -> SqlReturn 
                 None => crate::query_timer::QueryTimer::disarmed(),
             };
 
-            // `SQL_ATTR_ROW_BIND_OFFSET_PTR` points at an `SQLULEN` the
-            // application may change between fetches; the spec has the driver
-            // add that value to every bound address rather than fold it into the
-            // binding once. Read once per fetch so one row uses one offset
-            // throughout, and here so it precedes the borrow above.
-            let bind_offset = row_bind_offset(stmt);
-
             // Spec HY010: the handle was never put in an executed state. Every
             // sentence of this SQLSTATE's row is (DM)-annotated; the check is
             // kept as defence in depth for a driver loaded without a Driver
@@ -255,37 +307,33 @@ pub unsafe fn sql_fetch<B: Backend>(statement_handle: *mut c_void) -> SqlReturn 
 
             match timer.check_opt::<B, _, _>(statement.fetch(), cancel)? {
                 FetchResult::Row => {
-                    // Populate bound columns.
-                    // Collect binding info first to avoid borrowing stmt mutably
-                    // while also borrowing stmt.statement.
+                    // Populate bound columns. The bindings were collected from
+                    // the ARD before this borrow of `stmt.statement`; the offset
+                    // is applied here, so one row uses one offset throughout.
+                    //
+                    // The application supplied both the base pointer and the
+                    // offset, and the spec makes the sum its responsibility to
+                    // keep in bounds — the same contract as the unoffset pointer.
+                    // Byte arithmetic, because the offset is in bytes.
                     let binding_info: Vec<(
                         u16,
                         odbc_sys::CDataType,
                         *mut c_void,
                         isize,
                         *mut isize,
-                    )> = stmt
-                        .app_row_desc
-                        .records
+                    )> = bindings
                         .iter()
-                        // A record exists as soon as any one field is set, so
-                        // presence no longer means bound; the spec makes a null
-                        // `SQL_DESC_DATA_PTR` the unbind.
-                        .filter(|(_, record)| record.is_bound())
-                        .map(|(&col, b)| {
-                            Ok((
-                                col,
-                                b.c_type()?,
-                                // SAFETY: the application supplied both the base
-                                // pointer and the offset, and the spec makes the
-                                // sum its responsibility to keep in bounds — the
-                                // same contract as the unoffset pointer. Byte
-                                // arithmetic, because the offset is in bytes.
-                                b.data_ptr.wrapping_byte_add(bind_offset),
-                                b.octet_length,
-                                b.indicator_ptr.wrapping_byte_add(bind_offset),
-                            ))
-                        })
+                        .map(
+                            |&(col, concise_type, data_ptr, octet_length, indicator_ptr)| {
+                                Ok((
+                                    col,
+                                    c_type_of(concise_type)?,
+                                    data_ptr.wrapping_byte_add(bind_offset),
+                                    octet_length,
+                                    indicator_ptr.wrapping_byte_add(bind_offset),
+                                ))
+                            },
+                        )
                         .collect::<Result<Vec<_>, OdbcError>>()?;
 
                     let mut truncated = false;

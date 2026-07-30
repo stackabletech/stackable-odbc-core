@@ -407,6 +407,10 @@ pub unsafe fn sql_free_stmt<B: Backend>(statement_handle: *mut c_void, option: u
         panic_safe::<B, _>(statement_handle, |scope| {
             let stmt = scope.get::<StatementHandle<B>>(statement_handle)?;
             stmt.diagnostics.clear();
+            // Copied out of the statement now, so the `SQL_UNBIND` arm can reach
+            // the descriptor with one registry lookup rather than resolving the
+            // statement a second time through `desc_of`.
+            let ard_token = stmt.descriptor_token(DescriptorRole::Ard);
 
             // Parsed inside `panic_safe`, not before it: returning early out
             // there left no HandleScope, so the SQL_ERROR reached the
@@ -459,11 +463,10 @@ pub unsafe fn sql_free_stmt<B: Backend>(statement_handle: *mut c_void, option: u
                         return Err(e);
                     }
                 }
-                FreeStmtOption::Unbind => scope
-                    .desc_of::<B>(statement_handle, DescriptorRole::Ard)?
-                    .records
-                    .clear(),
-                FreeStmtOption::ResetParams => stmt.clear_param_records(),
+                FreeStmtOption::Unbind => scope.descriptor(ard_token)?.records.clear(),
+                FreeStmtOption::ResetParams => {
+                    scope.clear_param_records::<B>(statement_handle)?;
+                }
             }
 
             Ok(SqlReturn::SUCCESS)

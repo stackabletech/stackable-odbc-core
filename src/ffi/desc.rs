@@ -4,20 +4,20 @@
 //! # How a call reaches a field
 //!
 //! Every one of the four takes a descriptor handle and nothing that says which
-//! of the four descriptors it is. `HandleScope::descriptor_owner` answers that:
-//! it resolves the token to the *statement* that owns it and to the role, by
-//! comparing the token against the statement's four fields. Casting the address
-//! the registry stored could not, because `HandleKind::Desc` is one kind
-//! covering four roles — see that function, and `Descriptor`'s note on why it
-//! deliberately has no `HasKind` impl.
+//! of the four descriptors it is. The descriptor itself answers that: each is its
+//! own registered allocation carrying its own `role`, so a token names exactly
+//! one `Descriptor` and that struct says which role it is. `resolve_target`
+//! pairs it with the statement it was allocated with — through
+//! `HandleScope::stmt_with_desc`, which is sound for the same reason
+//! `stmt_with_parent` is — or with no statement at all, for a descriptor the
+//! application allocated against a connection.
 //!
-//! From that one `&mut` the caller reaches whichever of three sources owns the
-//! field:
+//! From that pair the caller reaches whichever of three sources owns the field:
 //!
-//! - the **record map**, for the ARD, APD and IPD;
-//! - the **header storage**, which is the same storage `SQLGetStmtAttr` reads
-//!   for the eight statement attributes ODBC defines as descriptor header
-//!   fields;
+//! - the **record map** on the descriptor, for the ARD, APD and IPD;
+//! - the **header storage**, which is the descriptor's own `attrs` for the six
+//!   ARD/APD header fields `SQLGetStmtAttr` also reads, and the statement's
+//!   attribute bag for the four IRD/IPD pairs that deliberately stay there;
 //! - the **IRD's computed view** over the current result set's
 //!   `ColumnDescriptor`s, which stores nothing and delegates to the same
 //!   `get_column_attribute` that implements `SQLColAttributeW`.
@@ -27,12 +27,10 @@
 //!
 //! # What is still missing
 //!
-//! `SQLCopyDesc` and `SQLAllocHandle(SQL_HANDLE_DESC)` — explicitly allocated
-//! descriptors, which belong to a *connection* rather than a statement and so
-//! do not resolve through `descriptor_owner`'s parent routing at all. Until
-//! they land, **`SQL_OIC_CORE` is not satisfied**: Core-level conformance
-//! requires working descriptors, and these four make a statement's own
-//! descriptors real without making an application's own possible.
+//! `SQLCopyDesc` and `SQLAllocHandle(SQL_HANDLE_DESC)`. Until they land,
+//! **`SQL_OIC_CORE` is not satisfied**: Core-level conformance requires working
+//! descriptors, and these four make a statement's own descriptors real without
+//! making an application's own possible.
 
 use std::ffi::c_void;
 
@@ -44,10 +42,55 @@ use crate::descriptor::{
     header_attribute, header_default, set_record_field,
 };
 use crate::errors::OdbcError;
-use crate::handles::StatementHandle;
+use crate::handles::scope::HandleScope;
+use crate::handles::{Descriptor, HeaderOwner, StatementHandle};
 use crate::panic::panic_safe;
 use crate::types::col_attr::{ColAttrValue, get_column_attribute};
 use crate::types::{SqlReturn, SqlState};
+
+/// What one of the four accessors is addressing: a descriptor, and the statement
+/// it was allocated with if it has one.
+///
+/// Both borrows at once, which [`HandleScope::stmt_with_desc`] makes sound now
+/// that a descriptor is its own allocation. `stmt` is what the IRD's computed
+/// view and the four IRD/IPD header pairs need; everything else is on `desc`.
+///
+/// `stmt` is `None` for a descriptor the application allocated against a
+/// connection. That is never an IRD — only application descriptors can be
+/// explicit — so the IRD paths treat `None` as an error rather than substituting
+/// an answer.
+struct DescTarget<'a, B: Backend> {
+    stmt: Option<&'a mut StatementHandle<B>>,
+    desc: &'a mut Descriptor,
+    role: DescriptorRole,
+}
+
+/// Resolve a descriptor handle to what the accessors operate on.
+///
+/// The role comes from the descriptor itself, which is why this needs no
+/// comparison against a statement's fields: a token names exactly one
+/// `Descriptor`, and that struct says which of the roles it is.
+fn resolve_target<'s, B: Backend>(
+    scope: &'s mut HandleScope<'_>,
+    token: *mut c_void,
+) -> Result<DescTarget<'s, B>, OdbcError> {
+    let role = scope.descriptor(token)?.role;
+    match scope.descriptor_stmt(token) {
+        Some(stmt_token) => {
+            let (stmt, desc) = scope.stmt_with_desc::<B>(stmt_token, token)?;
+            Ok(DescTarget {
+                stmt: Some(stmt),
+                desc,
+                role,
+            })
+        }
+        None => Ok(DescTarget {
+            stmt: None,
+            desc: scope.descriptor(token)?,
+            role,
+        }),
+    }
+}
 
 /// Generic implementation of SQLGetDescFieldW.
 ///
@@ -129,18 +172,19 @@ pub unsafe fn sql_get_desc_field_w<B: Backend>(
         buffer_length,
         string_length_ptr,
     );
-    // SAFETY: `descriptor_handle` is null or a token, which `descriptor_owner`
+    // SAFETY: `descriptor_handle` is null or a token, which `resolve_target`
     // validates without dereferencing. `value_ptr` and `string_length_ptr` are
     // null-checked before every write, and written unaligned because row-wise
     // binding may place either at an arbitrary offset.
     let ret = unsafe {
         panic_safe::<B, _>(descriptor_handle, |scope| {
-            let (stmt, role) = scope.descriptor_owner::<B>(descriptor_handle)?;
+            let mut target = resolve_target::<B>(scope, descriptor_handle)?;
+            let role = target.role;
             // Spec: clear diagnostics at the start of each ODBC call — before
             // the field parse, so an unrecognised identifier reports `HY091`
             // onto an empty queue rather than behind the previous call's
             // records.
-            stmt.descriptor_mut(role).diagnostics.clear();
+            target.desc.diagnostics.clear();
 
             let field = field_from_raw(field_identifier)?;
             tracing::debug!(
@@ -151,7 +195,7 @@ pub unsafe fn sql_get_desc_field_w<B: Backend>(
                 field,
             );
 
-            let Some(value) = read_desc_field::<B>(stmt, role, record_number, field)? else {
+            let Some(value) = read_desc_field(&mut target, record_number, field)? else {
                 return Ok(SqlReturn::NO_DATA);
             };
 
@@ -175,7 +219,7 @@ pub unsafe fn sql_get_desc_field_w<B: Backend>(
                             i16::try_from(buffer_length / 2).unwrap_or(i16::MAX),
                             &mut units,
                         ),
-                        &mut stmt.descriptor_mut(role).diagnostics,
+                        &mut target.desc.diagnostics,
                     );
                     if !string_length_ptr.is_null() {
                         std::ptr::write_unaligned(string_length_ptr, i32::from(units) * 2);
@@ -214,11 +258,11 @@ fn field_from_raw(field_identifier: i16) -> Result<Desc, OdbcError> {
 /// Shared with `SQLGetDescRecW`, which reads seven fixed record fields and must
 /// give the same answers as this for each of them.
 fn read_desc_field<B: Backend>(
-    stmt: &mut StatementHandle<B>,
-    role: DescriptorRole,
+    target: &mut DescTarget<'_, B>,
     record_number: i16,
     field: Desc,
 ) -> Result<Option<DescFieldValue>, OdbcError> {
+    let role = target.role;
     // Spec 07009: "the RecNumber argument was less than 0, and the
     // DescriptorHandle argument referred to an ARD or an APD". No `(DM)` on
     // that clause, so it is core's.
@@ -239,19 +283,18 @@ fn read_desc_field<B: Backend>(
     // Header fields first: `RecNumber` is ignored for them, and
     // `SQL_DESC_COUNT` in particular is answered even when there are no
     // records at all.
-    if let Some(value) = read_header_field(stmt, role, field) {
+    if let Some(value) = read_header_field(target, field) {
         return Ok(Some(DescFieldValue::Numeric(value)));
     }
 
     if role == DescriptorRole::Ird {
-        return read_ird_field(stmt, record_number, field).map(Some);
+        return read_ird_field(target, record_number, field).map(Some);
     }
 
     let record_number = u16::try_from(record_number).unwrap_or(0);
-    let desc = stmt.descriptor_mut(role);
     // Spec, Returns: `SQL_NO_DATA` when `RecNumber` is greater than
     // `SQL_DESC_COUNT`. Derived from the map, as everywhere.
-    let Some(record) = desc.records.get(&record_number) else {
+    let Some(record) = target.desc.records.get(&record_number) else {
         return Ok(None);
     };
     get_record_field(record, role, field).map(Some)
@@ -259,11 +302,8 @@ fn read_desc_field<B: Backend>(
 
 /// The header half of [`read_desc_field`], or `None` if `field` is not a header
 /// field.
-fn read_header_field<B: Backend>(
-    stmt: &mut StatementHandle<B>,
-    role: DescriptorRole,
-    field: Desc,
-) -> Option<isize> {
+fn read_header_field<B: Backend>(target: &mut DescTarget<'_, B>, field: Desc) -> Option<isize> {
+    let role = target.role;
     match field {
         // Every descriptor core owns is implicitly allocated; D4's explicit
         // ones are what make this vary.
@@ -271,30 +311,47 @@ fn read_header_field<B: Backend>(
         // Derived rather than stored, so it cannot disagree with the map. The
         // IRD's records are the result set's columns, which it does not store.
         Desc::Count => Some(match role {
-            DescriptorRole::Ird => stmt.statement.as_ref().map_or(0, |s| s.column_count()) as isize,
-            _ => stmt.descriptor_mut(role).records.len() as isize,
+            DescriptorRole::Ird => target
+                .stmt
+                .as_ref()
+                .and_then(|s| s.statement.as_ref())
+                .map_or(0, |s| s.column_count()) as isize,
+            _ => target.desc.records.len() as isize,
         }),
         _ => {
-            // `header_attribute` still answers "is this field stored as a
-            // statement attribute on this role", which is what keeps the four
-            // IRD/IPD pairs on `StatementHandle::attrs`; `attr_get` then routes
-            // to the descriptor header or to that bag, keyed by the field in
-            // the first case.
+            // `header_attribute` answers "is this field stored as a statement
+            // attribute on this role", and [`HeaderOwner::of`] then says which of
+            // the two storages holds it: the descriptor's own header for the
+            // ARD/APD fields, and the statement's attribute bag for the four
+            // IRD/IPD pairs that deliberately stay there.
             let attr = header_attribute(role, field)?;
-            let stored = stmt
-                .attr_get(attr as i32)
-                .unwrap_or_else(|| header_default(field));
-            Some(stored as isize)
+            let stored = match HeaderOwner::of(Some(attr)) {
+                Some((_, key)) => target.desc.attrs.get(&(key as u16)).copied(),
+                None => target
+                    .stmt
+                    .as_ref()
+                    .and_then(|s| s.plain_attr_get(attr as i32)),
+            };
+            Some(stored.unwrap_or_else(|| header_default(field)) as isize)
         }
     }
 }
 
 /// The IRD half of [`read_desc_field`]: a computed view, never stored state.
 fn read_ird_field<B: Backend>(
-    stmt: &mut StatementHandle<B>,
+    target: &mut DescTarget<'_, B>,
     record_number: i16,
     field: Desc,
 ) -> Result<DescFieldValue, OdbcError> {
+    // An IRD is always one of a statement's four, so a missing statement here is
+    // unreachable rather than a case to answer for. Erroring says so instead of
+    // inventing column metadata that belongs to nothing.
+    let Some(stmt) = target.stmt.as_deref_mut() else {
+        return Err(OdbcError::general(
+            "An implementation row descriptor has no owning statement",
+            SqlState::general_error(),
+        ));
+    };
     // Spec HY007: "The fields of an IRD have a default value only after the
     // statement has been prepared or executed and the IRD has been populated
     // ... Until the IRD has been populated, any attempt to gain access to a
@@ -399,18 +456,19 @@ pub unsafe fn sql_set_desc_field_w<B: Backend>(
         value_ptr,
         buffer_length,
     );
-    // SAFETY: `descriptor_handle` is null or a token, which `descriptor_owner`
+    // SAFETY: `descriptor_handle` is null or a token, which `resolve_target`
     // validates without dereferencing. `value_ptr` is read through only for a
     // character field, where the caller guarantees `buffer_length` readable
     // bytes.
     let ret = unsafe {
         panic_safe::<B, _>(descriptor_handle, |scope| {
-            let (stmt, role) = scope.descriptor_owner::<B>(descriptor_handle)?;
+            let mut target = resolve_target::<B>(scope, descriptor_handle)?;
+            let role = target.role;
             // Spec: clear diagnostics at the start of each ODBC call — before
             // the field parse, so an unrecognised identifier reports `HY091`
             // onto an empty queue rather than behind the previous call's
             // records.
-            stmt.descriptor_mut(role).diagnostics.clear();
+            target.desc.diagnostics.clear();
 
             let field = field_from_raw(field_identifier)?;
             tracing::debug!(
@@ -421,7 +479,7 @@ pub unsafe fn sql_set_desc_field_w<B: Backend>(
                 field,
             );
 
-            write_desc_field(stmt, role, record_number, field, value_ptr, buffer_length)
+            write_desc_field(&mut target, record_number, field, value_ptr, buffer_length)
         })
     };
     tracing::debug!("SQLSetDescFieldW -> {:?}", ret);
@@ -435,13 +493,13 @@ pub unsafe fn sql_set_desc_field_w<B: Backend>(
 /// As [`sql_set_desc_field_w`]: `value_ptr` must point to `buffer_length`
 /// readable bytes when `field` is a character field.
 unsafe fn write_desc_field<B: Backend>(
-    stmt: &mut StatementHandle<B>,
-    role: DescriptorRole,
+    target: &mut DescTarget<'_, B>,
     record_number: i16,
     field: Desc,
     value_ptr: *mut c_void,
     buffer_length: i32,
 ) -> Result<SqlReturn, OdbcError> {
+    let role = target.role;
     // Spec 07009, as in the read direction.
     if record_number < 0 && matches!(role, DescriptorRole::Ard | DescriptorRole::Apd) {
         return Err(OdbcError::general(
@@ -477,7 +535,7 @@ unsafe fn write_desc_field<B: Backend>(
     // A header field: `RecNumber` is ignored, and the value goes to the same
     // storage `SQLSetStmtAttr` writes.
     if field == Desc::Count {
-        return Ok(truncate_records(stmt, role, value_ptr as usize));
+        return Ok(truncate_records(target, value_ptr as usize));
     }
     if field == Desc::AllocType {
         // Read-only on every role, so `field_access` has already refused it.
@@ -489,13 +547,7 @@ unsafe fn write_desc_field<B: Backend>(
         ));
     }
     if let Some(attr) = header_attribute(role, field) {
-        return Ok(write_header_field(
-            stmt,
-            role,
-            field,
-            attr,
-            value_ptr as usize,
-        ));
+        return Ok(write_header_field(target, field, attr, value_ptr as usize));
     }
 
     // A record field. `or_default` is what makes a record exist as soon as any
@@ -511,11 +563,7 @@ unsafe fn write_desc_field<B: Backend>(
         DescFieldValue::Numeric(value_ptr as isize)
     };
 
-    let record = stmt
-        .descriptor_mut(role)
-        .records
-        .entry(record_number)
-        .or_default();
+    let record = target.desc.records.entry(record_number).or_default();
     set_record_field(record, role, field, value)?;
 
     // Spec: the consistency check runs "when SQLSetDescField is called to set
@@ -539,15 +587,9 @@ unsafe fn write_desc_field<B: Backend>(
 /// whose number is greater than the value in SQL_DESC_COUNT". Deriving the
 /// count from the map on read is what makes the two agree; discarding here is
 /// what keeps them agreeing after a write.
-fn truncate_records<B: Backend>(
-    stmt: &mut StatementHandle<B>,
-    role: DescriptorRole,
-    count: usize,
-) -> SqlReturn {
+fn truncate_records<B: Backend>(target: &mut DescTarget<'_, B>, count: usize) -> SqlReturn {
     let count = u16::try_from(count).unwrap_or(u16::MAX);
-    stmt.descriptor_mut(role)
-        .records
-        .retain(|&number, _| number <= count);
+    target.desc.records.retain(|&number, _| number <= count);
     SqlReturn::SUCCESS
 }
 
@@ -561,8 +603,7 @@ fn truncate_records<B: Backend>(
 /// warning lands on the *descriptor's* queue, since that is the handle the
 /// application named.
 fn write_header_field<B: Backend>(
-    stmt: &mut StatementHandle<B>,
-    role: DescriptorRole,
+    target: &mut DescTarget<'_, B>,
     field: Desc,
     attr: odbc_sys::StatementAttribute,
     value: usize,
@@ -573,10 +614,21 @@ fn write_header_field<B: Backend>(
     } else {
         value
     };
-    stmt.attr_set(attr as i32, stored);
+    // The same two storages [`read_header_field`] reads, so the pair cannot
+    // disagree about where the value lives.
+    match HeaderOwner::of(Some(attr)) {
+        Some((_, key)) => {
+            target.desc.attrs.insert(key as u16, stored);
+        }
+        None => {
+            if let Some(stmt) = target.stmt.as_deref_mut() {
+                stmt.plain_attr_set(attr as i32, stored);
+            }
+        }
+    }
     if substituted {
         return crate::ffi::stmt_attr::substitution_warning(
-            &mut stmt.descriptor_mut(role).diagnostics,
+            &mut target.desc.diagnostics,
             "SQL_DESC_ARRAY_SIZE",
             value,
             "1",
@@ -678,15 +730,15 @@ pub unsafe fn sql_get_desc_rec_w<B: Backend>(
         name,
         buffer_length,
     );
-    // SAFETY: `descriptor_handle` is null or a token, which `descriptor_owner`
+    // SAFETY: `descriptor_handle` is null or a token, which `resolve_target`
     // validates without dereferencing. Every output pointer is null-checked
     // before its write, and written unaligned because row-wise binding may
     // place any of them at an arbitrary offset.
     let ret = unsafe {
         panic_safe::<B, _>(descriptor_handle, |scope| {
-            let (stmt, role) = scope.descriptor_owner::<B>(descriptor_handle)?;
+            let mut target = resolve_target::<B>(scope, descriptor_handle)?;
             // Spec: clear diagnostics at the start of each ODBC call.
-            stmt.descriptor_mut(role).diagnostics.clear();
+            target.desc.diagnostics.clear();
 
             // The six numeric fields, each read through the same
             // `get_record_field` `SQLGetDescField` uses — one mapping, two
@@ -694,14 +746,12 @@ pub unsafe fn sql_get_desc_rec_w<B: Backend>(
             // `SQL_NO_DATA` from any one of them is `SQL_NO_DATA` for the call:
             // they all address the same record.
             let mut numeric = |field: Desc| -> Result<Option<isize>, OdbcError> {
-                Ok(
-                    match read_desc_field::<B>(stmt, role, record_number, field)? {
-                        Some(DescFieldValue::Numeric(n)) => Some(n),
-                        // A string where a number was expected cannot happen
-                        // for these six, and `None` is `SQL_NO_DATA`.
-                        Some(DescFieldValue::String(_)) | None => None,
-                    },
-                )
+                Ok(match read_desc_field(&mut target, record_number, field)? {
+                    Some(DescFieldValue::Numeric(n)) => Some(n),
+                    // A string where a number was expected cannot happen
+                    // for these six, and `None` is `SQL_NO_DATA`.
+                    Some(DescFieldValue::String(_)) | None => None,
+                })
             };
 
             let Some(verbose_type) = numeric(Desc::Type)? else {
@@ -726,14 +776,14 @@ pub unsafe fn sql_get_desc_rec_w<B: Backend>(
             // `SQL_DESC_NAME` is a character field, and its buffer is optional
             // like every other output here.
             let Some(DescFieldValue::String(field_name)) =
-                read_desc_field::<B>(stmt, role, record_number, Desc::Name)?
+                read_desc_field(&mut target, record_number, Desc::Name)?
             else {
                 return Ok(SqlReturn::SUCCESS);
             };
             let mut units: i16 = 0;
             let ret = crate::utf16::note_truncation(
                 crate::utf16::write_utf16(&field_name, name, buffer_length / 2, &mut units),
-                &mut stmt.descriptor_mut(role).diagnostics,
+                &mut target.desc.diagnostics,
             );
             if !string_length_ptr.is_null() {
                 std::ptr::write_unaligned(string_length_ptr, units.saturating_mul(2));
@@ -858,14 +908,15 @@ pub unsafe fn sql_set_desc_rec<B: Backend>(
         string_length_ptr,
         indicator_ptr,
     );
-    // SAFETY: `descriptor_handle` is null or a token, which `descriptor_owner`
+    // SAFETY: `descriptor_handle` is null or a token, which `resolve_target`
     // validates without dereferencing. The three pointer arguments are stored
     // as values and never read through.
     let ret = unsafe {
         panic_safe::<B, _>(descriptor_handle, |scope| {
-            let (stmt, role) = scope.descriptor_owner::<B>(descriptor_handle)?;
+            let target = resolve_target::<B>(scope, descriptor_handle)?;
+            let role = target.role;
             // Spec: clear diagnostics at the start of each ODBC call.
-            stmt.descriptor_mut(role).diagnostics.clear();
+            target.desc.diagnostics.clear();
 
             // Spec 07009, as in the other three. No clause of this function's
             // row is annotated `(DM)`.
@@ -911,11 +962,7 @@ pub unsafe fn sql_set_desc_rec<B: Backend>(
             // function grow the record set, which is the difference from
             // `SQLGetDescRec` answering `SQL_NO_DATA` there.
             let record_key = u16::try_from(record_number).unwrap_or(0);
-            let record = stmt
-                .descriptor_mut(role)
-                .records
-                .entry(record_key)
-                .or_default();
+            let record = target.desc.records.entry(record_key).or_default();
 
             for (field, value) in fields {
                 // The IPD defines neither pointer field, and the spec expects
@@ -954,10 +1001,9 @@ mod tests {
     use super::*;
     use crate::ffi::diag::sql_get_diag_rec_w;
     use crate::ffi::stmt_attr::sql_get_stmt_attr_w;
-    use crate::handles::StatementHandle;
     use crate::test_utils::{
         MockBackend, MockLongDataBackend, MockRecordingBackend, MockTypeInfoBackend,
-        alloc_env_conn_stmt, cleanup_env_conn_stmt, with_descriptor, with_handle,
+        alloc_env_conn_stmt, cleanup_env_conn_stmt, with_descriptor,
     };
     use crate::types::sql_state;
     use odbc_sys::{CDataType, HandleType, ParamType, SqlDataType, StatementAttribute};
@@ -1597,12 +1643,8 @@ mod tests {
             );
             assert_eq!(ret, SqlReturn::SUCCESS);
 
-            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
-                let record = handle
-                    .app_row_desc
-                    .records
-                    .get(&1)
-                    .expect("SQLSetDescRec wrote no record");
+            with_descriptor::<MockBackend, _>(stmt, DescriptorRole::Ard, |ard| {
+                let record = ard.records.get(&1).expect("SQLSetDescRec wrote no record");
                 assert_eq!(record.concise_type, CDataType::SBigInt as i16);
                 assert_eq!(record.octet_length, std::mem::size_of::<i64>() as isize);
                 assert!(record.is_bound());
@@ -1650,12 +1692,8 @@ mod tests {
             );
             assert_eq!(ret, SqlReturn::SUCCESS);
 
-            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
-                let record = handle
-                    .app_row_desc
-                    .records
-                    .get(&1)
-                    .expect("the record itself still exists");
+            with_descriptor::<MockBackend, _>(stmt, DescriptorRole::Ard, |ard| {
+                let record = ard.records.get(&1).expect("the record itself still exists");
                 assert!(!record.is_bound(), "a null DataPtr did not unbind");
             });
 

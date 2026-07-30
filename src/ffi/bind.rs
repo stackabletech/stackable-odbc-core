@@ -82,6 +82,9 @@ pub unsafe fn sql_bind_col<B: Backend>(
         panic_safe::<B, _>(statement_handle, |scope| {
             let stmt = scope.get::<StatementHandle<B>>(statement_handle)?;
             stmt.diagnostics.clear();
+            // Copied out now, so reaching the ARD below is one registry lookup
+            // rather than resolving this statement a second time.
+            let ard_token = stmt.descriptor_token(DescriptorRole::Ard);
 
             // Spec HYC00: bookmark column (col=0) is not supported by this driver.
             if column_number == 0 {
@@ -93,10 +96,7 @@ pub unsafe fn sql_bind_col<B: Backend>(
             if target_value_ptr.is_null() {
                 // Unbind the column
                 tracing::debug!("SQLBindCol: col={} unbind", column_number);
-                scope
-                    .desc_of::<B>(statement_handle, DescriptorRole::Ard)?
-                    .records
-                    .remove(&column_number);
+                scope.descriptor(ard_token)?.records.remove(&column_number);
             } else {
                 let c_type = crate::types::c_data_type_from_raw(target_type).ok_or_else(|| {
                     crate::errors::OdbcError::general(
@@ -123,7 +123,7 @@ pub unsafe fn sql_bind_col<B: Backend>(
                 // leaves the previous binding — or no binding — in place.
                 crate::descriptor::consistency_check(&record, DescriptorRole::Ard)?;
                 scope
-                    .desc_of::<B>(statement_handle, DescriptorRole::Ard)?
+                    .descriptor(ard_token)?
                     .records
                     .insert(column_number, record);
             }
@@ -139,7 +139,7 @@ pub unsafe fn sql_bind_col<B: Backend>(
 mod tests {
     use super::*;
     use crate::test_utils::{
-        MockBackend, alloc_env_conn_stmt, cleanup_env_conn_stmt, with_descriptor, with_handle,
+        MockBackend, alloc_env_conn_stmt, cleanup_env_conn_stmt, with_descriptor,
     };
     use crate::types::CDataType;
     use std::ffi::c_void;
@@ -230,9 +230,8 @@ mod tests {
             );
             assert_eq!(ret, SqlReturn::SUCCESS);
 
-            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
-                let record = handle
-                    .app_row_desc
+            with_descriptor::<MockBackend, _>(stmt, DescriptorRole::Ard, |ard| {
+                let record = ard
                     .records
                     .get(&1)
                     .expect("SQLBindCol did not write a record into the ARD");
@@ -279,9 +278,8 @@ mod tests {
                 "the consistency check rejected a plain SQL_C_TYPE_DATE binding"
             );
 
-            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
-                let record = handle
-                    .app_row_desc
+            with_descriptor::<MockBackend, _>(stmt, DescriptorRole::Ard, |ard| {
+                let record = ard
                     .records
                     .get(&1)
                     .expect("SQLBindCol did not write a record into the ARD");

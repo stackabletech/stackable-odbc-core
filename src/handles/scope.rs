@@ -21,8 +21,13 @@ use crate::descriptor::DescriptorRole;
 use crate::diagnostics::DiagnosticQueue;
 use crate::errors::OdbcError;
 use crate::handles::registry::{GroupLock, HandleKind, Registry, registry};
-use crate::handles::{ConnectionHandle, Descriptor, EnvironmentHandle, HasKind, StatementHandle};
+use crate::handles::{
+    ConnectionHandle, Descriptor, EnvironmentHandle, HasKind, HeaderOwner, ParamRecords,
+    StatementHandle,
+};
 use crate::sync::{Arc, MutexGuard};
+use crate::types::statement_attribute_from_raw;
+use odbc_sys::Desc;
 
 /// Proof that the caller holds one lock group, and the gateway to the handles
 /// inside it.
@@ -135,12 +140,14 @@ impl<'a> HandleScope<'a> {
     /// `ConnectionHandle` holds no field pointing at its statements at all —
     /// parentage lives in the registry (`Registry::children_of`), not in
     /// either handle struct. Different [`HandleKind`]s alone would not be
-    /// enough to justify this: `StatementHandle` owns four
-    /// `Box<DescriptorHandle>` fields that *are* reachable through its own
-    /// `&mut`, so a hypothetical `stmt_with_desc` built the same way would
-    /// alias under Stacked/Tree Borrows despite the two addresses differing
-    /// and `debug_assert_ne!` seeing nothing wrong — this combinator only
-    /// exists for the one pair that is actually mutually unreachable.
+    /// enough to justify this: while `StatementHandle` owned four
+    /// `Box<Descriptor>` fields, those *were* reachable through its own `&mut`,
+    /// so a `stmt_with_desc` built the same way would have aliased under
+    /// Stacked/Tree Borrows despite the two addresses differing and
+    /// `debug_assert_ne!` seeing nothing wrong. Making each descriptor its own
+    /// registered allocation is what removed that, and
+    /// [`Self::stmt_with_desc`] is now the second combinator of this shape. Both
+    /// exist only for pairs that are actually mutually unreachable.
     ///
     /// They share one group, so this needs no second acquisition.
     ///
@@ -275,7 +282,7 @@ impl<'a> HandleScope<'a> {
     /// `&mut DiagnosticQueue` rather than the whole handle, and — like
     /// [`Self::get`] and [`Self::push_diagnostic`] — refuses a token outside
     /// the held group. A descriptor is dispatched to
-    /// [`Self::descriptor_diagnostics`], which cannot use the cast below.
+    /// [`Self::descriptor_diagnostics`], which needs no backend type.
     pub fn diagnostics<B: Backend>(&mut self, token: *mut c_void) -> Option<&mut DiagnosticQueue> {
         let (kind, addr) = {
             let held = self.group.as_ref()?;
@@ -296,109 +303,261 @@ impl<'a> HandleScope<'a> {
             HandleKind::Stmt => {
                 Some(unsafe { &mut (*(addr as *mut StatementHandle<B>)).diagnostics })
             }
-            HandleKind::Desc => self.descriptor_diagnostics::<B>(token),
+            HandleKind::Desc => self.descriptor_diagnostics(token),
         }
+    }
+
+    /// Borrow a descriptor's diagnostic queue.
+    ///
+    /// `SQLGetDescField`, `SQLSetDescField` and `SQLSetDescRec` all say their
+    /// SQLSTATE "can be obtained by calling **SQLGetDiagRec** with a *HandleType*
+    /// of SQL_HANDLE_DESC", so each descriptor carries a queue of its own.
+    ///
+    /// Not generic in `B`, unlike its three siblings in [`Self::diagnostics`]:
+    /// resolving a descriptor needs no backend type, because a `Descriptor` is
+    /// not parameterised by one.
+    pub fn descriptor_diagnostics(&mut self, token: *mut c_void) -> Option<&mut DiagnosticQueue> {
+        Some(&mut self.descriptor(token).ok()?.diagnostics)
     }
 
     /// One of a statement's descriptors, by role.
     ///
     /// The single door onto descriptor storage. It exists so that no call site
     /// names a field of [`StatementHandle`]: which allocation a role resolves to
-    /// is this function's business, and it is about to become a registry lookup
-    /// rather than a field.
+    /// is this function's business — an application-supplied descriptor for the
+    /// ARD or APD when one has been set, the implicit one otherwise.
     ///
-    /// Returns only the descriptor. A caller that also needs the statement —
-    /// the IRD's computed view, or `SQL_DESC_COUNT` — cannot use this while the
-    /// four are `Box` fields; see [`Self::descriptor_owner`].
+    /// Returns only the descriptor. A caller that also needs the statement — the
+    /// IRD's computed view, or `SQL_DESC_COUNT` — wants [`Self::stmt_with_desc`].
     pub fn desc_of<B: Backend>(
         &mut self,
         stmt_token: *mut c_void,
         role: DescriptorRole,
     ) -> Result<&mut Descriptor, OdbcError> {
-        let stmt: &mut StatementHandle<B> = self.get(stmt_token)?;
-        Ok(stmt.descriptor_mut(role))
+        let token = self
+            .get::<StatementHandle<B>>(stmt_token)?
+            .descriptor_token(role);
+        self.descriptor(token)
     }
 
-    /// Resolve a descriptor token to the statement that owns it and to which of
-    /// the four it is.
+    /// A descriptor, by its own token.
     ///
-    /// This is how every descriptor is reached. Every other handle kind is
-    /// reached by casting the address the registry stored; a descriptor **must
-    /// not** be, and that is why [`Descriptor`] deliberately has no `HasKind`
-    /// impl. `HandleKind::Desc` is one kind covering four roles, so
-    /// [`Self::get`], which dispatches on the kind alone, would resolve any one
-    /// of a statement's four descriptors as any other and pass every check the
-    /// registry can make. Without the impl, that call does not compile.
+    /// Sound as a plain [`Self::get`] because every descriptor is its own
+    /// allocation carrying its own role — see [`Descriptor`]'s doc comment for
+    /// why D3's refusal of `HasKind` no longer applies.
+    pub fn descriptor(&mut self, token: *mut c_void) -> Result<&mut Descriptor, OdbcError> {
+        self.get::<Descriptor>(token)
+    }
+
+    /// The statement a descriptor was allocated with, or `None` when it has
+    /// none.
     ///
-    /// Asking the owning statement answers the question a cast could only
-    /// assume. `Slot::parent` records it at `alloc_statement` time, and
-    /// comparing the token against the statement's four fields identifies the
-    /// role exactly.
+    /// Read from `Slot::parent`, which `alloc_descriptor` records. An
+    /// application-allocated descriptor is parented to a *connection* instead, so
+    /// this answers `None` for one — which is what the IRD paths use to tell "no
+    /// column metadata is reachable from here" from "the statement has none yet".
+    pub fn descriptor_stmt(&mut self, token: *mut c_void) -> Option<*mut c_void> {
+        let held = self.group.as_ref()?;
+        let (kind, _addr, parent) = registry().resolve_any_in_group(token, held)?;
+        if kind != HandleKind::Desc {
+            return None;
+        }
+        let parent = parent?;
+        let (parent_kind, _, _) = registry().resolve_any_in_group(parent, held)?;
+        (parent_kind == HandleKind::Stmt).then_some(parent)
+    }
+
+    /// Borrow a statement and one of its descriptors together.
     ///
-    /// Returning the *statement* rather than the descriptor is what makes the
-    /// IRD-as-view workable, and it is also the only form the borrow rule in
-    /// [`Self::stmt_with_parent`]'s comment permits. The caller reaches
-    /// whatever it needs off this single `&mut`: a record map for the ARD, APD
-    /// or IPD, or `stmt.statement`'s column metadata for the IRD. A
-    /// `stmt_with_desc` combinator handing back both at once would alias under
-    /// Stacked Borrows, because the four `Box<Descriptor>` fields *are*
-    /// reachable through the statement's `&mut`.
+    /// Sound for exactly the reason [`Self::stmt_with_parent`] is: neither is
+    /// reachable from the other. The statement holds descriptor **tokens**
+    /// (`*mut c_void`), not typed pointers the compiler could follow, and a
+    /// [`Descriptor`] holds no back-pointer to any statement. D3 forbade this
+    /// combinator because the four descriptors were `Box` fields of the statement
+    /// and therefore *were* reachable through its `&mut`; making each its own
+    /// registered allocation is what removed that.
     ///
-    /// [`OdbcError::InvalidHandle`] for a token that is stale, outside the held
-    /// group, not a descriptor, or somehow parentless — the same answer,
-    /// because none of them names a descriptor this scope may reach.
-    ///
-    /// [`Descriptor`]: crate::handles::Descriptor
-    pub fn descriptor_owner<B: Backend>(
+    /// Needed by the IRD, whose fields are computed from the statement's column
+    /// metadata, and by `SQL_DESC_COUNT`.
+    pub fn stmt_with_desc<B: Backend>(
         &mut self,
-        token: *mut c_void,
-    ) -> Result<(&mut StatementHandle<B>, DescriptorRole), OdbcError> {
-        let parent = {
-            let held = self.group.as_ref().ok_or(OdbcError::InvalidHandle)?;
-            let (kind, _addr, parent) = registry()
-                .resolve_any_in_group(token, held)
-                .ok_or(OdbcError::InvalidHandle)?;
-            if kind != HandleKind::Desc {
-                return Err(OdbcError::InvalidHandle);
+        stmt_token: *mut c_void,
+        desc_token: *mut c_void,
+    ) -> Result<(&mut StatementHandle<B>, &mut Descriptor), OdbcError> {
+        let stmt_addr = {
+            let stmt: &mut StatementHandle<B> = self.get(stmt_token)?;
+            std::ptr::from_mut(stmt)
+        };
+        let desc_addr = {
+            let desc: &mut Descriptor = self.get(desc_token)?;
+            std::ptr::from_mut(desc)
+        };
+        // As in `stmt_with_parent`: this pins only the weaker fact that the two
+        // are different allocations. The reason the references cannot alias is
+        // that neither handle is reachable from the other.
+        debug_assert_ne!(stmt_addr as usize, desc_addr as usize);
+        // SAFETY: both addresses came from `get`, which validated each token
+        // against the registry and confirmed it belongs to the group this scope
+        // holds. Neither handle is reachable from the other, so the two `&mut`s
+        // cannot alias — the same argument `stmt_with_parent` makes, and see its
+        // comment for why reborrowing `self` between the two lookups touches
+        // nothing either pointer refers to.
+        Ok(unsafe { (&mut *stmt_addr, &mut *desc_addr) })
+    }
+
+    /// A descriptor header field's stored value on one of a statement's
+    /// descriptors, or `None` if never set.
+    ///
+    /// Keyed by the `SQL_DESC_*` field rather than by the statement attribute
+    /// that names it — see [`Descriptor::attrs`] for why.
+    pub fn header_field_get<B: Backend>(
+        &mut self,
+        stmt_token: *mut c_void,
+        owner: HeaderOwner,
+        field: Desc,
+    ) -> Result<Option<usize>, OdbcError> {
+        let role = match owner {
+            HeaderOwner::Ard => DescriptorRole::Ard,
+            HeaderOwner::Apd => DescriptorRole::Apd,
+        };
+        Ok(self
+            .desc_of::<B>(stmt_token, role)?
+            .attrs
+            .get(&(field as u16))
+            .copied())
+    }
+
+    /// [`Self::header_field_get`], for writing.
+    pub fn header_field_set<B: Backend>(
+        &mut self,
+        stmt_token: *mut c_void,
+        owner: HeaderOwner,
+        field: Desc,
+        value: usize,
+    ) -> Result<(), OdbcError> {
+        let role = match owner {
+            HeaderOwner::Ard => DescriptorRole::Ard,
+            HeaderOwner::Apd => DescriptorRole::Apd,
+        };
+        self.desc_of::<B>(stmt_token, role)?
+            .attrs
+            .insert(field as u16, value);
+        Ok(())
+    }
+
+    /// Where the value of the statement attribute `attribute` is stored: a
+    /// descriptor's header when ODBC defines the attribute as one, the
+    /// statement's own bag otherwise.
+    ///
+    /// Both the set and the get path route through [`HeaderOwner::of`] here, so
+    /// the two cannot disagree about which map to look in. It lives on the scope
+    /// rather than on [`StatementHandle`] because a descriptor is not a field of
+    /// a statement: resolving one is a registry lookup.
+    pub fn attr_get<B: Backend>(
+        &mut self,
+        stmt_token: *mut c_void,
+        attribute: i32,
+    ) -> Result<Option<usize>, OdbcError> {
+        match HeaderOwner::of(statement_attribute_from_raw(attribute)) {
+            Some((owner, field)) => self.header_field_get::<B>(stmt_token, owner, field),
+            None => Ok(self
+                .get::<StatementHandle<B>>(stmt_token)?
+                .plain_attr_get(attribute)),
+        }
+    }
+
+    /// [`Self::attr_get`], for writing.
+    pub fn attr_set<B: Backend>(
+        &mut self,
+        stmt_token: *mut c_void,
+        attribute: i32,
+        value: usize,
+    ) -> Result<(), OdbcError> {
+        match HeaderOwner::of(statement_attribute_from_raw(attribute)) {
+            Some((owner, field)) => self.header_field_set::<B>(stmt_token, owner, field, value),
+            None => {
+                self.get::<StatementHandle<B>>(stmt_token)?
+                    .plain_attr_set(attribute, value);
+                Ok(())
             }
-            parent.ok_or(OdbcError::InvalidHandle)?
-        };
-        // A descriptor shares its statement's group, so this resolves under the
-        // lock already held.
-        let stmt: &mut StatementHandle<B> = self.get(parent)?;
-        let role = if stmt.app_row_desc.token() == token {
-            DescriptorRole::Ard
-        } else if stmt.app_param_desc.token() == token {
-            DescriptorRole::Apd
-        } else if stmt.imp_row_desc.token() == token {
-            DescriptorRole::Ird
-        } else if stmt.imp_param_desc.token() == token {
-            DescriptorRole::Ipd
-        } else {
-            return Err(OdbcError::InvalidHandle);
-        };
-        Ok((stmt, role))
+        }
     }
 
-    /// Borrow a descriptor's diagnostic queue, through the statement that owns
-    /// it.
+    /// Borrow a statement, its connection, and its two parameter descriptors'
+    /// records, all at once.
     ///
-    /// `SQLGetDescField`, `SQLSetDescField` and `SQLSetDescRec` all say their
-    /// SQLSTATE "can be obtained by calling **SQLGetDiagRec** with a
-    /// *HandleType* of SQL_HANDLE_DESC", so each descriptor carries a queue of
-    /// its own. Which one is [`Self::descriptor_owner`]'s answer; this only
-    /// picks the field.
-    pub fn descriptor_diagnostics<B: Backend>(
+    /// `SQLExecute`, `SQLExecDirect` and `SQLParamData` each need all four in one
+    /// call: the connection to reach the backend, the statement for its
+    /// parameter count and data-at-execution state, and the two descriptors for
+    /// the bindings. Resolving them one at a time is not possible while any is
+    /// borrowed, and cloning the record maps per execution would make a second
+    /// copy of the one storage this milestone exists to keep single.
+    ///
+    /// Sound for the same reason [`Self::stmt_with_parent`] and
+    /// [`Self::stmt_with_desc`] are, applied to four allocations rather than two:
+    /// each is a separate registry slot, and none is reachable from any other. A
+    /// statement holds only opaque tokens; a `ConnectionHandle` holds no list of
+    /// its statements; a [`Descriptor`] holds no back-pointer at all.
+    pub fn stmt_with_parent_and_params<B: Backend>(
         &mut self,
-        token: *mut c_void,
-    ) -> Option<&mut DiagnosticQueue> {
-        let (owner, role) = self.descriptor_owner::<B>(token).ok()?;
-        Some(match role {
-            DescriptorRole::Ard => &mut owner.app_row_desc.diagnostics,
-            DescriptorRole::Apd => &mut owner.app_param_desc.diagnostics,
-            DescriptorRole::Ird => &mut owner.imp_row_desc.diagnostics,
-            DescriptorRole::Ipd => &mut owner.imp_param_desc.diagnostics,
+        stmt_token: *mut c_void,
+    ) -> Result<
+        (
+            &mut StatementHandle<B>,
+            &mut ConnectionHandle<B>,
+            ParamRecords<'_>,
+        ),
+        OdbcError,
+    > {
+        let (apd_token, ipd_token) = {
+            let stmt: &mut StatementHandle<B> = self.get(stmt_token)?;
+            (
+                stmt.descriptor_token(DescriptorRole::Apd),
+                stmt.descriptor_token(DescriptorRole::Ipd),
+            )
+        };
+        let apd = std::ptr::from_mut(self.descriptor(apd_token)?);
+        let ipd = std::ptr::from_mut(self.descriptor(ipd_token)?);
+        let (stmt, conn) = self.stmt_with_parent::<B>(stmt_token)?;
+        let stmt_addr = std::ptr::from_mut(stmt);
+        let conn_addr = std::ptr::from_mut(conn);
+        // As in the two-way combinators, this pins only the weaker fact that the
+        // four are distinct allocations.
+        debug_assert_ne!(apd as usize, ipd as usize);
+        debug_assert_ne!(stmt_addr as usize, conn_addr as usize);
+        // SAFETY: every address came from a validated registry lookup in the group
+        // this scope holds, and no two of the four handles are reachable from each
+        // other — see this function's doc comment. `self` holds no pointer into
+        // any of them, so the reborrows between the lookups touch nothing they
+        // refer to (the argument spelled out in `stmt_with_parent`).
+        Ok(unsafe {
+            (
+                &mut *stmt_addr,
+                &mut *conn_addr,
+                ParamRecords {
+                    apd: &(*apd).records,
+                    ipd: &(*ipd).records,
+                },
+            )
         })
+    }
+
+    /// Remove every parameter binding, from both descriptors.
+    ///
+    /// `SQLFreeStmt(SQL_RESET_PARAMS)`. Clearing one map and not the other leaves
+    /// exactly the split state [`ParamRecords::get`] reports as an internal
+    /// error, so the two clears stay in one place.
+    pub fn clear_param_records<B: Backend>(
+        &mut self,
+        stmt_token: *mut c_void,
+    ) -> Result<(), OdbcError> {
+        self.desc_of::<B>(stmt_token, DescriptorRole::Apd)?
+            .records
+            .clear();
+        self.desc_of::<B>(stmt_token, DescriptorRole::Ipd)?
+            .records
+            .clear();
+        Ok(())
     }
 }
 
@@ -440,10 +599,11 @@ mod tests {
         }
     }
 
-    /// Each of a statement's four descriptors resolves to that statement and to
-    /// its own role. Getting the role from the token is what `HY091` and the
-    /// IRD's read-only rule are decided from, so a token resolving as the wrong
-    /// role would answer the wrong SQLSTATE for every field.
+    /// Each of a statement's four descriptor tokens resolves to a descriptor
+    /// carrying that role, and to the statement it was allocated with. The role
+    /// is what `HY091` and the IRD's read-only rule are decided from, so a token
+    /// resolving as the wrong role would answer the wrong SQLSTATE for every
+    /// field.
     #[test]
     fn each_descriptor_token_resolves_to_its_statement_and_role() {
         unsafe {
@@ -452,20 +612,31 @@ mod tests {
             let tokens =
                 with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
                     [
-                        (handle.app_row_desc.token(), DescriptorRole::Ard),
-                        (handle.app_param_desc.token(), DescriptorRole::Apd),
-                        (handle.imp_row_desc.token(), DescriptorRole::Ird),
-                        (handle.imp_param_desc.token(), DescriptorRole::Ipd),
+                        (
+                            handle.descriptor_token(DescriptorRole::Ard),
+                            DescriptorRole::Ard,
+                        ),
+                        (
+                            handle.descriptor_token(DescriptorRole::Apd),
+                            DescriptorRole::Apd,
+                        ),
+                        (
+                            handle.descriptor_token(DescriptorRole::Ird),
+                            DescriptorRole::Ird,
+                        ),
+                        (
+                            handle.descriptor_token(DescriptorRole::Ipd),
+                            DescriptorRole::Ipd,
+                        ),
                     ]
                 });
 
             for (token, expected_role) in tokens {
                 let ret = panic_safe::<MockBackend, _>(token, |scope| {
-                    let (owner, role) = scope.descriptor_owner::<MockBackend>(token)?;
-                    assert_eq!(role, expected_role);
-                    // Every descriptor of one statement resolves to the same
-                    // owner, whichever token was used.
-                    assert_eq!(owner.app_row_desc.token(), tokens[0].0);
+                    assert_eq!(scope.descriptor(token)?.role, expected_role);
+                    // Every descriptor of one statement is parented to the same
+                    // statement, whichever token was used.
+                    assert_eq!(scope.descriptor_stmt(token), Some(stmt));
                     Ok(SqlReturn::SUCCESS)
                 });
                 assert_eq!(ret, SqlReturn::SUCCESS, "{expected_role:?} did not resolve");
@@ -475,18 +646,24 @@ mod tests {
         }
     }
 
-    /// A statement token is live and in the same group, so the group check
-    /// alone would admit it. It is not a descriptor.
+    /// A statement token is not a descriptor token, even though a descriptor is
+    /// now resolved by the same [`HandleScope::get`] every other kind uses: the
+    /// registry's kind compare is what refuses it.
     #[test]
-    fn descriptor_owner_refuses_a_non_descriptor_token() {
+    fn descriptor_refuses_a_non_descriptor_token() {
         unsafe {
             let (env, conn, stmt) = alloc_env_conn_stmt();
 
             let ret = panic_safe::<MockBackend, _>(stmt, |scope| {
-                let result = scope.descriptor_owner::<MockBackend>(stmt);
+                let result = scope.descriptor(stmt);
                 assert!(
                     matches!(result, Err(OdbcError::InvalidHandle)),
                     "a statement token resolved as a descriptor"
+                );
+                assert_eq!(
+                    scope.descriptor_stmt(stmt),
+                    None,
+                    "a statement token has no owning descriptor to report"
                 );
                 Ok(SqlReturn::SUCCESS)
             });

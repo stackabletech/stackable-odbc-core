@@ -110,19 +110,30 @@ impl Default for DescriptorRecord {
     }
 }
 
+/// A raw `SQL_DESC_CONCISE_TYPE` read as a C data type.
+///
+/// Fallible because `SQLSetDescField` can store any `i16` there, unlike
+/// `SQLBindCol`, which validated it at the boundary. `HY003` is the code
+/// `SQLBindCol` already uses for an unrecognised C type.
+///
+/// Separate from [`DescriptorRecord::c_type`], which delegates to it, so a caller
+/// holding the value out of a record — `SQLFetch`, which collects its bindings
+/// before it borrows the statement — gives the same answer rather than its own.
+pub fn c_type_of(concise_type: i16) -> Result<CDataType, OdbcError> {
+    c_data_type_from_raw(concise_type).ok_or_else(|| {
+        OdbcError::general(
+            format!("Unknown C data type: {concise_type}"),
+            SqlState::invalid_application_buffer_type(),
+        )
+    })
+}
+
 impl DescriptorRecord {
     /// [`Self::concise_type`] read as a C data type, for an ARD or APD.
     ///
-    /// Fallible because `SQLSetDescField` can store any `i16` here, unlike
-    /// `SQLBindCol`, which validated it at the boundary. `HY003` is the code
-    /// `SQLBindCol` already uses for an unrecognised C type.
+    /// See [`c_type_of`], which is the mapping.
     pub fn c_type(&self) -> Result<CDataType, OdbcError> {
-        c_data_type_from_raw(self.concise_type).ok_or_else(|| {
-            OdbcError::general(
-                format!("Unknown C data type: {}", self.concise_type),
-                SqlState::invalid_application_buffer_type(),
-            )
-        })
+        c_type_of(self.concise_type)
     }
 
     /// [`Self::concise_type`] read as a SQL data type, for an IPD.

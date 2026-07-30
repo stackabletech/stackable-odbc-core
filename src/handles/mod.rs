@@ -41,10 +41,7 @@ use crate::descriptor::{DescriptorRecord, DescriptorRole};
 use crate::diagnostics::DiagnosticQueue;
 use crate::errors::{IntoOdbc, OdbcError};
 use crate::sync::Arc;
-use crate::types::{
-    ColumnDescriptor, ColumnValue, ConnectParams, FetchResult, SqlReturn,
-    statement_attribute_from_raw,
-};
+use crate::types::{ColumnDescriptor, ColumnValue, ConnectParams, FetchResult, SqlReturn};
 
 pub(crate) mod registry;
 pub(crate) mod scope;
@@ -58,12 +55,12 @@ const SQL_NOSCAN_ON: usize = 1;
 
 /// One ODBC descriptor (`SQL_HANDLE_DESC`).
 ///
-/// A statement owns four of these — the ARD, APD, IRD and IPD — and the ODBC
+/// A statement has four of these — the ARD, APD, IRD and IPD — and the ODBC
 /// spec makes them the *definition* of a binding rather than a copy of one:
 /// "when `SQLBindCol` is called, the driver sets fields in the ARD". So a bound
-/// column is a record in [`StatementHandle::app_row_desc`], and a bound
-/// parameter is a record in the APD together with one in the IPD. There is one
-/// storage, so a binding and its descriptor cannot disagree.
+/// column is a record in the statement's ARD, and a bound parameter is a record
+/// in the APD together with one in the IPD. There is one storage, so a binding
+/// and its descriptor cannot disagree.
 ///
 /// [`Self::role`] is what tells the four apart, and it is a field rather than a
 /// type parameter because ODBC has one record shape and four *readings* of it:
@@ -80,27 +77,31 @@ const SQL_NOSCAN_ON: usize = 1;
 /// NULL and all subsequent application-facing calls crash. These handles
 /// satisfy that requirement.
 ///
-/// # Why there is no `HasKind` impl
+/// # Why there *is* a `HasKind` impl
 ///
-/// Every other handle type has one, and a descriptor deliberately does not.
-/// [`HandleScope::get`] dispatches on [`HandleKind`] alone, and all four
-/// descriptors register as `HandleKind::Desc` — so `get::<Descriptor>` on a
-/// token would resolve any of a statement's four descriptors as any other,
-/// passing every check the registry can make. Without the impl that call does
-/// not compile, which is the point: the role has to come from the owning
-/// statement, not from the token's kind.
+/// D3 refused one, and both facts it depended on are now false. Its argument was
+/// that [`HandleScope::get`] dispatches on [`HandleKind`] alone, and all four of
+/// a statement's descriptors register as `HandleKind::Desc` — so
+/// `get::<Descriptor>` would resolve any one of the four as any other and pass
+/// every check the registry can make. That held only while the four were `Box`
+/// fields of one allocation: a token then named the *statement*, and which field
+/// it meant had to come from somewhere else.
 ///
-/// A descriptor is reached instead through the statement that owns it, by
-/// [`HandleScope::descriptor_diagnostics`] and whatever D3 adds beside it.
-/// That is also the only form the borrow rule permits — see
-/// [`HandleScope::stmt_with_parent`]'s comment on why a `stmt_with_desc`
-/// combinator must never be written.
+/// Each descriptor is now its own `Box::into_raw` with its own registry slot and
+/// its own [`Self::role`] field. A token therefore names exactly one descriptor,
+/// and the struct at that address says which of the four it is — so `get` needs
+/// nothing the registry cannot check, and the role needs no owner to supply it.
+///
+/// The same change is what makes [`HandleScope::stmt_with_desc`] sound: a
+/// descriptor is no longer reachable through [`StatementHandle`]'s `&mut`, which
+/// is the one thing that would have made that combinator alias.
+///
+/// The rule that remains is that a `Descriptor` is never reached by casting an
+/// address — only through the registry, as every other handle kind is.
 ///
 /// [`HandleScope::get`]: crate::handles::scope::HandleScope::get
-/// [`HandleScope::descriptor_diagnostics`]:
-///     crate::handles::scope::HandleScope::descriptor_diagnostics
-/// [`HandleScope::stmt_with_parent`]:
-///     crate::handles::scope::HandleScope::stmt_with_parent
+/// [`HandleScope::stmt_with_desc`]:
+///     crate::handles::scope::HandleScope::stmt_with_desc
 #[repr(C)]
 pub struct Descriptor {
     header: HandleHeader,
@@ -143,6 +144,10 @@ pub struct Descriptor {
     pub role: DescriptorRole,
 }
 
+impl HasKind for Descriptor {
+    const KIND: HandleKind = HandleKind::Desc;
+}
+
 impl Descriptor {
     /// An empty descriptor, before it is registered.
     fn new(role: DescriptorRole) -> Self {
@@ -166,31 +171,47 @@ impl Descriptor {
     }
 }
 
-/// Register one of a statement's four descriptors, joining the statement's lock
-/// group and recording it as the parent.
+/// Allocate and register a descriptor, returning its token.
 ///
-/// A registration failure leaves the descriptor's header at
-/// [`HandleHeader::PLACEHOLDER`], whose generation 0 is never issued, so it has
-/// no valid token rather than a wrong one.
+/// `parent` is the statement for one of the four implicit descriptors and the
+/// connection for an explicit one; `group` is the connection's in both cases,
+/// which every statement on that connection already shares — so a descriptor
+/// adds no lock and no ordering rule.
 ///
-/// # Safety
-///
-/// `desc` must point to a live [`Descriptor`] owned by the statement
-/// `stmt_token` names.
-unsafe fn register_descriptor(
-    desc: *mut Descriptor,
+/// Returns `None` if the registry is exhausted, having freed the allocation
+/// rather than leaking it.
+pub(crate) fn alloc_descriptor(
+    role: DescriptorRole,
     group: &Arc<GroupLock>,
-    stmt_token: *mut c_void,
-) {
-    if let Some((_, slot, generation)) = registry().register(
+    parent: *mut c_void,
+) -> Option<*mut c_void> {
+    let ptr = Box::into_raw(Box::new(Descriptor::new(role)));
+    let Some((token, slot, generation)) = registry().register(
         HandleKind::Desc,
-        desc as usize,
+        ptr as usize,
         Arc::clone(group),
-        Some(stmt_token as usize),
-    ) {
-        // SAFETY: the caller guarantees `desc` is live, and this is the only
-        // write to its header.
-        unsafe { (*desc).header = HandleHeader { slot, generation } };
+        Some(parent as usize),
+    ) else {
+        // SAFETY: `ptr` came from `Box::into_raw` immediately above and was
+        // never registered, so nothing else can hold it.
+        drop(unsafe { Box::from_raw(ptr) });
+        return None;
+    };
+    // SAFETY: `ptr` is live and registered nowhere else; this is the only write
+    // to its header.
+    unsafe { (*ptr).header = HandleHeader { slot, generation } };
+    Some(token)
+}
+
+/// Retire a descriptor's slot and drop its allocation.
+///
+/// A stale or non-descriptor token is ignored, which is what makes a double free
+/// a refusal rather than a second deallocation.
+pub(crate) fn free_descriptor(token: *mut c_void) {
+    if let Some(addr) = registry().unregister(token, HandleKind::Desc) {
+        // SAFETY: `unregister` returned the address `alloc_descriptor`
+        // registered and retired the slot, so no other caller can reach it.
+        drop(unsafe { Box::from_raw(addr as *mut Descriptor) });
     }
 }
 
@@ -622,23 +643,34 @@ pub struct StatementHandle<B: Backend> {
     /// [`Backend::set_query_timeout`]: crate::backend::Backend::set_query_timeout
     /// [`QueryTimeout::CoreCancels`]: crate::types::QueryTimeout::CoreCancels
     pub core_query_timeout: Option<usize>,
-    /// The application row descriptor. Its records are the column bindings
-    /// `SQLBindCol` sets — the spec makes binding a column *be* setting ARD
-    /// fields, so this is the binding, not a copy of it.
-    pub app_row_desc: Box<Descriptor>,
-    /// The application parameter descriptor. Its records are the C-side half of
-    /// each `SQLBindParameter` call — see [`ParamRecord`].
-    pub app_param_desc: Box<Descriptor>,
-    /// The implementation row descriptor. Core stores no records here — reads
-    /// are computed from the current result set's `ColumnDescriptor`s, so the
-    /// map stays empty; see [`Descriptor`]. It exists as a handle because the
-    /// Windows Driver Manager queries `SQLGetStmtAttrW(10010–10013)` after
+    /// Tokens for the four descriptors allocated with this statement, in
+    /// [`DescriptorRole`] order: ARD, APD, IRD, IPD.
+    ///
+    /// Tokens rather than `Box` fields because a descriptor may be shared: one
+    /// explicit descriptor can stand in for the ARD of several statements, which
+    /// no owned field can express. It is also what makes
+    /// [`HandleScope::stmt_with_desc`] sound — a descriptor is no longer
+    /// reachable through this struct's `&mut`.
+    ///
+    /// The IRD's descriptor stores no records: reads there are computed from the
+    /// current result set's `ColumnDescriptor`s. It exists as a handle because
+    /// the Windows Driver Manager queries `SQLGetStmtAttrW(10010–10013)` after
     /// statement allocation and crashes without a valid handle for each.
-    pub imp_row_desc: Box<Descriptor>,
-    /// The implementation parameter descriptor. Its records are the
-    /// data-source-side half of each `SQLBindParameter` call — see
-    /// [`ParamRecord`].
-    pub imp_param_desc: Box<Descriptor>,
+    ///
+    /// **These are not reclaimed by `Drop`.** [`free_statement_allocation`]
+    /// frees them explicitly; Miri's leak check is what catches a teardown path
+    /// that forgets.
+    ///
+    /// [`HandleScope::stmt_with_desc`]:
+    ///     crate::handles::scope::HandleScope::stmt_with_desc
+    implicit_desc: [*mut c_void; 4],
+    /// `SQL_ATTR_APP_ROW_DESC`, when the application has supplied its own.
+    /// `None` means the implicit ARD, which is what `SQL_NULL_DESC` restores.
+    ard_override: Option<*mut c_void>,
+    /// `SQL_ATTR_APP_PARAM_DESC`, likewise. The implementation descriptors have
+    /// no override: "the application cannot specify alternate implementation
+    /// descriptors".
+    apd_override: Option<*mut c_void>,
 }
 
 impl<B: Backend> HasKind for StatementHandle<B> {
@@ -715,33 +747,17 @@ impl HeaderOwner {
 }
 
 impl<B: Backend> StatementHandle<B> {
-    /// A descriptor header field's stored value, or `None` if never set.
-    ///
-    /// Keyed by the `SQL_DESC_*` field rather than by the statement attribute
-    /// that names it — see [`Descriptor::attrs`] for why.
-    pub(crate) fn header_field_get(&self, owner: HeaderOwner, field: Desc) -> Option<usize> {
-        let desc = match owner {
-            HeaderOwner::Ard => &self.app_row_desc,
-            HeaderOwner::Apd => &self.app_param_desc,
-        };
-        desc.attrs.get(&(field as u16)).copied()
-    }
-
-    /// [`Self::header_field_get`], for writing.
-    pub(crate) fn header_field_set(&mut self, owner: HeaderOwner, field: Desc, value: usize) {
-        let desc = match owner {
-            HeaderOwner::Ard => &mut self.app_row_desc,
-            HeaderOwner::Apd => &mut self.app_param_desc,
-        };
-        desc.attrs.insert(field as u16, value);
-    }
-
     /// A statement attribute that is *not* a descriptor header field.
     ///
     /// The four IRD- and IPD-side pairs (`SQL_ATTR_ROW_STATUS_PTR`,
     /// `SQL_ATTR_ROWS_FETCHED_PTR`, `SQL_ATTR_PARAM_STATUS_PTR`,
     /// `SQL_ATTR_PARAMS_PROCESSED_PTR`) live here with the ordinary attributes,
     /// as they did before the header fields were re-keyed.
+    ///
+    /// A header-field attribute is on a descriptor, which is not a field of this
+    /// struct — [`HandleScope::attr_get`] is the door that reaches either.
+    ///
+    /// [`HandleScope::attr_get`]: crate::handles::scope::HandleScope::attr_get
     pub(crate) fn plain_attr_get(&self, attribute: i32) -> Option<usize> {
         self.attrs.get(&attribute).copied()
     }
@@ -751,66 +767,35 @@ impl<B: Backend> StatementHandle<B> {
         self.attrs.insert(attribute, value);
     }
 
-    /// Where the value of the statement attribute `attribute` is stored: a
-    /// descriptor's header when ODBC defines the attribute as one, this
-    /// statement's own bag otherwise.
+    /// The token for this statement's descriptor in `role`, honouring an
+    /// application-supplied override for the two application descriptors.
     ///
-    /// Both the set and the get path route through [`HeaderOwner::of`] here, so
-    /// the two cannot disagree about which map to look in. A caller that
-    /// already knows the descriptor field — `SQLGetDescField` and its siblings
-    /// — wants [`Self::header_field_get`] directly.
-    pub(crate) fn attr_get(&self, attribute: i32) -> Option<usize> {
-        match HeaderOwner::of(statement_attribute_from_raw(attribute)) {
-            Some((owner, field)) => self.header_field_get(owner, field),
-            None => self.plain_attr_get(attribute),
-        }
-    }
-
-    /// [`Self::attr_get`], for writing.
-    pub(crate) fn attr_set(&mut self, attribute: i32, value: usize) {
-        match HeaderOwner::of(statement_attribute_from_raw(attribute)) {
-            Some((owner, field)) => self.header_field_set(owner, field, value),
-            None => self.plain_attr_set(attribute, value),
-        }
-    }
-
-    /// One of this statement's four descriptors, by role.
-    ///
-    /// The counterpart of [`HandleScope::descriptor_owner`], which answers the
-    /// role: that resolves a token to this statement, and this turns the role
-    /// back into the field. One place rather than a four-armed `match` at every
-    /// descriptor entry point.
-    ///
-    /// [`HandleScope::descriptor_owner`]:
-    ///     crate::handles::scope::HandleScope::descriptor_owner
-    pub(crate) fn descriptor_mut(&mut self, role: DescriptorRole) -> &mut Descriptor {
+    /// The one place the override is applied, so no call site can read the
+    /// implicit descriptor while the application believes its own is in use.
+    pub(crate) fn descriptor_token(&self, role: DescriptorRole) -> *mut c_void {
         match role {
-            DescriptorRole::Ard => &mut self.app_row_desc,
-            DescriptorRole::Apd => &mut self.app_param_desc,
-            DescriptorRole::Ird => &mut self.imp_row_desc,
-            DescriptorRole::Ipd => &mut self.imp_param_desc,
+            DescriptorRole::Ard => self.ard_override.unwrap_or(self.implicit_desc[0]),
+            DescriptorRole::Apd => self.apd_override.unwrap_or(self.implicit_desc[1]),
+            DescriptorRole::Ird => self.implicit_desc[2],
+            DescriptorRole::Ipd => self.implicit_desc[3],
         }
     }
 
-    /// The two parameter descriptors' records, borrowed together.
+    /// The token for the descriptor implicitly allocated with this statement,
+    /// ignoring any override. Statement teardown, and reverting a statement whose
+    /// explicit descriptor was freed, are its only callers.
     ///
-    /// One call site rather than four field paths, so a reader cannot pair the
-    /// APD of this statement with the IPD of nothing.
-    pub(crate) fn param_records(&self) -> ParamRecords<'_> {
-        ParamRecords {
-            apd: &self.app_param_desc.records,
-            ipd: &self.imp_param_desc.records,
+    /// A `match` rather than `implicit_desc[role as usize]`: the array has four
+    /// elements and [`DescriptorRole`] will grow a fifth variant for an
+    /// explicitly allocated descriptor whose role is not yet known, which is
+    /// never one of these four.
+    pub(crate) fn implicit_descriptor_token(&self, role: DescriptorRole) -> *mut c_void {
+        match role {
+            DescriptorRole::Ard => self.implicit_desc[0],
+            DescriptorRole::Apd => self.implicit_desc[1],
+            DescriptorRole::Ird => self.implicit_desc[2],
+            DescriptorRole::Ipd => self.implicit_desc[3],
         }
-    }
-
-    /// Remove every parameter binding, from both descriptors.
-    ///
-    /// `SQLFreeStmt(SQL_RESET_PARAMS)`. Clearing one map and not the other
-    /// leaves exactly the split state [`ParamRecords::get`] reports as an
-    /// internal error, so the two clears live in one place.
-    pub(crate) fn clear_param_records(&mut self) {
-        self.app_param_desc.records.clear();
-        self.imp_param_desc.records.clear();
     }
 
     /// Store the result of an execution and open a cursor over it if it has
@@ -976,12 +961,15 @@ pub unsafe fn alloc_statement<B: Backend>(
         Some(g) => g,
         None => return SqlReturn::INVALID_HANDLE,
     };
-    // Owned by the statement: dropping the StatementHandle frees them, so no
-    // teardown path can forget to — do not add a manual free in
-    // disconnect/free-handle paths.
-    // Each descriptor gets its own registry slot: `SQLGetStmtAttrW` hands
-    // these out to the application, so they need tokens of their own or the
-    // application would receive a raw address it could not be validated from.
+    // Each descriptor is its own allocation with its own registry slot:
+    // `SQLGetStmtAttrW` hands these out to the application, so they need tokens
+    // of their own or the application would receive a raw address it could not be
+    // validated from — and a descriptor may be shared with another statement,
+    // which no owned field can express.
+    //
+    // **Not** freed by `Drop`. `free_statement_allocation` frees them, and it is
+    // the only thing that does; Miri's leak check is what catches a teardown path
+    // that forgets.
     let handle = Box::new(StatementHandle::<B> {
         header: HandleHeader::PLACEHOLDER,
         conn: conn_ptr,
@@ -1008,10 +996,10 @@ pub unsafe fn alloc_statement<B: Backend>(
         // statement attribute, so a fresh statement starts with no deadline
         // until something sets one on it.
         core_query_timeout: None,
-        app_row_desc: Box::new(Descriptor::new(DescriptorRole::Ard)),
-        app_param_desc: Box::new(Descriptor::new(DescriptorRole::Apd)),
-        imp_row_desc: Box::new(Descriptor::new(DescriptorRole::Ird)),
-        imp_param_desc: Box::new(Descriptor::new(DescriptorRole::Ipd)),
+        // Filled in below, once the statement has a token to be their parent.
+        implicit_desc: [std::ptr::null_mut(); 4],
+        ard_override: None,
+        apd_override: None,
     });
     let ptr = Box::into_raw(handle);
     // SAFETY: as in `alloc_environment`.
@@ -1026,25 +1014,39 @@ pub unsafe fn alloc_statement<B: Backend>(
     };
     unsafe {
         (*ptr).header = HandleHeader { slot, generation };
-        // Register the four descriptors now that the statement owns them.
-        // Each shares the statement's group and records the statement as its
-        // parent, which is what makes a descriptor token resolvable at all —
-        // see `HandleScope::descriptor_diagnostics`.
-        //
-        // Four calls rather than a loop: the four live in four distinct fields
-        // of the statement, so there is no array to iterate.
-        register_descriptor(std::ptr::from_mut(&mut *(*ptr).app_row_desc), &group, token);
-        register_descriptor(
-            std::ptr::from_mut(&mut *(*ptr).app_param_desc),
-            &group,
-            token,
-        );
-        register_descriptor(std::ptr::from_mut(&mut *(*ptr).imp_row_desc), &group, token);
-        register_descriptor(
-            std::ptr::from_mut(&mut *(*ptr).imp_param_desc),
-            &group,
-            token,
-        );
+    }
+    // Allocate the four descriptors now that the statement has a token to be
+    // their parent. Each shares the connection's group, which the statement
+    // already joined, so a descriptor adds no lock.
+    //
+    // A loop where D3 had four calls: the four are four elements of one array
+    // rather than four distinct fields.
+    let mut implicit = [std::ptr::null_mut(); 4];
+    for (index, role) in [
+        DescriptorRole::Ard,
+        DescriptorRole::Apd,
+        DescriptorRole::Ird,
+        DescriptorRole::Ipd,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let Some(desc) = alloc_descriptor(role, &group, token) else {
+            // Registry exhausted part-way: retire what this call created,
+            // including the statement, so no half-built handle escapes.
+            for created in implicit.iter().take(index) {
+                free_descriptor(*created);
+            }
+            registry().unregister(token, HandleKind::Stmt);
+            // SAFETY: `ptr` came from `Box::into_raw` above and its slot has
+            // just been retired, so no token can reach it any more.
+            drop(unsafe { Box::from_raw(ptr) });
+            return SqlReturn::ERROR;
+        };
+        implicit[index] = desc;
+    }
+    unsafe {
+        (*ptr).implicit_desc = implicit;
         std::ptr::write_unaligned(output, token);
     }
     SqlReturn::SUCCESS
@@ -1267,13 +1269,18 @@ pub(crate) unsafe fn free_statement_allocation<B: Backend>(token: *mut c_void) -
     // SAFETY: `unregister` returned the address registered in
     // `alloc_statement` and retired the slot.
     let stmt = unsafe { Box::from_raw(addr as *mut StatementHandle<B>) };
-    // Four statements rather than a loop, for the same reason `alloc_statement`
-    // has four calls: the four descriptors are four different types.
-    registry().unregister(stmt.app_row_desc.token(), HandleKind::Desc);
-    registry().unregister(stmt.app_param_desc.token(), HandleKind::Desc);
-    registry().unregister(stmt.imp_row_desc.token(), HandleKind::Desc);
-    registry().unregister(stmt.imp_param_desc.token(), HandleKind::Desc);
-    // `stmt` drops here, taking the descriptor allocations with it.
+    // Not `Drop`'s job any more: the four are separate allocations, so this is
+    // the only thing that reclaims them. An override is *not* freed here — an
+    // explicit descriptor outlives every statement that referenced it, until
+    // `SQLFreeHandle` or `SQLDisconnect` takes it.
+    for role in [
+        DescriptorRole::Ard,
+        DescriptorRole::Apd,
+        DescriptorRole::Ird,
+        DescriptorRole::Ipd,
+    ] {
+        free_descriptor(stmt.implicit_descriptor_token(role));
+    }
     SqlReturn::SUCCESS
 }
 
@@ -1713,10 +1720,10 @@ mod tests {
             let desc_tokens =
                 with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt_ptr, |stmt| {
                     [
-                        stmt.app_row_desc.token(),
-                        stmt.app_param_desc.token(),
-                        stmt.imp_row_desc.token(),
-                        stmt.imp_param_desc.token(),
+                        stmt.descriptor_token(DescriptorRole::Ard),
+                        stmt.descriptor_token(DescriptorRole::Apd),
+                        stmt.descriptor_token(DescriptorRole::Ird),
+                        stmt.descriptor_token(DescriptorRole::Ipd),
                     ]
                 });
             for desc_token in desc_tokens {
@@ -1858,6 +1865,36 @@ mod tests {
             assert_eq!(registry::registry().children_of(conn), vec![stmt_b]);
 
             assert_eq!(free_statement::<MockBackend>(stmt_b), SqlReturn::SUCCESS);
+            assert_eq!(free_conn(conn), SqlReturn::SUCCESS);
+            assert_eq!(free_env(env), SqlReturn::SUCCESS);
+        }
+    }
+
+    /// A statement's descriptors are separate allocations, reclaimed when the
+    /// statement is freed.
+    ///
+    /// `Drop` used to cover this because they were `Box` fields. It does not any
+    /// more, so a missed `free_descriptor` here is a leak Miri reports and
+    /// nothing else does.
+    #[test]
+    fn freeing_a_statement_retires_its_four_descriptor_slots() {
+        unsafe {
+            let (env, conn, stmt) = crate::test_utils::alloc_env_conn_stmt();
+            let tokens = with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |s| {
+                [
+                    s.descriptor_token(DescriptorRole::Ard),
+                    s.descriptor_token(DescriptorRole::Apd),
+                    s.descriptor_token(DescriptorRole::Ird),
+                    s.descriptor_token(DescriptorRole::Ipd),
+                ]
+            });
+            assert_eq!(free_statement::<MockBackend>(stmt), SqlReturn::SUCCESS);
+            for token in tokens {
+                assert!(
+                    registry().group_of(token).is_none(),
+                    "every descriptor slot must be retired with its statement"
+                );
+            }
             assert_eq!(free_conn(conn), SqlReturn::SUCCESS);
             assert_eq!(free_env(env), SqlReturn::SUCCESS);
         }

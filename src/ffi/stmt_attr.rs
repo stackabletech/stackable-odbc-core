@@ -8,6 +8,7 @@ use crate::backend::Backend;
 use crate::descriptor::DescriptorRole;
 use crate::errors::{IntoOdbc, OdbcError};
 use crate::handles::StatementHandle;
+use crate::handles::scope::HandleScope;
 use crate::panic::panic_safe;
 use crate::types::{
     QueryTimeout, SQL_CURSOR_FORWARD_ONLY, SQL_FALSE, SQL_NULL_DESC, SQL_UNSPECIFIED, SqlReturn,
@@ -76,20 +77,22 @@ const SQL_QUERY_TIMEOUT_DEFAULT: usize = 0;
 /// that list must not be substituted — it takes `HYC00` instead — with the two
 /// documented exceptions noted at their call sites.
 fn substitute_stmt_attr<B: Backend>(
-    stmt: &mut StatementHandle<B>,
+    scope: &mut HandleScope<'_>,
+    stmt_token: *mut c_void,
     attribute: i32,
     attr_name: &str,
     requested: usize,
     substituted: usize,
     substituted_display: &str,
-) -> SqlReturn {
-    stmt.attr_set(attribute, substituted);
-    substitution_warning(
+) -> Result<SqlReturn, OdbcError> {
+    scope.attr_set::<B>(stmt_token, attribute, substituted)?;
+    let stmt = scope.get::<StatementHandle<B>>(stmt_token)?;
+    Ok(substitution_warning(
         &mut stmt.diagnostics,
         attr_name,
         requested,
         substituted_display,
-    )
+    ))
 }
 
 /// The diagnostic half of [`substitute_stmt_attr`], against an explicit queue.
@@ -154,14 +157,26 @@ struct Substitution<'a> {
 }
 
 fn offer_to_data_source<B: Backend, T>(
-    stmt: &mut StatementHandle<B>,
-    connection: Option<&B::Connection>,
+    scope: &mut HandleScope<'_>,
+    stmt_token: *mut c_void,
     sub: Substitution<'_>,
     apply: impl FnOnce(&B::Connection) -> Result<T, OdbcError>,
 ) -> Result<(Option<T>, SqlReturn), OdbcError> {
-    let substitute = |stmt: &mut StatementHandle<B>| {
-        substitute_stmt_attr(
-            stmt,
+    // The backend call runs inside its own borrow of the connection, which ends
+    // before the attribute is stored: a header-field attribute lives on a
+    // descriptor, and reaching one is a registry lookup through this same scope.
+    //
+    // No connection means nothing to ask. The Driver Manager's 08003 keeps a
+    // statement from existing on an unconnected connection in the first place,
+    // so this is core being defensive rather than a path an application reaches.
+    let outcome = {
+        let (_stmt, conn) = scope.stmt_with_parent::<B>(stmt_token)?;
+        conn.connection.as_ref().map(apply)
+    };
+    let substitute = |scope: &mut HandleScope<'_>| {
+        substitute_stmt_attr::<B>(
+            scope,
+            stmt_token,
             sub.attribute,
             sub.name,
             sub.requested,
@@ -169,30 +184,25 @@ fn offer_to_data_source<B: Backend, T>(
             sub.fallback_display,
         )
     };
-    // No connection means nothing to ask. The Driver Manager's 08003 keeps a
-    // statement from existing on an unconnected connection in the first place,
-    // so this is core being defensive rather than a path an application reaches.
-    let Some(connection) = connection else {
-        return Ok((None, substitute(stmt)));
-    };
-    match apply(connection) {
-        Ok(value) => {
+    match outcome {
+        None => Ok((None, substitute(scope)?)),
+        Some(Ok(value)) => {
             tracing::debug!(
                 "SQLSetStmtAttrW: {}={} applied by the data source",
                 sub.name,
                 sub.requested
             );
-            stmt.attr_set(sub.attribute, sub.requested);
+            scope.attr_set::<B>(stmt_token, sub.attribute, sub.requested)?;
             Ok((Some(value), SqlReturn::SUCCESS))
         }
         // The backend says it cannot do this at all: substitute and report.
-        Err(OdbcError::NotImplemented { .. }) => Ok((None, substitute(stmt))),
+        Some(Err(OdbcError::NotImplemented { .. })) => Ok((None, substitute(scope)?)),
         // A *real* failure is propagated instead of substituted. 01S02 tells an
         // application "this driver capped your value", which is a different
         // claim from "the connection is broken", and quietly reporting the
         // first for the second sends it on to execute against a connection it
         // has been told is fine.
-        Err(e) => Err(e),
+        Some(Err(e)) => Err(e),
     }
 }
 
@@ -325,11 +335,17 @@ pub unsafe fn sql_set_stmt_attr_w<B: Backend>(
     // panic_safe catches any panics.
     let ret = unsafe {
         panic_safe::<B, _>(statement_handle, |scope| {
-            // The parent comes along for `SQL_ATTR_QUERY_TIMEOUT`, the one
-            // attribute here that has to reach the backend. One acquisition
-            // covers both, per the crate's per-connection lock group.
-            let (stmt, conn) = scope.stmt_with_parent::<B>(statement_handle)?;
-            stmt.diagnostics.clear();
+            // Resolved per arm rather than once up front. A header-field
+            // attribute lives on a descriptor, which is a separate allocation
+            // reached through this same scope, so holding the statement across
+            // the match would make every such write unreachable. The connection —
+            // needed by the one family of attributes that reaches the backend —
+            // is likewise taken inside `offer_to_data_source`, which is the only
+            // thing that wants it.
+            scope
+                .get::<StatementHandle<B>>(statement_handle)?
+                .diagnostics
+                .clear();
 
             let int_val = value_ptr as usize;
 
@@ -342,6 +358,7 @@ pub unsafe fn sql_set_stmt_attr_w<B: Backend>(
                     | StatementAttribute::SimulateCursor
                     | StatementAttribute::UseBookmarks,
                 ) => {
+                    let stmt = scope.get::<StatementHandle<B>>(statement_handle)?;
                     // Spec 24000: cursor is open.
                     if stmt.cursor_open {
                         return Err(OdbcError::general(
@@ -367,14 +384,15 @@ pub unsafe fn sql_set_stmt_attr_w<B: Backend>(
                     if matches!(attr, Some(StatementAttribute::CursorType))
                         && int_val != SQL_CURSOR_FORWARD_ONLY
                     {
-                        return Ok(substitute_stmt_attr(
-                            stmt,
+                        return substitute_stmt_attr::<B>(
+                            scope,
+                            statement_handle,
                             attribute,
                             "SQL_ATTR_CURSOR_TYPE",
                             int_val,
                             SQL_CURSOR_FORWARD_ONLY,
                             "SQL_CURSOR_FORWARD_ONLY",
-                        ));
+                        );
                     }
                     // Concurrency: core's cursor is read-only — nothing here
                     // implements a positioned update or delete — and
@@ -388,14 +406,15 @@ pub unsafe fn sql_set_stmt_attr_w<B: Backend>(
                     if matches!(attr, Some(StatementAttribute::Concurrency))
                         && int_val != SQL_CONCUR_READ_ONLY
                     {
-                        return Ok(substitute_stmt_attr(
-                            stmt,
+                        return substitute_stmt_attr::<B>(
+                            scope,
+                            statement_handle,
                             attribute,
                             "SQL_ATTR_CONCURRENCY",
                             int_val,
                             SQL_CONCUR_READ_ONLY,
                             "SQL_CONCUR_READ_ONLY",
-                        ));
+                        );
                     }
                     // Simulated positioned updates: core constructs no searched
                     // UPDATE or DELETE and so guarantees nothing about how many
@@ -407,14 +426,15 @@ pub unsafe fn sql_set_stmt_attr_w<B: Backend>(
                     if matches!(attr, Some(StatementAttribute::SimulateCursor))
                         && int_val != SQL_SC_NON_UNIQUE
                     {
-                        return Ok(substitute_stmt_attr(
-                            stmt,
+                        return substitute_stmt_attr::<B>(
+                            scope,
+                            statement_handle,
                             attribute,
                             "SQL_ATTR_SIMULATE_CURSOR",
                             int_val,
                             SQL_SC_NON_UNIQUE,
                             "SQL_SC_NON_UNIQUE",
-                        ));
+                        );
                     }
                     // Bookmarks: core implements none, and nothing reads
                     // `SQL_ATTR_FETCH_BOOKMARK_PTR`. The attribute is *not* on
@@ -429,7 +449,7 @@ pub unsafe fn sql_set_stmt_attr_w<B: Backend>(
                             feature: format!("SQL_ATTR_USE_BOOKMARKS = {int_val} (bookmarks)"),
                         });
                     }
-                    stmt.attr_set(attribute, int_val);
+                    scope.attr_set::<B>(statement_handle, attribute, int_val)?;
                     Ok(SqlReturn::SUCCESS)
                 }
 
@@ -448,16 +468,17 @@ pub unsafe fn sql_set_stmt_attr_w<B: Backend>(
                         // reads back a forward-only cursor type and a
                         // scrollable cursor has been told two contradictory
                         // things about one cursor.
-                        return Ok(substitute_stmt_attr(
-                            stmt,
+                        return substitute_stmt_attr::<B>(
+                            scope,
+                            statement_handle,
                             attribute,
                             "SQL_ATTR_CURSOR_SCROLLABLE",
                             int_val,
                             SQL_NONSCROLLABLE,
                             "SQL_NONSCROLLABLE",
-                        ));
+                        );
                     }
-                    stmt.attr_set(attribute, int_val);
+                    scope.attr_set::<B>(statement_handle, attribute, int_val)?;
                     Ok(SqlReturn::SUCCESS)
                 }
 
@@ -513,14 +534,15 @@ pub unsafe fn sql_set_stmt_attr_w<B: Backend>(
                 // explicitly listed as substitutable. SQLGetStmtAttr then
                 // reports the substituted value.
                 Some(StatementAttribute::RowArraySize) if int_val != SQL_ROW_ARRAY_SIZE_DEFAULT => {
-                    Ok(substitute_stmt_attr(
-                        stmt,
+                    substitute_stmt_attr::<B>(
+                        scope,
+                        statement_handle,
                         attribute,
                         "SQL_ATTR_ROW_ARRAY_SIZE",
                         int_val,
                         SQL_ROW_ARRAY_SIZE_DEFAULT,
                         "1",
-                    ))
+                    )
                 }
 
                 // Only a single parameter set is executed: SQLExecute binds and
@@ -537,14 +559,15 @@ pub unsafe fn sql_set_stmt_attr_w<B: Backend>(
                 // loss — or to fail a call every parameter-array-capable tool
                 // makes.
                 Some(StatementAttribute::ParamsetSize) if int_val != SQL_PARAMSET_SIZE_DEFAULT => {
-                    Ok(substitute_stmt_attr(
-                        stmt,
+                    substitute_stmt_attr::<B>(
+                        scope,
+                        statement_handle,
                         attribute,
                         "SQL_ATTR_PARAMSET_SIZE",
                         int_val,
                         SQL_PARAMSET_SIZE_DEFAULT,
                         "1",
-                    ))
+                    )
                 }
 
                 // No row limit is applied anywhere: `SQLFetch` asks the backend
@@ -556,8 +579,8 @@ pub unsafe fn sql_set_stmt_attr_w<B: Backend>(
                 // substitution list, so say so instead.
                 Some(StatementAttribute::MaxRows) if int_val != SQL_MAX_ROWS_DEFAULT => {
                     offer_to_data_source::<B, _>(
-                        stmt,
-                        conn.connection.as_ref(),
+                        scope,
+                        statement_handle,
                         Substitution {
                             attribute,
                             name: "SQL_ATTR_MAX_ROWS",
@@ -579,8 +602,8 @@ pub unsafe fn sql_set_stmt_attr_w<B: Backend>(
                 // says how to report it.
                 Some(StatementAttribute::MaxLength) if int_val != SQL_MAX_LENGTH_DEFAULT => {
                     offer_to_data_source::<B, _>(
-                        stmt,
-                        conn.connection.as_ref(),
+                        scope,
+                        statement_handle,
                         Substitution {
                             attribute,
                             name: "SQL_ATTR_MAX_LENGTH",
@@ -599,14 +622,15 @@ pub unsafe fn sql_set_stmt_attr_w<B: Backend>(
                 // size describes a cursor that cannot exist on this statement.
                 // Also on the spec's 01S02 list.
                 Some(StatementAttribute::KeysetSize) if int_val != SQL_KEYSET_SIZE_DEFAULT => {
-                    Ok(substitute_stmt_attr(
-                        stmt,
+                    substitute_stmt_attr::<B>(
+                        scope,
+                        statement_handle,
                         attribute,
                         "SQL_ATTR_KEYSET_SIZE",
                         int_val,
                         SQL_KEYSET_SIZE_DEFAULT,
                         "0",
-                    ))
+                    )
                 }
 
                 // A non-zero timeout is offered to the data source, which is the
@@ -637,8 +661,8 @@ pub unsafe fn sql_set_stmt_attr_w<B: Backend>(
                 // would put a value core never uses into the hook's contract.
                 Some(StatementAttribute::QueryTimeout) if int_val != SQL_QUERY_TIMEOUT_DEFAULT => {
                     let enforcer = offer_to_data_source::<B, _>(
-                        stmt,
-                        conn.connection.as_ref(),
+                        scope,
+                        statement_handle,
                         Substitution {
                             attribute,
                             name: "SQL_ATTR_QUERY_TIMEOUT",
@@ -655,7 +679,9 @@ pub unsafe fn sql_set_stmt_attr_w<B: Backend>(
                     // only for `CoreCancels` — arming a timer for a deadline the
                     // data source is already managing would give the statement
                     // two independent cancellers racing the same query.
-                    stmt.core_query_timeout = match enforcer {
+                    scope
+                        .get::<StatementHandle<B>>(statement_handle)?
+                        .core_query_timeout = match enforcer {
                         Some(QueryTimeout::CoreCancels) => Some(int_val),
                         Some(QueryTimeout::DataSource) | None => None,
                     };
@@ -721,7 +747,7 @@ pub unsafe fn sql_set_stmt_attr_w<B: Backend>(
                 // the spec's 01S02 list is closed and names none of them, and
                 // there is no "similar value" to substitute for a pointer.
                 Some(_) => {
-                    stmt.attr_set(attribute, int_val);
+                    scope.attr_set::<B>(statement_handle, attribute, int_val)?;
                     Ok(SqlReturn::SUCCESS)
                 }
 
@@ -876,51 +902,89 @@ pub unsafe fn sql_get_stmt_attr_w<B: Backend>(
 
             match attr {
                 Some(StatementAttribute::QueryTimeout) => {
-                    write_ulen(stmt.attr_get(attribute).unwrap_or(0));
+                    write_ulen(
+                        scope
+                            .attr_get::<B>(statement_handle, attribute)?
+                            .unwrap_or(0),
+                    );
                     Ok(SqlReturn::SUCCESS)
                 }
                 Some(StatementAttribute::MaxRows) => {
-                    write_ulen(stmt.attr_get(attribute).unwrap_or(0));
+                    write_ulen(
+                        scope
+                            .attr_get::<B>(statement_handle, attribute)?
+                            .unwrap_or(0),
+                    );
                     Ok(SqlReturn::SUCCESS)
                 }
                 Some(StatementAttribute::MaxLength) => {
-                    write_ulen(stmt.attr_get(attribute).unwrap_or(0));
+                    write_ulen(
+                        scope
+                            .attr_get::<B>(statement_handle, attribute)?
+                            .unwrap_or(0),
+                    );
                     Ok(SqlReturn::SUCCESS)
                 }
                 Some(StatementAttribute::NoScan) => {
-                    write_ulen(stmt.attr_get(attribute).unwrap_or(SQL_NOSCAN_OFF));
+                    write_ulen(
+                        scope
+                            .attr_get::<B>(statement_handle, attribute)?
+                            .unwrap_or(SQL_NOSCAN_OFF),
+                    );
                     Ok(SqlReturn::SUCCESS)
                 }
                 Some(StatementAttribute::RowBindType) => {
-                    write_ulen(stmt.attr_get(attribute).unwrap_or(SQL_BIND_BY_COLUMN));
+                    write_ulen(
+                        scope
+                            .attr_get::<B>(statement_handle, attribute)?
+                            .unwrap_or(SQL_BIND_BY_COLUMN),
+                    );
                     Ok(SqlReturn::SUCCESS)
                 }
                 Some(StatementAttribute::CursorType) => {
-                    write_ulen(stmt.attr_get(attribute).unwrap_or(SQL_CURSOR_FORWARD_ONLY));
+                    write_ulen(
+                        scope
+                            .attr_get::<B>(statement_handle, attribute)?
+                            .unwrap_or(SQL_CURSOR_FORWARD_ONLY),
+                    );
                     Ok(SqlReturn::SUCCESS)
                 }
                 Some(StatementAttribute::Concurrency) => {
-                    write_ulen(stmt.attr_get(attribute).unwrap_or(SQL_CONCUR_READ_ONLY));
+                    write_ulen(
+                        scope
+                            .attr_get::<B>(statement_handle, attribute)?
+                            .unwrap_or(SQL_CONCUR_READ_ONLY),
+                    );
                     Ok(SqlReturn::SUCCESS)
                 }
                 Some(StatementAttribute::RetrieveData) => {
-                    write_ulen(stmt.attr_get(attribute).unwrap_or(SQL_RD_ON));
+                    write_ulen(
+                        scope
+                            .attr_get::<B>(statement_handle, attribute)?
+                            .unwrap_or(SQL_RD_ON),
+                    );
                     Ok(SqlReturn::SUCCESS)
                 }
                 Some(StatementAttribute::UseBookmarks) => {
-                    write_ulen(stmt.attr_get(attribute).unwrap_or(SQL_UB_OFF));
+                    write_ulen(
+                        scope
+                            .attr_get::<B>(statement_handle, attribute)?
+                            .unwrap_or(SQL_UB_OFF),
+                    );
                     Ok(SqlReturn::SUCCESS)
                 }
                 Some(StatementAttribute::RowArraySize) => {
                     write_ulen(
-                        stmt.attr_get(attribute)
+                        scope
+                            .attr_get::<B>(statement_handle, attribute)?
                             .unwrap_or(SQL_ROW_ARRAY_SIZE_DEFAULT),
                     );
                     Ok(SqlReturn::SUCCESS)
                 }
                 Some(StatementAttribute::ParamsetSize) => {
                     write_ulen(
-                        stmt.attr_get(attribute)
+                        scope
+                            .attr_get::<B>(statement_handle, attribute)?
                             .unwrap_or(SQL_PARAMSET_SIZE_DEFAULT),
                     );
                     Ok(SqlReturn::SUCCESS)
@@ -933,7 +997,9 @@ pub unsafe fn sql_get_stmt_attr_w<B: Backend>(
                             SqlState::invalid_cursor_state(),
                         ));
                     }
-                    let v = stmt.attr_get(attribute).unwrap_or(0);
+                    let v = scope
+                        .attr_get::<B>(statement_handle, attribute)?
+                        .unwrap_or(0);
                     write_ulen(v);
                     Ok(SqlReturn::SUCCESS)
                 }
@@ -942,40 +1008,69 @@ pub unsafe fn sql_get_stmt_attr_w<B: Backend>(
                     Ok(SqlReturn::SUCCESS)
                 }
                 Some(StatementAttribute::AsyncEnable) => {
-                    write_ulen(stmt.attr_get(attribute).unwrap_or(0));
+                    write_ulen(
+                        scope
+                            .attr_get::<B>(statement_handle, attribute)?
+                            .unwrap_or(0),
+                    );
                     Ok(SqlReturn::SUCCESS)
                 }
                 Some(StatementAttribute::MetadataId) => {
-                    write_ulen(stmt.attr_get(attribute).unwrap_or(SQL_FALSE as usize));
+                    write_ulen(
+                        scope
+                            .attr_get::<B>(statement_handle, attribute)?
+                            .unwrap_or(SQL_FALSE as usize),
+                    );
                     Ok(SqlReturn::SUCCESS)
                 }
                 Some(StatementAttribute::CursorScrollable) => {
-                    write_ulen(stmt.attr_get(attribute).unwrap_or(SQL_NONSCROLLABLE));
+                    write_ulen(
+                        scope
+                            .attr_get::<B>(statement_handle, attribute)?
+                            .unwrap_or(SQL_NONSCROLLABLE),
+                    );
                     Ok(SqlReturn::SUCCESS)
                 }
                 Some(StatementAttribute::CursorSensitivity) => {
                     write_ulen(
-                        stmt.attr_get(attribute)
+                        scope
+                            .attr_get::<B>(statement_handle, attribute)?
                             .unwrap_or(usize::from(SQL_UNSPECIFIED)),
                     );
                     Ok(SqlReturn::SUCCESS)
                 }
                 Some(StatementAttribute::SimulateCursor) => {
-                    write_ulen(stmt.attr_get(attribute).unwrap_or(0));
+                    write_ulen(
+                        scope
+                            .attr_get::<B>(statement_handle, attribute)?
+                            .unwrap_or(0),
+                    );
                     Ok(SqlReturn::SUCCESS)
                 }
 
                 // Pointer-valued attributes.
                 Some(StatementAttribute::RowStatusPtr) => {
-                    write_ptr(stmt.attr_get(attribute).unwrap_or(0));
+                    write_ptr(
+                        scope
+                            .attr_get::<B>(statement_handle, attribute)?
+                            .unwrap_or(0),
+                    );
                     Ok(SqlReturn::SUCCESS)
                 }
                 Some(StatementAttribute::RowsFetchedPtr) => {
-                    write_ptr(stmt.attr_get(attribute).unwrap_or(0));
+                    write_ptr(
+                        scope
+                            .attr_get::<B>(statement_handle, attribute)?
+                            .unwrap_or(0),
+                    );
                     Ok(SqlReturn::SUCCESS)
                 }
                 Some(StatementAttribute::RowBindOffsetPtr) => {
-                    write_ptr(stmt.attr_get(attribute).unwrap_or(0));
+                    write_ptr(
+                        scope
+                            .attr_get::<B>(statement_handle, attribute)?
+                            .unwrap_or(0),
+                    );
                     Ok(SqlReturn::SUCCESS)
                 }
 
@@ -1022,11 +1117,19 @@ pub unsafe fn sql_get_stmt_attr_w<B: Backend>(
                 // set, so refusing one here would leave a value it accepted
                 // unreadable.
                 Some(StatementAttribute::KeysetSize) => {
-                    write_ulen(stmt.attr_get(attribute).unwrap_or(SQL_KEYSET_SIZE_DEFAULT));
+                    write_ulen(
+                        scope
+                            .attr_get::<B>(statement_handle, attribute)?
+                            .unwrap_or(SQL_KEYSET_SIZE_DEFAULT),
+                    );
                     Ok(SqlReturn::SUCCESS)
                 }
                 Some(StatementAttribute::ParamBindType) => {
-                    write_ulen(stmt.attr_get(attribute).unwrap_or(SQL_BIND_BY_COLUMN));
+                    write_ulen(
+                        scope
+                            .attr_get::<B>(statement_handle, attribute)?
+                            .unwrap_or(SQL_BIND_BY_COLUMN),
+                    );
                     Ok(SqlReturn::SUCCESS)
                 }
                 Some(
@@ -1038,7 +1141,11 @@ pub unsafe fn sql_get_stmt_attr_w<B: Backend>(
                     | StatementAttribute::FetchBookmarkPtr
                     | StatementAttribute::AsyncStmtEvent,
                 ) => {
-                    write_ptr(stmt.attr_get(attribute).unwrap_or(0));
+                    write_ptr(
+                        scope
+                            .attr_get::<B>(statement_handle, attribute)?
+                            .unwrap_or(0),
+                    );
                     Ok(SqlReturn::SUCCESS)
                 }
 
@@ -1062,7 +1169,7 @@ mod tests {
     use crate::test_utils::{
         MockBackend, MockCoreCancelsTimeoutBackend, MockFailingQueryTimeoutBackend,
         MockNoQueryTimeoutBackend, MockQueryTimeoutBackend, alloc_env_conn_stmt,
-        cleanup_env_conn_stmt, with_handle,
+        cleanup_env_conn_stmt, with_descriptor, with_handle,
     };
     use crate::types::{SQL_SENSITIVE, SQL_TRUE};
 
@@ -1118,12 +1225,14 @@ mod tests {
             );
             assert_eq!(ret, SqlReturn::SUCCESS);
 
-            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+            with_descriptor::<MockBackend, _>(stmt, DescriptorRole::Ard, |ard| {
                 assert_eq!(
-                    handle.header_field_get(HeaderOwner::Ard, Desc::BindType),
+                    ard.attrs.get(&(Desc::BindType as u16)).copied(),
                     Some(SQL_BIND_BY_COLUMN + 8),
                     "SQL_ATTR_ROW_BIND_TYPE did not land on the ARD's header"
                 );
+            });
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
                 assert!(
                     !handle.attrs.contains_key(&attribute),
                     "the value is also in stmt.attrs, so there are two copies to disagree"
@@ -1165,21 +1274,23 @@ mod tests {
             );
             assert_eq!(ret, SqlReturn::SUCCESS);
 
-            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+            with_descriptor::<MockBackend, _>(stmt, DescriptorRole::Apd, |apd| {
                 assert_eq!(
-                    handle.header_field_get(HeaderOwner::Apd, Desc::BindType),
+                    apd.attrs.get(&(Desc::BindType as u16)).copied(),
                     Some(SQL_BIND_BY_COLUMN + 16),
                     "SQL_ATTR_PARAM_BIND_TYPE did not land on the APD's header"
                 );
+            });
+            with_descriptor::<MockBackend, _>(stmt, DescriptorRole::Ard, |ard| {
+                assert!(
+                    !ard.attrs.contains_key(&(Desc::BindType as u16)),
+                    "a parameter-side attribute landed on the row descriptor"
+                );
+            });
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
                 assert!(
                     !handle.attrs.contains_key(&attribute),
                     "the value is also in stmt.attrs, so there are two copies to disagree"
-                );
-                assert!(
-                    handle
-                        .header_field_get(HeaderOwner::Ard, Desc::BindType)
-                        .is_none(),
-                    "a parameter-side attribute landed on the row descriptor"
                 );
             });
 
@@ -1222,15 +1333,20 @@ mod tests {
                 );
                 assert_eq!(ret, SqlReturn::SUCCESS_WITH_INFO, "attr {attribute}");
 
-                with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
-                    // Both attributes name `SQL_DESC_ARRAY_SIZE`; the owner is
-                    // what tells the two apart.
-                    let stored = handle.header_field_get(owner, Desc::ArraySize);
+                // Both attributes name `SQL_DESC_ARRAY_SIZE`; which descriptor
+                // it lands on is what tells the two apart.
+                let role = match owner {
+                    HeaderOwner::Ard => DescriptorRole::Ard,
+                    HeaderOwner::Apd => DescriptorRole::Apd,
+                };
+                with_descriptor::<MockBackend, _>(stmt, role, |desc| {
                     assert_eq!(
-                        stored,
+                        desc.attrs.get(&(Desc::ArraySize as u16)).copied(),
                         Some(1),
                         "the substituted value did not land on the {owner:?} header"
                     );
+                });
+                with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
                     assert!(
                         !handle.attrs.contains_key(&attribute),
                         "the substituted value is also in stmt.attrs"

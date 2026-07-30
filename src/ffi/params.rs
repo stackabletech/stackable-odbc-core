@@ -133,6 +133,10 @@ pub unsafe fn sql_bind_parameter<B: Backend>(
         panic_safe::<B, _>(statement_handle, |scope| {
             let stmt = scope.get::<StatementHandle<B>>(statement_handle)?;
             stmt.diagnostics.clear();
+            // Copied out now, so each descriptor below costs one registry lookup
+            // rather than resolving this statement again for both.
+            let apd_token = stmt.descriptor_token(DescriptorRole::Apd);
+            let ipd_token = stmt.descriptor_token(DescriptorRole::Ipd);
 
             // Spec: parameter number must be >= 1 (07009).
             if parameter_number == 0 {
@@ -160,11 +164,11 @@ pub unsafe fn sql_bind_parameter<B: Backend>(
             // both descriptors, or the next read finds one half of a parameter.
             if parameter_value_ptr.is_null() && str_len_or_ind_ptr.is_null() {
                 scope
-                    .desc_of::<B>(statement_handle, DescriptorRole::Apd)?
+                    .descriptor(apd_token)?
                     .records
                     .remove(&parameter_number);
                 scope
-                    .desc_of::<B>(statement_handle, DescriptorRole::Ipd)?
+                    .descriptor(ipd_token)?
                     .records
                     .remove(&parameter_number);
             } else {
@@ -217,11 +221,11 @@ pub unsafe fn sql_bind_parameter<B: Backend>(
                 crate::descriptor::consistency_check(&ipd, DescriptorRole::Ipd)?;
 
                 scope
-                    .desc_of::<B>(statement_handle, DescriptorRole::Apd)?
+                    .descriptor(apd_token)?
                     .records
                     .insert(parameter_number, apd);
                 scope
-                    .desc_of::<B>(statement_handle, DescriptorRole::Ipd)?
+                    .descriptor(ipd_token)?
                     .records
                     .insert(parameter_number, ipd);
             }
@@ -1323,7 +1327,7 @@ pub unsafe fn sql_param_data<B: Backend>(
     // via SQLBindParameter under the caller's guarantee that they remain valid.
     let ret = unsafe {
         panic_safe::<B, _>(statement_handle, |scope| {
-            let (stmt, conn) = scope.stmt_with_parent::<B>(statement_handle)?;
+            let (stmt, conn, records) = scope.stmt_with_parent_and_params::<B>(statement_handle)?;
             // Spec: clear diagnostics at the start of each ODBC call.
             stmt.diagnostics.clear();
 
@@ -1341,7 +1345,7 @@ pub unsafe fn sql_param_data<B: Backend>(
                 let value = if dae.buffer.is_empty() {
                     ColumnValue::Null
                 } else {
-                    let rec = stmt.param_records().get(param_num)?;
+                    let rec = records.get(param_num)?;
                     let c_type = rec.map(|r| r.apd.c_type()).transpose()?;
                     // An absent binding cannot reach here — `SQLParamData` only
                     // offers a parameter that `find_data_at_exec_params` found
@@ -1362,7 +1366,7 @@ pub unsafe fn sql_param_data<B: Backend>(
                 // Write the value_ptr from the binding to *value_ptr_ptr so the app
                 // can identify which parameter is being requested.
                 if !value_ptr_ptr.is_null() {
-                    if let Some(rec) = stmt.param_records().get(next_param)? {
+                    if let Some(rec) = records.get(next_param)? {
                         std::ptr::write_unaligned(value_ptr_ptr, rec.apd.data_ptr);
                     } else {
                         std::ptr::write_unaligned(value_ptr_ptr, std::ptr::null_mut());
@@ -1775,12 +1779,8 @@ mod tests {
             );
             assert_eq!(ret, SqlReturn::SUCCESS);
 
-            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
-                let apd = handle
-                    .app_param_desc
-                    .records
-                    .get(&1)
-                    .expect("no APD record was written");
+            with_descriptor::<MockBackend, _>(stmt, DescriptorRole::Apd, |desc| {
+                let apd = desc.records.get(&1).expect("no APD record was written");
                 assert_eq!(
                     apd.c_type()
                         .expect("SQLBindParameter stored a valid C type"),
@@ -1789,12 +1789,9 @@ mod tests {
                 assert_eq!(apd.data_ptr, val_ptr);
                 assert_eq!(apd.octet_length, 4);
                 assert_eq!(apd.indicator_ptr, indicator_ptr);
-
-                let ipd = handle
-                    .imp_param_desc
-                    .records
-                    .get(&1)
-                    .expect("no IPD record was written");
+            });
+            with_descriptor::<MockBackend, _>(stmt, DescriptorRole::Ipd, |desc| {
+                let ipd = desc.records.get(&1).expect("no IPD record was written");
                 assert_eq!(ipd.sql_type(), SqlDataType::INTEGER);
                 assert_eq!(ipd.length, 10);
                 assert_eq!(ipd.scale, 0);

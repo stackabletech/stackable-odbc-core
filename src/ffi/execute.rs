@@ -157,7 +157,7 @@ pub unsafe fn sql_exec_direct_w<B: Backend>(
     // function's safety contract.
     let ret = unsafe {
         panic_safe::<B, _>(statement_handle, |scope| {
-            let (stmt, conn) = scope.stmt_with_parent::<B>(statement_handle)?;
+            let (stmt, conn, records) = scope.stmt_with_parent_and_params::<B>(statement_handle)?;
             stmt.diagnostics.clear();
             let noscan = stmt.noscan_enabled();
 
@@ -220,10 +220,8 @@ pub unsafe fn sql_exec_direct_w<B: Backend>(
             let param_count = crate::ffi::params::count_params(&sql, &dialect);
             if param_count > 0 {
                 // SAFETY: caller guarantees all bound buffer pointers remain valid.
-                let (non_dae_values, dae_params) = crate::ffi::params::find_data_at_exec_params(
-                    stmt.param_records(),
-                    param_count,
-                )?;
+                let (non_dae_values, dae_params) =
+                    crate::ffi::params::find_data_at_exec_params(records, param_count)?;
 
                 if !dae_params.is_empty() {
                     stmt.data_at_exec = Some(crate::handles::DataAtExecState {
@@ -257,7 +255,7 @@ pub unsafe fn sql_exec_direct_w<B: Backend>(
             // backend and silently discard every bound value.
             let result = if param_count > 0 {
                 // SAFETY: caller guarantees all bound buffer pointers remain valid.
-                let params = crate::ffi::params::collect_params(stmt.param_records(), param_count)?;
+                let params = crate::ffi::params::collect_params(records, param_count)?;
                 let mut prepared =
                     timer.check::<B, _, _>(B::prepare(connection, cancel, &sql), cancel)?;
                 let executed = timer.check::<B, _, _>(
@@ -273,10 +271,7 @@ pub unsafe fn sql_exec_direct_w<B: Backend>(
                 // SAFETY: the application's bound output buffer pointers remain
                 // valid per the caller contract (same guarantee collect_params relies on).
                 // Already inside the enclosing `unsafe` context, like collect_params above.
-                crate::ffi::params::write_output_params(
-                    stmt.param_records(),
-                    &outcome.output_params,
-                )?;
+                crate::ffi::params::write_output_params(records, &outcome.output_params)?;
                 prepared
             } else {
                 let executed =
@@ -585,7 +580,7 @@ pub unsafe fn sql_execute<B: Backend>(statement_handle: *mut c_void) -> SqlRetur
     // they remain valid.
     let ret = unsafe {
         panic_safe::<B, _>(statement_handle, |scope| {
-            let (stmt, conn) = scope.stmt_with_parent::<B>(statement_handle)?;
+            let (stmt, conn, records) = scope.stmt_with_parent_and_params::<B>(statement_handle)?;
             stmt.diagnostics.clear();
 
             let param_count = match stmt.param_count {
@@ -601,7 +596,7 @@ pub unsafe fn sql_execute<B: Backend>(statement_handle: *mut c_void) -> SqlRetur
             // Check for data-at-execution parameters.
             // SAFETY: caller guarantees all bound buffer pointers remain valid.
             let (non_dae_values, dae_params) =
-                crate::ffi::params::find_data_at_exec_params(stmt.param_records(), param_count)?;
+                crate::ffi::params::find_data_at_exec_params(records, param_count)?;
 
             if !dae_params.is_empty() {
                 // Store DAE state and return SQL_NEED_DATA.
@@ -623,7 +618,7 @@ pub unsafe fn sql_execute<B: Backend>(statement_handle: *mut c_void) -> SqlRetur
 
             // No DAE params: collect all values normally and execute immediately.
             // SAFETY: caller guarantees all bound buffer pointers remain valid.
-            let params = crate::ffi::params::collect_params(stmt.param_records(), param_count)?;
+            let params = crate::ffi::params::collect_params(records, param_count)?;
 
             // Manual-commit mode: this call opens a transaction (or extends
             // the open one), which is what SQL_ATTR_TXN_ISOLATION's HY011 is
@@ -702,7 +697,7 @@ pub unsafe fn sql_execute<B: Backend>(statement_handle: *mut c_void) -> SqlRetur
             // SAFETY: the application's bound output buffer pointers remain valid
             // per the caller contract (same guarantee collect_params relies on).
             // Already inside the enclosing `unsafe` context, like collect_params above.
-            crate::ffi::params::write_output_params(stmt.param_records(), &outcome.output_params)?;
+            crate::ffi::params::write_output_params(records, &outcome.output_params)?;
 
             Ok(SqlReturn::SUCCESS)
         })
