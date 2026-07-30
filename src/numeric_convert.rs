@@ -48,13 +48,34 @@
 // unreachable, instead of leaving a per-item allow behind to be inherited.
 #![allow(dead_code)]
 
-use odbc_sys::SqlDataType;
+use odbc_sys::{CDataType, Interval, SqlDataType};
 
 use crate::{
     errors::OdbcError,
     param_convert::{DecimalLiteral, check_declared_char_size, parse_numeric_literal, truncation},
-    types::{ColumnValue, SqlState, ULen},
+    types::{
+        ColumnValue, SQL_INTERVAL_MINUTE_TO_SECOND, SQL_INTERVAL_SECOND, SQL_INTERVAL_YEAR,
+        SqlState, ULen, interval_from_raw,
+    },
 };
+
+/// Whether a declared SQL type is any of the thirteen interval types.
+///
+/// Lives here rather than beside the constants because both predicates are
+/// shaped by this table's footnote — the one below quotes it — and neither has
+/// a caller anywhere else.
+fn is_interval_sql_type(t: SqlDataType) -> bool {
+    (SQL_INTERVAL_YEAR.0..=SQL_INTERVAL_MINUTE_TO_SECOND.0).contains(&t.0)
+}
+
+/// Whether an interval's precision is a single field.
+///
+/// This table converts an exact numeric only to these six: its footnote says
+/// exact numeric C types "cannot be converted to an interval SQL type whose
+/// interval precision is not a single field".
+fn is_single_field_interval(t: SqlDataType) -> bool {
+    (SQL_INTERVAL_YEAR.0..=SQL_INTERVAL_SECOND.0).contains(&t.0)
+}
 
 /// A numeric parameter, canonicalised from the table's fourteen C types.
 ///
@@ -293,10 +314,202 @@ pub(crate) fn numeric_to_sql_type(
         return Err(truncation(&value.render(), "not be 0 or 1"));
     }
 
-    // Row 6 arrives in the following commit. Until then any other target is
-    // refused rather than silently passed through.
-    let _ = interval_precision;
+    // Row 6. Only the six single-field intervals, and only from an exact
+    // source; `numeric_pairing_is_supported` refuses the rest at bind time, so
+    // reaching here with one of those means a caller went round that gate.
+    if let Some(field) = single_field_interval_code(sql_type) {
+        return interval_from_exact(
+            value.as_exact(sql_type)?,
+            field,
+            interval_precision,
+            sql_type,
+        );
+    }
+
     Err(unsupported_target(sql_type))
+}
+
+/// Row 6's conversion, once the target is known to be a single-field interval.
+///
+/// Reuses the two `ColumnValue` interval variants a backend already returns
+/// rather than introducing a third representation: `INTERVAL '5' YEAR` and
+/// `IntervalYearMonth { years: 5, months: 0 }` denote the same quantity, and a
+/// value core can build but nothing can read back would be worse than one it
+/// shares with the read direction.
+///
+/// The sign rides in the signed field, as it does for a backend-produced value.
+fn interval_from_exact(
+    literal: DecimalLiteral,
+    field: Interval,
+    interval_precision: i32,
+    sql_type: SqlDataType,
+) -> Result<Converted, OdbcError> {
+    let text = literal.to_decimal_string();
+
+    // An interval field is a whole number, so a fraction is data the conversion
+    // would drop — this row's "data truncated". Unlike row 3, there is no
+    // footnote permitting a warning instead.
+    if !literal.fraction_is_zero() {
+        return Err(interval_overflow(&text, sql_type));
+    }
+
+    let signed = literal
+        .to_integer()
+        .ok_or_else(|| interval_overflow(&text, sql_type))?;
+
+    // A leading precision of 0 states that the application declared none,
+    // exactly as a `ColumnSize` of 0 does for the character and decimal rows.
+    // A precision of `p` admits magnitudes below `10^p`.
+    if interval_precision > 0 {
+        let limit = u32::try_from(interval_precision)
+            .ok()
+            .and_then(|p| 10_i128.checked_pow(p))
+            .unwrap_or(i128::MAX);
+        if signed.unsigned_abs() >= limit.unsigned_abs() {
+            return Err(interval_overflow(&text, sql_type));
+        }
+    }
+
+    let value = match field {
+        Interval::Year => ColumnValue::IntervalYearMonth {
+            years: narrow_interval_field(signed, &text, sql_type)?,
+            months: 0,
+        },
+        Interval::Month => ColumnValue::IntervalYearMonth {
+            years: 0,
+            months: narrow_interval_field(signed, &text, sql_type)?,
+        },
+        // The day-time family is one signed total in milliseconds, so each
+        // field is its own scale factor. An overflow here is a value the
+        // representation cannot hold, which is the row's "data truncated"
+        // rather than a wrap.
+        Interval::Day => day_time(signed, 86_400_000, &text, sql_type)?,
+        Interval::Hour => day_time(signed, 3_600_000, &text, sql_type)?,
+        Interval::Minute => day_time(signed, 60_000, &text, sql_type)?,
+        Interval::Second => day_time(signed, 1_000, &text, sql_type)?,
+        // `single_field_interval_code` returns only the six above.
+        _ => return Err(unsupported_target(sql_type)),
+    };
+    Ok(Converted::clean(value))
+}
+
+/// Narrow a year-month field to the `i32` its variant carries.
+fn narrow_interval_field(
+    signed: i128,
+    text: &str,
+    sql_type: SqlDataType,
+) -> Result<i32, OdbcError> {
+    i32::try_from(signed).map_err(|_| interval_overflow(text, sql_type))
+}
+
+/// Scale a day-time field into the single signed millisecond total its variant
+/// carries.
+fn day_time(
+    signed: i128,
+    millis_per_unit: i64,
+    text: &str,
+    sql_type: SqlDataType,
+) -> Result<ColumnValue, OdbcError> {
+    let total = i64::try_from(signed)
+        .ok()
+        .and_then(|v| v.checked_mul(millis_per_unit))
+        .ok_or_else(|| interval_overflow(text, sql_type))?;
+    Ok(ColumnValue::IntervalDayTime {
+        total_milliseconds: total,
+    })
+}
+
+/// The row's `22015` outcome: "data truncated".
+fn interval_overflow(text: &str, sql_type: SqlDataType) -> OdbcError {
+    OdbcError::general(
+        format!("Parameter value {text} does not fit {sql_type:?}"),
+        SqlState::interval_field_overflow(),
+    )
+}
+
+/// The `SQL_IS_*` subcode of a single-field interval SQL type, or `None`.
+///
+/// The concise SQL type is `100 + SQL_CODE_*`, so the subcode is recovered by
+/// subtracting 100 and converting — which is why `interval_from_raw` earns its
+/// keep here rather than six `==` comparisons against the constants: the match
+/// below is over a typed enum, as this crate's boundary rule asks.
+fn single_field_interval_code(sql_type: SqlDataType) -> Option<Interval> {
+    if !is_single_field_interval(sql_type) {
+        return None;
+    }
+    interval_from_raw(sql_type.0 - 100)
+}
+
+/// Whether this table converts `c_type` to `sql_type`.
+///
+/// `SQLBindParameter` calls this and refuses the pairing with `07006` when it
+/// is false, for the reason [`crate::binary_convert`] refuses at bind: the
+/// pairing is fixed at bind, needs no backend metadata and never depends on the
+/// data, so the application fails before running its query.
+///
+/// It takes **both** types because the table's interval footnote is a statement
+/// about the pairing, not about either type alone: an interval target is legal
+/// from an exact numeric C type and illegal from `SQL_C_FLOAT` or
+/// `SQL_C_DOUBLE`. That is why this is not simply
+/// `binary_target_is_supported`'s shape.
+pub(crate) fn numeric_pairing_is_supported(c_type: CDataType, sql_type: SqlDataType) -> bool {
+    if is_interval_sql_type(sql_type) {
+        return is_single_field_interval(sql_type) && is_exact_numeric_c_type(c_type);
+    }
+    sql_type == SqlDataType::CHAR
+        || sql_type == SqlDataType::VARCHAR
+        || sql_type == SqlDataType::EXT_LONG_VARCHAR
+        || sql_type == SqlDataType::EXT_W_CHAR
+        || sql_type == SqlDataType::EXT_W_VARCHAR
+        || sql_type == SqlDataType::EXT_W_LONG_VARCHAR
+        || sql_type == SqlDataType::DECIMAL
+        || sql_type == SqlDataType::NUMERIC
+        || sql_type == SqlDataType::EXT_TINY_INT
+        || sql_type == SqlDataType::SMALLINT
+        || sql_type == SqlDataType::INTEGER
+        || sql_type == SqlDataType::EXT_BIG_INT
+        || sql_type == SqlDataType::REAL
+        || sql_type == SqlDataType::FLOAT
+        || sql_type == SqlDataType::DOUBLE
+        || sql_type == SqlDataType::EXT_BIT
+}
+
+/// The table's "exact numeric" C types, which its interval footnote names.
+///
+/// Everything this table accepts as a source except the two approximate ones,
+/// so it is stated as the complement rather than as a second list that could
+/// drift from [`is_numeric_c_type`].
+fn is_exact_numeric_c_type(c_type: CDataType) -> bool {
+    is_numeric_c_type(c_type) && !matches!(c_type, CDataType::Float | CDataType::Double)
+}
+
+/// Whether a C type is one of this table's fourteen numeric sources.
+///
+/// Eleven variants cover fourteen spec types, because the three deprecated
+/// unsuffixed spellings are normalised at the boundary rather than carried as
+/// their own variants: `c_data_type_from_raw` maps `SQL_C_LONG` (4) to
+/// [`CDataType::SLong`], `SQL_C_SHORT` (5) to [`CDataType::SShort`] and
+/// `SQL_C_TINYINT` (-6) to [`CDataType::STinyInt`]. `odbc-sys` has no variant
+/// for any of the three; that is a gap in the binding, not in the ABI this
+/// crate accepts.
+///
+/// `SQL_C_BIT` is deliberately absent for a different reason: it has its own
+/// *C to SQL: Bit* table. `SQL_BIT` is one of this table's *targets*.
+pub(crate) fn is_numeric_c_type(c_type: CDataType) -> bool {
+    matches!(
+        c_type,
+        CDataType::STinyInt
+            | CDataType::UTinyInt
+            | CDataType::SShort
+            | CDataType::UShort
+            | CDataType::SLong
+            | CDataType::ULong
+            | CDataType::SBigInt
+            | CDataType::UBigInt
+            | CDataType::Float
+            | CDataType::Double
+            | CDataType::Numeric
+    )
 }
 
 /// The row's `22003` outcome: "data converted with truncation of whole digits".
@@ -385,6 +598,10 @@ impl NumericParam {
 mod tests {
     use super::*;
     use crate::param_convert::parse_numeric_literal;
+    use crate::types::{
+        SQL_INTERVAL_DAY, SQL_INTERVAL_DAY_TO_HOUR, SQL_INTERVAL_DAY_TO_SECOND, SQL_INTERVAL_HOUR,
+        SQL_INTERVAL_MINUTE, SQL_INTERVAL_MONTH, SQL_INTERVAL_YEAR_TO_MONTH,
+    };
 
     fn exact(text: &str) -> NumericParam {
         NumericParam::Exact(parse_numeric_literal(text).expect("a numeric literal"))
@@ -807,7 +1024,229 @@ mod tests {
         }
     }
 
-    // -- targets the following commits implement ----------------------------
+    // -- row 6: intervals ---------------------------------------------------
+
+    /// A year-month interval reuses the variant a backend already returns, so
+    /// nothing downstream has to learn a new shape. `INTERVAL '5' YEAR` and
+    /// `IntervalYearMonth { years: 5, months: 0 }` denote the same quantity.
+    #[test]
+    fn a_year_interval_becomes_years_with_no_months() {
+        let out = numeric_to_sql_type(exact("5"), SQL_INTERVAL_YEAR, 0, 0, 2)
+            .expect("5 fits a two-digit leading precision");
+        assert_eq!(
+            out.value,
+            ColumnValue::IntervalYearMonth {
+                years: 5,
+                months: 0
+            }
+        );
+        assert!(out.warning.is_none());
+    }
+
+    #[test]
+    fn a_month_interval_becomes_months_with_no_years() {
+        let out = numeric_to_sql_type(exact("18"), SQL_INTERVAL_MONTH, 0, 0, 2).expect("18 months");
+        // Not normalised into years: the variant documents `months` as "not
+        // normalised into `years`", and 18 months is what the application said.
+        assert_eq!(
+            out.value,
+            ColumnValue::IntervalYearMonth {
+                years: 0,
+                months: 18
+            }
+        );
+    }
+
+    #[test]
+    fn a_negative_interval_keeps_its_sign() {
+        assert_eq!(
+            numeric_to_sql_type(exact("-5"), SQL_INTERVAL_YEAR, 0, 0, 2)
+                .expect("-5")
+                .value,
+            ColumnValue::IntervalYearMonth {
+                years: -5,
+                months: 0
+            }
+        );
+        assert_eq!(
+            numeric_to_sql_type(exact("-5"), SQL_INTERVAL_HOUR, 0, 0, 2)
+                .expect("-5")
+                .value,
+            ColumnValue::IntervalDayTime {
+                total_milliseconds: -5 * 3_600_000
+            }
+        );
+    }
+
+    #[test]
+    fn each_day_time_interval_scales_to_milliseconds() {
+        for (target, expected) in [
+            (SQL_INTERVAL_DAY, 3 * 86_400_000_i64),
+            (SQL_INTERVAL_HOUR, 3 * 3_600_000),
+            (SQL_INTERVAL_MINUTE, 3 * 60_000),
+            (SQL_INTERVAL_SECOND, 3 * 1_000),
+        ] {
+            assert_eq!(
+                numeric_to_sql_type(exact("3"), target, 0, 0, 2)
+                    .expect("3 fits")
+                    .value,
+                ColumnValue::IntervalDayTime {
+                    total_milliseconds: expected
+                },
+                "{target:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_value_beyond_the_leading_precision_is_22015() {
+        assert_eq!(
+            state_of(numeric_to_sql_type(
+                exact("100"),
+                SQL_INTERVAL_YEAR,
+                0,
+                0,
+                2
+            )),
+            "22015"
+        );
+        assert!(numeric_to_sql_type(exact("99"), SQL_INTERVAL_YEAR, 0, 0, 2).is_ok());
+    }
+
+    /// A leading precision of 0 means the application declared none, as a
+    /// `ColumnSize` of 0 does elsewhere in this family.
+    #[test]
+    fn a_zero_leading_precision_disables_the_interval_check() {
+        assert!(numeric_to_sql_type(exact("100000"), SQL_INTERVAL_YEAR, 0, 0, 0).is_ok());
+    }
+
+    /// An interval field is a whole number, so a fraction is data the
+    /// conversion would drop — this row's "data truncated".
+    #[test]
+    fn a_fractional_value_cannot_be_an_interval_field() {
+        assert_eq!(
+            state_of(numeric_to_sql_type(
+                exact("1.5"),
+                SQL_INTERVAL_YEAR,
+                0,
+                0,
+                2
+            )),
+            "22015"
+        );
+    }
+
+    #[test]
+    fn an_interval_too_large_to_scale_is_22015_rather_than_wrapping() {
+        assert_eq!(
+            state_of(numeric_to_sql_type(
+                exact("99999999999999999999"),
+                SQL_INTERVAL_DAY,
+                0,
+                0,
+                0
+            )),
+            "22015"
+        );
+    }
+
+    // -- the pairing gate ---------------------------------------------------
+
+    #[test]
+    fn an_approximate_source_cannot_reach_any_interval() {
+        assert!(!numeric_pairing_is_supported(
+            CDataType::Double,
+            SQL_INTERVAL_YEAR
+        ));
+        assert!(!numeric_pairing_is_supported(
+            CDataType::Float,
+            SQL_INTERVAL_YEAR
+        ));
+        assert!(numeric_pairing_is_supported(
+            CDataType::SLong,
+            SQL_INTERVAL_YEAR
+        ));
+        assert!(numeric_pairing_is_supported(
+            CDataType::Numeric,
+            SQL_INTERVAL_YEAR
+        ));
+    }
+
+    #[test]
+    fn a_multi_field_interval_is_never_supported() {
+        for target in [
+            SQL_INTERVAL_YEAR_TO_MONTH,
+            SQL_INTERVAL_DAY_TO_HOUR,
+            SQL_INTERVAL_DAY_TO_SECOND,
+            SQL_INTERVAL_MINUTE_TO_SECOND,
+        ] {
+            assert!(
+                !numeric_pairing_is_supported(CDataType::SLong, target),
+                "{target:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_target_absent_from_the_table_is_not_supported() {
+        assert!(!numeric_pairing_is_supported(
+            CDataType::SLong,
+            SqlDataType::EXT_GUID
+        ));
+        assert!(!numeric_pairing_is_supported(
+            CDataType::SLong,
+            SqlDataType(4242)
+        ));
+    }
+
+    #[test]
+    fn every_ordinary_target_is_supported_from_every_numeric_source() {
+        for c in [CDataType::SLong, CDataType::Double, CDataType::Numeric] {
+            for t in [
+                SqlDataType::CHAR,
+                SqlDataType::VARCHAR,
+                SqlDataType::EXT_W_VARCHAR,
+                SqlDataType::DECIMAL,
+                SqlDataType::NUMERIC,
+                SqlDataType::EXT_TINY_INT,
+                SqlDataType::SMALLINT,
+                SqlDataType::INTEGER,
+                SqlDataType::EXT_BIG_INT,
+                SqlDataType::REAL,
+                SqlDataType::FLOAT,
+                SqlDataType::DOUBLE,
+                SqlDataType::EXT_BIT,
+            ] {
+                assert!(numeric_pairing_is_supported(c, t), "{c:?} -> {t:?}");
+            }
+        }
+    }
+
+    /// `SQL_C_BIT` has its own table, so it is not one of this one's sources
+    /// even though `SQL_BIT` is one of its targets.
+    #[test]
+    fn the_numeric_source_list_is_the_tables_own() {
+        for c in [
+            CDataType::STinyInt,
+            CDataType::UTinyInt,
+            CDataType::SShort,
+            CDataType::UShort,
+            CDataType::SLong,
+            CDataType::ULong,
+            CDataType::SBigInt,
+            CDataType::UBigInt,
+            CDataType::Float,
+            CDataType::Double,
+            CDataType::Numeric,
+        ] {
+            assert!(is_numeric_c_type(c), "{c:?}");
+        }
+        assert!(!is_numeric_c_type(CDataType::Bit));
+        assert!(!is_numeric_c_type(CDataType::Char));
+        assert!(!is_numeric_c_type(CDataType::Binary));
+    }
+
+    // -- targets this table does not convert to -----------------------------
 
     #[test]
     fn a_target_this_table_does_not_convert_to_is_07006() {

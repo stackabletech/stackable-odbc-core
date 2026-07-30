@@ -183,6 +183,17 @@ pub unsafe fn sql_bind_parameter<B: Backend>(
                 {
                     return Err(crate::binary_convert::unsupported_target(sql_type));
                 }
+                // "C to SQL: Numeric" — the same reasoning as the binary
+                // refusal above and the same timing. This one is asked of the
+                // *pairing* rather than of the target alone, because the
+                // table's interval footnote is a statement about both: an
+                // interval target is legal from an exact numeric C type and
+                // not from SQL_C_FLOAT or SQL_C_DOUBLE.
+                if crate::numeric_convert::is_numeric_c_type(c_data_type)
+                    && !crate::numeric_convert::numeric_pairing_is_supported(c_data_type, sql_type)
+                {
+                    return Err(crate::numeric_convert::unsupported_target(sql_type));
+                }
                 // One call, two descriptors: the spec's own `SQLBindParameter`
                 // page maps the C-side arguments onto APD fields and the
                 // declared-type arguments onto IPD fields. Both are written
@@ -1583,7 +1594,7 @@ mod tests {
             MockBackend, MockCancelAwareBackend, MockConnection, MockLongDataBackend,
             alloc_env_conn_stmt, with_descriptor, with_handle,
         },
-        types::{CDataType, ParamType},
+        types::{CDataType, ParamType, SQL_INTERVAL_YEAR, SQL_INTERVAL_YEAR_TO_MONTH},
     };
 
     unsafe fn cleanup(env: *mut c_void, conn: *mut c_void, stmt: *mut c_void) {
@@ -1952,6 +1963,103 @@ mod tests {
                 0,
                 &mut val as *mut i64 as *mut c_void,
                 8,
+                std::ptr::null_mut(),
+            );
+            assert_eq!(ret, SqlReturn::ERROR);
+            cleanup(env, conn, stmt);
+        }
+    }
+
+    /// The *C to SQL: Numeric* table's interval footnote: the conversion is
+    /// supported "only for the exact numeric data types … not … for the
+    /// approximate numeric data types (SQL_C_FLOAT or SQL_C_DOUBLE)".
+    #[test]
+    fn bind_parameter_refuses_an_approximate_source_to_an_interval_with_07006() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            let mut val: f64 = 0.0;
+            let ret = sql_bind_parameter::<MockBackend>(
+                stmt,
+                1,
+                ParamType::Input as i16,
+                CDataType::Double as i16,
+                SQL_INTERVAL_YEAR.0,
+                0,
+                0,
+                &mut val as *mut f64 as *mut c_void,
+                8,
+                std::ptr::null_mut(),
+            );
+            assert_eq!(ret, SqlReturn::ERROR);
+            cleanup(env, conn, stmt);
+        }
+    }
+
+    /// The same footnote's other clause: exact numeric C types "cannot be
+    /// converted to an interval SQL type whose interval precision is not a
+    /// single field".
+    #[test]
+    fn bind_parameter_refuses_an_integer_to_a_multi_field_interval_with_07006() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            let mut val: i32 = 0;
+            let ret = sql_bind_parameter::<MockBackend>(
+                stmt,
+                1,
+                ParamType::Input as i16,
+                CDataType::SLong as i16,
+                SQL_INTERVAL_YEAR_TO_MONTH.0,
+                0,
+                0,
+                &mut val as *mut i32 as *mut c_void,
+                4,
+                std::ptr::null_mut(),
+            );
+            assert_eq!(ret, SqlReturn::ERROR);
+            cleanup(env, conn, stmt);
+        }
+    }
+
+    /// The pairing the footnote does permit, so the gate must not over-reach.
+    #[test]
+    fn bind_parameter_accepts_an_exact_source_to_a_single_field_interval() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            let mut val: i32 = 0;
+            let ret = sql_bind_parameter::<MockBackend>(
+                stmt,
+                1,
+                ParamType::Input as i16,
+                CDataType::SLong as i16,
+                SQL_INTERVAL_YEAR.0,
+                0,
+                0,
+                &mut val as *mut i32 as *mut c_void,
+                4,
+                std::ptr::null_mut(),
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+            cleanup(env, conn, stmt);
+        }
+    }
+
+    /// A numeric source paired with a target this table does not list at all —
+    /// `SQL_GUID` is absent from every one of its six rows.
+    #[test]
+    fn bind_parameter_refuses_a_numeric_source_to_a_guid_with_07006() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            let mut val: i32 = 0;
+            let ret = sql_bind_parameter::<MockBackend>(
+                stmt,
+                1,
+                ParamType::Input as i16,
+                CDataType::SLong as i16,
+                SqlDataType::EXT_GUID.0,
+                0,
+                0,
+                &mut val as *mut i32 as *mut c_void,
+                4,
                 std::ptr::null_mut(),
             );
             assert_eq!(ret, SqlReturn::ERROR);
