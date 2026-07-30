@@ -118,6 +118,10 @@ Everything a driver has to change for the catalog rework, in one place.
 
 ### Added
 
+- **`SqlState::attempt_to_concatenate_a_null_value`** (`HY020`), and
+  `PutDataState`, which records what `SQLPutData` has delivered for the
+  parameter currently being filled.
+
 - **`SQLExtendedFetch` is implemented.** It was a bare `SQL_ERROR` inside the
   `forward_ffi!` macro — no handle validation, no diagnostic, no logging, no
   test — so an ODBC 2.x application, or the Driver Manager mapping a 2.x
@@ -2569,5 +2573,14 @@ Everything a driver has to change for the catalog rework, in one place.
   the whole binding on a null `TargetValuePtr` regardless. The spec sentence is
   unconditional, and an application that asked only for a length has no other
   way to obtain one.
+
+- **`SQLPutData` reports `HY020`.** Sending `SQL_NULL_DATA` after data had
+  already been put cleared the accumulated buffer and answered `SQL_SUCCESS`,
+  so the application's data disappeared with no diagnostic; the reverse order
+  concatenated onto a parameter the application had declared NULL. The spec's
+  row carries no `(DM)` marker — "SQLPutData was called more than once since
+  the call that returned SQL_NEED_DATA, and in one of those calls, the
+  `StrLen_or_Ind` argument contained SQL_NULL_DATA or SQL_DEFAULT_PARAM" — so
+  it is the driver's to return, and both orderings now do.
 
 [Unreleased]: https://github.com/stackabletech/stackable-odbc-core/commits/HEAD

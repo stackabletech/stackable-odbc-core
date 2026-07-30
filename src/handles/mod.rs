@@ -592,6 +592,26 @@ pub struct GetDataCursor {
     pub done: bool,
 }
 
+/// What `SQLPutData` has delivered so far for the parameter
+/// [`DataAtExecState::current_param`] names.
+///
+/// Three states rather than a `bool`, because three separate rules read it and
+/// no two of them ask the same question: `SQLPutData` needs "has a NULL already
+/// been sent" for its `HY020`, `SQLParamData` needs "was `SQLPutData` called at
+/// all" for its `HY010`, and the finaliser needs "NULL, or a value" — an empty
+/// buffer is a zero-length value when data was put and nothing at all when it
+/// was not, and those are two different parameters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PutDataState {
+    /// `SQLParamData` has named a parameter and `SQLPutData` has not been
+    /// called for it yet.
+    NotCalled,
+    /// At least one `SQLPutData` delivered data for it.
+    Data,
+    /// A `SQLPutData` delivered `SQL_NULL_DATA` for it.
+    Null,
+}
+
 /// Tracks the state machine for data-at-execution parameter streaming
 /// (SQLParamData / SQLPutData).
 ///
@@ -606,6 +626,9 @@ pub struct DataAtExecState {
     pub current_param: Option<u16>,
     /// Accumulated data chunks for the current parameter.
     pub buffer: Vec<u8>,
+    /// What `SQLPutData` has delivered for [`Self::current_param`]. Reset to
+    /// [`PutDataState::NotCalled`] each time `SQLParamData` names a new one.
+    pub put_state: PutDataState,
     /// Already-collected parameter values (both DAE and non-DAE).
     /// Key is 1-based parameter number.
     pub collected_values: std::collections::HashMap<u16, ColumnValue>,

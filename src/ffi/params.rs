@@ -11,7 +11,7 @@ use crate::{
     cancel::reclassify_cancelled_opt,
     descriptor::{DescriptorRecord, DescriptorRole},
     errors::OdbcError,
-    handles::{ParamRecord, ParamRecords, StatementHandle},
+    handles::{ParamRecord, ParamRecords, PutDataState, StatementHandle},
     panic::panic_safe,
     types::{
         ColumnValue, ParamDescriptor, SQL_DATA_AT_EXEC, SQL_DEFAULT_PARAM_SIZE,
@@ -1323,8 +1323,13 @@ unsafe fn dae_nts_byte_count(c_type: Option<odbc_sys::CDataType>, data_ptr: *con
 /// - HY013: Memory management error — not applicable.
 /// - HY019: Non-character and non-binary data sent in pieces — not applicable; we accept
 ///   all data types in pieces.
-/// - HY020: Attempt to concatenate a null value — not applicable; NULL is handled via
-///   `SQL_NULL_DATA` indicator.
+/// - HY020: Attempt to concatenate a null value — **returned by this driver**. The row
+///   carries no `(DM)` marker: "SQLPutData was called more than once since the call that
+///   returned SQL_NEED_DATA, and in one of those calls, the StrLen_or_Ind argument contained
+///   SQL_NULL_DATA or SQL_DEFAULT_PARAM." A NULL is the whole value of a parameter, so
+///   `SQLPutData(SQL_NULL_DATA)` after data, and data after `SQLPutData(SQL_NULL_DATA)`, are
+///   both refused. Two calls both carrying data are not: the spec's objection is to the null,
+///   not to the concatenation.
 /// - HY090: Invalid string or buffer length — returned when `str_len_or_ind` is negative
 ///   and not `SQL_NTS` or `SQL_NULL_DATA`.
 /// - HY117: Connection suspended — (driver-manager-handled; not returned here).
@@ -1391,9 +1396,27 @@ pub unsafe fn sql_put_data<B: Backend>(
                 str_len_or_ind
             );
 
+            // Spec HY020, with no `(DM)` marker: "SQLPutData was called more
+            // than once since the call that returned SQL_NEED_DATA, and in one
+            // of those calls, the StrLen_or_Ind argument contained
+            // SQL_NULL_DATA or SQL_DEFAULT_PARAM." A NULL is the whole value of
+            // a parameter, so it can neither follow data nor be followed by it.
+            // Both orderings used to succeed: the first discarded what the
+            // application had already sent, the second concatenated onto a
+            // value it had declared NULL.
+            if dae.put_state != PutDataState::NotCalled
+                && (str_len_or_ind == SQL_NULL_DATA || dae.put_state == PutDataState::Null)
+            {
+                return Err(OdbcError::general(
+                    "A null value cannot be concatenated with other data for one parameter",
+                    SqlState::attempt_to_concatenate_a_null_value(),
+                ));
+            }
+
             // SQL_NULL_DATA: set param to NULL by clearing the buffer.
             if str_len_or_ind == SQL_NULL_DATA {
                 dae.buffer.clear();
+                dae.put_state = PutDataState::Null;
                 return Ok(SqlReturn::SUCCESS);
             }
 
@@ -1424,6 +1447,7 @@ pub unsafe fn sql_put_data<B: Backend>(
             // SAFETY: caller guarantees data_ptr is valid for byte_count bytes.
             let data = std::slice::from_raw_parts(data_ptr as *const u8, byte_count);
             dae.buffer.extend_from_slice(data);
+            dae.put_state = PutDataState::Data;
 
             Ok(SqlReturn::SUCCESS)
         })
@@ -1561,6 +1585,10 @@ pub unsafe fn sql_param_data<B: Backend>(
             // Check if there's another pending parameter.
             if let Some(next_param) = dae.pending_params.pop_front() {
                 dae.current_param = Some(next_param);
+                // A fresh parameter has had nothing put for it, whatever the
+                // previous one received. Without this, `HY020` would fire on
+                // the first `SQLPutData` for the second parameter of a batch.
+                dae.put_state = PutDataState::NotCalled;
 
                 // Write the value_ptr from the binding to *value_ptr_ptr so the app
                 // can identify which parameter is being requested.
@@ -1988,6 +2016,112 @@ mod tests {
             );
 
             assert_eq!(dae_buffer(stmt), b"Hello".to_vec());
+
+            cleanup(env, conn, stmt);
+        }
+    }
+
+    /// Spec, `SQLPutData` `HY020`, with no `(DM)` marker: "SQLPutData was
+    /// called more than once since the call that returned SQL_NEED_DATA, and in
+    /// one of those calls, the StrLen_or_Ind argument contained SQL_NULL_DATA
+    /// or SQL_DEFAULT_PARAM."
+    ///
+    /// The old behaviour cleared the buffer and answered SQL_SUCCESS, so the
+    /// data the application had already sent vanished without a diagnostic.
+    #[test]
+    fn put_data_null_after_data_reports_hy020() {
+        unsafe {
+            let (env, conn, stmt) = connected_stmt();
+            let mut indicator: isize = SQL_DATA_AT_EXEC;
+            start_dae_loop(
+                stmt,
+                CDataType::Char,
+                SqlDataType::VARCHAR,
+                &raw mut indicator,
+            );
+
+            let mut data = *b"abc";
+            assert_eq!(
+                sql_put_data::<MockBackend>(stmt, data.as_mut_ptr().cast::<c_void>(), 3),
+                SqlReturn::SUCCESS,
+                "precondition: data is put for the current parameter",
+            );
+
+            assert_eq!(
+                sql_put_data::<MockBackend>(stmt, std::ptr::null_mut(), SQL_NULL_DATA),
+                SqlReturn::ERROR,
+            );
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |h| {
+                let rec = h.diagnostics.get(0).expect("record 1 exists");
+                assert_eq!(rec.sqlstate.as_str(), "HY020");
+            });
+
+            cleanup(env, conn, stmt);
+        }
+    }
+
+    /// The same row read the other way round: a NULL already sent cannot be
+    /// concatenated onto. This is the ordering that silently produced "abc"
+    /// where the application had declared the parameter NULL.
+    #[test]
+    fn put_data_data_after_null_reports_hy020() {
+        unsafe {
+            let (env, conn, stmt) = connected_stmt();
+            let mut indicator: isize = SQL_DATA_AT_EXEC;
+            start_dae_loop(
+                stmt,
+                CDataType::Char,
+                SqlDataType::VARCHAR,
+                &raw mut indicator,
+            );
+
+            assert_eq!(
+                sql_put_data::<MockBackend>(stmt, std::ptr::null_mut(), SQL_NULL_DATA),
+                SqlReturn::SUCCESS,
+                "precondition: the parameter is set to NULL",
+            );
+
+            let mut data = *b"abc";
+            assert_eq!(
+                sql_put_data::<MockBackend>(stmt, data.as_mut_ptr().cast::<c_void>(), 3),
+                SqlReturn::ERROR,
+            );
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |h| {
+                let rec = h.diagnostics.get(0).expect("record 1 exists");
+                assert_eq!(rec.sqlstate.as_str(), "HY020");
+            });
+
+            cleanup(env, conn, stmt);
+        }
+    }
+
+    /// The row says "more than once", so the *first* call carrying
+    /// `SQL_NULL_DATA` is legal and so is a second call carrying more data.
+    /// Neither may be turned into HY020 by an over-eager check.
+    #[test]
+    fn put_data_accepts_a_first_null_and_repeated_data() {
+        unsafe {
+            let (env, conn, stmt) = connected_stmt();
+            let mut indicator: isize = SQL_DATA_AT_EXEC;
+            start_dae_loop(
+                stmt,
+                CDataType::Char,
+                SqlDataType::VARCHAR,
+                &raw mut indicator,
+            );
+
+            let mut first = *b"ab";
+            let mut second = *b"cd";
+            assert_eq!(
+                sql_put_data::<MockBackend>(stmt, first.as_mut_ptr().cast::<c_void>(), 2),
+                SqlReturn::SUCCESS,
+            );
+            assert_eq!(
+                sql_put_data::<MockBackend>(stmt, second.as_mut_ptr().cast::<c_void>(), 2),
+                SqlReturn::SUCCESS,
+                "data may be sent in as many pieces as the application likes",
+            );
+            assert_eq!(dae_buffer(stmt), b"abcd".to_vec());
 
             cleanup(env, conn, stmt);
         }

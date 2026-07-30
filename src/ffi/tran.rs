@@ -1070,6 +1070,7 @@ mod tests {
                         pending_params: std::collections::VecDeque::new(),
                         current_param: Some(1),
                         buffer: vec![0xAB],
+                        put_state: crate::handles::PutDataState::NotCalled,
                         collected_values: std::collections::HashMap::new(),
                         sql: "INSERT INTO t VALUES (?)".to_string(),
                         warnings: Vec::new(),
