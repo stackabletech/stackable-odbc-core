@@ -2320,6 +2320,56 @@ mod tests {
         }
     }
 
+    /// `SQLGetInfo` and `SQLSetStmtAttr` must not contradict each other about
+    /// the one cursor core has.
+    ///
+    /// `SQL_CA2_READ_ONLY_CONCURRENCY` in `SQL_FORWARD_ONLY_CURSOR_ATTRIBUTES2`
+    /// asserts precisely that "the `SQL_ATTR_CONCURRENCY` statement attribute
+    /// can be `SQL_CONCUR_READ_ONLY`" for a forward-only cursor — which is the
+    /// arm below this test's subject: `SQL_CONCUR_READ_ONLY` is the one value
+    /// accepted unchanged, and every other is substituted back to it with
+    /// `01S02`.
+    ///
+    /// Reporting `0` for that bitmask, as core did, claimed no concurrency was
+    /// supported at all while the attribute setter accepted one. Both halves are
+    /// asserted here rather than in the `SQLGetInfo` snapshot alone, because a
+    /// snapshot pins the number and this pins the *reason* the number is right.
+    #[test]
+    fn forward_only_cursor_attributes2_agrees_with_the_concurrency_it_accepts() {
+        use crate::types::{InfoType, InfoValue, SQL_CA2_READ_ONLY_CONCURRENCY};
+
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+
+            assert_eq!(
+                sql_set_stmt_attr_w::<MockBackend>(
+                    stmt,
+                    StatementAttribute::Concurrency as i32,
+                    std::ptr::without_provenance_mut::<c_void>(SQL_CONCUR_READ_ONLY),
+                    0,
+                ),
+                SqlReturn::SUCCESS,
+                "SQL_CONCUR_READ_ONLY must be accepted without substitution",
+            );
+
+            let reported = crate::backend::default_get_info::<MockBackend>(
+                Some(&crate::test_utils::MockConnection),
+                InfoType::ForwardOnlyCursorAttributes2,
+            )
+            .expect("core answers this info type");
+            match reported {
+                InfoValue::U32(bits) => assert_eq!(
+                    bits & SQL_CA2_READ_ONLY_CONCURRENCY,
+                    SQL_CA2_READ_ONLY_CONCURRENCY,
+                    "SQLGetInfo denies the concurrency SQLSetStmtAttr just accepted",
+                ),
+                other => panic!("SQL_FORWARD_ONLY_CURSOR_ATTRIBUTES2 was {other:?}"),
+            }
+
+            cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
     /// The spec's `01S02` row closes the set of statement attributes a driver
     /// may substitute for: "SQL_ATTR_CONCURRENCY SQL_ATTR_CURSOR_TYPE
     /// SQL_ATTR_KEYSET_SIZE SQL_ATTR_MAX_LENGTH SQL_ATTR_MAX_ROWS

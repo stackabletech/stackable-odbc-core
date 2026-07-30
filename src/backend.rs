@@ -1738,7 +1738,8 @@ pub fn default_get_info<B: Backend>(
     info_type: crate::types::InfoType,
 ) -> Option<InfoValue> {
     use crate::types::{
-        InfoType, InfoValue, SQL_AM_NONE, SQL_ASYNC_NOTIFICATION_NOT_CAPABLE, SQL_CA1_NEXT,
+        InfoType, InfoValue, SQL_AM_NONE, SQL_ASYNC_DBC_NOT_CAPABLE,
+        SQL_ASYNC_NOTIFICATION_NOT_CAPABLE, SQL_CA1_NEXT, SQL_CA2_READ_ONLY_CONCURRENCY,
         SQL_DRIVER_ODBC_VER_STRING, SQL_GD_ANY_COLUMN, SQL_GD_ANY_ORDER, SQL_GD_BOUND,
         SQL_MAX_CURSOR_NAME_LEN, SQL_OIC_CORE, SQL_PARC_NO_BATCH, SQL_PAS_NO_SELECT,
         SQL_SO_FORWARD_ONLY, SQL_UNSPECIFIED,
@@ -1971,7 +1972,7 @@ pub fn default_get_info<B: Backend>(
         InfoType::IdentifierCase => Some(InfoValue::U16(B::identifier_case(conn?))),
         InfoType::OdbcInterfaceConformance => Some(InfoValue::U32(SQL_OIC_CORE)),
         InfoType::AsyncMode => Some(InfoValue::U32(SQL_AM_NONE)),
-        InfoType::AsyncDbcFunctions => Some(InfoValue::U32(0)),
+        InfoType::AsyncDbcFunctions => Some(InfoValue::U32(SQL_ASYNC_DBC_NOT_CAPABLE)),
 
         // --- Facts about core's own implementation ---
         //
@@ -2010,11 +2011,24 @@ pub fn default_get_info<B: Backend>(
             }
             .into(),
         )),
-        // --- Cursor attributes (all zero except ForwardOnly1) ---
+        // --- Cursor attributes (zero except the forward-only pair, which is
+        // the only cursor core has) ---
         InfoType::DynamicCursorAttributes1 => Some(InfoValue::U32(0)),
         InfoType::DynamicCursorAttributes2 => Some(InfoValue::U32(0)),
         InfoType::ForwardOnlyCursorAttributes1 => Some(InfoValue::U32(SQL_CA1_NEXT)),
-        InfoType::ForwardOnlyCursorAttributes2 => Some(InfoValue::U32(0)),
+        // `SQL_CA2_READ_ONLY_CONCURRENCY` asserts exactly what
+        // `SQLSetStmtAttr` does with `SQL_ATTR_CONCURRENCY`: the attribute "can
+        // be SQL_CONCUR_READ_ONLY" for this cursor. `SQL_CONCUR_READ_ONLY` is
+        // the one value that arm accepts unchanged — every other value is
+        // substituted back to it with `01S02` — so reporting `0` here would
+        // claim core supports no concurrency at all for the only cursor it has,
+        // and contradict the attribute it just accepted. The remaining bits in
+        // this bitmask stay clear: they describe updatable cursors, row-count
+        // exactness and positioned-statement simulation, none of which core
+        // does.
+        InfoType::ForwardOnlyCursorAttributes2 => {
+            Some(InfoValue::U32(SQL_CA2_READ_ONLY_CONCURRENCY))
+        }
         InfoType::KeysetCursorAttributes1 => Some(InfoValue::U32(0)),
         InfoType::KeysetCursorAttributes2 => Some(InfoValue::U32(0)),
         InfoType::StaticCursorAttributes1 => Some(InfoValue::U32(0)),
@@ -2139,14 +2153,15 @@ mod tests {
         MockTxnDeleteCloseBackend,
     };
     use crate::types::{
-        DEFAULT_IDENTIFIER_LEN, InfoType, InfoValue, SQL_AM_NONE, SQL_AT_ADD_COLUMN_SINGLE,
-        SQL_AT_DROP_COLUMN_RESTRICT, SQL_CA1_NEXT, SQL_CB_PRESERVE, SQL_CN_ANY,
-        SQL_DRIVER_ODBC_VER_STRING, SQL_FN_CVT_CAST, SQL_FN_TSI_DAY, SQL_FN_TSI_SECOND,
-        SQL_FN_TSI_YEAR, SQL_GB_GROUP_BY_EQUALS_SELECT, SQL_MAX_CURSOR_NAME_LEN, SQL_NC_END,
-        SQL_NNC_NON_NULL, SQL_OIC_CORE, SQL_OJ_LEFT, SQL_OJ_NESTED, SQL_SC_SQL92_ENTRY,
-        SQL_SO_FORWARD_ONLY, SQL_SQ_COMPARISON, SQL_SQ_CORRELATED_SUBQUERIES, SQL_SQ_EXISTS,
-        SQL_SQ_IN, SQL_SQ_QUANTIFIED, SQL_TC_ALL, SQL_TXN_SERIALIZABLE, SQL_U_UNION,
-        SQL_U_UNION_ALL, SQL_UNSPECIFIED,
+        DEFAULT_IDENTIFIER_LEN, InfoType, InfoValue, SQL_AM_NONE, SQL_ASYNC_DBC_NOT_CAPABLE,
+        SQL_AT_ADD_COLUMN_SINGLE, SQL_AT_DROP_COLUMN_RESTRICT, SQL_CA1_NEXT,
+        SQL_CA2_READ_ONLY_CONCURRENCY, SQL_CB_PRESERVE, SQL_CN_ANY, SQL_DRIVER_ODBC_VER_STRING,
+        SQL_FN_CVT_CAST, SQL_FN_TSI_DAY, SQL_FN_TSI_SECOND, SQL_FN_TSI_YEAR,
+        SQL_GB_GROUP_BY_EQUALS_SELECT, SQL_MAX_CURSOR_NAME_LEN, SQL_NC_END, SQL_NNC_NON_NULL,
+        SQL_OIC_CORE, SQL_OJ_LEFT, SQL_OJ_NESTED, SQL_SC_SQL92_ENTRY, SQL_SO_FORWARD_ONLY,
+        SQL_SQ_COMPARISON, SQL_SQ_CORRELATED_SUBQUERIES, SQL_SQ_EXISTS, SQL_SQ_IN,
+        SQL_SQ_QUANTIFIED, SQL_TC_ALL, SQL_TXN_SERIALIZABLE, SQL_U_UNION, SQL_U_UNION_ALL,
+        SQL_UNSPECIFIED,
     };
 
     enum Expected {
@@ -2242,11 +2257,11 @@ mod tests {
         (InfoType::TimedateDiffIntervals,         Expected::U32(SQL_FN_TSI_SECOND | SQL_FN_TSI_YEAR)),
         (InfoType::OdbcInterfaceConformance,      Expected::U32(SQL_OIC_CORE)),
         (InfoType::AsyncMode,                     Expected::U32(SQL_AM_NONE)),
-        (InfoType::AsyncDbcFunctions,             Expected::U32(0)),
+        (InfoType::AsyncDbcFunctions,             Expected::U32(SQL_ASYNC_DBC_NOT_CAPABLE)),
         (InfoType::DynamicCursorAttributes1,      Expected::U32(0)),
         (InfoType::DynamicCursorAttributes2,      Expected::U32(0)),
         (InfoType::ForwardOnlyCursorAttributes1,  Expected::U32(SQL_CA1_NEXT)),
-        (InfoType::ForwardOnlyCursorAttributes2,  Expected::U32(0)),
+        (InfoType::ForwardOnlyCursorAttributes2,  Expected::U32(SQL_CA2_READ_ONLY_CONCURRENCY)),
         (InfoType::KeysetCursorAttributes1,       Expected::U32(0)),
         (InfoType::KeysetCursorAttributes2,       Expected::U32(0)),
         (InfoType::StaticCursorAttributes1,       Expected::U32(0)),
@@ -2729,7 +2744,7 @@ mod tests {
         ),
         (
             InfoType::ForwardOnlyCursorAttributes2,
-            "core implements none of these",
+            "SQL_CONCUR_READ_ONLY is the one concurrency SQLSetStmtAttr accepts",
         ),
         (
             InfoType::DynamicCursorAttributes1,

@@ -145,6 +145,13 @@ pub const SQL_ASYNC_NOTIFICATION_NOT_CAPABLE: u32 = 0x0000_0000;
 /// execution notification.
 pub const SQL_ASYNC_NOTIFICATION_CAPABLE: u32 = 0x0000_0001;
 
+/// `SQL_ASYNC_DBC_NOT_CAPABLE` — the driver cannot execute connection
+/// functions asynchronously (`SQL_ASYNC_DBC_FUNCTIONS`).
+pub const SQL_ASYNC_DBC_NOT_CAPABLE: u32 = 0x0000_0000;
+/// `SQL_ASYNC_DBC_CAPABLE` — the driver can execute connection functions
+/// asynchronously.
+pub const SQL_ASYNC_DBC_CAPABLE: u32 = 0x0000_0001;
+
 /// `SQL_PRED_NONE` / `SQL_UNSEARCHABLE` — column is not usable in a `WHERE` clause.
 /// Used in the `SEARCHABLE` column of `SQLGetTypeInfo` and `SQLColAttribute`.
 pub const SQL_PRED_NONE: i16 = 0;
@@ -411,6 +418,12 @@ pub const SQL_AM_STATEMENT: u32 = 2;
 
 /// `SQL_CA1_NEXT` — `SQL_FETCH_NEXT` orientation is supported in `SQLFetchScroll`.
 pub const SQL_CA1_NEXT: u32 = 0x0000_0001;
+
+/// `SQL_CA2_READ_ONLY_CONCURRENCY` — a read-only cursor, in which no updates
+/// are allowed, is supported: the `SQL_ATTR_CONCURRENCY` statement attribute
+/// can be `SQL_CONCUR_READ_ONLY` for a cursor of the kind the enclosing
+/// `SQL_*_CURSOR_ATTRIBUTES2` info type describes.
+pub const SQL_CA2_READ_ONLY_CONCURRENCY: u32 = 0x0000_0001;
 
 /// `SQL_ROWSET_SIZE` (9) — the ODBC 2.x statement option giving the rowset size
 /// `SQLExtendedFetch` uses.

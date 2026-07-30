@@ -150,6 +150,12 @@ call `SQLCloseCursor` or `SQLFreeStmt(SQL_CLOSE)` first, as it already must for
 
 ### Added
 
+- **`SQL_ASYNC_DBC_NOT_CAPABLE`, `SQL_ASYNC_DBC_CAPABLE` and
+  `SQL_CA2_READ_ONLY_CONCURRENCY`** in `types::constants`. The first names the
+  value `SQL_ASYNC_DBC_FUNCTIONS` was already answering as a bare `0`; the
+  third is the bit `SQL_FORWARD_ONLY_CURSOR_ATTRIBUTES2` now sets. None is in
+  `odbc-sys`.
+
 - **`SqlState::attempt_to_concatenate_a_null_value`** (`HY020`), and
   `PutDataState`, which records what `SQLPutData` has delivered for the
   parameter currently being filled.
@@ -1486,6 +1492,16 @@ call `SQLCloseCursor` or `SQLFreeStmt(SQL_CLOSE)` first, as it already must for
   it returns `SQL_SUCCESS` with no diagnostic, as it did before. A driver that
   implements any of the three hooks should expect a call with `0` where it
   previously got none.
+
+- **`SQL_FORWARD_ONLY_CURSOR_ATTRIBUTES2` now reports
+  `SQL_CA2_READ_ONLY_CONCURRENCY`.** It answered `0`, which claims no
+  concurrency is supported for the only cursor core has — while
+  `SQLSetStmtAttr(SQL_ATTR_CONCURRENCY)` accepts `SQL_CONCUR_READ_ONLY`
+  unchanged and substitutes every other value back to it with `01S02`. That
+  bit asserts exactly what the attribute does, so the two contradicted each
+  other. The rest of the bitmask stays clear: it describes updatable cursors,
+  row-count exactness and positioned-statement simulation, none of which core
+  does.
 
 - **`SQLFetchScroll` logs its own return value.** The `SQL_FETCH_NEXT` branch —
   the only one that fetches — returned through `sql_fetch`, so the exit log read
