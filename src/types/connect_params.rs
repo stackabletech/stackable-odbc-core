@@ -173,8 +173,27 @@ impl ConnectParams {
             let braced = chars.peek() == Some(&'{');
             if braced {
                 chars.next(); // consume '{'
-                for c in chars.by_ref() {
+                // A `}` inside a braced value is written `}}`. Without that, a
+                // value containing a brace ends its own quoted run and
+                // everything after it parses as further keywords — which is how
+                // a DSN value could inject keywords into the string this driver
+                // hands back through *OutConnectionString*. unixODBC's Driver
+                // Manager uses the same convention in both directions
+                // (`DriverManager/SQLDriverConnect.c`: its parser takes "all
+                // characters until next '}' not followed by '}'").
+                //
+                // `while let` rather than `for c in chars.by_ref()`: the body
+                // needs `chars.peek()` to look one past the current character,
+                // and `by_ref()` borrows the iterator for the whole body.
+                // Clippy's `while_let_on_iterator` does not fire for the same
+                // reason — the iterator is used inside the loop.
+                while let Some(c) = chars.next() {
                     if c == '}' {
+                        if chars.peek() == Some(&'}') {
+                            chars.next();
+                            value.push('}');
+                            continue;
+                        }
                         break;
                     }
                     value.push(c);
@@ -390,12 +409,33 @@ impl ConnectParams {
     }
 
     /// Reconstruct an ODBC connection string from the stored key-value pairs.
-    /// Values containing `;` or `=` are wrapped in `{braces}`.
+    ///
+    /// A value is wrapped in `{braces}` when it contains `;`, `=`, `{` or `}`,
+    /// or begins or ends with whitespace — anything that would otherwise mean
+    /// something different when the string is parsed again. Inside the braces
+    /// every `}` is doubled, because a single one ends the quoted run.
+    ///
+    /// The doubling closes an injection hole rather than a cosmetic one. This
+    /// string is what `SQLBrowseConnectW` returns to the application, and the
+    /// spec calls it "suitable to use, in conjunction with **SQLDriverConnect**"
+    /// — so a value that ends its own quoting early lets a hostile `odbc.ini`
+    /// entry add keywords to the application's *next* connect, even though the
+    /// merge that produced it was safe.
+    ///
+    /// Both halves follow unixODBC's Driver Manager, which uses the same
+    /// convention in both directions (`DriverManager/SQLDriverConnect.c`: its
+    /// generator brace-quotes on `{`, `}` or edge whitespace and doubles every
+    /// `}`; its parser reads "all characters until next `'}'` not followed by
+    /// `'}'`"). [`ConnectParams::parse`] is the other half here.
     pub fn to_connection_string(&self) -> String {
         let mut parts = Vec::new();
         for (key, value) in &self.params {
-            if value.contains(';') || value.contains('=') {
-                parts.push(format!("{key}={{{value}}}"));
+            let needs_braces = value.contains([';', '=', '{', '}'])
+                || value.starts_with(char::is_whitespace)
+                || value.ends_with(char::is_whitespace);
+            if needs_braces {
+                let escaped = value.replace('}', "}}");
+                parts.push(format!("{key}={{{escaped}}}"));
             } else {
                 parts.push(format!("{key}={value}"));
             }
@@ -677,6 +717,49 @@ mod tests {
     }
 
     #[test]
+    fn parse_undoubles_a_doubled_closing_brace() {
+        // A `}` inside a braced value is written `}}`, the convention
+        // unixODBC's Driver Manager uses in both directions.
+        let params = ConnectParams::parse("Key={a}}b};Next=v").unwrap();
+        assert_eq!(params.get("key"), Some("a}b"));
+        assert_eq!(params.get("next"), Some("v"));
+    }
+
+    /// The completed connection string `SQLBrowseConnect` hands back is
+    /// "suitable to use, in conjunction with SQLDriverConnect", so a value that
+    /// does not survive the round trip is a value the application's *next*
+    /// connect reads differently. A `}` used to end its own quoted run, so
+    /// everything after it parsed as further keywords.
+    #[test]
+    fn to_connection_string_round_trips_a_value_containing_a_closing_brace() {
+        let mut params = ConnectParams::parse("").unwrap();
+        params.insert("description", "a};UID=admin;PWD=hunter2");
+
+        let reparsed = ConnectParams::parse(&params.to_connection_string()).unwrap();
+        assert_eq!(
+            reparsed.get("description"),
+            Some("a};UID=admin;PWD=hunter2"),
+        );
+        assert_eq!(
+            reparsed.get("uid"),
+            None,
+            "the value must not inject keywords"
+        );
+        assert_eq!(reparsed.get("pwd"), None);
+    }
+
+    #[test]
+    fn to_connection_string_round_trips_edge_whitespace() {
+        // An unbraced value is trimmed on the way back in, so a value whose own
+        // edges are whitespace has to be braced.
+        let mut params = ConnectParams::parse("").unwrap();
+        params.insert("token", " leading and trailing ");
+
+        let reparsed = ConnectParams::parse(&params.to_connection_string()).unwrap();
+        assert_eq!(reparsed.get("token"), Some(" leading and trailing "));
+    }
+
+    #[test]
     fn parse_unterminated_brace_consumes_remainder() {
         // An unterminated '{' has no closing '}', so the rest of the string
         // (including any later "key=value") becomes part of this value.
@@ -696,6 +779,21 @@ mod proptest_connect_params {
         #[test]
         fn parse_never_panics(s in ".*") {
             let _ = ConnectParams::parse(&s);
+        }
+
+        /// Any value at all survives rendering and re-parsing. This is the
+        /// property the browse result depends on: the spec calls the completed
+        /// string "suitable to use, in conjunction with SQLDriverConnect".
+        #[test]
+        fn any_value_round_trips_through_to_connection_string(
+            key in "[a-zA-Z][a-zA-Z0-9]{0,15}",
+            value in ".{0,64}",
+        ) {
+            let mut params = ConnectParams::parse("").unwrap();
+            params.insert(key.clone(), value.clone());
+
+            let reparsed = ConnectParams::parse(&params.to_connection_string()).unwrap();
+            prop_assert_eq!(reparsed.get(&key.to_lowercase()), Some(value.as_str()));
         }
 
         /// Valid K=V pairs are always accessible after parsing.

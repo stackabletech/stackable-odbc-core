@@ -1482,6 +1482,16 @@ call `SQLCloseCursor` or `SQLFreeStmt(SQL_CLOSE)` first, as it already must for
   conversion the FFI boundary uses; `attr_odbc_version_from_raw` is unchanged and
   still cannot name `SQL_OV_ODBC2`.
 
+- `ConnectParams::to_connection_string` renders a value containing `}` so that
+  it survives being parsed again: the value is brace-quoted and every `}` inside
+  is doubled, and `ConnectParams::parse` un-doubles it. A single `}` used to end
+  its own quoted run, so everything after it parsed as further keywords — and
+  since `SQLBrowseConnectW` returns this string to the application as one the
+  spec calls "suitable to use, in conjunction with `SQLDriverConnect`", a
+  hostile `odbc.ini` value could inject keywords into the application's *next*
+  connect. Values whose edges are whitespace are now braced for the same reason.
+  The convention is unixODBC's Driver Manager's, in both directions.
+
 - `SQLNativeSqlW` reports `01004` and `SQL_SUCCESS_WITH_INFO` when
   *OutStatementText* is non-null and *BufferLength* is zero. Total truncation
   returned plain `SQL_SUCCESS`, so an application sizing its buffer from the

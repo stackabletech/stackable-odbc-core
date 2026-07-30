@@ -667,22 +667,6 @@ pub unsafe fn sql_browse_connect_w<B: Backend>(
     ret
 }
 
-/// Parse a connection string, merging in DSN keys from odbc.ini when a `DSN=` key is present.
-///
-/// Explicit connection string values take priority over DSN-file values. The
-/// direction matters: an application states its connection string in its own
-/// code, whereas `odbc.ini` is a file any process running as the user can edit,
-/// so the DSN file must never be able to redirect a connection or substitute
-/// credentials the application supplied itself.
-///
-/// The merge is done on parsed values, never by concatenating strings and
-/// re-parsing. A DSN value is arbitrary file content: rendered back into
-/// `Key=Value;` form it could contain a `;` and inject further keywords, and
-/// brace-quoting it does not close that hole, because a `}` in the value ends
-/// the quoted run early and everything after it parses as keywords again.
-/// [`ConnectParams::merge`] does not overwrite existing keys, which is exactly
-/// the required precedence.
-///
 /// The prompter this connect may use, given the entry point's *DriverCompletion*.
 ///
 /// **The one place that decides whether a driver is allowed to prompt.** The
@@ -718,6 +702,21 @@ fn prompter_for<B: Backend>(
     B::prompter()
 }
 
+/// Parse a connection string, merging in DSN keys from odbc.ini when a `DSN=` key is present.
+///
+/// Explicit connection string values take priority over DSN-file values. The
+/// direction matters: an application states its connection string in its own
+/// code, whereas `odbc.ini` is a file any process running as the user can edit,
+/// so the DSN file must never be able to redirect a connection or substitute
+/// credentials the application supplied itself.
+///
+/// The merge is done on parsed values, never by concatenating strings and
+/// re-parsing. A DSN value is arbitrary file content: rendered back into
+/// `Key=Value;` form it could contain a `;` and inject further keywords.
+/// [`ConnectParams::merge`] does not overwrite existing keys, which is exactly
+/// the required precedence, and [`ConnectParams::to_connection_string`] quotes
+/// what it renders so the result survives being parsed again.
+///
 /// `dsn_resolver` is injectable so unit tests can supply fake DSN data.
 fn merge_dsn_params<B: Backend>(
     conn_str: &str,
