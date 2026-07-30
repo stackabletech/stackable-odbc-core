@@ -1482,6 +1482,11 @@ call `SQLCloseCursor` or `SQLFreeStmt(SQL_CLOSE)` first, as it already must for
   conversion the FFI boundary uses; `attr_odbc_version_from_raw` is unchanged and
   still cannot name `SQL_OV_ODBC2`.
 
+- `SQLGetConnectAttrW` no longer fails with `HY000` when the application offers
+  a buffer of 64 KB or more. Its *BufferLength* is `SQLINTEGER`, the spec
+  defines no error for a large one, and a value that genuinely does not fit is
+  still reported as `01004`.
+
 - `SQLGetConnectAttrW` reports `HYC00` for a connection attribute the spec
   defines but this driver does not answer — `SQL_ATTR_QUIET_MODE`,
   `SQL_ATTR_TRACEFILE`, `SQL_ATTR_TRANSLATE_LIB`, `SQL_ATTR_ENLIST_IN_DTC`,

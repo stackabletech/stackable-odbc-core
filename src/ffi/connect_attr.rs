@@ -711,11 +711,12 @@ const DEFINED_CONNECTION_ATTRIBUTES: &[ConnectionAttribute] = &[
 /// - HY013 Memory management error: not returned; Rust panics on memory errors,
 ///   caught by `panic_safe` and converted to `SQL_ERROR`/HY000.
 /// - HY090 Invalid string or buffer length: (driver-manager-handled; not returned
-///   here except for negative `buffer_length`). A `buffer_length < 0` check for
+///   here except for a negative `buffer_length`). A `buffer_length < 0` check for
 ///   `SQL_ATTR_CURRENT_CATALOG` is performed as a defensive measure and returns
-///   HY090. However, when `buffer_length` is valid but exceeds the maximum
-///   (32767 chars), HY000 (general error) is returned instead, as the buffer
-///   is not "invalid" but unsupported.
+///   HY090. A *large* `buffer_length` is not an error: the spec describes the
+///   argument only as "the length of \**ValuePtr*", so a buffer past what the
+///   shared string writer's `SQLSMALLINT` can express is clamped rather than
+///   refused.
 /// - HY092 Invalid attribute/option identifier: returned for an identifier that
 ///   is not an ODBC connection attribute at all — see
 ///   `DEFINED_CONNECTION_ATTRIBUTES`, which is the whole of the spec's list.
@@ -946,12 +947,17 @@ pub unsafe fn sql_get_connect_attr_w<B: Backend>(
                             SqlState::invalid_string_or_buffer_length(),
                         ));
                     }
-                    let buf_u16 = i16::try_from(buffer_length / 2).map_err(|_| {
-                        OdbcError::general(
-                            format!("Buffer length {buffer_length} exceeds driver maximum (32767 chars for string attributes)"),
-                            SqlState::general_error(),
-                        )
-                    })?;
+                    // `write_utf16` takes an `i16` because most string-bearing
+                    // entry points declare their buffer `SQLSMALLINT`;
+                    // `SQLGetConnectAttr` is the odd one out and declares it
+                    // `SQLINTEGER`. Clamping rather than failing is safe in the
+                    // direction that matters: core writes at most `i16::MAX`
+                    // code units into a buffer the application declared larger,
+                    // and a value that genuinely does not fit is still reported
+                    // as `01004` by the writer below. The spec describes this
+                    // argument only as "the length of *ValuePtr" and defines no
+                    // error for a large one.
+                    let buf_u16 = i16::try_from(buffer_length / 2).unwrap_or(i16::MAX);
                     let mut len_u16: i16 = 0;
                     let ret = crate::utf16::note_truncation(
                         write_utf16(&s, value_ptr as *mut u16, buf_u16, &mut len_u16),
@@ -1787,6 +1793,40 @@ mod tests {
             assert_eq!(
                 info, attr,
                 "SQL_DATABASE_NAME and SQL_ATTR_CURRENT_CATALOG disagree"
+            );
+
+            cleanup_for::<MockAltBackend>(env, conn);
+        }
+    }
+
+    /// `SQLGetConnectAttr`'s *BufferLength* is `SQLINTEGER`, so 64 KB is an
+    /// ordinary thing for an application to offer for a catalog name and the
+    /// spec defines no error for it — the argument is described only as "the
+    /// length of \**ValuePtr*". It used to fail with `HY000`, because the value
+    /// was narrowed to the `SQLSMALLINT` the shared string writer takes.
+    #[test]
+    fn a_buffer_larger_than_i16_max_still_returns_the_catalog() {
+        unsafe {
+            let (env, conn) = alloc_env_conn_for::<MockAltBackend>();
+            assert_eq!(driver_connect::<MockAltBackend>(conn), SqlReturn::SUCCESS);
+
+            // 32768 code units is 65536 bytes: one past what an i16 can hold.
+            let mut buf = vec![0u16; 32_768];
+            let mut len: i32 = 0;
+            assert_eq!(
+                sql_get_connect_attr_w::<MockAltBackend>(
+                    conn,
+                    ConnectionAttribute::CURRENT_CATALOG.0,
+                    buf.as_mut_ptr().cast(),
+                    i32::try_from(buf.len() * 2).expect("length fits in i32"),
+                    &mut len,
+                ),
+                SqlReturn::SUCCESS,
+                "a large buffer is not a failure the spec defines",
+            );
+            assert_eq!(
+                String::from_utf16_lossy(&buf[..(len / 2) as usize]),
+                "alt_catalog",
             );
 
             cleanup_for::<MockAltBackend>(env, conn);
