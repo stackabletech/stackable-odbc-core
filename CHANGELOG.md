@@ -2583,4 +2583,18 @@ Everything a driver has to change for the catalog rework, in one place.
   `StrLen_or_Ind` argument contained SQL_NULL_DATA or SQL_DEFAULT_PARAM" — so
   it is the driver's to return, and both orderings now do.
 
+- **`SQLParamData` called twice in a row reports `HY010`.** It finalised the
+  requested parameter from an empty accumulated buffer, which it read as NULL,
+  so an application that lost track of its own data-at-execution loop inserted
+  a silently wrong row. The spec's `HY010` row states it directly, after the
+  `(DM)` clause and unmarked: "The previous function call was a call to
+  **SQLParamData**." The state survives the error, so the application recovers
+  by calling `SQLPutData` for the parameter it was already asked for.
+
+- **A zero-length data-at-execution value is no longer NULL.**
+  `SQLPutData(ptr, 0)` sends a zero-length value and
+  `SQLPutData(_, SQL_NULL_DATA)` sends NULL; inferring NULL from an empty
+  buffer collapsed the two, so an empty string could not be sent this way at
+  all.
+
 [Unreleased]: https://github.com/stackabletech/stackable-odbc-core/commits/HEAD

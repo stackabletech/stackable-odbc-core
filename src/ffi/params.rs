@@ -1145,8 +1145,12 @@ pub(crate) fn is_data_at_exec(indicator: isize) -> bool {
 /// Convert an accumulated data-at-execution buffer into a `ColumnValue` using the
 /// parameter's bound C type. Binary data must not pass through a UTF-8 conversion
 /// (which corrupts non-UTF-8 bytes); `SQL_C_WCHAR` data is UTF-16; everything else
-/// is treated as text. The buffer is assumed non-empty (the caller maps an empty
-/// buffer to `ColumnValue::Null`).
+/// is treated as text.
+///
+/// An empty buffer is a **zero-length value**, not NULL. The caller decides that
+/// from `PutDataState`, because `SQLPutData(ptr, 0)` and
+/// `SQLPutData(_, SQL_NULL_DATA)` send two different parameters and inferring
+/// NULL from emptiness made the first of them unexpressible.
 ///
 /// Text is then converted to `sql_type` by [`crate::param_convert::text_to_sql_type`],
 /// the same way [`read_param_value`] converts a value delivered in one piece.
@@ -1517,7 +1521,11 @@ pub unsafe fn sql_put_data<B: Backend>(
 ///   `Backend::is_cancelled` reporting its token signalled, core reports `HY008` in place of
 ///   the backend's own SQLSTATE.
 /// - HY010: Function sequence error — returned when no data-at-execution operation is in
-///   progress. (DM cases for async: driver-manager-handled; not returned here.)
+///   progress, and, per the row's unmarked sentence "The previous function call was a call to
+///   SQLParamData", when this call would finalise a parameter for which `SQLPutData` was never
+///   called. The data-at-execution state survives that error, so the application recovers by
+///   calling `SQLPutData` for the parameter it was already asked for. (DM cases for async:
+///   driver-manager-handled; not returned here.)
 /// - HY013: Memory management error — not applicable.
 /// - HY090: Invalid string or buffer length — propagated from backend.
 /// - HY105: Invalid parameter type — propagated from backend.
@@ -1563,9 +1571,28 @@ pub unsafe fn sql_param_data<B: Backend>(
                 )
             })?;
 
+            // Spec HY010, the sentence after the `(DM)` clause and itself
+            // unmarked: "The previous function call was a call to
+            // SQLParamData." An empty buffer cannot stand in for that check —
+            // `SQLPutData(ptr, 0)` sends a zero-length value and produces the
+            // same empty buffer — so two SQLParamData calls in a row used to
+            // send NULL for the parameter and move on.
+            //
+            // The state goes back on the statement first: an HY010 does not
+            // cancel the data-at-execution sequence, and the application
+            // recovers by calling SQLPutData for the parameter it was already
+            // asked for.
+            if dae.current_param.is_some() && dae.put_state == PutDataState::NotCalled {
+                stmt.data_at_exec = Some(dae);
+                return Err(OdbcError::general(
+                    "SQLPutData must be called for the requested parameter before SQLParamData is called again",
+                    SqlState::function_sequence_error(),
+                ));
+            }
+
             // If there's a current param being filled, finalize it.
             if let Some(param_num) = dae.current_param.take() {
-                let value = if dae.buffer.is_empty() {
+                let value = if dae.put_state == PutDataState::Null {
                     ColumnValue::Null
                 } else {
                     let rec = records.get(param_num)?;
@@ -2122,6 +2149,189 @@ mod tests {
                 "data may be sent in as many pieces as the application likes",
             );
             assert_eq!(dae_buffer(stmt), b"abcd".to_vec());
+
+            cleanup(env, conn, stmt);
+        }
+    }
+
+    /// Spec, `SQLParamData` `HY010`, the sentence after the `(DM)` clause and
+    /// itself unmarked: "The previous function call was a call to
+    /// SQLParamData."
+    ///
+    /// The old finaliser read an empty buffer as NULL, so calling SQLParamData
+    /// twice in a row sent NULL for the parameter and moved on. An application
+    /// that lost track of its own loop got a silently wrong row inserted.
+    #[test]
+    fn param_data_called_twice_in_a_row_reports_hy010() {
+        unsafe {
+            let (env, conn, stmt) = connected_stmt();
+            let mut indicator: isize = SQL_DATA_AT_EXEC;
+            start_dae_loop(
+                stmt,
+                CDataType::Char,
+                SqlDataType::VARCHAR,
+                &raw mut indicator,
+            );
+
+            // `start_dae_loop` left parameter 1 requested and no SQLPutData
+            // called for it.
+            let mut value_ptr: *mut c_void = std::ptr::null_mut();
+            assert_eq!(
+                sql_param_data::<MockBackend>(stmt, &raw mut value_ptr),
+                SqlReturn::ERROR,
+            );
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |h| {
+                let rec = h.diagnostics.get(0).expect("record 1 exists");
+                assert_eq!(rec.sqlstate.as_str(), "HY010");
+                assert!(
+                    h.data_at_exec.is_some(),
+                    "the loop must survive so the application can recover by calling SQLPutData",
+                );
+            });
+
+            cleanup(env, conn, stmt);
+        }
+    }
+
+    /// `SQLPutData(ptr, 0)` sends a zero-length value; `SQLPutData(_,
+    /// SQL_NULL_DATA)` sends NULL. Reading an empty accumulated buffer as NULL
+    /// collapsed the two, so an empty string could not be sent at all.
+    ///
+    /// Two parameters, because a finalised value is only observable while the
+    /// loop is still open — the second `SQLParamData` finalises the first
+    /// parameter and then asks for the second.
+    #[test]
+    fn param_data_keeps_a_zero_length_value_distinct_from_null() {
+        unsafe {
+            let (env, conn, stmt) = connected_stmt();
+            let mut ind1: isize = SQL_DATA_AT_EXEC;
+            let mut ind2: isize = SQL_DATA_AT_EXEC;
+
+            for (number, indicator) in [(1u16, &raw mut ind1), (2u16, &raw mut ind2)] {
+                assert_eq!(
+                    sql_bind_parameter::<MockBackend>(
+                        stmt,
+                        number,
+                        ParamType::Input as i16,
+                        CDataType::Char as i16,
+                        SqlDataType::VARCHAR.0,
+                        50,
+                        0,
+                        std::ptr::null_mut(),
+                        0,
+                        indicator,
+                    ),
+                    SqlReturn::SUCCESS,
+                );
+            }
+
+            let wide: Vec<u16> = "INSERT INTO t VALUES (?, ?)".encode_utf16().collect();
+            assert_eq!(
+                crate::ffi::execute::sql_exec_direct_w::<MockBackend>(
+                    stmt,
+                    wide.as_ptr(),
+                    i32::try_from(wide.len()).expect("short"),
+                ),
+                SqlReturn::NEED_DATA,
+            );
+
+            let mut value_ptr: *mut c_void = std::ptr::null_mut();
+            assert_eq!(
+                sql_param_data::<MockBackend>(stmt, &raw mut value_ptr),
+                SqlReturn::NEED_DATA,
+                "precondition: parameter 1 is requested",
+            );
+
+            let mut nothing = [0u8; 1];
+            assert_eq!(
+                sql_put_data::<MockBackend>(stmt, nothing.as_mut_ptr().cast::<c_void>(), 0),
+                SqlReturn::SUCCESS,
+                "a zero-length put is legal",
+            );
+
+            assert_eq!(
+                sql_param_data::<MockBackend>(stmt, &raw mut value_ptr),
+                SqlReturn::NEED_DATA,
+                "parameter 1 is finalised and parameter 2 requested",
+            );
+
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |h| {
+                let dae = h.data_at_exec.as_ref().expect("the loop is still open");
+                assert_eq!(
+                    dae.collected_values.get(&1),
+                    Some(&ColumnValue::String(String::new())),
+                    "a zero-length put must not become NULL",
+                );
+            });
+
+            cleanup(env, conn, stmt);
+        }
+    }
+
+    /// The state is per parameter, not per loop: the second parameter of a
+    /// batch starts from "nothing put", or its first `SQLPutData` would be
+    /// refused as a concatenated null.
+    #[test]
+    fn param_data_resets_the_put_state_for_each_parameter() {
+        unsafe {
+            let (env, conn, stmt) = connected_stmt();
+            let mut ind1: isize = SQL_DATA_AT_EXEC;
+            let mut ind2: isize = SQL_DATA_AT_EXEC;
+
+            for (number, indicator) in [(1u16, &raw mut ind1), (2u16, &raw mut ind2)] {
+                assert_eq!(
+                    sql_bind_parameter::<MockBackend>(
+                        stmt,
+                        number,
+                        ParamType::Input as i16,
+                        CDataType::Char as i16,
+                        SqlDataType::VARCHAR.0,
+                        50,
+                        0,
+                        std::ptr::null_mut(),
+                        0,
+                        indicator,
+                    ),
+                    SqlReturn::SUCCESS,
+                );
+            }
+
+            let wide: Vec<u16> = "INSERT INTO t VALUES (?, ?)".encode_utf16().collect();
+            assert_eq!(
+                crate::ffi::execute::sql_exec_direct_w::<MockBackend>(
+                    stmt,
+                    wide.as_ptr(),
+                    i32::try_from(wide.len()).expect("short"),
+                ),
+                SqlReturn::NEED_DATA,
+            );
+
+            let mut value_ptr: *mut c_void = std::ptr::null_mut();
+            assert_eq!(
+                sql_param_data::<MockBackend>(stmt, &raw mut value_ptr),
+                SqlReturn::NEED_DATA,
+            );
+            // Parameter 1 is NULL.
+            assert_eq!(
+                sql_put_data::<MockBackend>(stmt, std::ptr::null_mut(), SQL_NULL_DATA),
+                SqlReturn::SUCCESS,
+            );
+            assert_eq!(
+                sql_param_data::<MockBackend>(stmt, &raw mut value_ptr),
+                SqlReturn::NEED_DATA,
+            );
+            // Parameter 2 takes data, which a state left at Null would refuse.
+            let mut data = *b"abc";
+            assert_eq!(
+                sql_put_data::<MockBackend>(stmt, data.as_mut_ptr().cast::<c_void>(), 3),
+                SqlReturn::SUCCESS,
+                "the put state must reset when SQLParamData names a new parameter",
+            );
+
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |h| {
+                let dae = h.data_at_exec.as_ref().expect("the loop is still open");
+                assert_eq!(dae.collected_values.get(&1), Some(&ColumnValue::Null));
+            });
 
             cleanup(env, conn, stmt);
         }
