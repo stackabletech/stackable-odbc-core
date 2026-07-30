@@ -101,6 +101,20 @@ pub const INDICATOR_VARIABLE_REQUIRED: &str = "22002";
 /// Invalid cursor state — 24000
 pub const INVALID_CURSOR_STATE: &str = "24000";
 
+/// Transaction is rolled back — 25S03
+///
+/// `SQLEndTran`'s diagnostics table describes this as a global-transaction
+/// outcome, but its `Suspended State` section gives it a second, sharper role:
+/// `25S03`, `40001`, `40002` and `HYC00` are the four SQLSTATEs that "confirm
+/// that the transaction did not complete". A driver returning `SQL_ERROR` from
+/// `SQLEndTran` with any *other* SQLSTATE puts the connection into a suspended
+/// state, where only read-only functions are allowed until `SQLDisconnect`.
+///
+/// So a backend that could not commit, rolled back, and is left with a
+/// perfectly usable connection reports this rather than `HY000`. The
+/// difference is not cosmetic: `HY000` would suspend a healthy connection.
+pub const TRANSACTION_ROLLED_BACK: &str = "25S03";
+
 /// Invalid authorization specification — 28000
 pub const INVALID_AUTH_SPEC: &str = "28000";
 
@@ -280,6 +294,14 @@ impl SqlState {
     /// Connection not open — 08003
     pub fn connection_not_open() -> Self {
         Self::new(CONNECTION_NOT_OPEN)
+    }
+
+    /// Transaction is rolled back — 25S03
+    ///
+    /// See [`TRANSACTION_ROLLED_BACK`] for why a backend that rolled back
+    /// instead of committing must report this rather than `HY000`.
+    pub fn transaction_rolled_back() -> Self {
+        Self::new(TRANSACTION_ROLLED_BACK)
     }
 
     /// Invalid cursor state — 24000

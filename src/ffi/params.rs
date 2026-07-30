@@ -1236,6 +1236,40 @@ pub(crate) unsafe fn find_data_at_exec_params(
     Ok((non_dae, dae_params, warnings))
 }
 
+/// Resolve `SQL_NTS` for a data-at-execution chunk, in the C type the parameter
+/// was bound with.
+///
+/// The spec's *StrLen_or_Ind* description: "The data must be in the C data type
+/// specified in the *ValueType* argument of **SQLBindParameter**." So a
+/// `SQL_C_WCHAR` parameter's terminator is a zero *code unit*, not a zero byte.
+/// Scanning it byte-wise stops inside the first character of any ASCII text and
+/// `dae_buffer_to_value`'s `chunks_exact(2)` then has nothing to pair, so the
+/// parameter arrives empty with no diagnostic — the bound-parameter path has
+/// always got this right, via `utf16_to_string`.
+///
+/// A C type that is neither known nor `SQL_C_WCHAR` scans bytes, which is what
+/// every single-byte C type wants and what `SQL_C_BINARY` gets by default. A
+/// binary value containing a zero byte cannot be sent with `SQL_NTS` at all,
+/// under any reading of the spec: the terminator is the only length there is.
+///
+/// # Safety
+///
+/// `data_ptr` must be non-null and satisfy [`crate::utf16::nts_byte_len`]'s
+/// contract, or [`crate::utf16::nts_utf16_len`]'s when the C type is
+/// `SQL_C_WCHAR`.
+unsafe fn dae_nts_byte_count(c_type: Option<odbc_sys::CDataType>, data_ptr: *const u8) -> usize {
+    match c_type {
+        // Two bytes per code unit, exactly as `dae_buffer_to_value` reads them
+        // back out of the accumulated buffer.
+        Some(odbc_sys::CDataType::WChar) => {
+            // SAFETY: forwarded from this function's own contract.
+            unsafe { crate::utf16::nts_utf16_len(data_ptr.cast::<u16>()) * 2 }
+        }
+        // SAFETY: forwarded from this function's own contract.
+        _ => unsafe { crate::utf16::nts_byte_len(data_ptr) },
+    }
+}
+
 /// Generic implementation of SQLPutData.
 ///
 /// Spec: <https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlputdata-function>
@@ -1302,8 +1336,8 @@ pub unsafe fn sql_put_data<B: Backend>(
     data_ptr: *mut c_void,
     str_len_or_ind: isize,
 ) -> SqlReturn {
-    tracing::debug!(
-        "SQLPutData(stmt={:?}, data={:?}, len={})",
+    tracing::trace!(
+        "SQLPutData(stmt={:?}, data={:?}, raw_len={})",
         statement_handle,
         data_ptr,
         str_len_or_ind
@@ -1313,7 +1347,8 @@ pub unsafe fn sql_put_data<B: Backend>(
     // before use and is valid for the specified length per the caller's contract.
     let ret = unsafe {
         panic_safe::<B, _>(statement_handle, |scope| {
-            let stmt = scope.get::<StatementHandle<B>>(statement_handle)?;
+            let (stmt, _conn, records) =
+                scope.stmt_with_parent_and_params::<B>(statement_handle)?;
             stmt.diagnostics.clear();
 
             // Spec HY010: must be in DAE state.
@@ -1325,12 +1360,27 @@ pub unsafe fn sql_put_data<B: Backend>(
             })?;
 
             // Spec HY010: SQLParamData must have been called first to set current_param.
-            if dae.current_param.is_none() {
+            let Some(param_num) = dae.current_param else {
                 return Err(OdbcError::general(
                     "SQLParamData must be called before SQLPutData to identify the current parameter",
                     SqlState::function_sequence_error(),
                 ));
-            }
+            };
+
+            // The C type this chunk is declared to be in. Resolved before the
+            // branches below so the log names it on every path, not only the
+            // one that scans.
+            let c_type = records
+                .get(param_num)?
+                .map(|r| r.apd.c_type())
+                .transpose()?;
+            tracing::debug!(
+                "SQLPutData(stmt={:?}, param={}, c_type={:?}, str_len_or_ind={})",
+                statement_handle,
+                param_num,
+                c_type,
+                str_len_or_ind
+            );
 
             // SQL_NULL_DATA: set param to NULL by clearing the buffer.
             if str_len_or_ind == SQL_NULL_DATA {
@@ -1348,10 +1398,10 @@ pub unsafe fn sql_put_data<B: Backend>(
 
             // Determine byte count.
             let byte_count = if str_len_or_ind == SQL_NTS as isize {
-                // Null-terminated string: scan for null byte.
-                // SAFETY: caller guarantees data_ptr is a valid null-terminated C string.
-                let cstr = std::ffi::CStr::from_ptr(data_ptr as *const std::ffi::c_char);
-                cstr.to_bytes().len()
+                // SAFETY: data_ptr is non-null (guarded above) and the caller
+                // guarantees it is null-terminated in the bound C type. Covered
+                // by this function's own `unsafe` block, as the reads below are.
+                dae_nts_byte_count(c_type, data_ptr.cast::<u8>())
             } else if str_len_or_ind < 0 {
                 // Spec HY090: negative length that's not SQL_NTS or SQL_NULL_DATA.
                 return Err(OdbcError::general(
@@ -1767,6 +1817,210 @@ mod tests {
     unsafe fn prepare_sql(stmt: *mut c_void, sql: &str) -> SqlReturn {
         let wide: Vec<u16> = sql.encode_utf16().collect();
         unsafe { sql_prepare_w::<MockBackend>(stmt, wide.as_ptr(), wide.len() as i32) }
+    }
+
+    /// [`alloc_env_conn_stmt`] with the connection actually open, which the
+    /// data-at-execution path needs: `SQLExecDirectW` reads
+    /// `ConnectionHandle::connection` before it ever looks at the parameters.
+    ///
+    /// # Safety
+    ///
+    /// The caller must free the three tokens with [`cleanup`].
+    unsafe fn connected_stmt() -> (*mut c_void, *mut c_void, *mut c_void) {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            assert_eq!(
+                connect_handle(conn),
+                SqlReturn::SUCCESS,
+                "precondition: the connection is open",
+            );
+            (env, conn, stmt)
+        }
+    }
+
+    /// Drive `stmt` into the data-at-execution loop with parameter 1 bound as
+    /// `SQL_DATA_AT_EXEC`, stopping where `SQLPutData` is the next legal call.
+    ///
+    /// The value pointer is null and the indicator is not, which is a binding:
+    /// `ParamRecords::get` counts a record carrying either pointer, and
+    /// `SQLBindParameter`'s own *ParameterValuePtr* text allows the null "as
+    /// long as *StrLen_or_IndPtr is SQL_NULL_DATA or SQL_DATA_AT_EXEC".
+    ///
+    /// # Safety
+    ///
+    /// `indicator` must outlive the whole loop: core reads it again at execute
+    /// time.
+    unsafe fn start_dae_loop(
+        stmt: *mut c_void,
+        c_type: CDataType,
+        sql_type: SqlDataType,
+        indicator: *mut isize,
+    ) {
+        unsafe {
+            assert_eq!(
+                sql_bind_parameter::<MockBackend>(
+                    stmt,
+                    1,
+                    ParamType::Input as i16,
+                    c_type as i16,
+                    sql_type.0,
+                    50,
+                    0,
+                    std::ptr::null_mut(),
+                    0,
+                    indicator,
+                ),
+                SqlReturn::SUCCESS,
+                "precondition: parameter 1 is bound",
+            );
+
+            let wide: Vec<u16> = "INSERT INTO t VALUES (?)".encode_utf16().collect();
+            assert_eq!(
+                crate::ffi::execute::sql_exec_direct_w::<MockBackend>(
+                    stmt,
+                    wide.as_ptr(),
+                    i32::try_from(wide.len()).expect("short"),
+                ),
+                SqlReturn::NEED_DATA,
+                "precondition: the data-at-execution loop starts",
+            );
+
+            let mut value_ptr: *mut c_void = std::ptr::null_mut();
+            assert_eq!(
+                sql_param_data::<MockBackend>(stmt, &raw mut value_ptr),
+                SqlReturn::NEED_DATA,
+                "precondition: parameter 1 is requested",
+            );
+        }
+    }
+
+    /// Read the accumulated data-at-execution buffer, which is what
+    /// `SQLPutData` appends to and `SQLParamData` later converts.
+    fn dae_buffer(stmt: *mut c_void) -> Vec<u8> {
+        with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |h| {
+            h.data_at_exec
+                .as_ref()
+                .expect("the data-at-execution loop is still open")
+                .buffer
+                .clone()
+        })
+    }
+
+    /// `SQL_NTS` must be resolved in the C type the parameter was bound with:
+    /// "The data must be in the C data type specified in the ValueType argument
+    /// of SQLBindParameter."
+    ///
+    /// A byte-wise scan stops inside the first character of any ASCII text —
+    /// "Hello" in UTF-16LE carries a zero byte at index 1 — and
+    /// `dae_buffer_to_value`'s `chunks_exact(2)` then has nothing to pair, so
+    /// the parameter arrived as an empty string with no diagnostic at all.
+    #[test]
+    fn put_data_resolves_sql_nts_in_the_bound_c_type() {
+        unsafe {
+            let (env, conn, stmt) = connected_stmt();
+            let mut indicator: isize = SQL_DATA_AT_EXEC;
+            start_dae_loop(
+                stmt,
+                CDataType::WChar,
+                SqlDataType::EXT_W_VARCHAR,
+                &raw mut indicator,
+            );
+
+            let mut wide: Vec<u16> = "Hello".encode_utf16().collect();
+            wide.push(0);
+            assert_eq!(
+                sql_put_data::<MockBackend>(
+                    stmt,
+                    wide.as_mut_ptr().cast::<c_void>(),
+                    SQL_NTS as isize,
+                ),
+                SqlReturn::SUCCESS,
+            );
+
+            let buffer = dae_buffer(stmt);
+            assert_eq!(
+                buffer.len(),
+                10,
+                "five UTF-16 code units are ten bytes; a byte-wise scan keeps one",
+            );
+            let units: Vec<u16> = buffer
+                .chunks_exact(2)
+                .map(|b| u16::from_ne_bytes([b[0], b[1]]))
+                .collect();
+            assert_eq!(String::from_utf16_lossy(&units), "Hello");
+
+            cleanup(env, conn, stmt);
+        }
+    }
+
+    /// The narrow half of the same rule: `SQL_C_CHAR` still terminates on a
+    /// zero *byte*, so this is the behaviour the C-type dispatch must not
+    /// change.
+    #[test]
+    fn put_data_resolves_sql_nts_bytewise_for_sql_c_char() {
+        unsafe {
+            let (env, conn, stmt) = connected_stmt();
+            let mut indicator: isize = SQL_DATA_AT_EXEC;
+            start_dae_loop(
+                stmt,
+                CDataType::Char,
+                SqlDataType::VARCHAR,
+                &raw mut indicator,
+            );
+
+            let mut data = *b"Hello\0";
+            assert_eq!(
+                sql_put_data::<MockBackend>(
+                    stmt,
+                    data.as_mut_ptr().cast::<c_void>(),
+                    SQL_NTS as isize,
+                ),
+                SqlReturn::SUCCESS,
+            );
+
+            assert_eq!(dae_buffer(stmt), b"Hello".to_vec());
+
+            cleanup(env, conn, stmt);
+        }
+    }
+
+    /// `CStr::from_ptr` scans without a bound, so a buffer whose terminator is
+    /// missing is read past its own allocation — the only such scan in the
+    /// crate, since `utf16_to_string` caps its own at `MAX_NTS_SCAN`.
+    ///
+    /// The buffer is exactly the cap, so a correctly bounded scan stops on its
+    /// last byte and reads nothing beyond it. One byte further and Miri reports
+    /// the over-read, which is what makes this test worth its size.
+    #[test]
+    fn put_data_bounds_an_unterminated_nts_scan() {
+        unsafe {
+            let (env, conn, stmt) = connected_stmt();
+            let mut indicator: isize = SQL_DATA_AT_EXEC;
+            start_dae_loop(
+                stmt,
+                CDataType::Char,
+                SqlDataType::VARCHAR,
+                &raw mut indicator,
+            );
+
+            let mut data = vec![b'a'; crate::utf16::MAX_NTS_SCAN];
+            assert_eq!(
+                sql_put_data::<MockBackend>(
+                    stmt,
+                    data.as_mut_ptr().cast::<c_void>(),
+                    SQL_NTS as isize,
+                ),
+                SqlReturn::SUCCESS,
+            );
+
+            assert_eq!(
+                dae_buffer(stmt).len(),
+                crate::utf16::MAX_NTS_SCAN,
+                "the scan did not stop at its bound",
+            );
+
+            cleanup(env, conn, stmt);
+        }
     }
 
     /// Spec, `SQLParamData` `HY008`, second clause: `SQLCancel` "was called on

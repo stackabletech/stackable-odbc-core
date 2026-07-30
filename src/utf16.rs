@@ -1,13 +1,19 @@
 //! UTF-16 conversion helpers for the Wide ODBC ABI (`utf16_to_string`,
-//! `write_utf16`).
+//! `write_utf16`), and the bound every `SQL_NTS` scan in the crate shares.
 
 use crate::errors::OdbcError;
 use crate::types::SqlReturn;
 
-/// Maximum number of UTF-16 code units to scan when searching for a null
-/// terminator (`SQL_NTS`). This prevents unbounded reads on malformed input.
-/// 32 767 code units (64 KiB) is generous for any realistic ODBC string.
-const MAX_NTS_SCAN: usize = i16::MAX as usize;
+/// Maximum number of units to scan when searching for a null terminator
+/// (`SQL_NTS`) — UTF-16 code units or bytes, depending on the scan. This
+/// prevents unbounded reads on malformed input. 32 767 units is generous for
+/// any realistic ODBC string.
+///
+/// `pub(crate)` because `SQLPutData` resolves `SQL_NTS` over an
+/// application-supplied buffer too. A second bound stated there would be a
+/// second answer to one question, and the answer that went missing is the one
+/// that let an unterminated buffer be read past its allocation.
+pub(crate) const MAX_NTS_SCAN: usize = i16::MAX as usize;
 
 /// Convert a UTF-16 encoded string pointer into a Rust `String`.
 ///
@@ -61,6 +67,56 @@ pub unsafe fn utf16_to_string(ptr: *const u16, len: i32) -> Result<String, OdbcE
     };
 
     Ok(String::from_utf16_lossy(&units))
+}
+
+/// Length, in `u16` code units, of a null-terminated UTF-16 string, bounded to
+/// [`MAX_NTS_SCAN`]. The terminator itself is not counted.
+///
+/// The counting half of [`utf16_to_string`]'s scan, for a caller that wants the
+/// length rather than the decoded text — `SQLPutData` accumulates raw bytes and
+/// decodes once, at the end, so decoding each chunk would be both wasteful and
+/// wrong across a split surrogate pair.
+///
+/// # Safety
+///
+/// `ptr` must be non-null and either point to a null-terminated UTF-16 string
+/// or be valid for [`MAX_NTS_SCAN`] readable code units.
+pub(crate) unsafe fn nts_utf16_len(ptr: *const u16) -> usize {
+    let mut len = 0;
+    while len < MAX_NTS_SCAN {
+        // SAFETY: the caller guarantees a terminator within the bound, or that
+        // many readable units. `read_unaligned` because an ODBC application may
+        // place its buffer at any offset inside a packed structure.
+        if unsafe { std::ptr::read_unaligned(ptr.add(len)) } == 0 {
+            break;
+        }
+        len += 1;
+    }
+    len
+}
+
+/// Length, in bytes, of a null-terminated byte string, bounded to
+/// [`MAX_NTS_SCAN`]. The terminator itself is not counted.
+///
+/// The byte counterpart of [`nts_utf16_len`], for `SQL_C_CHAR` and the other
+/// single-byte C types. `CStr::from_ptr` is the alternative and is unbounded,
+/// so a buffer whose terminator is missing is read past its own allocation.
+///
+/// # Safety
+///
+/// `ptr` must be non-null and either point to a null-terminated byte string or
+/// be valid for [`MAX_NTS_SCAN`] readable bytes.
+pub(crate) unsafe fn nts_byte_len(ptr: *const u8) -> usize {
+    let mut len = 0;
+    while len < MAX_NTS_SCAN {
+        // SAFETY: as above. `u8` has alignment 1, so no unaligned read is
+        // possible and no `read_unaligned` is needed.
+        if unsafe { *ptr.add(len) } == 0 {
+            break;
+        }
+        len += 1;
+    }
+    len
 }
 
 /// Write a UTF-16 encoded string into an output buffer.

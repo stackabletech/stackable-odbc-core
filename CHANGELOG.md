@@ -2538,4 +2538,18 @@ Everything a driver has to change for the catalog rework, in one place.
   `SQL_DESC_PARAMETER_TYPE` has always been rejected, as `HY092`. The line now
   says so, and a test pins it. No behaviour change.
 
+- **`SQLPutData` corrupted every wide data-at-execution value.** It resolved
+  `SQL_NTS` with a byte-wise scan whatever the parameter was bound as, so a
+  `SQL_C_WCHAR` value stopped at the first zero byte — index 1 of any ASCII
+  text in UTF-16LE. The one surviving byte then failed to pair under
+  `chunks_exact(2)` and the parameter reached the backend as an empty string,
+  with no diagnostic. `SQL_NTS` is now resolved in the C type the APD records,
+  which is what the spec says it is: "The data must be in the C data type
+  specified in the *ValueType* argument of **SQLBindParameter**."
+
+- **`SQLPutData`'s `SQL_NTS` scan is bounded.** It used `CStr::from_ptr`, which
+  scans until it finds a terminator; a buffer without one was read past its own
+  allocation. It now shares `utf16_to_string`'s `MAX_NTS_SCAN` bound, which was
+  already applied everywhere else in the crate.
+
 [Unreleased]: https://github.com/stackabletech/stackable-odbc-core/commits/HEAD
