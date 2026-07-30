@@ -2521,4 +2521,15 @@ Everything a driver has to change for the catalog rework, in one place.
   bookmark records, which remain out of scope: bookmarks are an ARD and IRD
   concept and an IPD has none.
 
+- **`SQLSetDescFieldW` accepted a `SQL_DESC_NAME` longer than
+  `SQL_MAX_IDENTIFIER_LEN`.** The spec's `22001` row is unmarked — "The
+  FieldIdentifier argument was SQL_DESC_NAME, and the BufferLength argument was
+  a value larger than SQL_MAX_IDENTIFIER_LEN" — and the doc comment's stated
+  reason for skipping it ("core imposes no length limit of its own") was beside
+  the point: the limit is the *backend's*, and core already answers it from
+  `Backend::catalog_result_column_widths().identifier_len`. A name longer than
+  that is now `22001`. **A driver declaring a small `identifier_len` will see
+  calls fail that previously succeeded**, which is the report the application
+  was entitled to.
+
 [Unreleased]: https://github.com/stackabletech/stackable-odbc-core/commits/HEAD

@@ -432,8 +432,12 @@ fn read_ird_field<B: Backend>(
 ///   this row precede the `SQL_DESC_COUNT` and implicitly-allocated-APD clauses only; read
 ///   them clause by clause
 /// - `08S01` Communication link failure — (not returned here; this function performs no I/O)
-/// - `22001` String data, right truncated — (not returned here; `SQL_DESC_NAME` is stored as
-///   given, and core imposes no length limit of its own on it)
+/// - `22001` String data, right truncated — returned when `SQL_DESC_NAME` is longer than
+///   `SQL_MAX_IDENTIFIER_LEN`, which core answers per backend from
+///   `Backend::catalog_result_column_widths().identifier_len`. The spec's row names
+///   `BufferLength`, a byte count for this Wide function, while `SQL_MAX_IDENTIFIER_LEN` is a
+///   character count — so the comparison is against the decoded name's characters, which is
+///   the only reading that gives the ANSI and Wide entry points the same limit
 /// - `HY000` General error — returned only for an internal panic caught by `panic_safe`
 /// - `HY001` Memory allocation error — (not returned here; nothing is allocated)
 /// - `HY010` Function sequence error — **(DM)** on all four of its clauses; not returned here
@@ -586,9 +590,35 @@ unsafe fn write_desc_field<B: Backend>(
     let record_number = u16::try_from(record_number).unwrap_or(0);
     let value = if field == Desc::Name {
         // SAFETY: forwarded from this function's contract.
-        DescFieldValue::String(unsafe {
-            crate::utf16::utf16_to_string(value_ptr.cast::<u16>(), buffer_length / 2)?
-        })
+        let name =
+            unsafe { crate::utf16::utf16_to_string(value_ptr.cast::<u16>(), buffer_length / 2)? };
+        // Spec 22001, unmarked: "The FieldIdentifier argument was
+        // SQL_DESC_NAME, and the BufferLength argument was a value larger than
+        // SQL_MAX_IDENTIFIER_LEN."
+        //
+        // The limit is the backend's, not core's: `SQL_MAX_IDENTIFIER_LEN` is
+        // answered from `Backend::catalog_result_column_widths`, which takes no
+        // connection and so is reachable from here. Reading it from the same
+        // declaration `SQLGetInfo` reads is what keeps the two from disagreeing
+        // about one data source's limit.
+        //
+        // The row names `BufferLength`, a **byte** count for this Wide
+        // function, while `SQL_MAX_IDENTIFIER_LEN` is a **character** count.
+        // Comparing the two directly would reject every name over half the
+        // limit here and accept twice the limit through an ANSI Driver Manager,
+        // so the comparison is against the decoded name.
+        let max_identifier_len = usize::from(B::catalog_result_column_widths().identifier_len);
+        let length = name.chars().count();
+        if length > max_identifier_len {
+            return Err(OdbcError::general(
+                format!(
+                    "SQL_DESC_NAME is {length} characters, and SQL_MAX_IDENTIFIER_LEN is \
+                     {max_identifier_len}"
+                ),
+                SqlState::string_data_right_truncation(),
+            ));
+        }
+        DescFieldValue::String(name)
     } else {
         DescFieldValue::Numeric(value_ptr as isize)
     };
@@ -1290,8 +1320,8 @@ mod tests {
     use crate::ffi::diag::sql_get_diag_rec_w;
     use crate::ffi::stmt_attr::sql_get_stmt_attr_w;
     use crate::test_utils::{
-        MockBackend, MockLongDataBackend, MockRecordingBackend, MockTypeInfoBackend,
-        alloc_env_conn_stmt, cleanup_env_conn_stmt, with_descriptor,
+        MockAltBackend, MockBackend, MockLongDataBackend, MockRecordingBackend,
+        MockTypeInfoBackend, alloc_env_conn_stmt, cleanup_env_conn_stmt, with_descriptor,
     };
     use crate::types::sql_state;
     use odbc_sys::{CDataType, HandleType, ParamType, SqlDataType, StatementAttribute};
@@ -2578,6 +2608,60 @@ mod tests {
             assert_eq!(ret, SqlReturn::INVALID_HANDLE);
 
             cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
+    /// Spec `22001`, unmarked: "The FieldIdentifier argument was SQL_DESC_NAME,
+    /// and the BufferLength argument was a value larger than
+    /// SQL_MAX_IDENTIFIER_LEN."
+    ///
+    /// `MockAltBackend` declares `identifier_len: 63`, where the default is
+    /// 128 — so a test that passed against a hard-coded limit in core would
+    /// fail here, which is the point of using it. The spec names `BufferLength`,
+    /// a byte count for this Wide function, while `SQL_MAX_IDENTIFIER_LEN` is a
+    /// character count; the comparison is against the decoded name's characters.
+    #[test]
+    fn a_name_longer_than_the_backends_identifier_limit_reports_22001() {
+        unsafe {
+            let (env, conn, stmt) =
+                crate::test_utils::alloc_connected_env_conn_stmt::<MockAltBackend>();
+            let ipd = desc_token_of::<MockAltBackend>(stmt, StatementAttribute::ImpParamDesc);
+
+            let limit = usize::from(
+                <MockAltBackend as Backend>::catalog_result_column_widths().identifier_len,
+            );
+
+            // Exactly at the limit: accepted.
+            let at_limit: Vec<u16> = "a".repeat(limit).encode_utf16().collect();
+            let ret = sql_set_desc_field_w::<MockAltBackend>(
+                ipd,
+                1,
+                Desc::Name as i16,
+                at_limit.as_ptr().cast_mut().cast::<c_void>(),
+                i32::try_from(at_limit.len() * 2).expect("short"),
+            );
+            assert_eq!(
+                ret,
+                SqlReturn::SUCCESS,
+                "a name of exactly SQL_MAX_IDENTIFIER_LEN characters is legal"
+            );
+
+            // One over: refused.
+            let too_long: Vec<u16> = "a".repeat(limit + 1).encode_utf16().collect();
+            let ret = sql_set_desc_field_w::<MockAltBackend>(
+                ipd,
+                1,
+                Desc::Name as i16,
+                too_long.as_ptr().cast_mut().cast::<c_void>(),
+                i32::try_from(too_long.len() * 2).expect("short"),
+            );
+            assert_eq!(ret, SqlReturn::ERROR);
+            assert_eq!(
+                first_sqlstate_of::<MockAltBackend>(ipd),
+                sql_state::STRING_DATA_RIGHT_TRUNCATION
+            );
+
+            crate::test_utils::cleanup_connected_env_conn_stmt::<MockAltBackend>(env, conn, stmt);
         }
     }
 
