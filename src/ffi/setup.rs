@@ -127,7 +127,7 @@ pub(crate) fn dsn_section_attributes(attrs: &HashMap<String, String>) -> Vec<(&s
     for (k, v) in attrs {
         if is_reserved_dsn_key(k) {
             // AGENTS.md: an intentional silent accept gets a `warn!`. Keyword
-            // name only -- a DSN attribute list routinely carries `PWD=`, and
+            // name only. A DSN attribute list routinely carries `PWD=`, and
             // unlike `ConnectParams` this is a plain `HashMap` with no
             // redacting `Debug`.
             tracing::warn!(
@@ -168,12 +168,69 @@ unsafe extern "system" {
     unsafe fn SQLValidDSNW(lpszDSN: *const u16) -> i32;
 }
 
-#[cfg(windows)]
+// `SQLConfigDataSource` request flags, from `odbcinst.h`. Not `#[cfg(windows)]`:
+// `config_request_from_raw` below is the boundary conversion, and keeping it
+// outside the gate is what lets a Linux test reach it at all.
+//
+// Only the first three are `ConfigDSN`'s. The rest are listed because they are
+// the values a Driver Manager can plausibly forward here and `ConfigDSN` must
+// reject — its diagnostics table names the condition exactly: "The *fRequest*
+// argument was not one of the following: ODBC_ADD_DSN ODBC_CONFIG_DSN
+// ODBC_REMOVE_DSN."
+#[cfg_attr(not(windows), allow(dead_code))]
 const ODBC_ADD_DSN: u16 = 1;
-#[cfg(windows)]
+#[cfg_attr(not(windows), allow(dead_code))]
 const ODBC_CONFIG_DSN: u16 = 2;
-#[cfg(windows)]
+#[cfg_attr(not(windows), allow(dead_code))]
 const ODBC_REMOVE_DSN: u16 = 3;
+/// `ODBC_ADD_SYS_DSN` (4) — `SQLConfigDataSource`'s system-DSN request, which
+/// `ConfigDSN` does not accept. Named only so the guard test can reject it by
+/// name rather than by literal.
+#[allow(dead_code)]
+const ODBC_ADD_SYS_DSN: u16 = 4;
+/// `ODBC_CONFIG_SYS_DSN` (5) — likewise.
+#[allow(dead_code)]
+const ODBC_CONFIG_SYS_DSN: u16 = 5;
+/// `ODBC_REMOVE_SYS_DSN` (6) — likewise.
+#[allow(dead_code)]
+const ODBC_REMOVE_SYS_DSN: u16 = 6;
+/// `ODBC_REMOVE_DEFAULT_DSN` (7) — likewise.
+#[allow(dead_code)]
+const ODBC_REMOVE_DEFAULT_DSN: u16 = 7;
+
+/// `ConfigDSN`'s *fRequest* argument, as one of the three values its spec
+/// defines.
+///
+/// A typed enum because the crate converts raw ABI integers at the boundary
+/// rather than passing them through, and because the alternative — a `_` arm at
+/// the bottom of a `match f_request` — is what put the request check *after*
+/// the attribute checks, so an unrecognised request was diagnosed as a bad
+/// attribute list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) enum ConfigRequest {
+    /// `ODBC_ADD_DSN` (1) — add a new data source.
+    Add,
+    /// `ODBC_CONFIG_DSN` (2) — configure (modify) an existing data source.
+    Config,
+    /// `ODBC_REMOVE_DSN` (3) — remove an existing data source.
+    Remove,
+}
+
+/// Recognise a *fRequest* value, following the crate's `*_from_raw` idiom.
+///
+/// `None` for anything else, including `odbcinst.h`'s `ODBC_ADD_SYS_DSN` and
+/// its neighbours: those belong to `SQLConfigDataSource`, and `ConfigDSN`'s own
+/// table lists three values and no others.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn config_request_from_raw(raw: u16) -> Option<ConfigRequest> {
+    match raw {
+        ODBC_ADD_DSN => Some(ConfigRequest::Add),
+        ODBC_CONFIG_DSN => Some(ConfigRequest::Config),
+        ODBC_REMOVE_DSN => Some(ConfigRequest::Remove),
+        _ => None,
+    }
+}
 
 // `SQLInstallerError` codes, from `odbcinst.h`. Only the ones `ConfigDSN`'s own
 // diagnostics table lists are defined here; the header carries eighteen more
@@ -385,8 +442,12 @@ fn write_dsn_attributes(dsn_w: &[u16], attrs: &std::collections::HashMap<String,
 /// - **ODBC_ERROR_INVALID_NAME** — **posted** when `lpszDriver` is null. A driver
 ///   name that is non-null but absent from the registry is `SQLWriteDSNToIniW`'s
 ///   to detect, and it posts its own error for that.
-/// - **ODBC_ERROR_INVALID_REQUEST_TYPE** — **posted** by the `_` match arm, for
-///   an `fRequest` outside the three defined values.
+/// - **ODBC_ERROR_INVALID_REQUEST_TYPE** — **posted** for an `fRequest` outside
+///   the three defined values, and posted *first*: it is checked before the
+///   driver name, the attribute list and `SQLValidDSN`, so an unrecognised
+///   request is diagnosed as one rather than as whatever else the call also got
+///   wrong. `odbcinst.h`'s `ODBC_ADD_SYS_DSN` (4) and its neighbours are
+///   `SQLConfigDataSource`'s and land here.
 /// - **ODBC_ERROR_REQUEST_FAILED** — **posted** when a panic is caught (see
 ///   below), and when `ODBC_CONFIG_DSN` names a data source that is not in
 ///   ODBC.INI. The spec makes that check `ConfigDSN`'s: "**ConfigDSN** checks
@@ -463,6 +524,20 @@ unsafe fn config_dsn_body(
     lpsz_driver: *const u16,
     lpsz_attributes: *const u16,
 ) -> i32 {
+    // First, before anything else can fail. The spec ties
+    // ODBC_ERROR_INVALID_REQUEST_TYPE to this condition alone ("The fRequest
+    // argument was not one of the following: ODBC_ADD_DSN ODBC_CONFIG_DSN
+    // ODBC_REMOVE_DSN"), and checking it last meant an out-of-range request
+    // with a malformed attribute list was reported as a bad attribute list, so
+    // the caller never learned the request itself was rejected.
+    let Some(request) = config_request_from_raw(f_request) else {
+        return fail(
+            ODBC_ERROR_INVALID_REQUEST_TYPE,
+            "fRequest was not ODBC_ADD_DSN, ODBC_CONFIG_DSN or ODBC_REMOVE_DSN",
+        );
+    };
+    tracing::debug!("ConfigDSNW: request={:?}", request);
+
     if lpsz_driver.is_null() {
         return fail(
             ODBC_ERROR_INVALID_NAME,
@@ -495,7 +570,7 @@ unsafe fn config_dsn_body(
     // source name and to verify that no invalid characters are included in the
     // name." Reported as an invalid keyword *value*, since it is the DSN
     // keyword's value that is bad and that is the code ConfigDSN's own
-    // diagnostics table offers -- odbcinst.h's ODBC_ERROR_INVALID_DSN belongs to
+    // diagnostics table offers. odbcinst.h's ODBC_ERROR_INVALID_DSN belongs to
     // other installer entry points and is absent from this function's table.
     //
     // SAFETY: dsn_w is a null-terminated UTF-16 string constructed above.
@@ -507,8 +582,8 @@ unsafe fn config_dsn_body(
         );
     }
 
-    match f_request {
-        ODBC_ADD_DSN => {
+    match request {
+        ConfigRequest::Add => {
             // "Adding a Data Source": SQLWriteDSNToIni registers the name and the
             // Driver value, then "ConfigDSN calls SQLWritePrivateProfileString in
             // the installer DLL to add any additional keywords and values used by
@@ -519,7 +594,7 @@ unsafe fn config_dsn_body(
             // data source name and hwndParent is null, ConfigDSN overwrites the
             // existing name", and SQLWriteDSNToIni "removes the old section
             // before creating the new one". So an ADD carrying fewer keywords
-            // than a previous ADD *drops* the ones it left out -- callers must
+            // than a previous ADD *drops* the ones it left out, so callers must
             // supply the full attribute set, or use ODBC_CONFIG_DSN.
             //
             // SAFETY: dsn_w and lpsz_driver are null-terminated UTF-16 strings;
@@ -532,7 +607,7 @@ unsafe fn config_dsn_body(
             }
             write_dsn_attributes(&dsn_w, &attrs)
         }
-        ODBC_CONFIG_DSN => {
+        ConfigRequest::Config => {
             // "Modifying a Data Source": "ConfigDSN checks that the data source
             // name is in the Odbc.ini file (or registry)", and "If the data
             // source name was not changed, ConfigDSN calls
@@ -542,12 +617,12 @@ unsafe fn config_dsn_body(
             // SQLWriteDSNToIni is deliberately not called here. It "removes the
             // old section before creating the new one", so a modify carrying
             // three keywords would delete every other keyword the data source
-            // had -- which is what this arm did while it shared ODBC_ADD_DSN's
+            // had, which is what this arm did while it shared ODBC_ADD_DSN's
             // body. Keywords absent from a CONFIG are left standing, which is
             // what makes it a modify.
             //
-            // The rename branch -- "If the data source name was changed,
-            // ConfigDSN first calls SQLRemoveDSNFromIni" -- is unreachable
+            // The rename branch ("If the data source name was changed,
+            // ConfigDSN first calls SQLRemoveDSNFromIni") is unreachable
             // rather than unimplemented: lpszAttributes carries one DSN keyword
             // and no previous name, so there is nothing to compare against and
             // no rename to detect.
@@ -561,13 +636,9 @@ unsafe fn config_dsn_body(
             write_dsn_attributes(&dsn_w, &attrs)
         }
         // SAFETY: dsn_w is a null-terminated UTF-16 string constructed above.
-        ODBC_REMOVE_DSN => installer_result("SQLRemoveDSNFromIniW", unsafe {
+        ConfigRequest::Remove => installer_result("SQLRemoveDSNFromIniW", unsafe {
             SQLRemoveDSNFromIniW(dsn_w.as_ptr())
         }),
-        _ => fail(
-            ODBC_ERROR_INVALID_REQUEST_TYPE,
-            "fRequest was not ODBC_ADD_DSN, ODBC_CONFIG_DSN or ODBC_REMOVE_DSN",
-        ),
     }
 }
 
@@ -758,6 +829,75 @@ mod tests {
         assert!(attrs.is_empty());
     }
 
+    /// `ODBC_ADD_SYS_DSN` (4) and its neighbours are real `SQLConfigDataSource`
+    /// request flags — `/usr/include/odbcinst.h` lists 4 through 7 — that
+    /// `ConfigDSN` does not accept. Each must be unrecognised, so the caller
+    /// gets `ODBC_ERROR_INVALID_REQUEST_TYPE` and not a diagnosis of whatever
+    /// else was wrong with the call.
+    #[test]
+    fn only_the_three_config_dsn_requests_are_recognised() {
+        assert_eq!(
+            config_request_from_raw(ODBC_ADD_DSN),
+            Some(ConfigRequest::Add)
+        );
+        assert_eq!(
+            config_request_from_raw(ODBC_CONFIG_DSN),
+            Some(ConfigRequest::Config)
+        );
+        assert_eq!(
+            config_request_from_raw(ODBC_REMOVE_DSN),
+            Some(ConfigRequest::Remove)
+        );
+
+        // Values from odbcinst.h that belong to SQLConfigDataSource, not to
+        // ConfigDSN, plus the ends of the range.
+        for rejected in [
+            0,
+            ODBC_ADD_SYS_DSN,
+            ODBC_CONFIG_SYS_DSN,
+            ODBC_REMOVE_SYS_DSN,
+            ODBC_REMOVE_DEFAULT_DSN,
+            u16::MAX,
+        ] {
+            assert_eq!(
+                config_request_from_raw(rejected),
+                None,
+                "fRequest {rejected} is not one of ConfigDSN's three"
+            );
+        }
+    }
+
+    /// The request type is validated before anything else can fail, so that an
+    /// out-of-range `fRequest` is diagnosed as one. The spec ties
+    /// `ODBC_ERROR_INVALID_REQUEST_TYPE` to exactly that condition; reaching the
+    /// attribute checks first reports whatever was wrong with the attribute list
+    /// instead, and the caller never learns the request itself was rejected.
+    ///
+    /// A source-order assertion because `config_dsn_body` is `#[cfg(windows)]`
+    /// and links `odbccp32`.
+    #[test]
+    fn the_request_type_is_validated_before_the_attribute_list() {
+        let body = function_source("unsafe fn config_dsn_body(");
+        let request_check = body
+            .find("config_request_from_raw(")
+            .expect("config_dsn_body validates fRequest");
+        let attribute_parse = body
+            .find("parse_attributes_w(")
+            .expect("config_dsn_body parses the attribute list");
+        let valid_dsn = body
+            .find("SQLValidDSNW(")
+            .expect("config_dsn_body calls SQLValidDSN");
+
+        assert!(
+            request_check < attribute_parse,
+            "fRequest must be checked before the attribute list is parsed"
+        );
+        assert!(
+            request_check < valid_dsn,
+            "fRequest must be checked before SQLValidDSN can reject the name"
+        );
+    }
+
     /// `ODBC_CONFIG_DSN` must not call `SQLWriteDSNToIni`.
     ///
     /// That function "removes the old section before creating the new one", so
@@ -776,10 +916,10 @@ mod tests {
         // fall between the markers.
         let body = function_source("unsafe fn config_dsn_body(");
         let config_arm_start = body
-            .find("ODBC_CONFIG_DSN => {")
+            .find("ConfigRequest::Config => {")
             .expect("ODBC_CONFIG_DSN has an arm of its own");
         let add_arm_start = body
-            .find("ODBC_ADD_DSN => {")
+            .find("ConfigRequest::Add => {")
             .expect("ODBC_ADD_DSN has an arm of its own");
         assert!(
             add_arm_start < config_arm_start,
@@ -787,14 +927,14 @@ mod tests {
         );
         let config_arm = &body[config_arm_start..];
         let config_arm_end = config_arm
-            .find("ODBC_REMOVE_DSN")
+            .find("ConfigRequest::Remove")
             .expect("ODBC_REMOVE_DSN follows the CONFIG arm");
         let config_arm = &config_arm[..config_arm_end];
 
         assert!(
             !config_arm.contains("SQLWriteDSNToIniW"),
             "the ODBC_CONFIG_DSN arm calls SQLWriteDSNToIniW, which removes the \
-             data source's whole section before recreating it -- so a modify \
+             data source's whole section before recreating it, so a modify \
              carrying three keys deletes everything else the DSN had"
         );
         assert!(

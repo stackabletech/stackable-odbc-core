@@ -1501,6 +1501,14 @@ call `SQLCloseCursor` or `SQLFreeStmt(SQL_CLOSE)` first, as it already must for
   conversion the FFI boundary uses; `attr_odbc_version_from_raw` is unchanged and
   still cannot name `SQL_OV_ODBC2`.
 
+- `ConfigDSNW` validates `fRequest` before anything else. It was matched last,
+  so an out-of-range request carrying a malformed attribute list posted
+  `ODBC_ERROR_INVALID_KEYWORD_VALUE` and never reached the arm that posts
+  `ODBC_ERROR_INVALID_REQUEST_TYPE` — which the spec ties to that condition
+  alone. `odbcinst.h`'s `ODBC_ADD_SYS_DSN` (4) and its neighbours are real
+  `SQLConfigDataSource` flags that reach `ConfigDSN` and must be rejected as
+  request types.
+
 - `SQLGetDiagFieldW` no longer rejects a negative `BufferLength` for an
   integer-valued field. The check ran ahead of the field match, so
   `SQL_DIAG_NATIVE`, `SQL_DIAG_COLUMN_NUMBER` and `SQL_DIAG_ROW_NUMBER` failed

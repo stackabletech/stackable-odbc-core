@@ -1224,7 +1224,7 @@ mod tests {
             );
 
             // MockFailingCloseStatement::close_cursor fails, so this reports the
-            // backend's 08S01 rather than SQL_NO_DATA -- and the discard must
+            // backend's 08S01 rather than SQL_NO_DATA, and the discard must
             // happen anyway, exactly as SQLCloseCursor and SQLFreeStmt(SQL_CLOSE)
             // already do it.
             assert_eq!(
