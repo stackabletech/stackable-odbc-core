@@ -825,6 +825,30 @@ impl<B: Backend> StatementHandle<B> {
         }
     }
 
+    /// Point one of the two application descriptors at an explicit descriptor, or
+    /// back at the implicit one with `None`.
+    ///
+    /// `SQL_ATTR_APP_ROW_DESC` / `SQL_ATTR_APP_PARAM_DESC`. The implementation
+    /// descriptors have no counterpart: "the application cannot specify alternate
+    /// implementation descriptors".
+    ///
+    /// A token equal to this statement's own implicit descriptor is stored as
+    /// `None` rather than as an override of itself, so
+    /// [`Self::descriptor_token`] answers the same either way and a later
+    /// `SQLFreeHandle` on some *other* descriptor cannot mistake this statement
+    /// for one that needs reverting.
+    pub(crate) fn set_app_descriptor(&mut self, role: DescriptorRole, token: Option<*mut c_void>) {
+        let token = match token {
+            Some(t) if t == self.implicit_descriptor_token(role) => None,
+            other => other,
+        };
+        match role {
+            DescriptorRole::Ard => self.ard_override = token,
+            DescriptorRole::Apd => self.apd_override = token,
+            _ => tracing::error!("set_app_descriptor called for {role:?}, which has no override"),
+        }
+    }
+
     /// The token for the descriptor implicitly allocated with this statement,
     /// ignoring any override. Statement teardown, and reverting a statement whose
     /// explicit descriptor was freed, are its only callers.
@@ -1351,6 +1375,45 @@ pub(crate) unsafe fn free_statement_allocation<B: Backend>(token: *mut c_void) -
 /// # Safety
 ///
 /// `conn_token` must be a live connection handle.
+/// Point every statement on `conn_token` that used `desc_token` back at its own
+/// implicit descriptor.
+///
+/// The spec: "When an explicitly allocated descriptor is freed, all statement
+/// handles to which the freed descriptor applied automatically revert to the
+/// descriptors implicitly allocated for them."
+///
+/// Called *before* the descriptor is freed. Afterwards would work equally well —
+/// nothing here reads the descriptor — but the token is what identifies it, and
+/// comparing against a token whose slot has been retired invites the next reader
+/// to wonder whether it still resolves.
+///
+/// # Safety
+///
+/// The caller must hold the connection's group lock, which `scope` is the proof
+/// of, and `conn_token` must be live.
+pub(crate) unsafe fn revert_statements_using<B: Backend>(
+    scope: &mut HandleScope<'_>,
+    conn_token: *mut c_void,
+    desc_token: *mut c_void,
+) {
+    for stmt_token in registry().children_of(conn_token) {
+        let Ok(stmt) = scope.get::<StatementHandle<B>>(stmt_token) else {
+            // Not a statement — a sibling descriptor on the same connection.
+            continue;
+        };
+        for role in [DescriptorRole::Ard, DescriptorRole::Apd] {
+            if stmt.descriptor_token(role) == desc_token {
+                tracing::debug!(
+                    "SQLFreeHandle: statement {:?} reverts its {:?} to the implicit descriptor",
+                    stmt_token,
+                    role
+                );
+                stmt.set_app_descriptor(role, None);
+            }
+        }
+    }
+}
+
 /// Free every explicit descriptor allocated on a connection.
 ///
 /// `SQLDisconnect` "drops any statements or descriptors open on the connection".

@@ -7,7 +7,7 @@ use crate::handles::registry::{HandleKind, registry};
 use crate::handles::{
     AllocType, ConnectionHandle, StatementHandle, alloc_connection, alloc_descriptor,
     alloc_environment, alloc_statement, free_connection, free_descriptor, free_environment,
-    free_statement,
+    free_statement, revert_statements_using,
 };
 use crate::panic::panic_safe;
 use crate::types::{SqlReturn, free_stmt_option_from_raw, handle_type_from_raw};
@@ -364,6 +364,14 @@ pub unsafe fn sql_free_handle<B: Backend>(handle_type: i16, handle: *mut c_void)
                     // Manager this branch never fires.
                     match registry().parent_kind_of(handle, HandleKind::Desc) {
                         Some(HandleKind::Dbc) => {
+                            // Spec: "all statement handles to which the freed
+                            // descriptor applied automatically revert to the
+                            // descriptors implicitly allocated for them." Without
+                            // this, a statement is left pointing at a retired slot
+                            // and every later call through it fails.
+                            if let Some(conn) = registry().parent_of(handle, HandleKind::Desc) {
+                                revert_statements_using::<B>(scope, conn, handle);
+                            }
                             free_descriptor(handle);
                             SqlReturn::SUCCESS
                         }

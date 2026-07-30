@@ -8,6 +8,7 @@ use crate::backend::Backend;
 use crate::descriptor::DescriptorRole;
 use crate::errors::{IntoOdbc, OdbcError};
 use crate::handles::StatementHandle;
+use crate::handles::registry::{HandleKind, registry};
 use crate::handles::scope::HandleScope;
 use crate::panic::panic_safe;
 use crate::types::{
@@ -283,12 +284,22 @@ fn offer_to_data_source<B: Backend, T>(
 ///   allocated handle passed to `SQL_ATTR_APP_ROW_DESC` / `SQL_ATTR_APP_PARAM_DESC`
 ///   that is not the one originally allocated for that statement's ARD or APD. Both
 ///   therefore reach core unchecked, and the two implementation descriptors are
-///   accepted here. What core *does* return, for an explicitly allocated descriptor
-///   it cannot honour, is HYC00 — a different question with a different code.
-/// - HY024 Invalid attribute value: not returned. A value core cannot honour
-///   takes one of the two paths above — 01S02 substitution on the spec's list,
-///   HYC00 off it — rather than being rejected as invalid, since the values in
-///   question are valid ODBC values that this driver does not implement.
+///   accepted here. The second clause's wording — "other than the handle
+///   originally allocated" — implies the original *is* allowed, and core accepts
+///   it: the check it does make is the HY024 one below, which a statement's own
+///   descriptor passes.
+/// - HY024 Invalid attribute value: returned when `SQL_ATTR_APP_ROW_DESC` or
+///   `SQL_ATTR_APP_PARAM_DESC` is given a value that is not a descriptor on this
+///   statement's connection — a descriptor allocated on another connection, or a
+///   value that names no live descriptor at all. This row is **not** (DM): it
+///   states the case verbatim, and closes with the general rule that makes it
+///   core's, "For all other connection and statement attributes, the driver must
+///   verify the value specified in *ValuePtr*". The check compares the parent
+///   *chain*, so both an explicit descriptor of this connection and one of this
+///   connection's statements' own four are accepted. For every *other* attribute,
+///   a value core cannot honour takes one of the two paths above — 01S02
+///   substitution on the spec's list, HYC00 off it — rather than being rejected
+///   as invalid, since those are valid ODBC values this driver does not implement.
 /// - HY090 Invalid string or buffer length: (driver-manager-handled; not
 ///   returned here).
 /// - HY092 Invalid attribute/option identifier: (driver-manager-handled; not
@@ -296,9 +307,7 @@ fn offer_to_data_source<B: Backend, T>(
 /// - HY117 Connection is suspended due to unknown transaction state:
 ///   (driver-manager-handled; not returned here).
 /// - HYC00 Optional feature not implemented: returned for
-///   `SQL_ATTR_APP_ROW_DESC` / `SQL_ATTR_APP_PARAM_DESC` set to anything but
-///   `SQL_NULL_DESC` (core cannot allocate an explicit descriptor, so it cannot
-///   honour one being swapped in), `SQL_ATTR_USE_BOOKMARKS` other than `SQL_UB_OFF`,
+///   `SQL_ATTR_USE_BOOKMARKS` other than `SQL_UB_OFF`,
 ///   `SQL_ATTR_RETRIEVE_DATA` = `SQL_RD_OFF`, `SQL_ATTR_CURSOR_SENSITIVITY` =
 ///   `SQL_SENSITIVE`, `SQL_ATTR_ENABLE_AUTO_IPD` = `SQL_TRUE` (a case the
 ///   spec's own HYC00 row names), and `SQL_ATTR_ASYNC_ENABLE` =
@@ -496,31 +505,76 @@ pub unsafe fn sql_set_stmt_attr_w<B: Backend>(
                     Ok(SqlReturn::SUCCESS)
                 }
 
-                // An application descriptor. `SQL_NULL_DESC` means "revert to
-                // the descriptor implicitly allocated with this statement",
-                // which is the only state core has, so it is a genuine no-op
-                // success rather than a refusal. Any other value is an
-                // explicitly allocated descriptor, and core cannot allocate one
-                // at all — `SQLAllocHandle` refuses `SQL_HANDLE_DESC` with
-                // HYC00 — so it cannot honour one being swapped in either.
-                //
-                // This used to accept every value with a warning and ignore it,
-                // which told the application its own ARD was in use when the
-                // statement's was.
-                Some(StatementAttribute::AppRowDesc | StatementAttribute::AppParamDesc) => {
+                // An application descriptor. `SQL_NULL_DESC` reverts to the one
+                // implicitly allocated with this statement; any other value is a
+                // descriptor the application allocated, which this statement then
+                // uses in place of its own.
+                Some(
+                    attr_desc @ (StatementAttribute::AppRowDesc | StatementAttribute::AppParamDesc),
+                ) => {
+                    let role = if attr_desc == StatementAttribute::AppRowDesc {
+                        DescriptorRole::Ard
+                    } else {
+                        DescriptorRole::Apd
+                    };
                     if int_val == SQL_NULL_DESC {
                         tracing::debug!(
-                            "SQLSetStmtAttrW: {:?} set to SQL_NULL_DESC (revert to the implicit \
-                             descriptor); no-op",
-                            attr
+                            "SQLSetStmtAttrW: {:?} set to SQL_NULL_DESC; reverting to the \
+                             implicit descriptor",
+                            attr_desc
                         );
+                        scope
+                            .get::<StatementHandle<B>>(statement_handle)?
+                            .set_app_descriptor(role, None);
                         return Ok(SqlReturn::SUCCESS);
                     }
-                    Err(OdbcError::NotImplemented {
-                        feature: format!(
-                            "SQLSetStmtAttr: {attr:?} set to an explicitly allocated descriptor"
-                        ),
-                    })
+                    let token = int_val as *mut c_void;
+                    // Spec HY024, and *not* (DM): "The Attribute argument was
+                    // SQL_ATTR_APP_ROW_DESC or SQL_ATTR_APP_PARAM_DESC, and
+                    // ValuePtr was an explicitly allocated descriptor handle that
+                    // is not on the same connection as the StatementHandle
+                    // argument." The same row makes the general case core's too:
+                    // "For all other connection and statement attributes, the
+                    // driver must verify the value specified in ValuePtr."
+                    //
+                    // The check is group-independent on purpose: a descriptor on
+                    // another connection is in another lock group, and telling it
+                    // apart from a garbage value is exactly what this SQLSTATE is
+                    // for.
+                    //
+                    // The parent *chain*, not just the parent: a descriptor
+                    // allocated by SQLAllocHandle is parented to the connection,
+                    // and one of a statement's own four is parented to that
+                    // statement. Both are "on this connection", and the second is
+                    // legitimate — HY017's clause is "an implicitly allocated
+                    // descriptor handle *other than the handle originally
+                    // allocated*", which implies the original is allowed. That
+                    // clause is (DM) in any case, so core does not check it.
+                    let conn = scope.get::<StatementHandle<B>>(statement_handle)?.conn;
+                    let on_this_connection = registry()
+                        .parent_of(token, HandleKind::Desc)
+                        .is_some_and(|parent| {
+                            parent == conn
+                                || registry().parent_of(parent, HandleKind::Stmt) == Some(conn)
+                        });
+                    if !on_this_connection {
+                        return Err(OdbcError::general(
+                            format!(
+                                "SQLSetStmtAttr: {attr_desc:?} was given a value that is not a \
+                                 descriptor on this statement's connection"
+                            ),
+                            SqlState::invalid_attribute_value(),
+                        ));
+                    }
+                    tracing::debug!(
+                        "SQLSetStmtAttrW: {:?} now uses descriptor {:?}",
+                        attr_desc,
+                        token
+                    );
+                    scope
+                        .get::<StatementHandle<B>>(statement_handle)?
+                        .set_app_descriptor(role, Some(token));
+                    Ok(SqlReturn::SUCCESS)
                 }
 
                 // Only single-row rowsets are implemented: SQLFetch reads one
@@ -1074,8 +1128,12 @@ pub unsafe fn sql_get_stmt_attr_w<B: Backend>(
                     Ok(SqlReturn::SUCCESS)
                 }
 
-                // Descriptor handle attrs: return the allocated descriptor handles.
-                // The Windows DM requires these to build its CLI dispatch table.
+                // Descriptor handle attrs: return the descriptor handles in
+                // *effect*, which for the two application descriptors is an
+                // application-supplied one when it has set one and the implicit
+                // one otherwise — `desc_of` applies the override, so this needs no
+                // branch of its own. The Windows DM requires these to build its
+                // CLI dispatch table.
                 Some(StatementAttribute::AppRowDesc) => {
                     write_ptr(
                         scope
@@ -1393,48 +1451,336 @@ mod tests {
         }
     }
 
-    /// Core cannot allocate an explicit descriptor — `SQLAllocHandle` refuses
-    /// `SQL_HANDLE_DESC` with HYC00 — so it cannot honour one being swapped in.
-    /// It used to accept and ignore, which told the application its own
-    /// descriptor was in use when the statement's was.
+    /// An explicit descriptor associated as the ARD is where `SQLBindCol` writes,
+    /// and `SQLGetStmtAttr` reports it rather than the implicit one.
     ///
     /// There is deliberately no counterpart for `SQL_ATTR_IMP_ROW_DESC` or
     /// `SQL_ATTR_IMP_PARAM_DESC`: HY017 is **(DM)** on both clauses, so a test
     /// there would pin behaviour the driver must not have.
     #[test]
-    fn setting_an_application_descriptor_to_a_handle_reports_hyc00() {
+    fn an_explicit_ard_replaces_the_implicit_one() {
         unsafe {
             let (env, conn, stmt) = alloc_env_conn_stmt();
+            let implicit = app_row_desc_of(stmt);
+            let explicit = alloc_explicit_desc(conn);
 
-            for attr in [
-                StatementAttribute::AppRowDesc,
-                StatementAttribute::AppParamDesc,
-            ] {
-                // Any non-null value: the point is that core refuses to pretend
-                // it applied one, not that this particular token resolves.
-                let ret = sql_set_stmt_attr_w::<MockBackend>(
+            assert_eq!(
+                sql_set_stmt_attr_w::<MockBackend>(
                     stmt,
-                    attr as i32,
-                    std::ptr::without_provenance_mut(0x1234usize),
-                    0,
-                );
-                assert_eq!(ret, SqlReturn::ERROR, "{attr:?} swap was accepted");
+                    StatementAttribute::AppRowDesc as i32,
+                    explicit,
+                    0
+                ),
+                SqlReturn::SUCCESS
+            );
 
-                with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
-                    let record = handle
-                        .diagnostics
-                        .get(0)
-                        .expect("no diagnostic was recorded for the refused swap");
-                    assert_eq!(
-                        record.sqlstate.as_str(),
-                        crate::types::sql_state::OPTIONAL_FEATURE_NOT_IMPLEMENTED,
-                        "{attr:?} was refused with the wrong SQLSTATE"
-                    );
-                });
+            let reported = app_row_desc_of(stmt);
+            assert_eq!(reported, explicit, "the override must be what is reported");
+            assert_ne!(reported, implicit);
+
+            let mut buf = [0u8; 4];
+            assert_eq!(
+                crate::ffi::bind::sql_bind_col::<MockBackend>(
+                    stmt,
+                    1,
+                    odbc_sys::CDataType::SLong as i16,
+                    buf.as_mut_ptr().cast(),
+                    4,
+                    std::ptr::null_mut(),
+                ),
+                SqlReturn::SUCCESS
+            );
+            assert_eq!(
+                desc_count(explicit),
+                1,
+                "SQLBindCol must have written the explicit ARD"
+            );
+            assert_eq!(
+                desc_count(implicit),
+                0,
+                "SQLBindCol wrote the implicit ARD as well"
+            );
+
+            free_explicit_desc(explicit);
+            cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
+    /// Two statements sharing one explicit ARD share one set of bindings — there
+    /// is one storage, so a bind through either is visible through both, and
+    /// `SQLFreeStmt(SQL_UNBIND)` on one clears the other's too.
+    ///
+    /// That last part is spec-correct rather than a wart: the spec makes the
+    /// descriptor *be* the binding, so two statements pointed at one descriptor
+    /// have one binding set between them.
+    #[test]
+    fn two_statements_can_share_one_explicit_descriptor() {
+        unsafe {
+            let (env, conn, stmt_a) = alloc_env_conn_stmt();
+            let mut stmt_b: *mut c_void = std::ptr::null_mut();
+            assert_eq!(
+                crate::ffi::handle::sql_alloc_handle::<MockBackend>(
+                    odbc_sys::HandleType::Stmt as i16,
+                    conn,
+                    &mut stmt_b
+                ),
+                SqlReturn::SUCCESS
+            );
+            let explicit = alloc_explicit_desc(conn);
+
+            for stmt in [stmt_a, stmt_b] {
+                assert_eq!(
+                    sql_set_stmt_attr_w::<MockBackend>(
+                        stmt,
+                        StatementAttribute::AppRowDesc as i32,
+                        explicit,
+                        0
+                    ),
+                    SqlReturn::SUCCESS
+                );
+                assert_eq!(app_row_desc_of(stmt), explicit);
             }
+
+            let mut buf = [0u8; 4];
+            assert_eq!(
+                crate::ffi::bind::sql_bind_col::<MockBackend>(
+                    stmt_a,
+                    1,
+                    odbc_sys::CDataType::SLong as i16,
+                    buf.as_mut_ptr().cast(),
+                    4,
+                    std::ptr::null_mut(),
+                ),
+                SqlReturn::SUCCESS
+            );
+            assert_eq!(desc_count(explicit), 1);
+
+            // Unbinding through the *other* statement clears it, because there
+            // is one descriptor and therefore one binding.
+            assert_eq!(
+                crate::ffi::handle::sql_free_stmt::<MockBackend>(
+                    stmt_b,
+                    odbc_sys::FreeStmtOption::Unbind as u16
+                ),
+                SqlReturn::SUCCESS
+            );
+            assert_eq!(
+                desc_count(explicit),
+                0,
+                "the shared descriptor still holds a binding after SQL_UNBIND"
+            );
+
+            free_explicit_desc(explicit);
+            let _ = crate::ffi::handle::sql_free_handle::<MockBackend>(
+                odbc_sys::HandleType::Stmt as i16,
+                stmt_b,
+            );
+            cleanup_env_conn_stmt(env, conn, stmt_a);
+        }
+    }
+
+    /// Freeing the explicit descriptor reverts every statement that used it.
+    ///
+    /// The spec: "all statement handles to which the freed descriptor applied
+    /// automatically revert to the descriptors implicitly allocated for them."
+    #[test]
+    fn freeing_an_explicit_descriptor_reverts_its_statements() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            let implicit = app_row_desc_of(stmt);
+            let explicit = alloc_explicit_desc(conn);
+            assert_eq!(
+                sql_set_stmt_attr_w::<MockBackend>(
+                    stmt,
+                    StatementAttribute::AppRowDesc as i32,
+                    explicit,
+                    0
+                ),
+                SqlReturn::SUCCESS
+            );
+
+            free_explicit_desc(explicit);
+
+            assert_eq!(
+                app_row_desc_of(stmt),
+                implicit,
+                "the statement did not revert to its own ARD"
+            );
+            // And it still works, which is the point of reverting rather than
+            // leaving a dangling override.
+            let mut buf = [0u8; 4];
+            assert_eq!(
+                crate::ffi::bind::sql_bind_col::<MockBackend>(
+                    stmt,
+                    1,
+                    odbc_sys::CDataType::SLong as i16,
+                    buf.as_mut_ptr().cast(),
+                    4,
+                    std::ptr::null_mut(),
+                ),
+                SqlReturn::SUCCESS
+            );
+            assert_eq!(desc_count(implicit), 1);
 
             cleanup_env_conn_stmt(env, conn, stmt);
         }
+    }
+
+    /// A descriptor allocated on another connection is `HY024`, and that row is
+    /// **not** (DM): "For all other connection and statement attributes, the
+    /// driver must verify the value specified in ValuePtr."
+    #[test]
+    fn a_descriptor_from_another_connection_is_rejected() {
+        unsafe {
+            let (env, conn_a, stmt) = alloc_env_conn_stmt();
+            let mut conn_b: *mut c_void = std::ptr::null_mut();
+            assert_eq!(
+                crate::ffi::handle::sql_alloc_handle::<MockBackend>(
+                    odbc_sys::HandleType::Dbc as i16,
+                    env,
+                    &mut conn_b
+                ),
+                SqlReturn::SUCCESS
+            );
+            let foreign = alloc_explicit_desc(conn_b);
+
+            assert_eq!(
+                sql_set_stmt_attr_w::<MockBackend>(
+                    stmt,
+                    StatementAttribute::AppRowDesc as i32,
+                    foreign,
+                    0
+                ),
+                SqlReturn::ERROR
+            );
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+                let record = handle
+                    .diagnostics
+                    .get(0)
+                    .expect("no diagnostic for the cross-connection descriptor");
+                assert_eq!(
+                    record.sqlstate.as_str(),
+                    crate::types::sql_state::INVALID_ATTRIBUTE_VALUE
+                );
+            });
+
+            free_explicit_desc(foreign);
+            let _ = crate::ffi::handle::sql_free_handle::<MockBackend>(
+                odbc_sys::HandleType::Dbc as i16,
+                conn_b,
+            );
+            cleanup_env_conn_stmt(env, conn_a, stmt);
+        }
+    }
+
+    /// A value that is not a descriptor token at all is `HY024` too — the
+    /// question core answers is "is this a descriptor on my connection", and a
+    /// garbage value fails it for the same reason a foreign one does.
+    #[test]
+    fn a_non_descriptor_value_is_rejected() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            assert_eq!(
+                sql_set_stmt_attr_w::<MockBackend>(
+                    stmt,
+                    StatementAttribute::AppRowDesc as i32,
+                    std::ptr::without_provenance_mut(0x1234usize),
+                    0
+                ),
+                SqlReturn::ERROR
+            );
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+                let record = handle.diagnostics.get(0).expect("no diagnostic");
+                assert_eq!(
+                    record.sqlstate.as_str(),
+                    crate::types::sql_state::INVALID_ATTRIBUTE_VALUE
+                );
+            });
+            cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
+    /// A statement's *own* ARD token set back onto itself is accepted.
+    ///
+    /// `HY017`'s clause is "an implicitly allocated descriptor handle **other
+    /// than the handle originally allocated** for the ARD or APD", which implies
+    /// the original is allowed — and that clause is (DM) anyway. So the check
+    /// core does make compares the parent *chain*: a token whose parent is this
+    /// connection, or whose parent is a statement on this connection, is on this
+    /// connection either way.
+    #[test]
+    fn a_statements_own_descriptor_is_accepted() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            let implicit = app_row_desc_of(stmt);
+            assert_eq!(
+                sql_set_stmt_attr_w::<MockBackend>(
+                    stmt,
+                    StatementAttribute::AppRowDesc as i32,
+                    implicit,
+                    0
+                ),
+                SqlReturn::SUCCESS
+            );
+            assert_eq!(app_row_desc_of(stmt), implicit);
+            cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
+    /// `SQL_ATTR_APP_ROW_DESC` as the application sees it.
+    unsafe fn app_row_desc_of(stmt: *mut c_void) -> *mut c_void {
+        let mut out: *mut c_void = std::ptr::null_mut();
+        let ret = unsafe {
+            sql_get_stmt_attr_w::<MockBackend>(
+                stmt,
+                StatementAttribute::AppRowDesc as i32,
+                std::ptr::from_mut(&mut out).cast(),
+                0,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(ret, SqlReturn::SUCCESS);
+        out
+    }
+
+    /// `SQL_DESC_COUNT` of a descriptor, read through `SQLGetDescField`.
+    unsafe fn desc_count(desc: *mut c_void) -> isize {
+        let mut count: isize = -1;
+        let ret = unsafe {
+            crate::ffi::desc::sql_get_desc_field_w::<MockBackend>(
+                desc,
+                0,
+                Desc::Count as i16,
+                std::ptr::from_mut(&mut count).cast(),
+                0,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(ret, SqlReturn::SUCCESS);
+        count
+    }
+
+    unsafe fn alloc_explicit_desc(conn: *mut c_void) -> *mut c_void {
+        let mut desc: *mut c_void = std::ptr::null_mut();
+        let ret = unsafe {
+            crate::ffi::handle::sql_alloc_handle::<MockBackend>(
+                odbc_sys::HandleType::Desc as i16,
+                conn,
+                &mut desc,
+            )
+        };
+        assert_eq!(ret, SqlReturn::SUCCESS);
+        desc
+    }
+
+    unsafe fn free_explicit_desc(desc: *mut c_void) {
+        let ret = unsafe {
+            crate::ffi::handle::sql_free_handle::<MockBackend>(
+                odbc_sys::HandleType::Desc as i16,
+                desc,
+            )
+        };
+        assert_eq!(ret, SqlReturn::SUCCESS);
     }
 
     #[test]
