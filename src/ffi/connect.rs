@@ -176,6 +176,11 @@ pub unsafe fn sql_driver_connect_w<B: Backend>(
 
             let conn_str = utf16_to_string(in_connection_string, string_length1.into())?;
             let mut params = merge_dsn_params::<B>(&conn_str, read_dsn_keys)?;
+            // The parsed form, never `conn_str`: `ConnectParams`' `Debug`
+            // redacts credential keywords and the raw connection string does
+            // not. Both sibling entry points log the same thing at the same
+            // point in their bodies.
+            tracing::debug!("SQLDriverConnectW: params = {:?}", params);
             crate::ffi::connect_attr::carry_connect_timeouts::<B>(handle, &mut params);
             params.set_prompter(prompter_for::<B>(completion));
             let connection = B::connect(&params).into_odbc()?;
@@ -2138,6 +2143,25 @@ mod tests {
 
             let _ = sql_free_handle::<MockBrowseBackend>(HandleType::Dbc as i16, conn);
             let _ = sql_free_handle::<MockBrowseBackend>(HandleType::Env as i16, env);
+        }
+    }
+
+    /// Every connect entry point must name what it was asked to connect *to*,
+    /// not just the handle it was called on. An entry log carrying only the
+    /// handle shows which call happened and not what it asked for, which is
+    /// precisely what is needed when a connection fails against a DSN nobody
+    /// can reproduce.
+    ///
+    /// The parsed `ConnectParams`, never the raw string: its `Debug` redacts
+    /// credential keywords and the raw string does not.
+    #[test]
+    fn every_connect_entry_point_logs_its_redacted_params() {
+        let source = include_str!("connect.rs");
+        for name in ["SQLDriverConnectW", "SQLConnectW", "SQLBrowseConnectW"] {
+            assert!(
+                source.contains(&format!("\"{name}: params = {{:?}}\"")),
+                "{name} does not log the ConnectParams it parsed",
+            );
         }
     }
 
