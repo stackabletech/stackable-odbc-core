@@ -52,7 +52,7 @@ use odbc_sys::SqlDataType;
 
 use crate::{
     errors::OdbcError,
-    param_convert::{DecimalLiteral, check_declared_char_size, parse_numeric_literal},
+    param_convert::{DecimalLiteral, check_declared_char_size, parse_numeric_literal, truncation},
     types::{ColumnValue, SqlState, ULen},
 };
 
@@ -107,6 +107,22 @@ impl Converted {
 }
 
 impl NumericParam {
+    /// The value as an `f64`, for the rows whose test is a magnitude.
+    ///
+    /// An exact literal too large for `f64` parses to an infinity, which the
+    /// two callers either accept (row 4, where the target represents it) or
+    /// reject (row 5) on their own terms. `unwrap_or` rather than `unwrap`:
+    /// it states the value the failing branch takes instead of panicking
+    /// inside an FFI call.
+    fn as_f64(&self) -> f64 {
+        match self {
+            NumericParam::Exact(literal) => {
+                literal.to_decimal_string().parse().unwrap_or(f64::INFINITY)
+            }
+            NumericParam::Approx { value, .. } => *value,
+        }
+    }
+
     /// Render at the source's own precision.
     ///
     /// Rows 1 and 2 measure "number of digits ... including the minus sign,
@@ -240,8 +256,45 @@ pub(crate) fn numeric_to_sql_type(
         });
     }
 
-    // Rows 4 to 6 arrive in the following commits. Until then any other target
-    // is refused rather than silently passed through.
+    // Row 4. This is the one row that accepts a non-finite value: its test is
+    // "data is within the range of the data type to which the number is being
+    // converted", and an IEEE-754 float represents NaN and both infinities.
+    // Only a value that is finite *and* outside the target's range fails, so
+    // the `is_finite` guard is what keeps NaN — which compares false against
+    // every bound — from being read as out of range.
+    if sql_type == SqlDataType::REAL {
+        let v = value.as_f64();
+        if v.is_finite() && (v > f64::from(f32::MAX) || v < f64::from(f32::MIN)) {
+            return Err(out_of_range(&value.render(), sql_type));
+        }
+        return Ok(Converted::clean(ColumnValue::F32(v as f32)));
+    }
+    if sql_type == SqlDataType::FLOAT || sql_type == SqlDataType::DOUBLE {
+        // Every `f64` is within `f64`'s range, so the only way to leave it is
+        // an exact literal too large to parse back, which `as_f64` reports as
+        // an infinity — and an infinity is representable here.
+        return Ok(Converted::clean(ColumnValue::F64(value.as_f64())));
+    }
+
+    // Row 5. Three outcomes, and the middle one is 22001 where its neighbours
+    // are 22003: a value strictly between 0 and 2 is one the target truncates
+    // to a bit, where anything outside that band is one it cannot hold at all.
+    if sql_type == SqlDataType::EXT_BIT {
+        let v = value.as_f64();
+        if !v.is_finite() || !(0.0..2.0).contains(&v) {
+            return Err(out_of_range(&value.render(), sql_type));
+        }
+        if v == 0.0 {
+            return Ok(Converted::clean(ColumnValue::Bool(false)));
+        }
+        if v == 1.0 {
+            return Ok(Converted::clean(ColumnValue::Bool(true)));
+        }
+        return Err(truncation(&value.render(), "not be 0 or 1"));
+    }
+
+    // Row 6 arrives in the following commit. Until then any other target is
+    // refused rather than silently passed through.
     let _ = interval_precision;
     Err(unsupported_target(sql_type))
 }
@@ -607,6 +660,150 @@ mod tests {
                     "{value} -> {target:?}"
                 );
             }
+        }
+    }
+
+    // -- row 4: approximate numeric targets ---------------------------------
+
+    #[test]
+    fn a_value_within_the_float_range_converts() {
+        assert_eq!(
+            convert(exact("1.5"), SqlDataType::REAL, 0)
+                .expect("1.5 fits a REAL")
+                .value,
+            ColumnValue::F32(1.5)
+        );
+        assert_eq!(
+            convert(exact("1.5"), SqlDataType::DOUBLE, 0)
+                .expect("1.5 fits a DOUBLE")
+                .value,
+            ColumnValue::F64(1.5)
+        );
+        assert_eq!(
+            convert(exact("1.5"), SqlDataType::FLOAT, 0)
+                .expect("SQL_FLOAT is the 64-bit one")
+                .value,
+            ColumnValue::F64(1.5)
+        );
+    }
+
+    #[test]
+    fn a_value_beyond_the_real_range_is_22003() {
+        assert_eq!(
+            state_of(convert(exact("1e300"), SqlDataType::REAL, 0)),
+            "22003"
+        );
+        assert_eq!(
+            state_of(convert(exact("-1e300"), SqlDataType::REAL, 0)),
+            "22003"
+        );
+        // The same value is comfortably inside a DOUBLE.
+        assert!(convert(exact("1e300"), SqlDataType::DOUBLE, 0).is_ok());
+    }
+
+    /// Row 4's test is whether the target can represent the value, and an
+    /// IEEE-754 float represents both infinities and NaN. This is the one place
+    /// in the table where a non-finite value is accepted.
+    #[test]
+    fn a_float_target_accepts_non_finite_values() {
+        for target in [SqlDataType::REAL, SqlDataType::DOUBLE] {
+            for value in [f64::INFINITY, f64::NEG_INFINITY] {
+                assert!(
+                    numeric_to_sql_type(
+                        NumericParam::Approx {
+                            value,
+                            single: false
+                        },
+                        target,
+                        0,
+                        0,
+                        0
+                    )
+                    .is_ok(),
+                    "{value} -> {target:?}"
+                );
+            }
+        }
+        let out = numeric_to_sql_type(
+            NumericParam::Approx {
+                value: f64::NAN,
+                single: false,
+            },
+            SqlDataType::DOUBLE,
+            0,
+            0,
+            0,
+        )
+        .expect("NaN is representable in an f64");
+        assert!(matches!(out.value, ColumnValue::F64(v) if v.is_nan()));
+    }
+
+    // -- row 5: SQL_BIT -----------------------------------------------------
+
+    #[test]
+    fn zero_and_one_reach_a_bit_target() {
+        assert_eq!(
+            convert(exact("0"), SqlDataType::EXT_BIT, 0)
+                .expect("0")
+                .value,
+            ColumnValue::Bool(false)
+        );
+        assert_eq!(
+            convert(exact("1"), SqlDataType::EXT_BIT, 0)
+                .expect("1")
+                .value,
+            ColumnValue::Bool(true)
+        );
+    }
+
+    /// "Data is greater than 0, less than 2, and not equal to 1" — 22001, which
+    /// is this row's own answer and not the truncation state it resembles.
+    #[test]
+    fn a_fraction_between_zero_and_two_is_22001_for_a_bit() {
+        assert_eq!(
+            state_of(convert(exact("0.5"), SqlDataType::EXT_BIT, 0)),
+            "22001"
+        );
+        assert_eq!(
+            state_of(convert(exact("1.5"), SqlDataType::EXT_BIT, 0)),
+            "22001"
+        );
+    }
+
+    #[test]
+    fn a_value_outside_zero_to_two_is_22003_for_a_bit() {
+        assert_eq!(
+            state_of(convert(exact("-1"), SqlDataType::EXT_BIT, 0)),
+            "22003"
+        );
+        assert_eq!(
+            state_of(convert(exact("2"), SqlDataType::EXT_BIT, 0)),
+            "22003"
+        );
+        // The boundary: 2 is out, everything below it is in.
+        assert_eq!(
+            state_of(convert(exact("1.999"), SqlDataType::EXT_BIT, 0)),
+            "22001"
+        );
+    }
+
+    #[test]
+    fn a_non_finite_value_cannot_reach_a_bit_target() {
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(
+                state_of(numeric_to_sql_type(
+                    NumericParam::Approx {
+                        value,
+                        single: false
+                    },
+                    SqlDataType::EXT_BIT,
+                    0,
+                    0,
+                    0
+                )),
+                "22003",
+                "{value}"
+            );
         }
     }
 
