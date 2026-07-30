@@ -526,12 +526,14 @@ pub unsafe fn sql_end_tran<B: Backend>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::descriptor::DescriptorRole;
     use crate::ffi::handle::{sql_alloc_handle, sql_free_handle};
     use crate::handles::{StatementData, StatementHandle};
     use crate::synthetic::SyntheticStatement;
     use crate::test_utils::{
         MockBackend, MockFailingCloseBackend, MockFailingCloseStatement, MockTxnCloseBackend,
-        MockTxnDeleteBackend, MockTxnNotConnectedBackend, MockTxnPreserveBackend, with_handle,
+        MockTxnDeleteBackend, MockTxnNotConnectedBackend, MockTxnPreserveBackend, with_descriptor,
+        with_handle,
     };
     use crate::types::{
         ColumnDescriptor, ColumnValue, CompletionType, FetchResult, Nullable, SQL_NTS, SqlDataType,
@@ -1196,41 +1198,36 @@ mod tests {
                 stmt,
                 |handle| {
                     handle.cursor_name = Some("C1".to_string());
-                    handle.app_row_desc.records.insert(
-                        1,
-                        crate::descriptor::DescriptorRecord {
-                            concise_type: crate::types::CDataType::SLong as i16,
-                            verbose_type: crate::types::CDataType::SLong as i16,
-                            data_ptr: std::ptr::null_mut(),
-                            octet_length: 4,
-                            indicator_ptr: std::ptr::null_mut(),
-                            ..Default::default()
-                        },
-                    );
-                    handle.app_param_desc.records.insert(
-                        1,
-                        crate::descriptor::DescriptorRecord {
-                            concise_type: crate::types::CDataType::SLong as i16,
-                            verbose_type: crate::types::CDataType::SLong as i16,
-                            data_ptr: std::ptr::null_mut(),
-                            octet_length: 4,
-                            indicator_ptr: std::ptr::null_mut(),
-                            ..Default::default()
-                        },
-                    );
-                    handle.imp_param_desc.records.insert(
-                        1,
-                        crate::descriptor::DescriptorRecord {
-                            concise_type: crate::types::SqlDataType::INTEGER.0,
-                            verbose_type: crate::types::SqlDataType::INTEGER.0,
-                            length: 10,
-                            scale: 0,
-                            parameter_type: crate::types::ParamType::Input,
-                            ..Default::default()
-                        },
-                    );
                 },
             );
+            for role in [DescriptorRole::Ard, DescriptorRole::Apd] {
+                with_descriptor::<MockTxnDeleteBackend, _>(stmt, role, |desc| {
+                    desc.records.insert(
+                        1,
+                        crate::descriptor::DescriptorRecord {
+                            concise_type: crate::types::CDataType::SLong as i16,
+                            verbose_type: crate::types::CDataType::SLong as i16,
+                            data_ptr: std::ptr::null_mut(),
+                            octet_length: 4,
+                            indicator_ptr: std::ptr::null_mut(),
+                            ..Default::default()
+                        },
+                    );
+                });
+            }
+            with_descriptor::<MockTxnDeleteBackend, _>(stmt, DescriptorRole::Ipd, |ipd| {
+                ipd.records.insert(
+                    1,
+                    crate::descriptor::DescriptorRecord {
+                        concise_type: crate::types::SqlDataType::INTEGER.0,
+                        verbose_type: crate::types::SqlDataType::INTEGER.0,
+                        length: 10,
+                        scale: 0,
+                        parameter_type: crate::types::ParamType::Input,
+                        ..Default::default()
+                    },
+                );
+            });
 
             let ret = sql_end_tran::<MockTxnDeleteBackend>(
                 HandleType::Dbc as i16,
@@ -1247,20 +1244,20 @@ mod tests {
                         Some("C1"),
                         "SQL_CB_DELETE cleared the cursor name"
                     );
-                    assert!(
-                        handle.app_row_desc.records.contains_key(&1),
-                        "SQL_CB_DELETE cleared the column bindings"
-                    );
-                    assert!(
-                        handle.app_param_desc.records.contains_key(&1),
-                        "SQL_CB_DELETE cleared the APD's parameter records"
-                    );
-                    assert!(
-                        handle.imp_param_desc.records.contains_key(&1),
-                        "SQL_CB_DELETE cleared the IPD's parameter records"
-                    );
                 },
             );
+            for (role, what) in [
+                (DescriptorRole::Ard, "the column bindings"),
+                (DescriptorRole::Apd, "the APD's parameter records"),
+                (DescriptorRole::Ipd, "the IPD's parameter records"),
+            ] {
+                with_descriptor::<MockTxnDeleteBackend, _>(stmt, role, |desc| {
+                    assert!(
+                        desc.records.contains_key(&1),
+                        "SQL_CB_DELETE cleared {what}"
+                    );
+                });
+            }
 
             cleanup_connected::<MockTxnDeleteBackend>(env, conn, stmt);
         }

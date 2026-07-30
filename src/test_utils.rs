@@ -152,6 +152,30 @@ pub(crate) fn with_handle<B: Backend, T: crate::handles::HasKind, R>(
     out.expect("closure ran")
 }
 
+/// [`with_handle`], for one of a statement's descriptors.
+///
+/// Goes through [`HandleScope::desc_of`] rather than naming a field of
+/// [`StatementHandle`], so a test asserting on a record map keeps working as
+/// which allocation a role resolves to changes.
+///
+/// [`HandleScope::desc_of`]: crate::handles::scope::HandleScope::desc_of
+/// [`StatementHandle`]: crate::handles::StatementHandle
+pub(crate) fn with_descriptor<B: Backend, R>(
+    stmt: *mut c_void,
+    role: crate::descriptor::DescriptorRole,
+    f: impl FnOnce(&mut crate::handles::Descriptor) -> R,
+) -> R {
+    let mut out = None;
+    let ret = unsafe {
+        crate::panic::panic_safe::<B, _>(stmt, |scope| {
+            out = Some(f(scope.desc_of::<B>(stmt, role)?));
+            Ok(SqlReturn::SUCCESS)
+        })
+    };
+    assert_eq!(ret, SqlReturn::SUCCESS, "statement {stmt:?} was not valid");
+    out.expect("closure ran")
+}
+
 // ---------------------------------------------------------------------------
 // Shared types
 // ---------------------------------------------------------------------------

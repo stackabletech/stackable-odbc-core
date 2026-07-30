@@ -21,7 +21,7 @@ use crate::descriptor::DescriptorRole;
 use crate::diagnostics::DiagnosticQueue;
 use crate::errors::OdbcError;
 use crate::handles::registry::{GroupLock, HandleKind, Registry, registry};
-use crate::handles::{ConnectionHandle, EnvironmentHandle, HasKind, StatementHandle};
+use crate::handles::{ConnectionHandle, Descriptor, EnvironmentHandle, HasKind, StatementHandle};
 use crate::sync::{Arc, MutexGuard};
 
 /// Proof that the caller holds one lock group, and the gateway to the handles
@@ -300,6 +300,25 @@ impl<'a> HandleScope<'a> {
         }
     }
 
+    /// One of a statement's descriptors, by role.
+    ///
+    /// The single door onto descriptor storage. It exists so that no call site
+    /// names a field of [`StatementHandle`]: which allocation a role resolves to
+    /// is this function's business, and it is about to become a registry lookup
+    /// rather than a field.
+    ///
+    /// Returns only the descriptor. A caller that also needs the statement —
+    /// the IRD's computed view, or `SQL_DESC_COUNT` — cannot use this while the
+    /// four are `Box` fields; see [`Self::descriptor_owner`].
+    pub fn desc_of<B: Backend>(
+        &mut self,
+        stmt_token: *mut c_void,
+        role: DescriptorRole,
+    ) -> Result<&mut Descriptor, OdbcError> {
+        let stmt: &mut StatementHandle<B> = self.get(stmt_token)?;
+        Ok(stmt.descriptor_mut(role))
+    }
+
     /// Resolve a descriptor token to the statement that owns it and to which of
     /// the four it is.
     ///
@@ -386,6 +405,7 @@ impl<'a> HandleScope<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::descriptor::DescriptorRecord;
     use crate::panic::panic_safe;
     use crate::test_utils::{MockBackend, alloc_env_conn_stmt, cleanup_env_conn_stmt, with_handle};
     use crate::types::SqlReturn;
@@ -629,6 +649,31 @@ mod tests {
                 SqlReturn::SUCCESS,
                 "re-entering the already-held group must be a no-op, not an error or a hang"
             );
+            cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
+    /// `desc_of` reaches the same storage the statement's own field does.
+    ///
+    /// The point of the indirection: once a descriptor is its own allocation the
+    /// field is gone, and every caller must already be going through this.
+    #[test]
+    fn desc_of_reaches_a_statements_own_descriptor() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            let ret = panic_safe::<MockBackend, _>(stmt, |scope| {
+                let ard = scope.desc_of::<MockBackend>(stmt, DescriptorRole::Ard)?;
+                ard.records.insert(1, DescriptorRecord::default());
+                let again = scope.desc_of::<MockBackend>(stmt, DescriptorRole::Ard)?;
+                assert!(again.records.contains_key(&1));
+                let apd = scope.desc_of::<MockBackend>(stmt, DescriptorRole::Apd)?;
+                assert!(
+                    !apd.records.contains_key(&1),
+                    "the APD is a different descriptor from the ARD"
+                );
+                Ok(SqlReturn::SUCCESS)
+            });
+            assert_eq!(ret, SqlReturn::SUCCESS);
             cleanup_env_conn_stmt(env, conn, stmt);
         }
     }

@@ -714,12 +714,14 @@ pub unsafe fn sql_execute<B: Backend>(statement_handle: *mut c_void) -> SqlRetur
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::descriptor::DescriptorRole;
     use crate::ffi::handle::sql_free_handle;
     use crate::handles::ConnectionHandle;
     use crate::handles::StatementHandle;
     use crate::test_utils::{
         MockBackend, MockBlockingBackend, MockCancelAwareBackend, MockConnection,
-        MockCoreCancelsTimeoutBackend, MockRecordingBackend, alloc_env_conn_stmt, with_handle,
+        MockCoreCancelsTimeoutBackend, MockRecordingBackend, alloc_env_conn_stmt, with_descriptor,
+        with_handle,
     };
     use odbc_sys::HandleType;
 
@@ -1010,15 +1012,19 @@ mod tests {
             let wide2: Vec<u16> = sql2.encode_utf16().collect();
             let _ret = sql_prepare_w::<MockBackend>(stmt, wide2.as_ptr(), wide2.len() as i32);
 
+            for role in [DescriptorRole::Apd, DescriptorRole::Ipd] {
+                with_descriptor::<MockBackend, _>(stmt, role, |desc| {
+                    assert!(
+                        desc.records.contains_key(&1),
+                        "SQLPrepare unbound a parameter ({role:?}), which only \
+                         SQLBindParameter, SQLFreeStmt(SQL_RESET_PARAMS) or \
+                         SQLSetDescField may do"
+                    );
+                });
+            }
             with_handle::<MockBackend, crate::handles::StatementHandle<MockBackend>, _>(
                 stmt,
                 |stmt_handle| {
-                    assert!(
-                        stmt_handle.app_param_desc.records.contains_key(&1)
-                            && stmt_handle.imp_param_desc.records.contains_key(&1),
-                        "SQLPrepare unbound a parameter, which only SQLBindParameter, \
-                         SQLFreeStmt(SQL_RESET_PARAMS) or SQLSetDescField may do"
-                    );
                     // The new statement has no markers, so nothing reads the surviving
                     // binding: `collect_params` walks 1..=param_count.
                     assert_eq!(stmt_handle.param_count, Some(0));

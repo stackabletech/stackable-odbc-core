@@ -5,6 +5,7 @@ use std::ffi::c_void;
 use odbc_sys::StatementAttribute;
 
 use crate::backend::Backend;
+use crate::descriptor::DescriptorRole;
 use crate::errors::{IntoOdbc, OdbcError};
 use crate::handles::StatementHandle;
 use crate::panic::panic_safe;
@@ -981,19 +982,35 @@ pub unsafe fn sql_get_stmt_attr_w<B: Backend>(
                 // Descriptor handle attrs: return the allocated descriptor handles.
                 // The Windows DM requires these to build its CLI dispatch table.
                 Some(StatementAttribute::AppRowDesc) => {
-                    write_ptr(stmt.app_row_desc.token() as usize);
+                    write_ptr(
+                        scope
+                            .desc_of::<B>(statement_handle, DescriptorRole::Ard)?
+                            .token() as usize,
+                    );
                     Ok(SqlReturn::SUCCESS)
                 }
                 Some(StatementAttribute::AppParamDesc) => {
-                    write_ptr(stmt.app_param_desc.token() as usize);
+                    write_ptr(
+                        scope
+                            .desc_of::<B>(statement_handle, DescriptorRole::Apd)?
+                            .token() as usize,
+                    );
                     Ok(SqlReturn::SUCCESS)
                 }
                 Some(StatementAttribute::ImpRowDesc) => {
-                    write_ptr(stmt.imp_row_desc.token() as usize);
+                    write_ptr(
+                        scope
+                            .desc_of::<B>(statement_handle, DescriptorRole::Ird)?
+                            .token() as usize,
+                    );
                     Ok(SqlReturn::SUCCESS)
                 }
                 Some(StatementAttribute::ImpParamDesc) => {
-                    write_ptr(stmt.imp_param_desc.token() as usize);
+                    write_ptr(
+                        scope
+                            .desc_of::<B>(statement_handle, DescriptorRole::Ipd)?
+                            .token() as usize,
+                    );
                     Ok(SqlReturn::SUCCESS)
                 }
 

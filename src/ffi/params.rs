@@ -159,8 +159,14 @@ pub unsafe fn sql_bind_parameter<B: Backend>(
             // Null value pointer AND null indicator removes the binding — from
             // both descriptors, or the next read finds one half of a parameter.
             if parameter_value_ptr.is_null() && str_len_or_ind_ptr.is_null() {
-                stmt.app_param_desc.records.remove(&parameter_number);
-                stmt.imp_param_desc.records.remove(&parameter_number);
+                scope
+                    .desc_of::<B>(statement_handle, DescriptorRole::Apd)?
+                    .records
+                    .remove(&parameter_number);
+                scope
+                    .desc_of::<B>(statement_handle, DescriptorRole::Ipd)?
+                    .records
+                    .remove(&parameter_number);
             } else {
                 // "C to SQL: Binary" — core converts SQL_C_BINARY only to the
                 // targets whose byte layout ODBC defines. Refused here rather
@@ -210,8 +216,14 @@ pub unsafe fn sql_bind_parameter<B: Backend>(
                 crate::descriptor::consistency_check(&apd, DescriptorRole::Apd)?;
                 crate::descriptor::consistency_check(&ipd, DescriptorRole::Ipd)?;
 
-                stmt.app_param_desc.records.insert(parameter_number, apd);
-                stmt.imp_param_desc.records.insert(parameter_number, ipd);
+                scope
+                    .desc_of::<B>(statement_handle, DescriptorRole::Apd)?
+                    .records
+                    .insert(parameter_number, apd);
+                scope
+                    .desc_of::<B>(statement_handle, DescriptorRole::Ipd)?
+                    .records
+                    .insert(parameter_number, ipd);
             }
 
             Ok(SqlReturn::SUCCESS)
@@ -1554,7 +1566,7 @@ mod tests {
         handles::ConnectionHandle,
         test_utils::{
             MockBackend, MockCancelAwareBackend, MockConnection, MockLongDataBackend,
-            alloc_env_conn_stmt, with_handle,
+            alloc_env_conn_stmt, with_descriptor, with_handle,
         },
         types::{CDataType, ParamType},
     };
@@ -1831,16 +1843,14 @@ mod tests {
             );
             assert_eq!(ret, SqlReturn::SUCCESS);
 
-            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
-                assert!(
-                    !handle.app_param_desc.records.contains_key(&1),
-                    "the APD record survived the unbind"
-                );
-                assert!(
-                    !handle.imp_param_desc.records.contains_key(&1),
-                    "the IPD record survived the unbind"
-                );
-            });
+            for (role, which) in [(DescriptorRole::Apd, "APD"), (DescriptorRole::Ipd, "IPD")] {
+                with_descriptor::<MockBackend, _>(stmt, role, |desc| {
+                    assert!(
+                        !desc.records.contains_key(&1),
+                        "the {which} record survived the unbind"
+                    );
+                });
+            }
 
             cleanup(env, conn, stmt);
         }
@@ -1879,12 +1889,15 @@ mod tests {
                     record.sqlstate.as_str(),
                     crate::types::sql_state::INCONSISTENT_DESCRIPTOR_INFORMATION
                 );
-                assert!(
-                    !handle.app_param_desc.records.contains_key(&1)
-                        && !handle.imp_param_desc.records.contains_key(&1),
-                    "a rejected bind must leave neither descriptor written"
-                );
             });
+            for role in [DescriptorRole::Apd, DescriptorRole::Ipd] {
+                with_descriptor::<MockBackend, _>(stmt, role, |desc| {
+                    assert!(
+                        !desc.records.contains_key(&1),
+                        "a rejected bind must leave neither descriptor written ({role:?})"
+                    );
+                });
+            }
 
             cleanup(env, conn, stmt);
         }

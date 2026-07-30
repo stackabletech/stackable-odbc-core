@@ -93,7 +93,10 @@ pub unsafe fn sql_bind_col<B: Backend>(
             if target_value_ptr.is_null() {
                 // Unbind the column
                 tracing::debug!("SQLBindCol: col={} unbind", column_number);
-                stmt.app_row_desc.records.remove(&column_number);
+                scope
+                    .desc_of::<B>(statement_handle, DescriptorRole::Ard)?
+                    .records
+                    .remove(&column_number);
             } else {
                 let c_type = crate::types::c_data_type_from_raw(target_type).ok_or_else(|| {
                     crate::errors::OdbcError::general(
@@ -119,7 +122,10 @@ pub unsafe fn sql_bind_col<B: Backend>(
                 // SQLBindCol is called". Before the insert, so a rejected bind
                 // leaves the previous binding — or no binding — in place.
                 crate::descriptor::consistency_check(&record, DescriptorRole::Ard)?;
-                stmt.app_row_desc.records.insert(column_number, record);
+                scope
+                    .desc_of::<B>(statement_handle, DescriptorRole::Ard)?
+                    .records
+                    .insert(column_number, record);
             }
 
             Ok(SqlReturn::SUCCESS)
@@ -132,7 +138,9 @@ pub unsafe fn sql_bind_col<B: Backend>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::{MockBackend, alloc_env_conn_stmt, cleanup_env_conn_stmt, with_handle};
+    use crate::test_utils::{
+        MockBackend, alloc_env_conn_stmt, cleanup_env_conn_stmt, with_descriptor, with_handle,
+    };
     use crate::types::CDataType;
     use std::ffi::c_void;
 
@@ -173,8 +181,8 @@ mod tests {
             assert_eq!(ret, SqlReturn::SUCCESS);
 
             // Verify binding exists
-            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
-                assert!(handle.app_row_desc.records.contains_key(&1));
+            with_descriptor::<MockBackend, _>(stmt, DescriptorRole::Ard, |ard| {
+                assert!(ard.records.contains_key(&1));
             });
 
             // Unbind by passing null target_value_ptr
@@ -187,8 +195,8 @@ mod tests {
                 std::ptr::null_mut(),
             );
             assert_eq!(ret, SqlReturn::SUCCESS);
-            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
-                assert!(!handle.app_row_desc.records.contains_key(&1));
+            with_descriptor::<MockBackend, _>(stmt, DescriptorRole::Ard, |ard| {
+                assert!(!ard.records.contains_key(&1));
             });
 
             cleanup_env_conn_stmt(env, conn, stmt);

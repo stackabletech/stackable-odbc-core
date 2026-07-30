@@ -957,7 +957,7 @@ mod tests {
     use crate::handles::StatementHandle;
     use crate::test_utils::{
         MockBackend, MockLongDataBackend, MockRecordingBackend, MockTypeInfoBackend,
-        alloc_env_conn_stmt, cleanup_env_conn_stmt, with_handle,
+        alloc_env_conn_stmt, cleanup_env_conn_stmt, with_descriptor, with_handle,
     };
     use crate::types::sql_state;
     use odbc_sys::{CDataType, HandleType, ParamType, SqlDataType, StatementAttribute};
@@ -1051,11 +1051,11 @@ mod tests {
     /// `SQLSetDescFieldW`, which is still unimplemented at this point. Task 7's
     /// tests drive the real round trip.
     unsafe fn seed_ard_records(stmt: *mut c_void, count: u16, concise_type: i16) {
-        with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+        with_descriptor::<MockBackend, _>(stmt, DescriptorRole::Ard, |ard| {
             for column in 1..=count {
                 let mut record = crate::descriptor::DescriptorRecord::default();
                 record.set_concise_type(concise_type);
-                handle.app_row_desc.records.insert(column, record);
+                ard.records.insert(column, record);
             }
         });
     }
@@ -1484,10 +1484,10 @@ mod tests {
             );
             assert_eq!(ret, SqlReturn::SUCCESS);
 
-            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
-                assert!(handle.app_row_desc.records.contains_key(&1));
-                assert!(!handle.app_row_desc.records.contains_key(&2));
-                assert!(!handle.app_row_desc.records.contains_key(&3));
+            with_descriptor::<MockBackend, _>(stmt, DescriptorRole::Ard, |ard| {
+                assert!(ard.records.contains_key(&1));
+                assert!(!ard.records.contains_key(&2));
+                assert!(!ard.records.contains_key(&3));
             });
 
             cleanup_env_conn_stmt(env, conn, stmt);

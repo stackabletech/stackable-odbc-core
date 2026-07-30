@@ -734,7 +734,8 @@ mod tests {
     use crate::ffi::handle::{sql_alloc_handle, sql_free_handle};
     use crate::test_utils::{
         LONG_BYTES, LONG_TEXT, MockBackend, MockCancelAwareBackend, MockFetchTimeoutBackend,
-        MockLongDataBackend, alloc_env_conn_stmt, cleanup_env_conn_stmt, with_handle,
+        MockLongDataBackend, alloc_env_conn_stmt, cleanup_env_conn_stmt, with_descriptor,
+        with_handle,
     };
     use crate::types::CDataType;
     use odbc_sys::HandleType;
@@ -1228,10 +1229,11 @@ mod tests {
             // Inserted directly: no public call creates a record with a null
             // data pointer until `SQLSetDescField` lands, and this test is what
             // makes that arrival safe.
-            with_handle::<MockLongDataBackend, StatementHandle<MockLongDataBackend>, _>(
+            with_descriptor::<MockLongDataBackend, _>(
                 stmt,
-                |handle| {
-                    handle.app_row_desc.records.insert(
+                crate::descriptor::DescriptorRole::Ard,
+                |ard| {
+                    ard.records.insert(
                         2,
                         crate::descriptor::DescriptorRecord {
                             concise_type: CDataType::SLong as i16,

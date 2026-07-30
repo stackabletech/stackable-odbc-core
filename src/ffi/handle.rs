@@ -1,6 +1,7 @@
 //! Handle lifecycle entry points: `SQLAllocHandle`, `SQLFreeHandle`, `SQLFreeStmt`.
 
 use crate::backend::{Backend, StatementBackend};
+use crate::descriptor::DescriptorRole;
 use crate::errors::OdbcError;
 use crate::handles::{
     ConnectionHandle, StatementHandle, alloc_connection, alloc_environment, alloc_statement,
@@ -458,7 +459,10 @@ pub unsafe fn sql_free_stmt<B: Backend>(statement_handle: *mut c_void, option: u
                         return Err(e);
                     }
                 }
-                FreeStmtOption::Unbind => stmt.app_row_desc.records.clear(),
+                FreeStmtOption::Unbind => scope
+                    .desc_of::<B>(statement_handle, DescriptorRole::Ard)?
+                    .records
+                    .clear(),
                 FreeStmtOption::ResetParams => stmt.clear_param_records(),
             }
 
