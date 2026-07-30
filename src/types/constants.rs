@@ -67,11 +67,51 @@ pub const SQL_DATETIME: i16 = SqlDataType::DATETIME.0;
 /// `SQL_INTERVAL` — the *verbose* type of every interval SQL type, the
 /// counterpart of [`SQL_DATETIME`] for the `SQL_INTERVAL_*` concise types.
 ///
-/// Stated as a literal because `odbc-sys` has no `SqlDataType::INTERVAL`, only
-/// the concise `EXT_INTERVAL_*` codes. This is the asymmetry the module doc's
+/// Stated as a literal because `odbc-sys` has no `SqlDataType::INTERVAL`, and
+/// no concise interval codes either — the `SQL_INTERVAL_*` constants below are
+/// core's own for the same reason. This is the asymmetry the module doc's
 /// rule permits: derive where `odbc-sys` carries the value, state it where it
 /// does not.
 pub const SQL_INTERVAL: i16 = 10;
+
+// --- The concise interval SQL types (SQL_INTERVAL_*, sqlext.h) --------------
+//
+// `odbc-sys` provides the C-side codes as `CDataType::Interval*` and the
+// `SQL_IS_*` subcodes as `odbc_sys::Interval`, but no `SqlDataType` constants
+// for the concise SQL types. Each is `100 + SQL_CODE_*`, which is why these
+// values are `odbc_sys::Interval`'s discriminants offset by 100 —
+// `single_field_interval_code` converts between them by subtracting it.
+//
+// Note that the concise *C* types share these numbers: `SQL_C_INTERVAL_YEAR`
+// is defined as `SQL_INTERVAL_YEAR`. The subcodes 1..=13 are a different
+// thing, and are what `SQL_DESC_DATETIME_INTERVAL_CODE` carries.
+
+/// `SQL_INTERVAL_YEAR`.
+pub const SQL_INTERVAL_YEAR: SqlDataType = SqlDataType(101);
+/// `SQL_INTERVAL_MONTH`.
+pub const SQL_INTERVAL_MONTH: SqlDataType = SqlDataType(102);
+/// `SQL_INTERVAL_DAY`.
+pub const SQL_INTERVAL_DAY: SqlDataType = SqlDataType(103);
+/// `SQL_INTERVAL_HOUR`.
+pub const SQL_INTERVAL_HOUR: SqlDataType = SqlDataType(104);
+/// `SQL_INTERVAL_MINUTE`.
+pub const SQL_INTERVAL_MINUTE: SqlDataType = SqlDataType(105);
+/// `SQL_INTERVAL_SECOND`.
+pub const SQL_INTERVAL_SECOND: SqlDataType = SqlDataType(106);
+/// `SQL_INTERVAL_YEAR_TO_MONTH`.
+pub const SQL_INTERVAL_YEAR_TO_MONTH: SqlDataType = SqlDataType(107);
+/// `SQL_INTERVAL_DAY_TO_HOUR`.
+pub const SQL_INTERVAL_DAY_TO_HOUR: SqlDataType = SqlDataType(108);
+/// `SQL_INTERVAL_DAY_TO_MINUTE`.
+pub const SQL_INTERVAL_DAY_TO_MINUTE: SqlDataType = SqlDataType(109);
+/// `SQL_INTERVAL_DAY_TO_SECOND`.
+pub const SQL_INTERVAL_DAY_TO_SECOND: SqlDataType = SqlDataType(110);
+/// `SQL_INTERVAL_HOUR_TO_MINUTE`.
+pub const SQL_INTERVAL_HOUR_TO_MINUTE: SqlDataType = SqlDataType(111);
+/// `SQL_INTERVAL_HOUR_TO_SECOND`.
+pub const SQL_INTERVAL_HOUR_TO_SECOND: SqlDataType = SqlDataType(112);
+/// `SQL_INTERVAL_MINUTE_TO_SECOND`.
+pub const SQL_INTERVAL_MINUTE_TO_SECOND: SqlDataType = SqlDataType(113);
 
 /// `SQL_PARC_BATCH` — each parameter set in an array produces its own row count.
 pub const SQL_PARC_BATCH: u32 = 1;
@@ -1360,6 +1400,32 @@ pub const ODBC_RESERVED_KEYWORDS: &[&str] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The concise interval SQL types are stated as literals because
+    /// `odbc-sys` carries none of them, so this test asserts the spec's own
+    /// numbers against them for the reason the info-type test below records:
+    /// a constant checked against the expression that defines it cannot fail.
+    ///
+    /// `sqlext.h` defines each as `100 + SQL_CODE_*`, and the `SQL_CODE_*`
+    /// subcodes run 1..=13 in the order below — which is also
+    /// `odbc_sys::Interval`'s discriminant order, the relationship
+    /// `single_field_interval_code` relies on.
+    #[test]
+    fn the_interval_sql_types_carry_their_spec_values() {
+        assert_eq!(SQL_INTERVAL_YEAR.0, 101);
+        assert_eq!(SQL_INTERVAL_MONTH.0, 102);
+        assert_eq!(SQL_INTERVAL_DAY.0, 103);
+        assert_eq!(SQL_INTERVAL_HOUR.0, 104);
+        assert_eq!(SQL_INTERVAL_MINUTE.0, 105);
+        assert_eq!(SQL_INTERVAL_SECOND.0, 106);
+        assert_eq!(SQL_INTERVAL_YEAR_TO_MONTH.0, 107);
+        assert_eq!(SQL_INTERVAL_DAY_TO_HOUR.0, 108);
+        assert_eq!(SQL_INTERVAL_DAY_TO_MINUTE.0, 109);
+        assert_eq!(SQL_INTERVAL_DAY_TO_SECOND.0, 110);
+        assert_eq!(SQL_INTERVAL_HOUR_TO_MINUTE.0, 111);
+        assert_eq!(SQL_INTERVAL_HOUR_TO_SECOND.0, 112);
+        assert_eq!(SQL_INTERVAL_MINUTE_TO_SECOND.0, 113);
+    }
 
     /// These info-type constants are *derived* from `odbc_sys::InfoType`
     /// (e.g. `SQL_FILE_USAGE: u16 = InfoType::SqlFileUsage as u16`) rather
