@@ -2617,4 +2617,20 @@ Everything a driver has to change for the catalog rework, in one place.
   parameter's default, and core refuses `{call ...}` and `{?= call ...}` with
   `HYC00`, so no statement it executes has a parameter carrying one.
 
+- **`SQLPutData` accepts a null `DataPtr` with a length of zero.** Its `HY009`
+  guard refused every null pointer, which is stricter than the clause it stands
+  in for: "(DM) The argument *DataPtr* was a null pointer, and the argument
+  *StrLen_or_Ind* was **not** 0, SQL_DEFAULT_PARAM, or SQL_NULL_DATA." A
+  zero-length put is how an application sends an empty value, and it now works.
+
+- **Five doc comments corrected against the spec's diagnostics tables.**
+  `SQLBindParameter` claimed `HY021` was driver-manager-handled, though its row
+  carries no `(DM)` marker and the function returns it; `SQLBindCol` did not
+  list `HY021` at all, though it returns it under `SQLSetDescRec`'s
+  consistency-check mandate, and justified deferring `07009` by asserting a
+  Driver Manager check that does not exist — binding before a result set exists
+  is the real reason. `SQLPutData` was missing `07006`, `08S01` and `HY008`,
+  `SQLParamData` was missing `22026`, and `SQLDescribeParam` was missing
+  `21S01`.
+
 [Unreleased]: https://github.com/stackabletech/stackable-odbc-core/commits/HEAD

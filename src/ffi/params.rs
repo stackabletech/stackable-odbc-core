@@ -72,7 +72,12 @@ use crate::{
 /// - `HY009` Invalid argument value — (driver-manager-handled; not returned here)
 /// - `HY010` Function sequence error — (driver-manager-handled; not returned here)
 /// - `HY013` Memory management error — (driver-manager-handled; not returned here)
-/// - `HY021` Inconsistent descriptor information — (driver-manager-handled; not returned here)
+/// - `HY021` Inconsistent descriptor information — **returned by this driver**. The row
+///   carries no `(DM)` marker, and `SQLSetDescRec`'s "Consistency Checks" section says when
+///   the check runs: "This check is always performed when **SQLBindParameter** or
+///   **SQLBindCol** is called". Both halves of the binding are checked before either
+///   descriptor is written, so a rejected bind leaves neither changed
+///   (`crate::descriptor::consistency_check`).
 /// - `HY090` Invalid string or buffer length — (driver-manager-handled; not returned here)
 /// - `HY104` Invalid precision or scale value — a driver-returned code (the spec does not mark it
 ///   (DM)): `column_size` and `decimal_digits` are stored verbatim without range validation.
@@ -356,6 +361,11 @@ pub unsafe fn sql_num_params<B: Backend>(
 /// - 01000: General warning — (driver-manager-handled; not returned here).
 /// - 07009: Invalid descriptor index — returned when `parameter_number` is 0 or exceeds
 ///   the number of parameter markers in the prepared statement.
+/// - 21S01: Insert value list does not match column list — not returned here. The row is
+///   about an `INSERT` whose parameter count differs from the target table's column count,
+///   which needs the data source's catalog: core parses the statement only far enough to
+///   count `?` markers (`count_params`) and never resolves a table. A backend that describes
+///   parameters itself is where this would originate.
 /// - 08S01: Communication link failure — not applicable (no backend query).
 /// - HY000: General error — returned for unexpected failures.
 /// - HY001: Memory allocation error — not applicable; Rust allocation panics are caught by `panic_safe`.
@@ -1303,6 +1313,13 @@ unsafe fn dae_nts_byte_count(c_type: Option<odbc_sys::CDataType>, data_ptr: *con
 /// - 01000: General warning — (driver-manager-handled; not returned here).
 /// - 01004: String data, right truncated — not applicable; data is accumulated without
 ///   truncation.
+/// - 07006: Restricted data type attribute violation — not returned here. The pairing is
+///   fixed at `SQLBindParameter`, which refuses the C-to-SQL combinations core cannot convert
+///   before the query runs (`crate::binary_convert`, `crate::numeric_convert`), so a chunk
+///   arriving here is already of a pairing that was accepted.
+/// - 08S01: Communication link failure — not returned here. `SQLPutData` accumulates into a
+///   buffer on the statement handle and makes no backend call at all; the link is next touched
+///   by the `SQLParamData` that completes the execution, which is where this arrives.
 /// - 22001: String data, right truncation — not applicable; no target column size check
 ///   at this stage.
 /// - 22003: Numeric value out of range — not applicable; type conversion happens at execute
@@ -1318,9 +1335,17 @@ unsafe fn dae_nts_byte_count(c_type: Option<odbc_sys::CDataType>, data_ptr: *con
 /// - HY000: General error — returned for unexpected failures.
 /// - HY001: Memory allocation error — not applicable; Rust allocation panics are caught by
 ///   `panic_safe`.
-/// - HY009: Invalid use of null pointer — returned when `data_ptr` is null but
-///   `str_len_or_ind` is neither `SQL_NULL_DATA` nor `SQL_DEFAULT_PARAM`, the two values
-///   that carry the whole parameter and so need no buffer.
+/// - HY008: Operation canceled — not returned here. This call makes no fallible backend call,
+///   so there is no error for a cancellation to be reported through, and the asynchronous
+///   clause is inapplicable: core never returns `SQL_STILL_EXECUTING`. A `SQLCancel` during a
+///   data-at-execution sequence discards the sequence; the following `SQLParamData` is what
+///   reports it.
+/// - HY009: Invalid use of null pointer — (DM) the row is driver-manager-marked. Core keeps a
+///   guard anyway, because unixODBC does not always run it and the alternative is
+///   dereferencing a null pointer, and the guard matches the clause exactly: "(DM) The
+///   argument DataPtr was a null pointer, and the argument StrLen_or_Ind was not 0,
+///   SQL_DEFAULT_PARAM, or SQL_NULL_DATA." A null pointer with a length of 0 is a legal
+///   zero-length put and is accepted.
 /// - HY010: Function sequence error — returned when no data-at-execution is in progress
 ///   (no prior `SQL_NEED_DATA` from `SQLExecute`/`SQLExecDirectW`), or when
 ///   `SQLParamData` has not yet been called to identify the current parameter.
@@ -1463,9 +1488,16 @@ pub unsafe fn sql_put_data<B: Backend>(
                 return Ok(SqlReturn::SUCCESS);
             }
 
-            // Spec HY009: data_ptr must not be null (unless SQL_NULL_DATA or
-            // SQL_DEFAULT_PARAM, both handled above).
-            if data_ptr.is_null() {
+            // A refusal to dereference a null pointer, not a spec check: the
+            // row is `(DM)`-marked and belongs to the Driver Manager. It is
+            // kept because unixODBC does not always run it, and it is written
+            // to match the clause exactly — "(DM) The argument DataPtr was a
+            // null pointer, and the argument StrLen_or_Ind was not 0,
+            // SQL_DEFAULT_PARAM, or SQL_NULL_DATA". The other two values are
+            // handled above, so only the zero remains, and a null pointer with
+            // a length of zero is a legal zero-length put that this guard used
+            // to refuse.
+            if data_ptr.is_null() && str_len_or_ind != 0 {
                 return Err(OdbcError::general(
                     "DataPtr is null",
                     SqlState::invalid_use_of_null_pointer(),
@@ -1490,9 +1522,17 @@ pub unsafe fn sql_put_data<B: Backend>(
                 str_len_or_ind as usize
             };
 
-            // SAFETY: caller guarantees data_ptr is valid for byte_count bytes.
-            let data = std::slice::from_raw_parts(data_ptr as *const u8, byte_count);
-            dae.buffer.extend_from_slice(data);
+            if byte_count > 0 {
+                // SAFETY: caller guarantees data_ptr is valid for byte_count
+                // bytes, and it is non-null: the guard above admits a null only
+                // with a length of zero, which this branch excludes.
+                // `from_raw_parts` on a null pointer is undefined behaviour
+                // even at length zero.
+                let data = std::slice::from_raw_parts(data_ptr as *const u8, byte_count);
+                dae.buffer.extend_from_slice(data);
+            }
+            // A zero-length put is still a put: it is what distinguishes an
+            // empty value from a parameter nobody supplied.
             dae.put_state = PutDataState::Data;
 
             Ok(SqlReturn::SUCCESS)
@@ -1548,6 +1588,10 @@ pub unsafe fn sql_put_data<B: Backend>(
 ///   backend.
 /// - 23000: Integrity constraint violation — propagated from backend.
 /// - 24000: Invalid cursor state — propagated from backend.
+/// - 22026: String data, length mismatch — not returned here. The row's condition opens with
+///   "The SQL_NEED_LONG_DATA_LEN information type in `SQLGetInfo` was 'Y'", and core answers
+///   `"N"` for it (`default_get_info`), so the driver never asked the application to declare a
+///   long parameter's length in advance and has nothing to compare against.
 /// - 40001: Serialization failure — propagated from backend.
 /// - 40003: Statement completion unknown — propagated from backend.
 /// - 42000: Syntax error or access violation — propagated from backend.
@@ -2486,6 +2530,64 @@ mod tests {
             with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |h| {
                 let rec = h.diagnostics.get(0).expect("record 1 exists");
                 assert_eq!(rec.sqlstate.as_str(), "HY090");
+            });
+
+            cleanup(env, conn, stmt);
+        }
+    }
+
+    /// The spec's clause, read as written: "(DM) The argument DataPtr was a
+    /// null pointer, and the argument StrLen_or_Ind was **not** 0,
+    /// SQL_DEFAULT_PARAM, or SQL_NULL_DATA." A null pointer with a length of
+    /// zero is therefore a legal zero-length put, and core's own guard — which
+    /// exists to avoid dereferencing a null pointer, not to enforce a `(DM)`
+    /// row — must not be stricter than the clause it stands in for.
+    #[test]
+    fn put_data_accepts_a_null_pointer_with_a_zero_length() {
+        unsafe {
+            let (env, conn, stmt) = connected_stmt();
+            let mut indicator: isize = SQL_DATA_AT_EXEC;
+            start_dae_loop(
+                stmt,
+                CDataType::Char,
+                SqlDataType::VARCHAR,
+                &raw mut indicator,
+            );
+
+            assert_eq!(
+                sql_put_data::<MockBackend>(stmt, std::ptr::null_mut(), 0),
+                SqlReturn::SUCCESS,
+            );
+            assert!(
+                dae_buffer(stmt).is_empty(),
+                "a zero-length put appends nothing",
+            );
+
+            cleanup(env, conn, stmt);
+        }
+    }
+
+    /// The half of the clause that stays: a null pointer with a real length is
+    /// still HY009, because there is nothing to read those bytes from.
+    #[test]
+    fn put_data_rejects_a_null_pointer_with_a_real_length() {
+        unsafe {
+            let (env, conn, stmt) = connected_stmt();
+            let mut indicator: isize = SQL_DATA_AT_EXEC;
+            start_dae_loop(
+                stmt,
+                CDataType::Char,
+                SqlDataType::VARCHAR,
+                &raw mut indicator,
+            );
+
+            assert_eq!(
+                sql_put_data::<MockBackend>(stmt, std::ptr::null_mut(), 3),
+                SqlReturn::ERROR,
+            );
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |h| {
+                let rec = h.diagnostics.get(0).expect("record 1 exists");
+                assert_eq!(rec.sqlstate.as_str(), "HY009");
             });
 
             cleanup(env, conn, stmt);

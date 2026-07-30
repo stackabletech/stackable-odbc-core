@@ -48,13 +48,20 @@ use crate::types::SqlReturn;
 ///   not returned here because bookmark columns are not supported)
 /// - `07009` Invalid descriptor index — the spec requires returning 07009 when `column_number`
 ///   exceeds the maximum number of columns in the result set. The binding is stored without
-///   checking: column count is not available at bind time (before `SQLExecute`), and
-///   the DM validates descriptor indices against the result set. Deferred.
+///   checking, because binding is legal before a result set exists: `SQLBindCol` is routinely
+///   called before `SQLExecute`, when there is no column count to compare against, and the row
+///   carries no `(DM)` marker, so nothing else checks it either. Deferred.
 /// - `HY000` General error — returned for unexpected failures
 /// - `HY001` Memory allocation error — (driver-manager-handled; not returned here)
 /// - `HY003` Invalid application buffer type — returned when `target_type` is not a valid
 ///   C data type identifier (`c_data_type_from_raw` returns `None`)
 /// - `HY010` Function sequence error — (driver-manager-handled; not returned here)
+/// - `HY021` Inconsistent descriptor information — **returned by this driver**, although
+///   `SQLBindCol`'s own diagnostics table has no such row. `SQLSetDescRec`'s "Consistency
+///   Checks" section states the mandate: "This check is always performed when
+///   **SQLBindParameter** or **SQLBindCol** is called". The check runs before the record is
+///   inserted, so a rejected bind leaves the previous binding — or no binding — in place
+///   (`crate::descriptor::consistency_check`).
 /// - `HY013` Memory management error — (driver-manager-handled; not returned here)
 /// - `HY090` Invalid string or buffer length — (driver-manager-handled; not returned here;
 ///   the DM checks for `buffer_length < 0`)
