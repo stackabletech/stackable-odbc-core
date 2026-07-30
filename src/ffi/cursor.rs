@@ -191,7 +191,12 @@ pub unsafe fn sql_row_count<B: Backend>(
 ///
 /// Spec: <https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlmoreresults-function>
 ///
-/// Always returns `SQL_NO_DATA`; only single result sets are supported.
+/// Always returns `SQL_NO_DATA`: only single result sets are supported, so there is never
+/// a next result to make available. The current one is discarded on the way out — Appendix
+/// B's `SQL_NO_DATA` entries for this function are `S1` when the statement was not prepared
+/// and `S2`/`S3` when it was, which is `SQLFreeStmt(SQL_CLOSE)`'s row exactly. A statement
+/// in `S1 Allocated` or `S2-S3 Prepared` is left untouched: those columns are `--` with the
+/// footnote "The function always returns SQL_NO_DATA in this state".
 ///
 /// # Parameters
 ///
@@ -203,18 +208,22 @@ pub unsafe fn sql_row_count<B: Backend>(
 ///
 /// - 01000 (general warning): driver-specific informational message — not produced here.
 /// - 01S02 (option value changed): would be returned if a statement attribute changed while
-///   processing a batch; not applicable as `SQL_NO_DATA` is always returned immediately.
-/// - 08S01 (communication link failure): not applicable; the framework is in-process.
+///   processing a batch; not applicable, as there is never a next result to move to.
+/// - 08S01 (communication link failure): **returned by this driver** when
+///   `StatementBackend::close_cursor` fails with that state. Discarding the result set is
+///   the transition this function performs, and for a networked data source that is a round
+///   trip. The discard happens even so, per `sql_close_cursor`'s reasoning.
 /// - 40001 (serialization failure): not applicable; the `Backend` trait is synchronous and
 ///   does not return partial batch results.
 /// - 40003 (statement completion unknown): not applicable; the framework is in-process.
 /// - HY000 (general error): returned via `OdbcError::general` for unexpected failures.
 /// - HY001 (memory allocation error): not applicable; Rust allocation panics are caught by
 ///   `panic_safe`.
-/// - HY008: Operation canceled; not returned here. This call makes no fallible backend call —
-///   `SQLMoreResults` is a core stub that reports `SQL_NO_DATA` without asking the backend — so
-///   there is no error for a cancellation to be reported through. The asynchronous clause is
-///   inapplicable: core never returns `SQL_STILL_EXECUTING`.
+/// - HY008: Operation canceled; not returned here. This call reaches the backend only
+///   through `StatementBackend::close_cursor`, which core does not reclassify against the
+///   cancel token — `crate::cancel` is applied at the statement-producing and
+///   cursor-consuming calls, not at teardown. The asynchronous clause is inapplicable: core
+///   never returns `SQL_STILL_EXECUTING`.
 /// - HY010 (function sequence error): (driver-manager-handled; not returned here)
 /// - HY013 (memory management error): not applicable; Rust memory access cannot fail silently.
 /// - HY117 (connection suspended): (driver-manager-handled; not returned here)
@@ -235,6 +244,47 @@ pub unsafe fn sql_more_results<B: Backend>(statement_handle: *mut c_void) -> Sql
         panic_safe::<B, _>(statement_handle, |scope| {
             let stmt = scope.get::<StatementHandle<B>>(statement_handle)?;
             stmt.diagnostics.clear();
+
+            // Spec Comments: "If there was a current result set with unfetched
+            // rows, SQLMoreResults discards that result set and makes the next
+            // result set or count available. If all results have been processed,
+            // SQLMoreResults returns SQL_NO_DATA."
+            //
+            // This driver never has a next result, so every call is the second
+            // sentence — but the first still governs what is left behind, and
+            // Appendix B says exactly what that is. Restricted to the single
+            // result core produces (footnote [4], "the current result is the
+            // last result"), the SQL_NO_DATA entries are `S1 [np]` / `S2 [p]`
+            // from S4 and `S1 [np]` / `S3 [p]` from S5-S7 — the same pair
+            // SQLFreeStmt(SQL_CLOSE)'s own row gives, so this does what that
+            // option does: tell the backend, then discard. `prepared_sql`
+            // survives the discard, which is what makes the `[p]` half of those
+            // entries true.
+            //
+            // The `S1 Allocated` and `S2-S3 Prepared` columns are `--` with
+            // footnote [1], "The function always returns SQL_NO_DATA in this
+            // state", so a statement that has not executed is left alone. That
+            // is why this reads `executed` and not `statement.is_some()`: a
+            // prepared statement holds a backend statement and must keep it.
+            if stmt.cursor_open || stmt.executed {
+                // Gated on `cursor_open` for the same reason SQLFreeStmt's
+                // SQL_CLOSE arm is: asking a backend to close a cursor it never
+                // opened is not something any spec text calls for.
+                let close_err = if stmt.cursor_open {
+                    stmt.statement
+                        .as_mut()
+                        .and_then(|statement| statement.close_cursor().err())
+                } else {
+                    None
+                };
+                // Discarded even when the close failed, as in `sql_close_cursor`:
+                // the application would otherwise hold a cursor it cannot clear.
+                stmt.discard_result_set();
+                if let Some(e) = close_err {
+                    return Err(e);
+                }
+            }
+
             Ok(SqlReturn::NO_DATA)
         })
     };
@@ -1124,6 +1174,82 @@ mod tests {
             let ret = sql_more_results::<MockBackend>(stmt);
             assert_eq!(ret, SqlReturn::NO_DATA);
             cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
+    /// Appendix B's `SQLMoreResults` row, restricted to the single-result-set
+    /// case core produces: from `S5-S7 Cursor` the `[nf]` entries are
+    /// `S1 [np]` and `S3 [p]` — the same pair `SQLFreeStmt(SQL_CLOSE)` names.
+    /// Returning `SQL_NO_DATA` and leaving the cursor open left a following
+    /// `SQLFetch` re-reading the result set that had just been reported away.
+    #[test]
+    fn more_results_discards_the_result_set_it_reports_away() {
+        unsafe {
+            let (env, conn, stmt) = cursor_open_stmt_for::<MockFailingCloseBackend>();
+            with_handle::<MockFailingCloseBackend, StatementHandle<MockFailingCloseBackend>, _>(
+                stmt,
+                |handle| assert!(handle.cursor_open, "precondition: a cursor is open"),
+            );
+
+            // MockFailingCloseStatement::close_cursor fails, so this reports the
+            // backend's 08S01 rather than SQL_NO_DATA -- and the discard must
+            // happen anyway, exactly as SQLCloseCursor and SQLFreeStmt(SQL_CLOSE)
+            // already do it.
+            assert_eq!(
+                sql_more_results::<MockFailingCloseBackend>(stmt),
+                SqlReturn::ERROR,
+                "a failing close_cursor is reported, not swallowed",
+            );
+
+            with_handle::<MockFailingCloseBackend, StatementHandle<MockFailingCloseBackend>, _>(
+                stmt,
+                |handle| {
+                    assert!(!handle.cursor_open, "the cursor must be closed");
+                    assert!(
+                        handle.statement.is_none(),
+                        "the result set must be discarded",
+                    );
+                },
+            );
+
+            crate::test_utils::cleanup_connected_env_conn_stmt::<MockFailingCloseBackend>(
+                env, conn, stmt,
+            );
+        }
+    }
+
+    /// The `S1 Allocated` and `S2-S3 Prepared` columns of the same row are `--`
+    /// with footnote [1], "The function always returns SQL_NO_DATA in this
+    /// state". A prepared statement therefore keeps its backend statement: a
+    /// teardown written against `statement.is_some()` would throw away work
+    /// `SQLPrepare` had just done.
+    #[test]
+    fn more_results_leaves_a_prepared_statement_untouched() {
+        unsafe {
+            let (env, conn, stmt) =
+                crate::test_utils::alloc_connected_env_conn_stmt::<MockBackend>();
+
+            let sql: Vec<u16> = "SELECT 1".encode_utf16().collect();
+            assert_eq!(
+                crate::ffi::execute::sql_prepare_w::<MockBackend>(
+                    stmt,
+                    sql.as_ptr(),
+                    i32::try_from(sql.len()).expect("the fixed test SQL is short"),
+                ),
+                SqlReturn::SUCCESS
+            );
+
+            assert_eq!(sql_more_results::<MockBackend>(stmt), SqlReturn::NO_DATA);
+
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+                assert!(
+                    handle.statement.is_some(),
+                    "a prepared statement must survive SQLMoreResults",
+                );
+                assert_eq!(handle.prepared_sql.as_deref(), Some("SELECT 1"));
+            });
+
+            crate::test_utils::cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 

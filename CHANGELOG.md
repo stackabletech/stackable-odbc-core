@@ -1474,6 +1474,15 @@ field.
   implements any of the three hooks should expect a call with `0` where it
   previously got none.
 
+- **`SQLMoreResults` discards the result set it reports away.** It returned
+  `SQL_NO_DATA` and left the cursor open, so a following `SQLFetch` re-read the
+  same rows and a following `SQLExecDirect` was refused with `24000`. Appendix
+  B's `SQL_NO_DATA` entries for this function are `S1` when the statement was
+  not prepared and `S2`/`S3` when it was — `SQLFreeStmt(SQL_CLOSE)`'s row
+  exactly — so it now tells the backend and discards, and reports an `08S01`
+  from a failing `close_cursor` rather than swallowing it. A statement in `S1`
+  or `S2`/`S3` is still left untouched.
+
 - **`SQLConnectW` now hands the backend the DSN name it connected with.**
   `ConnectParams` was built only from the keys `SQLGetPrivateProfileStringW`
   enumerates out of the DSN's `odbc.ini` section, and a section lists the
