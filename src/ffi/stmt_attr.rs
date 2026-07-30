@@ -357,6 +357,38 @@ pub unsafe fn sql_set_stmt_attr_w<B: Backend>(
 
             let int_val = value_ptr as usize;
 
+            // SQL_ROWSET_SIZE is the rowset SQLExtendedFetch reads, and this
+            // driver's rowset is one row. It reaches this function as an
+            // *unrecognised* attribute -- odbc-sys models only the 3.x
+            // SQL_ATTR_ROW_ARRAY_SIZE -- so without this arm it falls to the
+            // catch-all below and is accepted silently, leaving an application
+            // that asked for ten rows to receive one under SQL_SUCCESS.
+            //
+            // A value core cannot honour must be refused identically through
+            // every door. This is the third, beside SQL_ATTR_ROW_ARRAY_SIZE here
+            // and SQL_DESC_ARRAY_SIZE in SQLSetDescField.
+            //
+            // The spec's 01S02 list is closed and names SQL_ATTR_ROW_ARRAY_SIZE
+            // rather than this ODBC 2.x spelling, so this is the same deliberate
+            // deviation already recorded for SQL_ATTR_PARAMSET_SIZE and
+            // SQL_ATTR_CURSOR_SCROLLABLE below: substitution is the least-bad
+            // answer, because the alternative is an undetectable short read.
+            if attribute == crate::types::SQL_ROWSET_SIZE {
+                if int_val == SQL_ROW_ARRAY_SIZE_DEFAULT {
+                    scope.attr_set::<B>(statement_handle, attribute, int_val)?;
+                    return Ok(SqlReturn::SUCCESS);
+                }
+                return substitute_stmt_attr::<B>(
+                    scope,
+                    statement_handle,
+                    attribute,
+                    "SQL_ROWSET_SIZE",
+                    int_val,
+                    SQL_ROW_ARRAY_SIZE_DEFAULT,
+                    "1",
+                );
+            }
+
             match attr {
                 // Spec 24000 + HY011: these attributes cannot be set while a cursor is
                 // open or after the statement has been prepared.
@@ -1206,6 +1238,21 @@ pub unsafe fn sql_get_stmt_attr_w<B: Backend>(
                     Ok(SqlReturn::SUCCESS)
                 }
 
+                // SQL_ROWSET_SIZE has no `StatementAttribute` variant, so it lands
+                // here rather than in an arm above. It must be readable: the
+                // `01S02` its setter returns closes with "(SQLGetStmtAttr can be
+                // called to determine the temporarily substituted value)", and a
+                // substitution the application cannot read back is not a
+                // substitution it was told about.
+                None if attribute == crate::types::SQL_ROWSET_SIZE => {
+                    write_ulen(
+                        scope
+                            .attr_get::<B>(statement_handle, attribute)?
+                            .unwrap_or(SQL_ROW_ARRAY_SIZE_DEFAULT),
+                    );
+                    Ok(SqlReturn::SUCCESS)
+                }
+
                 _ => Err(OdbcError::general(
                     format!("SQLGetStmtAttrW: unsupported attribute {attribute}"),
                     SqlState::optional_feature_not_implemented(),
@@ -1228,6 +1275,7 @@ mod tests {
         MockNoQueryTimeoutBackend, MockQueryTimeoutBackend, alloc_env_conn_stmt,
         cleanup_env_conn_stmt, with_descriptor, with_handle,
     };
+    use crate::types::SQL_ROWSET_SIZE;
     use crate::types::{SQL_SENSITIVE, SQL_TRUE};
 
     #[test]
@@ -1837,6 +1885,76 @@ mod tests {
             let ret = sql_set_stmt_attr_w::<MockBackend>(
                 stmt,
                 StatementAttribute::RowArraySize as i32,
+                std::ptr::without_provenance_mut(1usize),
+                0,
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+                assert_eq!(handle.diagnostics.len(), 0);
+            });
+            cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
+    /// `SQL_ROWSET_SIZE` is the rowset `SQLExtendedFetch` reads, and this driver
+    /// produces exactly one row. It arrives as an *unrecognised* attribute —
+    /// `odbc-sys` models only the 3.x `SQL_ATTR_ROW_ARRAY_SIZE` (27) — so without
+    /// its own arm it falls to the catch-all that accepts unknown attributes
+    /// silently, and an application asking for ten rows would receive one under
+    /// `SQL_SUCCESS`. It is also where the Driver Manager's `SQLSetScrollOptions`
+    /// mapping lands.
+    #[test]
+    fn rowset_size_greater_than_one_is_substituted_with_01s02() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+
+            let ret = sql_set_stmt_attr_w::<MockBackend>(
+                stmt,
+                SQL_ROWSET_SIZE,
+                std::ptr::without_provenance_mut(10usize),
+                0,
+            );
+            assert_eq!(
+                ret,
+                SqlReturn::SUCCESS_WITH_INFO,
+                "a rowset core cannot produce was accepted silently"
+            );
+
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+                assert_eq!(
+                    handle.diagnostics.len(),
+                    1,
+                    "no 01S02 diagnostic was recorded"
+                );
+            });
+
+            // SQLGetStmtAttr must report the substituted value, per 01S02.
+            let mut out: usize = 0;
+            assert_eq!(
+                sql_get_stmt_attr_w::<MockBackend>(
+                    stmt,
+                    SQL_ROWSET_SIZE,
+                    std::ptr::from_mut(&mut out).cast(),
+                    0,
+                    std::ptr::null_mut(),
+                ),
+                SqlReturn::SUCCESS
+            );
+            assert_eq!(out, 1, "substituted value not reported back");
+
+            cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
+    /// The value the driver will actually use is 1, so setting 1 is not a
+    /// substitution and must not warn.
+    #[test]
+    fn rowset_size_of_one_is_accepted_without_warning() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            let ret = sql_set_stmt_attr_w::<MockBackend>(
+                stmt,
+                SQL_ROWSET_SIZE,
                 std::ptr::without_provenance_mut(1usize),
                 0,
             );

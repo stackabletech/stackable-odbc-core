@@ -412,6 +412,19 @@ pub const SQL_AM_STATEMENT: u32 = 2;
 /// `SQL_CA1_NEXT` — `SQL_FETCH_NEXT` orientation is supported in `SQLFetchScroll`.
 pub const SQL_CA1_NEXT: u32 = 0x0000_0001;
 
+/// `SQL_ROWSET_SIZE` (9) — the ODBC 2.x statement option giving the rowset size
+/// `SQLExtendedFetch` uses.
+///
+/// Not in `odbc-sys`: its `StatementAttribute` models only the ODBC 3.x
+/// `SQL_ATTR_ROW_ARRAY_SIZE` (27), which is a different value with a different
+/// number, set through a different call, and read by different functions. The
+/// spec keeps them apart deliberately — `SQLSetScrollOptions` "cannot be used by
+/// an application when fetching multiple rows by a call to **SQLFetch** or
+/// **SQLFetchScroll**. It can be used only when fetching multiple rows by a call
+/// to **SQLExtendedFetch**" — and the Driver Manager's `SQLSetScrollOptions`
+/// mapping sets this one.
+pub const SQL_ROWSET_SIZE: i32 = 9;
+
 /// `SQL_FETCH_BOOKMARK` (8) — fetch the rowset at a bookmark.
 ///
 /// Not in `odbc-sys`: its `FetchOrientation` stops at `Relative = 6` and jumps to
