@@ -630,6 +630,10 @@ pub const SQL_DATA_AT_EXEC: isize = -2;
 /// `SQL_LEN_DATA_AT_EXEC(len)` = `-(len) + SQL_LEN_DATA_AT_EXEC_OFFSET`.
 pub const SQL_LEN_DATA_AT_EXEC_OFFSET: isize = -100;
 
+/// `SQL_DEFAULT_PARAM` — indicator value meaning "use the procedure parameter's
+/// own default value" (`sqlext.h`).
+pub const SQL_DEFAULT_PARAM: isize = -5;
+
 // ---------------------------------------------------------------------------
 // SQLSetPos operation and lock type codes (sql.h)
 // ---------------------------------------------------------------------------

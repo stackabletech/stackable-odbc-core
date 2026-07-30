@@ -122,6 +122,8 @@ Everything a driver has to change for the catalog rework, in one place.
   `PutDataState`, which records what `SQLPutData` has delivered for the
   parameter currently being filled.
 
+- **`SQL_DEFAULT_PARAM`** (`-5`), which `odbc-sys` does not model.
+
 - **`SQLExtendedFetch` is implemented.** It was a bare `SQL_ERROR` inside the
   `forward_ffi!` macro — no handle validation, no diagnostic, no logging, no
   test — so an ODBC 2.x application, or the Driver Manager mapping a 2.x
@@ -2596,5 +2598,23 @@ Everything a driver has to change for the catalog rework, in one place.
   `SQLPutData(_, SQL_NULL_DATA)` sends NULL; inferring NULL from an empty
   buffer collapsed the two, so an empty string could not be sent this way at
   all.
+
+- **`SQLPutData` recognises `SQL_DEFAULT_PARAM`.** The constant appeared nowhere
+  in the crate, so an indicator of `-5` fell into the generic negative branch
+  and reported `HY090` — telling the application its length was malformed when
+  the spec's own *StrLen_or_Ind* description lists the value: "is SQL_NTS,
+  SQL_NULL_DATA, or SQL_DEFAULT_PARAM". It is now accepted and resolves to
+  NULL, and it participates in the `HY020` concatenation rule, whose row names
+  it beside `SQL_NULL_DATA`.
+
+  Accepting rather than refusing follows psqlODBC, which pairs the two
+  constants in `PGAPI_PutData` and answers `SQL_SUCCESS` for both while raising
+  "Invalid string or buffer length" for every other negative value; MySQL
+  Connector/ODBC does not recognise the constant at all. The `07S01` row was
+  considered and not taken — no mature driver returns it here. NULL is the only
+  value the request can resolve to in core, which is a fact about core rather
+  than a guess about a data source: `SQL_DEFAULT_PARAM` names a *procedure*
+  parameter's default, and core refuses `{call ...}` and `{?= call ...}` with
+  `HYC00`, so no statement it executes has a parameter carrying one.
 
 [Unreleased]: https://github.com/stackabletech/stackable-odbc-core/commits/HEAD

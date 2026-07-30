@@ -14,7 +14,7 @@ use crate::{
     handles::{ParamRecord, ParamRecords, PutDataState, StatementHandle},
     panic::panic_safe,
     types::{
-        ColumnValue, ParamDescriptor, SQL_DATA_AT_EXEC, SQL_DEFAULT_PARAM_SIZE,
+        ColumnValue, ParamDescriptor, SQL_DATA_AT_EXEC, SQL_DEFAULT_PARAM, SQL_DEFAULT_PARAM_SIZE,
         SQL_LEN_DATA_AT_EXEC_OFFSET, SQL_NTS, SQL_NULL_DATA, SQL_PARAM_ERROR, SQL_PARAM_SUCCESS,
         SqlReturn, SqlState, ULen, c_data_type_from_raw, param_type_from_raw,
     },
@@ -1319,7 +1319,8 @@ unsafe fn dae_nts_byte_count(c_type: Option<odbc_sys::CDataType>, data_ptr: *con
 /// - HY001: Memory allocation error — not applicable; Rust allocation panics are caught by
 ///   `panic_safe`.
 /// - HY009: Invalid use of null pointer — returned when `data_ptr` is null but
-///   `str_len_or_ind` is not `SQL_NULL_DATA`.
+///   `str_len_or_ind` is neither `SQL_NULL_DATA` nor `SQL_DEFAULT_PARAM`, the two values
+///   that carry the whole parameter and so need no buffer.
 /// - HY010: Function sequence error — returned when no data-at-execution is in progress
 ///   (no prior `SQL_NEED_DATA` from `SQLExecute`/`SQLExecDirectW`), or when
 ///   `SQLParamData` has not yet been called to identify the current parameter.
@@ -1332,10 +1333,20 @@ unsafe fn dae_nts_byte_count(c_type: Option<odbc_sys::CDataType>, data_ptr: *con
 ///   returned SQL_NEED_DATA, and in one of those calls, the StrLen_or_Ind argument contained
 ///   SQL_NULL_DATA or SQL_DEFAULT_PARAM." A NULL is the whole value of a parameter, so
 ///   `SQLPutData(SQL_NULL_DATA)` after data, and data after `SQLPutData(SQL_NULL_DATA)`, are
-///   both refused. Two calls both carrying data are not: the spec's objection is to the null,
-///   not to the concatenation.
+///   both refused, and `SQL_DEFAULT_PARAM` is treated the same because the row names it too.
+///   Two calls both carrying data are not: the spec's objection is to the null, not to the
+///   concatenation.
+/// - 07S01: Invalid use of default parameter — (not returned here). `SQL_DEFAULT_PARAM` is
+///   **accepted**, following psqlODBC, whose `PGAPI_PutData` pairs it with `SQL_NULL_DATA`
+///   and answers `SQL_SUCCESS` while raising "Invalid string or buffer length" for every
+///   other negative value; MySQL Connector/ODBC does not recognise the constant at all. The
+///   row describes a parameter that "did not have a default value", and no mature driver
+///   returns it here. It resolves to NULL, which is the only value it can take in core:
+///   `SQL_DEFAULT_PARAM` names a *procedure* parameter's default and `crate::escape` refuses
+///   `{call ...}` with `HYC00`, so no statement core executes has one.
 /// - HY090: Invalid string or buffer length — returned when `str_len_or_ind` is negative
-///   and not `SQL_NTS` or `SQL_NULL_DATA`.
+///   and none of `SQL_NTS`, `SQL_NULL_DATA` or `SQL_DEFAULT_PARAM`, which are the three the
+///   spec's *StrLen_or_Ind* description lists.
 /// - HY117: Connection suspended — (driver-manager-handled; not returned here).
 /// - HYT01: Connection timeout expired — (driver-manager-handled; not returned here).
 /// - IM001: Driver does not support this function — (driver-manager-handled; not returned
@@ -1408,8 +1419,13 @@ pub unsafe fn sql_put_data<B: Backend>(
             // Both orderings used to succeed: the first discarded what the
             // application had already sent, the second concatenated onto a
             // value it had declared NULL.
+            //
+            // The row names `SQL_DEFAULT_PARAM` alongside `SQL_NULL_DATA`, so
+            // accepting that value below does not exempt it from this rule.
+            let whole_value =
+                str_len_or_ind == SQL_NULL_DATA || str_len_or_ind == SQL_DEFAULT_PARAM;
             if dae.put_state != PutDataState::NotCalled
-                && (str_len_or_ind == SQL_NULL_DATA || dae.put_state == PutDataState::Null)
+                && (whole_value || dae.put_state == PutDataState::Null)
             {
                 return Err(OdbcError::general(
                     "A null value cannot be concatenated with other data for one parameter",
@@ -1417,14 +1433,38 @@ pub unsafe fn sql_put_data<B: Backend>(
                 ));
             }
 
-            // SQL_NULL_DATA: set param to NULL by clearing the buffer.
-            if str_len_or_ind == SQL_NULL_DATA {
+            // `SQL_NULL_DATA` sets the parameter to NULL by clearing the
+            // buffer, and `SQL_DEFAULT_PARAM` joins it.
+            //
+            // The spec's *StrLen_or_Ind* description lists `SQL_DEFAULT_PARAM`
+            // as a value the argument may carry — "is SQL_NTS, SQL_NULL_DATA,
+            // or SQL_DEFAULT_PARAM" — so reporting `HY090` for it, as core did
+            // while the constant was unknown, told the application its length
+            // was malformed when it was not.
+            //
+            // Accepted rather than refused, following psqlODBC, which pairs the
+            // two constants in `PGAPI_PutData` and answers `SQL_SUCCESS` for
+            // both, while raising "Invalid string or buffer length" for every
+            // other negative value — so the exemption is deliberate there.
+            // MySQL Connector/ODBC does not recognise the constant at all.
+            // `SQLPutData`'s `07S01` row was considered and not taken: it
+            // describes a parameter that "did not have a default value", and no
+            // driver returns it here.
+            //
+            // NULL is the only value the request can resolve to, and that is a
+            // fact about core rather than a guess about a data source:
+            // `SQL_DEFAULT_PARAM` names a *procedure* parameter's default, and
+            // `crate::escape` refuses `{call ...}` and `{?= call ...}` with
+            // `HYC00`, so no statement core executes has a parameter carrying
+            // one.
+            if whole_value {
                 dae.buffer.clear();
                 dae.put_state = PutDataState::Null;
                 return Ok(SqlReturn::SUCCESS);
             }
 
-            // Spec HY009: data_ptr must not be null (unless SQL_NULL_DATA, handled above).
+            // Spec HY009: data_ptr must not be null (unless SQL_NULL_DATA or
+            // SQL_DEFAULT_PARAM, both handled above).
             if data_ptr.is_null() {
                 return Err(OdbcError::general(
                     "DataPtr is null",
@@ -1439,7 +1479,9 @@ pub unsafe fn sql_put_data<B: Backend>(
                 // by this function's own `unsafe` block, as the reads below are.
                 dae_nts_byte_count(c_type, data_ptr.cast::<u8>())
             } else if str_len_or_ind < 0 {
-                // Spec HY090: negative length that's not SQL_NTS or SQL_NULL_DATA.
+                // Spec HY090: a negative length that is none of the three the
+                // *StrLen_or_Ind* description lists — SQL_NTS, SQL_NULL_DATA
+                // and SQL_DEFAULT_PARAM, the last two handled above.
                 return Err(OdbcError::general(
                     format!("Invalid string or buffer length: {str_len_or_ind}"),
                     SqlState::invalid_string_or_buffer_length(),
@@ -2331,6 +2373,119 @@ mod tests {
             with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |h| {
                 let dae = h.data_at_exec.as_ref().expect("the loop is still open");
                 assert_eq!(dae.collected_values.get(&1), Some(&ColumnValue::Null));
+            });
+
+            cleanup(env, conn, stmt);
+        }
+    }
+
+    /// `SQL_DEFAULT_PARAM` is a value the spec's own *StrLen_or_Ind*
+    /// description lists — "is SQL_NTS, SQL_NULL_DATA, or SQL_DEFAULT_PARAM" —
+    /// so it must not be reported as a malformed length. It was `HY090` only
+    /// because the constant was unknown to core.
+    ///
+    /// Accepted rather than refused, following psqlODBC, whose `PGAPI_PutData`
+    /// pairs it with `SQL_NULL_DATA` in both directions: `if (cbValue ==
+    /// SQL_NULL_DATA || cbValue == SQL_DEFAULT_PARAM) putlen = cbValue;` and
+    /// then `if (cbValue == SQL_NULL_DATA || cbValue == SQL_DEFAULT_PARAM) {
+    /// retval = SQL_SUCCESS; goto cleanup; }`. Its unrecognised-negative branch
+    /// raises "Invalid string or buffer length", so exempting `-5` from that
+    /// path is deliberate there rather than incidental.
+    #[test]
+    fn put_data_accepts_sql_default_param_as_a_null_like_value() {
+        unsafe {
+            let (env, conn, stmt) = connected_stmt();
+            let mut indicator: isize = SQL_DATA_AT_EXEC;
+            start_dae_loop(
+                stmt,
+                CDataType::Char,
+                SqlDataType::VARCHAR,
+                &raw mut indicator,
+            );
+
+            assert_eq!(
+                sql_put_data::<MockBackend>(stmt, std::ptr::null_mut(), SQL_DEFAULT_PARAM),
+                SqlReturn::SUCCESS,
+                "SQL_DEFAULT_PARAM is a listed value, not a malformed length",
+            );
+
+            // Core refuses `{call ...}` and `{?= call ...}` with `HYC00`, so no
+            // statement it executes has a parameter with a data-source default
+            // to substitute. NULL is the only value the request can resolve to,
+            // which is what the recorded state says it will become.
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |h| {
+                let dae = h.data_at_exec.as_ref().expect("the loop is still open");
+                assert_eq!(
+                    dae.put_state,
+                    crate::handles::PutDataState::Null,
+                    "SQL_DEFAULT_PARAM resolves to NULL when there is no default",
+                );
+                assert!(dae.buffer.is_empty(), "no data may be left to concatenate");
+            });
+
+            cleanup(env, conn, stmt);
+        }
+    }
+
+    /// The spec's `HY020` row names `SQL_DEFAULT_PARAM` beside `SQL_NULL_DATA`
+    /// — "in one of those calls, the StrLen_or_Ind argument contained
+    /// SQL_NULL_DATA or SQL_DEFAULT_PARAM" — so accepting the value must not
+    /// exempt it from the concatenation rule.
+    #[test]
+    fn put_data_default_param_after_data_reports_hy020() {
+        unsafe {
+            let (env, conn, stmt) = connected_stmt();
+            let mut indicator: isize = SQL_DATA_AT_EXEC;
+            start_dae_loop(
+                stmt,
+                CDataType::Char,
+                SqlDataType::VARCHAR,
+                &raw mut indicator,
+            );
+
+            let mut data = *b"abc";
+            assert_eq!(
+                sql_put_data::<MockBackend>(stmt, data.as_mut_ptr().cast::<c_void>(), 3),
+                SqlReturn::SUCCESS,
+                "precondition: data is put for the current parameter",
+            );
+
+            assert_eq!(
+                sql_put_data::<MockBackend>(stmt, std::ptr::null_mut(), SQL_DEFAULT_PARAM),
+                SqlReturn::ERROR,
+            );
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |h| {
+                let rec = h.diagnostics.get(0).expect("record 1 exists");
+                assert_eq!(rec.sqlstate.as_str(), "HY020");
+            });
+
+            cleanup(env, conn, stmt);
+        }
+    }
+
+    /// Every *other* negative length is still `HY090`, whose row exempts only
+    /// `SQL_NTS` and `SQL_NULL_DATA`. Recognising one constant must not open
+    /// the door to the rest.
+    #[test]
+    fn put_data_still_reports_hy090_for_an_unlisted_negative_length() {
+        unsafe {
+            let (env, conn, stmt) = connected_stmt();
+            let mut indicator: isize = SQL_DATA_AT_EXEC;
+            start_dae_loop(
+                stmt,
+                CDataType::Char,
+                SqlDataType::VARCHAR,
+                &raw mut indicator,
+            );
+
+            let mut data = *b"abc";
+            assert_eq!(
+                sql_put_data::<MockBackend>(stmt, data.as_mut_ptr().cast::<c_void>(), -7),
+                SqlReturn::ERROR,
+            );
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |h| {
+                let rec = h.diagnostics.get(0).expect("record 1 exists");
+                assert_eq!(rec.sqlstate.as_str(), "HY090");
             });
 
             cleanup(env, conn, stmt);
