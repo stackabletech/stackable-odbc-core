@@ -86,6 +86,13 @@ pub fn genuine_convert_info_types() -> Vec<u16> {
 /// - **String**: `write_utf16` bails out before writing anything once
 ///   `buf_len <= 0` (it still reports the true length through
 ///   `string_length_ptr`); every sentinel byte survives untouched.
+///
+///   Note the *return code* for this case is `SQL_SUCCESS_WITH_INFO`, not
+///   `SQL_SUCCESS`. A non-null buffer with no room in it is total truncation,
+///   and `SQLGetInfo`'s own diagnostics table carries the `01004` row that
+///   says so. A caller asserting on the return value of this helper wants
+///   "not `SQL_ERROR`" rather than "is `SQL_SUCCESS`": the shape probe
+///   deliberately supplies a buffer it has declared to be empty.
 /// - **`U16`**: the numeric branch does not consult `buffer_length` at all;
 ///   it always writes exactly 2 bytes through `write_unaligned` and reports
 ///   `string_length_ptr = 2`.
@@ -425,9 +432,9 @@ mod tests {
             for info_type in all_info_types() {
                 let (ret, kind, _string_length) =
                     observe_info_value_kind::<MockBackend>(conn, info_type as u16);
-                assert_eq!(
+                assert_ne!(
                     ret,
-                    SqlReturn::SUCCESS,
+                    SqlReturn::ERROR,
                     "{info_type:?}: SQLGetInfoW must never return SQL_ERROR for a \
                      named-but-unimplemented info type (corrupts the Windows DM's \
                      internal state)"
@@ -460,9 +467,9 @@ mod tests {
             for info_type in all_info_types() {
                 let (ret, kind, _string_length) =
                     observe_info_value_kind::<MockBackend>(conn, info_type as u16);
-                assert_eq!(
+                assert_ne!(
                     ret,
-                    SqlReturn::SUCCESS,
+                    SqlReturn::ERROR,
                     "{info_type:?}: SQLGetInfoW must never return SQL_ERROR for a \
                      named-but-unimplemented info type"
                 );

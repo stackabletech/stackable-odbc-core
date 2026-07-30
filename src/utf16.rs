@@ -124,8 +124,12 @@ pub(crate) unsafe fn nts_byte_len(ptr: *const u8) -> usize {
 /// Always writes the total length (in `u16` code units, not including null) to
 /// `len_ptr` if it is non-null.
 ///
-/// If `out_ptr` is null or `buf_len <= 0`, no data is written and
-/// `SUCCESS_WITH_INFO` is returned.
+/// If `out_ptr` is null, nothing is written and `SUCCESS` is returned: that is
+/// the length-query form, and the caller asked for no data.
+///
+/// If `out_ptr` is non-null but `buf_len <= 0`, nothing is written and
+/// `SUCCESS_WITH_INFO` is returned: the caller supplied a buffer with no room
+/// for even the null terminator, which is total truncation.
 ///
 /// If the value fits entirely (including null terminator), returns `SUCCESS`.
 /// Otherwise truncates to `buf_len - 1` chars, writes the null terminator, and
@@ -156,11 +160,24 @@ pub unsafe fn write_utf16(
         unsafe { std::ptr::write_unaligned(len_ptr, reported_len) };
     }
 
-    // If no output buffer is provided, just report the length.
-    // Return SUCCESS (not SUCCESS_WITH_INFO): the caller is just querying
-    // the required buffer size, not experiencing truncation.
-    if out_ptr.is_null() || buf_len <= 0 {
+    // A null output buffer is a pure length query: the application asked how much
+    // room it needs and gets SQL_SUCCESS plus the count, having supplied nowhere
+    // to write. The spec sanctions it by name: "If DiagInfoPtr is NULL,
+    // StringLengthPtr will still return the total number of bytes ... available
+    // to return in the buffer pointed to by DiagInfoPtr."
+    if out_ptr.is_null() {
         return SqlReturn::SUCCESS;
+    }
+
+    // A non-null buffer with no room in it is a different thing, and sharing the
+    // branch above gave the two the same answer. The application supplied
+    // somewhere to write and nothing was written, not even the null terminator,
+    // which is total truncation, and reporting SUCCESS made it
+    // indistinguishable from a complete write. The length reported back is the
+    // length *needed*, so it is the same number either way and cannot be used to
+    // tell them apart.
+    if buf_len <= 0 {
+        return SqlReturn::SUCCESS_WITH_INFO;
     }
 
     let capacity = (buf_len - 1) as usize; // reserve one slot for null terminator
@@ -333,6 +350,54 @@ mod tests {
         let ret = unsafe { write_utf16("hello", std::ptr::null_mut(), 0, &mut len) };
         assert_eq!(ret, SqlReturn::SUCCESS);
         assert_eq!(len, 5);
+    }
+
+    /// A non-null buffer with no room in it is total truncation: nothing was
+    /// written, not even the null terminator. Reporting SUCCESS gave it the same
+    /// answer as a complete write, so an application had no way to tell them
+    /// apart: the length it reads back is the length *needed*, which is the same
+    /// number either way.
+    ///
+    /// Spec, on the SQL_SUCCESS_WITH_INFO row: "The \*MessageText buffer was too
+    /// small to hold the requested diagnostic message."
+    #[test]
+    fn write_utf16_reports_truncation_for_a_zero_length_non_null_buffer() {
+        let mut buf = [0u16; 4];
+        let mut len: i16 = -1;
+        // SAFETY: `buf` is a real allocation and `len` is writable; the declared
+        // length of 0 is the input under test.
+        let ret = unsafe { write_utf16("hello", buf.as_mut_ptr(), 0, &mut len) };
+        assert_eq!(ret, SqlReturn::SUCCESS_WITH_INFO);
+        assert_eq!(len, 5, "the required length is still reported");
+        assert_eq!(
+            buf, [0u16; 4],
+            "nothing may be written into a zero-length buffer"
+        );
+    }
+
+    /// A null buffer is a pure length query and stays SUCCESS. The spec
+    /// sanctions it: "If *DiagInfoPtr* is NULL, *StringLengthPtr* will still
+    /// return the total number of bytes ... available to return in the buffer".
+    /// Collapsing the two cases is what produced the wrong answer above.
+    #[test]
+    fn write_utf16_still_reports_success_for_a_null_buffer_length_query() {
+        let mut len: i16 = -1;
+        // SAFETY: a null out pointer is the documented length-query form.
+        let ret = unsafe { write_utf16("hello", std::ptr::null_mut(), 0, &mut len) };
+        assert_eq!(ret, SqlReturn::SUCCESS);
+        assert_eq!(len, 5);
+    }
+
+    /// A negative declared length is the same case: the application supplied a
+    /// buffer and said there is no room in it.
+    #[test]
+    fn write_utf16_reports_truncation_for_a_negative_buffer_length() {
+        let mut buf = [0u16; 4];
+        let mut len: i16 = 0;
+        // SAFETY: as above.
+        let ret = unsafe { write_utf16("hi", buf.as_mut_ptr(), -1, &mut len) };
+        assert_eq!(ret, SqlReturn::SUCCESS_WITH_INFO);
+        assert_eq!(buf, [0u16; 4]);
     }
 
     #[test]

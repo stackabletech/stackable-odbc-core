@@ -1536,6 +1536,31 @@ call `SQLCloseCursor` or `SQLFreeStmt(SQL_CLOSE)` first, as it already must for
   `SQLConfigDataSource` flags that reach `ConfigDSN` and must be rejected as
   request types.
 
+- A string-returning function given a **non-null** buffer of length zero now
+  returns `SQL_SUCCESS_WITH_INFO` and posts `01004`, instead of `SQL_SUCCESS`.
+  Nothing is written in that case, not even the null terminator, so reporting
+  success made total truncation indistinguishable from a complete write, and the
+  length reported back is the length *needed*, which is the same number either
+  way. A **null** buffer is unchanged and still `SQL_SUCCESS`: that is the
+  length-query form the spec sanctions.
+
+  This is in the shared `write_utf16` helper, so it applies to
+  `SQLGetConnectAttrW`, `SQLGetCursorNameW`, `SQLGetDescFieldW`,
+  `SQLGetDescRecW`, `SQLGetInfoW`, `SQLDescribeColW`, `SQLColAttributeW`,
+  `SQLGetDiagRecW` and `SQLGetDiagFieldW`. Every one of those lists `01004` (or
+  the equivalent `SQL_SUCCESS_WITH_INFO` row) in its own diagnostics table.
+  `SQLDriverConnectW` and `SQLBrowseConnectW` discard the value and are
+  unaffected, deliberately.
+
+  `conformance::observe_info_value_kind` probes the write shape with a non-null
+  zero-length buffer, so it now reports `SQL_SUCCESS_WITH_INFO` for a
+  `String`-shaped info type. A driver test suite asserting on its return value
+  wants "not `SQL_ERROR`" rather than "is `SQL_SUCCESS`".
+
+  **Migration:** an application that passed a zero-length non-null buffer as a
+  length probe now sees `SQL_SUCCESS_WITH_INFO`. Passing a null pointer is the
+  spec's length-probe form and keeps returning `SQL_SUCCESS`.
+
 - `SQLGetDiagFieldW` no longer rejects a negative `BufferLength` for an
   integer-valued field. The check ran ahead of the field match, so
   `SQL_DIAG_NATIVE`, `SQL_DIAG_COLUMN_NUMBER` and `SQL_DIAG_ROW_NUMBER` failed

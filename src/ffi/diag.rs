@@ -1496,6 +1496,48 @@ mod tests {
         assert_eq!(SQL_DIAG_UNKNOWN_STATEMENT, 0);
     }
 
+    /// `SQLGetDiagRecW` with a real buffer and no room in it must say the
+    /// message was truncated. Its spec row is explicit ("SQL_SUCCESS_WITH_INFO:
+    /// The \*MessageText buffer was too small to hold the requested diagnostic
+    /// message") and the total-truncation case is the one an application is
+    /// least able to detect for itself.
+    #[test]
+    fn diag_rec_zero_length_message_buffer_reports_truncation() {
+        unsafe {
+            let mut env: *mut c_void = std::ptr::null_mut();
+            let _ = sql_alloc_handle::<MockBackend>(
+                HandleType::Env as i16,
+                std::ptr::null_mut(),
+                &mut env,
+            );
+            with_handle::<MockBackend, EnvironmentHandle<MockBackend>, _>(env, |handle| {
+                handle
+                    .diagnostics
+                    .push(&crate::errors::OdbcError::NotConnected);
+            });
+
+            let mut state = [0u16; 6];
+            let mut native_err: i32 = 0;
+            let mut msg_buf = [0u16; 1];
+            let mut msg_len: i16 = 0;
+
+            let ret = sql_get_diag_rec_w::<MockBackend>(
+                HandleType::Env as i16,
+                env,
+                1,
+                state.as_mut_ptr(),
+                &mut native_err,
+                msg_buf.as_mut_ptr(),
+                0, // a real buffer, declared to have no room
+                &mut msg_len,
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS_WITH_INFO);
+            assert!(msg_len > 0, "the required length is still reported");
+
+            let _ = sql_free_handle::<MockBackend>(HandleType::Env as i16, env);
+        }
+    }
+
     /// Four combinations, and all four occur. The class rule keys on the
     /// two-character class ("For ODBC-specific SQLSTATEs (all those whose
     /// SQLSTATE class is 'IM'), its value is 'ODBC 3.0'") while the subclass
