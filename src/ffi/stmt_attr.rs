@@ -387,9 +387,11 @@ fn reset_at_data_source<B: Backend, T>(
 ///   (driver-manager-handled; not returned here).
 /// - HYC00 Optional feature not implemented: returned for
 ///   `SQL_ATTR_USE_BOOKMARKS` other than `SQL_UB_OFF`,
-///   `SQL_ATTR_RETRIEVE_DATA` = `SQL_RD_OFF`, `SQL_ATTR_CURSOR_SENSITIVITY` =
-///   `SQL_SENSITIVE`, `SQL_ATTR_ENABLE_AUTO_IPD` = `SQL_TRUE` (a case the
-///   spec's own HYC00 row names), and `SQL_ATTR_ASYNC_ENABLE` =
+///   `SQL_ATTR_RETRIEVE_DATA` = `SQL_RD_OFF`, any
+///   `SQL_ATTR_CURSOR_SENSITIVITY` other than `SQL_UNSPECIFIED` — both
+///   `SQL_INSENSITIVE` and `SQL_SENSITIVE`, since each is a promise a streaming
+///   forward-only cursor cannot keep — `SQL_ATTR_ENABLE_AUTO_IPD` = `SQL_TRUE`
+///   (a case the spec's own HYC00 row names), and `SQL_ATTR_ASYNC_ENABLE` =
 ///   `SQL_ASYNC_ENABLE_ON`. These are the unsupported values that the spec's
 ///   `01S02` row does not cover, so there is no substitution to report instead.
 /// - HYT01 Connection timeout expired: not raised by core. Since
@@ -1019,16 +1021,21 @@ pub unsafe fn sql_set_stmt_attr_w<B: Backend>(
 ///
 /// Spec: <https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlgetstmtattr-function>
 ///
-/// Returns integer attributes as `u32` written to `*value_ptr`.
-/// Pointer attributes are returned as pointer-sized values.
+/// Returns integer attributes as an `SQLULEN` written to `*value_ptr` — the
+/// width every non-pointer attribute on the `SQLSetStmtAttr` page is declared
+/// at, and eight bytes on LP64 rather than four. Pointer attributes are
+/// returned as pointer-sized values. The `write_ulen` helper in the body
+/// carries the spec text and what an application reads when a driver fills
+/// only the low half.
 ///
 /// # Parameters
 ///
 /// - `statement_handle`: statement handle (SQL_HANDLE_STMT).
 /// - `attribute`: the statement attribute to retrieve (e.g. `SQL_ATTR_CURSOR_TYPE`).
 /// - `value_ptr`: output buffer to receive the attribute value. For integer
-///   attributes this receives a `u32`; for pointer attributes a pointer-sized
-///   value; for descriptor-handle attributes a pointer to the descriptor handle.
+///   attributes this receives an `SQLULEN`; for pointer attributes a
+///   pointer-sized value; for descriptor-handle attributes a pointer to the
+///   descriptor handle.
 ///   May be null — the driver still writes `*string_length_ptr` in that case.
 /// - `_buffer_length`: maximum byte length of `*value_ptr` when it is a string;
 ///   ignored for integer and pointer attributes.
