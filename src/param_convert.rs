@@ -323,6 +323,20 @@ pub(crate) fn parse_numeric_literal(s: &str) -> Option<DecimalLiteral> {
 }
 
 impl DecimalLiteral {
+    /// An exact integer, with no fractional part.
+    ///
+    /// Built directly rather than by rendering to text and parsing it back,
+    /// because [`crate::numeric_convert`] calls this for every bound integer
+    /// parameter of every execution — the one place in this family that is on a
+    /// hot path rather than a per-statement one.
+    pub(crate) fn from_integer(value: i128) -> Self {
+        Self {
+            negative: value < 0,
+            digits: value.unsigned_abs().to_string(),
+            scale: 0,
+        }
+    }
+
     /// The significant digits with leading zeros removed, never empty.
     pub(crate) fn significant(&self) -> &str {
         let trimmed = self.digits.trim_start_matches('0');

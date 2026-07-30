@@ -38,16 +38,6 @@
 //!
 //! [C to SQL: Numeric]: https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/c-to-sql-numeric
 
-// The table is built row by row, and `read_param_value` routes into it only once
-// every row is present — a half-wired conversion would send some numeric
-// parameters through the table and others past it, which is worse than none.
-// Until that wiring lands nothing outside the tests calls in here.
-//
-// This allow must go away with that wiring. It is scoped to the module rather
-// than to each item so that removing it fails loudly if anything is genuinely
-// unreachable, instead of leaving a per-item allow behind to be inherited.
-#![allow(dead_code)]
-
 use odbc_sys::{CDataType, Interval, SqlDataType};
 
 use crate::{
@@ -128,6 +118,25 @@ impl Converted {
 }
 
 impl NumericParam {
+    /// An exact integer source: every one of the table's integer C types.
+    pub(crate) fn exact_integer(value: i128) -> Self {
+        NumericParam::Exact(DecimalLiteral::from_integer(value))
+    }
+
+    /// A `SQL_C_NUMERIC` source, from the decimal string its struct renders to.
+    ///
+    /// `None` only if that string is not a *numeric-literal*, which core's own
+    /// renderer cannot produce; the caller turns it into a diagnostic rather
+    /// than panicking, because this runs inside an FFI call.
+    pub(crate) fn exact_text(text: &str) -> Option<Self> {
+        parse_numeric_literal(text).map(NumericParam::Exact)
+    }
+
+    /// An approximate source: `SQL_C_FLOAT` or `SQL_C_DOUBLE`.
+    pub(crate) fn approx(value: f64, single: bool) -> Self {
+        NumericParam::Approx { value, single }
+    }
+
     /// The value as an `f64`, for the rows whose test is a magnitude.
     ///
     /// An exact literal too large for `f64` parses to an infinity, which the

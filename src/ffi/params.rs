@@ -556,6 +556,92 @@ fn clamp_to_bound_buffer(byte_len: usize, buffer_length: isize) -> usize {
     byte_len
 }
 
+/// Read one of the *C to SQL: Numeric* table's source types out of the
+/// application's buffer.
+///
+/// The spec fixes the width: "The driver ignores the length/indicator value
+/// when converting data from the numeric C data types and assumes that the size
+/// of the data buffer is the size of the numeric C data type." So each arm
+/// reads exactly its own type and no indicator is consulted.
+///
+/// **The unsigned types widen rather than reinterpret.** `SQL_C_UBIGINT` used to
+/// be read as a `u64` and cast to `i64`, which turned any value above
+/// `i64::MAX` into a negative number on its way to the data source; the same
+/// shape made `SQL_C_USHORT` and `SQL_C_UTINYINT` wrap. Going through `i128`
+/// there is no cast that can wrap, and the table's own range checks decide what
+/// the declared target can hold.
+///
+/// # Safety
+///
+/// `ptr` must be non-null and point to a valid value of `c_type`.
+unsafe fn read_numeric_param(
+    c_type: odbc_sys::CDataType,
+    ptr: crate::types::Pointer,
+) -> Result<crate::numeric_convert::NumericParam, OdbcError> {
+    use crate::numeric_convert::NumericParam;
+    use odbc_sys::CDataType;
+
+    // SAFETY for every read below: the caller guarantees `ptr` points to a
+    // valid value of `c_type`. `read_unaligned` tolerates the arbitrary offsets
+    // row-wise binding can place an application buffer at, where a plain
+    // dereference of a multi-byte type would be UB.
+    let exact = |v: i128| Ok(NumericParam::exact_integer(v));
+    match c_type {
+        CDataType::STinyInt => exact(i128::from(unsafe {
+            std::ptr::read_unaligned(ptr as *const i8)
+        })),
+        CDataType::UTinyInt => exact(i128::from(unsafe {
+            std::ptr::read_unaligned(ptr as *const u8)
+        })),
+        CDataType::SShort => exact(i128::from(unsafe {
+            std::ptr::read_unaligned(ptr as *const i16)
+        })),
+        CDataType::UShort => exact(i128::from(unsafe {
+            std::ptr::read_unaligned(ptr as *const u16)
+        })),
+        CDataType::SLong => exact(i128::from(unsafe {
+            std::ptr::read_unaligned(ptr as *const i32)
+        })),
+        CDataType::ULong => exact(i128::from(unsafe {
+            std::ptr::read_unaligned(ptr as *const u32)
+        })),
+        CDataType::SBigInt => exact(i128::from(unsafe {
+            std::ptr::read_unaligned(ptr as *const i64)
+        })),
+        CDataType::UBigInt => exact(i128::from(unsafe {
+            std::ptr::read_unaligned(ptr as *const u64)
+        })),
+        CDataType::Float => Ok(NumericParam::approx(
+            f64::from(unsafe { std::ptr::read_unaligned(ptr as *const f32) }),
+            true,
+        )),
+        CDataType::Double => Ok(NumericParam::approx(
+            unsafe { std::ptr::read_unaligned(ptr as *const f64) },
+            false,
+        )),
+        CDataType::Numeric => {
+            let n = unsafe { std::ptr::read_unaligned(ptr as *const odbc_sys::Numeric) };
+            let text = numeric_struct_to_decimal_string(&n);
+            NumericParam::exact_text(&text).ok_or_else(|| {
+                // Unreachable: `numeric_struct_to_decimal_string` and
+                // `parse_numeric_literal` are both core's, and the first always
+                // renders a *numeric-literal*. Reported rather than unwrapped
+                // because this runs inside an FFI call.
+                OdbcError::general(
+                    format!("SQL_C_NUMERIC parameter rendered as {text:?}, which is not a number"),
+                    SqlState::general_error(),
+                )
+            })
+        }
+        // `is_numeric_c_type` gates every caller, and it lists exactly the arms
+        // above.
+        other => Err(OdbcError::general(
+            format!("{other:?} is not a numeric C data type"),
+            SqlState::general_error(),
+        )),
+    }
+}
+
 /// A parameter value, and the optional warning reading it raised.
 ///
 /// The warning exists because the *C to SQL: Numeric* table's fractional
@@ -605,42 +691,33 @@ pub(crate) unsafe fn read_param_value(rec: ParamRecord<'_>) -> Result<ParamValue
         return Ok(ColumnValue::Null.into());
     }
 
-    Ok(ParamValue::from(match apd.c_type()? {
-        // SAFETY for all integer/float reads below: value_ptr is non-null (guarded above) and the
-        // caller guarantees it points to a valid value of the appropriate C type provided by the
-        // ODBC caller via SQLBindParameter. `read_unaligned` tolerates the arbitrary offsets
-        // row-wise binding can place an application buffer at, where a plain dereference of a
-        // multi-byte type would be UB.
-        CDataType::SLong => {
-            ColumnValue::I32(unsafe { std::ptr::read_unaligned(apd.data_ptr as *const i32) })
-        }
-        CDataType::SShort => {
-            ColumnValue::I16(unsafe { std::ptr::read_unaligned(apd.data_ptr as *const i16) })
-        }
-        CDataType::STinyInt => {
-            ColumnValue::I8(unsafe { std::ptr::read_unaligned(apd.data_ptr as *const i8) })
-        }
-        CDataType::SBigInt => {
-            ColumnValue::I64(unsafe { std::ptr::read_unaligned(apd.data_ptr as *const i64) })
-        }
-        CDataType::ULong => {
-            ColumnValue::I64(unsafe { std::ptr::read_unaligned(apd.data_ptr as *const u32) } as i64)
-        }
-        CDataType::UShort => {
-            ColumnValue::I16(unsafe { std::ptr::read_unaligned(apd.data_ptr as *const u16) } as i16)
-        }
-        CDataType::UTinyInt => {
-            ColumnValue::I8(unsafe { std::ptr::read_unaligned(apd.data_ptr as *const u8) } as i8)
-        }
-        CDataType::UBigInt => {
-            ColumnValue::I64(unsafe { std::ptr::read_unaligned(apd.data_ptr as *const u64) } as i64)
-        }
-        CDataType::Double => {
-            ColumnValue::F64(unsafe { std::ptr::read_unaligned(apd.data_ptr as *const f64) })
-        }
-        CDataType::Float => {
-            ColumnValue::F32(unsafe { std::ptr::read_unaligned(apd.data_ptr as *const f32) })
-        }
+    // The whole "C to SQL: Numeric" table: every one of its fourteen source
+    // types, converted to whatever `SQLBindParameter`'s ParameterType declared.
+    // Placed before the arms below so it captures `SQL_C_NUMERIC` too, and
+    // guarded rather than listed so the table's own source list stays in one
+    // place. `SQL_C_BIT` is deliberately not captured: it has its own table.
+    //
+    // `SQLBindParameter` has already refused any pairing this cannot convert,
+    // so a target reaching here is one of the table's six rows.
+    let c_type = apd.c_type()?;
+    if crate::numeric_convert::is_numeric_c_type(c_type) {
+        // SAFETY: data_ptr is non-null (guarded above) and the caller
+        // guarantees it points to a valid value of that C type.
+        let param = unsafe { read_numeric_param(c_type, apd.data_ptr) }?;
+        let converted = crate::numeric_convert::numeric_to_sql_type(
+            param,
+            ipd.sql_type(),
+            ipd.length,
+            ipd.scale,
+            ipd.datetime_interval_precision,
+        )?;
+        return Ok(ParamValue {
+            value: converted.value,
+            warning: converted.warning,
+        });
+    }
+
+    Ok(ParamValue::from(match c_type {
         CDataType::Bit => {
             ColumnValue::Bool(unsafe { std::ptr::read_unaligned(apd.data_ptr as *const u8) } != 0)
         }
@@ -804,10 +881,8 @@ pub(crate) unsafe fn read_param_value(rec: ParamRecord<'_>) -> Result<ParamValue
                 fraction: 0,
             }
         }
-        CDataType::Numeric => {
-            let n = unsafe { std::ptr::read_unaligned(apd.data_ptr as *const odbc_sys::Numeric) };
-            ColumnValue::Decimal(numeric_struct_to_decimal_string(&n))
-        }
+        // `SQL_C_NUMERIC` is handled by the numeric table above, which is why
+        // it is absent here.
         CDataType::Guid => {
             let g = unsafe { std::ptr::read_unaligned(apd.data_ptr as *const odbc_sys::Guid) };
             ColumnValue::Guid(guid_struct_to_bytes(&g))
@@ -2789,10 +2864,18 @@ mod tests {
         assert_eq!(err.sqlstate().as_str(), "22018");
     }
 
-    /// A binding whose C type already fixes the value's shape is untouched:
-    /// the declared SQL type only decides how *text* is read.
+    /// **Inverted, deliberately.** This test used to assert that a binding
+    /// whose C type already fixes the value's shape is untouched, on the
+    /// premise that "the declared SQL type only decides how *text* is read".
+    /// The *C to SQL: Numeric* table is exactly the repeal of that premise: its
+    /// third row converts an integer source to a `DECIMAL` target, and the
+    /// declared type reaches the backend as the value's shape rather than being
+    /// discarded.
+    ///
+    /// Kept rather than deleted so the change of contract is visible in the
+    /// history at the point it happened.
     #[test]
-    fn read_param_value_ignores_the_declared_type_for_a_non_character_binding() {
+    fn read_param_value_converts_an_integer_to_the_declared_decimal_type() {
         let mut v: i32 = 42;
         let binding = BoundParam {
             input_output_type: ParamType::Input,
@@ -2807,7 +2890,196 @@ mod tests {
 
         let val = unsafe { read_bound_param(&binding) }.unwrap();
 
-        assert_eq!(val, ColumnValue::I32(42));
+        assert_eq!(val, ColumnValue::Decimal("42".to_owned()));
+    }
+
+    /// The declared type still has to be *honoured*, not merely applied: an
+    /// integer target keeps its own width.
+    #[test]
+    fn read_param_value_keeps_an_integer_target_at_its_own_width() {
+        let mut v: i32 = 42;
+        let binding = BoundParam {
+            input_output_type: ParamType::Input,
+            c_type: CDataType::SLong,
+            sql_type: SqlDataType::SMALLINT,
+            col_size: 0,
+            decimal_digits: 0,
+            value_ptr: std::ptr::from_mut(&mut v).cast::<c_void>(),
+            buffer_length: 4,
+            str_len_or_ind_ptr: std::ptr::null_mut(),
+        };
+
+        assert_eq!(
+            unsafe { read_bound_param(&binding) }.unwrap(),
+            ColumnValue::I16(42)
+        );
+    }
+
+    /// The sign-wrap this rework removes. `SQL_C_UBIGINT` was read as a `u64`
+    /// and cast to `i64`, so every value above `i64::MAX` reached the data
+    /// source negative. Reading through `i128` there is no cast that can wrap.
+    #[test]
+    fn a_large_unsigned_bigint_parameter_no_longer_wraps_negative() {
+        let mut v: u64 = u64::MAX;
+        let binding = BoundParam {
+            input_output_type: ParamType::Input,
+            c_type: CDataType::UBigInt,
+            sql_type: SqlDataType::DECIMAL,
+            col_size: 0,
+            decimal_digits: 0,
+            value_ptr: std::ptr::from_mut(&mut v).cast::<c_void>(),
+            buffer_length: 8,
+            str_len_or_ind_ptr: std::ptr::null_mut(),
+        };
+
+        assert_eq!(
+            unsafe { read_bound_param(&binding) }.unwrap(),
+            ColumnValue::Decimal(u64::MAX.to_string())
+        );
+    }
+
+    /// The same wrap in the two narrower unsigned types.
+    #[test]
+    fn large_unsigned_short_and_tinyint_parameters_no_longer_wrap_negative() {
+        let mut short: u16 = u16::MAX;
+        let binding = BoundParam {
+            input_output_type: ParamType::Input,
+            c_type: CDataType::UShort,
+            sql_type: SqlDataType::INTEGER,
+            col_size: 0,
+            decimal_digits: 0,
+            value_ptr: std::ptr::from_mut(&mut short).cast::<c_void>(),
+            buffer_length: 2,
+            str_len_or_ind_ptr: std::ptr::null_mut(),
+        };
+        assert_eq!(
+            unsafe { read_bound_param(&binding) }.unwrap(),
+            ColumnValue::I32(65535)
+        );
+
+        let mut tiny: u8 = 200;
+        let binding = BoundParam {
+            input_output_type: ParamType::Input,
+            c_type: CDataType::UTinyInt,
+            sql_type: SqlDataType::SMALLINT,
+            col_size: 0,
+            decimal_digits: 0,
+            value_ptr: std::ptr::from_mut(&mut tiny).cast::<c_void>(),
+            buffer_length: 1,
+            str_len_or_ind_ptr: std::ptr::null_mut(),
+        };
+        assert_eq!(
+            unsafe { read_bound_param(&binding) }.unwrap(),
+            ColumnValue::I16(200)
+        );
+    }
+
+    /// Footnote [b] end to end through the read path: the value is truncated,
+    /// sent, and accompanied by a warning rather than an error.
+    #[test]
+    fn read_param_value_reports_a_fractional_truncation_as_a_warning() {
+        let mut v: f64 = 3.7;
+        let binding = BoundParam {
+            input_output_type: ParamType::Input,
+            c_type: CDataType::Double,
+            sql_type: SqlDataType::INTEGER,
+            col_size: 0,
+            decimal_digits: 0,
+            value_ptr: std::ptr::from_mut(&mut v).cast::<c_void>(),
+            buffer_length: 8,
+            str_len_or_ind_ptr: std::ptr::null_mut(),
+        };
+
+        let read = unsafe { read_bound_param_full(&binding) }.unwrap();
+        assert_eq!(read.value, ColumnValue::I32(3));
+        assert_eq!(
+            read.warning.expect("a warning").sqlstate().as_str(),
+            "01S07"
+        );
+    }
+
+    /// The interval row measures against the IPD's
+    /// `SQL_DESC_DATETIME_INTERVAL_PRECISION`, so the read path has to hand
+    /// that field over rather than a zero. Added because a mutation check found
+    /// nothing pinned it: passing `0` here left every other test green, since
+    /// they all reach `numeric_to_sql_type` directly.
+    #[test]
+    fn read_param_value_applies_the_declared_interval_precision() {
+        let mut v: i32 = 100;
+        // Built directly rather than through `BoundParam`, because
+        // `SQL_DESC_DATETIME_INTERVAL_PRECISION` is an IPD field that only this
+        // row reads and threading it through that helper would touch every
+        // literal in the module for one test.
+        let apd = DescriptorRecord {
+            concise_type: CDataType::SLong as i16,
+            verbose_type: CDataType::SLong as i16,
+            data_ptr: std::ptr::from_mut(&mut v).cast::<c_void>(),
+            octet_length: 4,
+            indicator_ptr: std::ptr::null_mut(),
+            ..Default::default()
+        };
+        let ipd_with = |precision: i32| DescriptorRecord {
+            concise_type: SQL_INTERVAL_YEAR.0,
+            verbose_type: SQL_INTERVAL_YEAR.0,
+            parameter_type: ParamType::Input,
+            datetime_interval_precision: precision,
+            ..Default::default()
+        };
+
+        // A two-digit leading precision admits 0..=99, so 100 overflows it.
+        let ipd = ipd_with(2);
+        let err = unsafe {
+            read_param_value(ParamRecord {
+                apd: &apd,
+                ipd: &ipd,
+            })
+        }
+        .err()
+        .expect("100 does not fit a two-digit leading precision");
+        assert_eq!(err.sqlstate().as_str(), "22015");
+
+        // Declaring none disables the check, and the same value converts.
+        let ipd = ipd_with(0);
+        let read = unsafe {
+            read_param_value(ParamRecord {
+                apd: &apd,
+                ipd: &ipd,
+            })
+        }
+        .expect("an undeclared precision checks nothing");
+        assert_eq!(
+            read.value,
+            ColumnValue::IntervalYearMonth {
+                years: 100,
+                months: 0
+            }
+        );
+    }
+
+    /// And `collect_params` carries it out to the caller.
+    #[test]
+    fn collect_params_reports_a_fractional_truncation_as_a_warning() {
+        let mut v: f64 = 3.7;
+        let mut bindings = BoundParams::new();
+        bindings.insert(
+            1,
+            BoundParam {
+                input_output_type: ParamType::Input,
+                c_type: CDataType::Double,
+                sql_type: SqlDataType::INTEGER,
+                col_size: 0,
+                decimal_digits: 0,
+                value_ptr: std::ptr::from_mut(&mut v).cast::<c_void>(),
+                buffer_length: 8,
+                str_len_or_ind_ptr: std::ptr::null_mut(),
+            },
+        );
+
+        let (params, warnings) = unsafe { collect_params(bindings.records(), 1) }
+            .expect("truncation is a warning, not an error");
+        assert_eq!(params, vec![ColumnValue::I32(3)]);
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].sqlstate().as_str(), "01S07");
     }
 
     /// Data-at-execution delivers the same text by another route, so it gets
