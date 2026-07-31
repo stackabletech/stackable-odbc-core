@@ -4015,6 +4015,135 @@ impl Backend for MockFailingDescribeBackend {
 }
 
 // ---------------------------------------------------------------------------
+// A backend whose describe_col panics, for SQLCopyDesc phase-one panic safety
+// ---------------------------------------------------------------------------
+
+/// A statement whose `describe_col` panics instead of returning an error.
+///
+/// `column_count` is 1 — enough to make `snapshot_ird`'s loop
+/// (`src/handles/scope.rs`) call `describe_col` at all, which is the one
+/// driver-author call `SQLCopyDesc`'s phase one runs before phase two's
+/// `panic_safe` is even reached.
+pub struct MockPanickingDescribeStatement;
+
+impl StatementBackend for MockPanickingDescribeStatement {
+    type Error = OdbcError;
+
+    fn column_count(&self) -> i16 {
+        1
+    }
+
+    fn describe_col(
+        &self,
+        _col: u16,
+    ) -> Result<Cow<'_, crate::types::ColumnDescriptor>, OdbcError> {
+        panic!("mock describe_col panic");
+    }
+}
+
+/// Hands out statements whose column metadata cannot be described without
+/// panicking.
+///
+/// The `MockFailingDescribeBackend` sibling above proves core surfaces a
+/// backend's own *error*; this one proves core survives a backend's *panic*
+/// — the distinction `SQLCopyDesc`'s phase one needed a guard for.
+pub struct MockPanickingDescribeBackend;
+
+impl Backend for MockPanickingDescribeBackend {
+    type Connection = MockConnection;
+    type Statement = MockPanickingDescribeStatement;
+    type Error = OdbcError;
+    type CancelToken = MockCancelToken;
+
+    fn connect(_: &ConnectParams) -> Result<MockConnection, OdbcError> {
+        Ok(MockConnection)
+    }
+    fn disconnect(_: &mut MockConnection) -> Result<(), OdbcError> {
+        Ok(())
+    }
+    fn cancel_token(_conn: &Self::Connection) -> Self::CancelToken {
+        MockCancelToken::default()
+    }
+    fn cancel(token: &Self::CancelToken) -> Result<(), Self::Error> {
+        token
+            .cancelled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+    fn is_cancelled(token: &Self::CancelToken) -> bool {
+        token.cancelled.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    fn exec_direct(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: &str,
+    ) -> Result<MockPanickingDescribeStatement, OdbcError> {
+        Ok(MockPanickingDescribeStatement)
+    }
+    fn prepare(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: &str,
+    ) -> Result<MockPanickingDescribeStatement, OdbcError> {
+        Ok(MockPanickingDescribeStatement)
+    }
+    fn execute(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: &mut MockPanickingDescribeStatement,
+        _: &[crate::types::ColumnValue],
+    ) -> Result<crate::types::ExecuteOutcome, OdbcError> {
+        Ok(crate::types::ExecuteOutcome::default())
+    }
+    fn get_info(_: &MockConnection, _: crate::types::InfoType) -> Result<InfoValue, OdbcError> {
+        Err(OdbcError::NotImplemented {
+            feature: "get_info".into(),
+        })
+    }
+    fn get_functions() -> Cow<'static, [crate::function_id::FunctionId]> {
+        Cow::Borrowed(&[])
+    }
+    fn get_type_info(_conn: &Self::Connection) -> Cow<'static, [TypeInfoRow]> {
+        Cow::Borrowed(&[])
+    }
+    fn tables(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: &crate::types::TablesQuery<'_>,
+    ) -> Result<Vec<TableRow>, OdbcError> {
+        Ok(Vec::new())
+    }
+    fn columns(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: &crate::types::ColumnsQuery<'_>,
+    ) -> Result<Vec<ColumnRow>, OdbcError> {
+        Ok(Vec::new())
+    }
+
+    fn supports_catalogs(_conn: &Self::Connection) -> bool {
+        false
+    }
+    fn supports_schemas(_conn: &Self::Connection) -> bool {
+        false
+    }
+    fn alter_table_support(_conn: &Self::Connection) -> u32 {
+        0
+    }
+    fn outer_join_capabilities(_conn: &Self::Connection) -> u32 {
+        0
+    }
+    fn default_txn_isolation(_conn: &Self::Connection) -> u32 {
+        0
+    }
+    fn txn_isolation_options(_conn: &Self::Connection) -> u32 {
+        0
+    }
+
+    minimal_capability_decls!();
+}
+
+// ---------------------------------------------------------------------------
 // A backend that rejects an unknown catalog, for 3D000
 // ---------------------------------------------------------------------------
 

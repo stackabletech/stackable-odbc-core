@@ -1189,8 +1189,14 @@ pub unsafe fn sql_set_desc_rec<B: Backend>(
 /// - `01000` General warning — not produced here.
 /// - `08S01` Communication link failure — not returned; this call performs no
 ///   I/O.
-/// - `HY000` General error — returned for a failure with no more specific code,
-///   including an internal panic caught by `panic_safe`.
+/// - `HY000` General error — returned for a failure with no more specific
+///   code, including an internal panic. Phase two's own panic is caught by
+///   `panic_safe`, as everywhere else; phase one's is caught by
+///   `panic::catch_panic_as_error` (`src/panic.rs`, crate-private), since
+///   phase one holds no target handle to post a diagnostic through yet —
+///   both are folded into the same
+///   `OdbcError::Panic` and posted to the target's queue by phase two's
+///   `panic_safe`, exactly where `HY007` is.
 /// - `HY001` Memory allocation error — not returned; allocation here is an
 ///   infallible `Box`/`HashMap` clone.
 /// - `HY007` Associated statement is not prepared — returned when the source is
@@ -1244,7 +1250,15 @@ pub unsafe fn sql_copy_desc<B: Backend>(
     // guard — so that the lock is released before phase two is a fact its
     // signature states rather than something this function has to remember.
     let Some(snapshot) = HandleScope::with_group(source_desc_handle, HandleKind::Desc, |scope| {
-        scope.snapshot_descriptor::<B>(source_desc_handle)
+        // `with_group` is a plain lock-then-call with no `catch_unwind` of its
+        // own, so a panic from `describe_col` (via `snapshot_ird`) would
+        // otherwise unwind straight through it and across the `extern
+        // "system"` boundary. Caught here and folded into the same `Err`
+        // shape a non-panicking failure already returns, so it flows through
+        // the `snapshot?` below and phase two's `panic_safe` posts it to the
+        // target's queue exactly where every other diagnostic this call
+        // makes belongs.
+        crate::panic::catch_panic_as_error(|| scope.snapshot_descriptor::<B>(source_desc_handle))
     }) else {
         tracing::debug!("SQLCopyDesc -> INVALID_HANDLE (source)");
         return SqlReturn::INVALID_HANDLE;
@@ -1331,8 +1345,9 @@ mod tests {
     use crate::ffi::diag::sql_get_diag_rec_w;
     use crate::ffi::stmt_attr::sql_get_stmt_attr_w;
     use crate::test_utils::{
-        MockAltBackend, MockBackend, MockLongDataBackend, MockRecordingBackend,
-        MockTypeInfoBackend, alloc_env_conn_stmt, cleanup_env_conn_stmt, with_descriptor,
+        MockAltBackend, MockBackend, MockLongDataBackend, MockPanickingDescribeBackend,
+        MockRecordingBackend, MockTypeInfoBackend, alloc_env_conn_stmt, cleanup_env_conn_stmt,
+        with_descriptor,
     };
     use crate::types::sql_state;
     use odbc_sys::{CDataType, HandleType, ParamType, SqlDataType, StatementAttribute};
@@ -3177,6 +3192,87 @@ mod tests {
             let _ =
                 crate::ffi::handle::sql_free_handle::<MockBackend>(HandleType::Stmt as i16, stmt_b);
             cleanup_env_conn_stmt(env, conn, stmt_a);
+        }
+    }
+
+    /// Audit finding B4: phase one runs `describe_col` (through
+    /// `snapshot_ird`) before phase two's `panic_safe` is ever reached, so a
+    /// panicking `describe_col` used to unwind straight out of
+    /// `sql_copy_desc` and across the `extern "system"` boundary
+    /// `forward_ffi!` generates for it — an abort, not a `SqlReturn`. Driven
+    /// through `catch_unwind` because that escape is exactly what a bare
+    /// `assert_eq!` on the return value cannot see: before the fix, this test
+    /// itself never gets to the `assert_eq!`, because the panic unwinds
+    /// through it too.
+    #[test]
+    fn copy_desc_from_ird_with_panicking_describe_col_returns_error_not_abort() {
+        unsafe {
+            let (env, conn, stmt) =
+                crate::test_utils::alloc_connected_env_conn_stmt::<MockPanickingDescribeBackend>();
+
+            let sql: Vec<u16> = "SELECT 1".encode_utf16().collect();
+            assert_eq!(
+                crate::ffi::execute::sql_exec_direct_w::<MockPanickingDescribeBackend>(
+                    stmt,
+                    sql.as_ptr(),
+                    i32::try_from(sql.len()).expect("short"),
+                ),
+                SqlReturn::SUCCESS,
+                "precondition: the statement ran and the IRD has a column to describe"
+            );
+
+            let ird =
+                desc_token_of::<MockPanickingDescribeBackend>(stmt, StatementAttribute::ImpRowDesc);
+            let mut target: *mut c_void = std::ptr::null_mut();
+            assert_eq!(
+                crate::ffi::handle::sql_alloc_handle::<MockPanickingDescribeBackend>(
+                    HandleType::Desc as i16,
+                    conn,
+                    &mut target,
+                ),
+                SqlReturn::SUCCESS,
+                "precondition: an explicit target descriptor"
+            );
+
+            let result = std::panic::catch_unwind(|| {
+                sql_copy_desc::<MockPanickingDescribeBackend>(ird, target)
+            });
+            assert!(
+                result.is_ok(),
+                "a panic in phase one must be caught and reported as SQL_ERROR, \
+                 not unwind across the extern \"system\" boundary"
+            );
+            assert_eq!(result.unwrap(), SqlReturn::ERROR);
+            assert_eq!(
+                first_sqlstate_of::<MockPanickingDescribeBackend>(target),
+                sql_state::GENERAL_ERROR,
+                "the panic is routed through phase two's panic_safe onto the \
+                 target's queue, exactly where SQLCopyDesc's other diagnostics \
+                 (e.g. HY007) are posted"
+            );
+
+            // The group lock was never held across the panic (it is caught
+            // inside phase one's own closure, before `with_group` even sees
+            // it), so it is not poisoned and the statement is still usable —
+            // prove it with an ordinary follow-up call.
+            let mut columns: i16 = -1;
+            assert_eq!(
+                crate::ffi::cursor::sql_num_result_cols::<MockPanickingDescribeBackend>(
+                    stmt,
+                    &mut columns,
+                ),
+                SqlReturn::SUCCESS,
+                "the statement's group lock must still be usable after the panic"
+            );
+            assert_eq!(columns, 1);
+
+            let _ = crate::ffi::handle::sql_free_handle::<MockPanickingDescribeBackend>(
+                HandleType::Desc as i16,
+                target,
+            );
+            crate::test_utils::cleanup_connected_env_conn_stmt::<MockPanickingDescribeBackend>(
+                env, conn, stmt,
+            );
         }
     }
 

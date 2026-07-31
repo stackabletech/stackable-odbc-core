@@ -1316,6 +1316,22 @@ ODBC Application (e.g. isql)
   for a new entry point, and "it takes no handle" is a reason to reach for
   `panic_safe_unlocked`, not a reason to skip the guard — `ConfigDSNW` had no
   guard at all until 2026-07-30 on exactly that reasoning.
+
+  **`SQLCopyDesc` is the one export a single guard cannot cover, because it is
+  the one export that takes two lock phases rather than one** (see
+  "Descriptors" → "The explicit-descriptor rulings" above for why). Phase two
+  is an ordinary `panic_safe` on the target. Phase one holds only the
+  *source*'s group — through `HandleScope::with_group`, which is a plain
+  lock-then-call with no `catch_unwind` of its own — so a panic reaching
+  `describe_col` through `snapshot_ird` had no guard at all until 2026-07-31,
+  the same gap `ConfigDSNW` had. `panic::catch_panic_as_error` closes it:
+  narrower than `panic_safe_unlocked`, because it does not itself sit at the
+  FFI boundary — it converts the panic into the same `OdbcError` shape a
+  non-panicking phase-one failure (`HY007`) already returns, and phase two's
+  `panic_safe` posts it to the target's queue either way, which is where the
+  whole call's diagnostics belong. So `sql_copy_desc` is fully guarded, just not by
+  "one of the two" in the sense above — the property this bullet is
+  asserting one export needs a third shape to satisfy.
 - **W-only for string-bearing functions**: every ODBC function that takes or
   returns a string is exported only in its Wide (`W`-suffix) form; the Driver
   Manager translates an ANSI application's calls into those. Functions with no
@@ -1367,7 +1383,7 @@ Generic framework. Zero database-specific code.
 | `handles/scope.rs` | `HandleScope` — the only way to reach a handle's contents; token validation without dereferencing the application's pointer |
 | `sync.rs` | The one import path for every lock in the crate; aliases to `loom`'s primitives under `#[cfg(all(loom, test))]`, `std::sync` otherwise |
 | `utf16.rs` | `utf16_to_string`, `write_utf16` (ODBC uses UTF-16LE) |
-| `panic.rs` | `panic_safe` (locks the target's group, builds a `HandleScope`, catches panics) and `panic_safe_unlocked` (`SQLCancel`'s lock-free sibling) |
+| `panic.rs` | `panic_safe` (locks the target's group, builds a `HandleScope`, catches panics), `panic_safe_unlocked` (`SQLCancel`'s lock-free sibling), and `catch_panic_as_error` (`SQLCopyDesc` phase one's panic-to-`OdbcError` guard) |
 | `logging.rs` | `init_logging()` via tracing, configured by `ODBC_LOG_LEVEL` / `ODBC_LOG_FILE` |
 | `function_id.rs` | `FunctionId` enum + `function_id_from_raw()` for `SQL_API_*` constants |
 | `test_support.rs` | `test-support`-feature-gated hooks a driver's test suite uses to put a connection into a handle without `SQLDriverConnectW` |

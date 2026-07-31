@@ -3066,4 +3066,23 @@ call `SQLCloseCursor` or `SQLFreeStmt(SQL_CLOSE)` first, as it already must for
   framing of the attribute as shifting a *buffer* — a pointer with no buffer
   behind it has nothing to shift.
 
+- **`SQLCopyDesc`'s phase one now runs under a panic guard.** It copies a
+  descriptor in two lock phases — the source's group alone, then the target's
+  — and only phase two was wrapped by `panic_safe`. Phase one calls
+  `describe_col` (via `snapshot_ird`) whenever the source is an IRD, which is
+  driver-author code and the exact panic surface every other `Backend` call
+  runs under a guard for; a panic there had no `catch_unwind` above it at all,
+  so it unwound straight through `HandleScope::with_group` and across the
+  `extern "system"` boundary `forward_ffi!` generates for
+  `SQLCopyDesc` — aborting the process rather than returning `SQL_ERROR`.
+
+  The fix is a new `panic::catch_panic_as_error`, narrower than
+  `panic_safe_unlocked`: phase one has no target handle to post a diagnostic
+  through yet, so it folds a caught panic into the same `OdbcError::Panic` a
+  non-panicking phase-one failure (`HY007`) already produces, and phase two's
+  ordinary `panic_safe` posts it to the target's queue as `HY000` — exactly
+  where the spec says this call's diagnostics belong. No SQLSTATE this
+  function returns changed; the previously-unguarded path now returns one
+  (`HY000`) instead of aborting.
+
 [Unreleased]: https://github.com/stackabletech/stackable-odbc-core/commits/HEAD
