@@ -216,8 +216,10 @@ fn table_enumeration(
 /// - 08S01: Communication link failure; propagated from the backend when its
 ///   client library reports the link to the data source failed.
 /// - 24000: Invalid cursor state — returned if a cursor is already open on this statement.
-/// - 40001: Serialization failure; propagated from backend as `HY000`.
-/// - 40003: Statement completion unknown; propagated from backend as `HY000`.
+/// - 40001: Serialization failure — propagated from the backend unchanged, as `08S01` is.
+///   Core degrades nothing to `HY000`; that state appears only when the backend's own error
+///   mapping produced no more specific one.
+/// - 40003: Statement completion unknown — propagated from the backend unchanged.
 /// - HY000: General error; returned for any unexpected backend error.
 /// - HY001: Memory allocation error; returned if allocation fails.
 /// - HY008: Operation canceled. The row's first clause — asynchronous processing, then the
@@ -235,16 +237,28 @@ fn table_enumeration(
 /// - HY010: Function sequence error — returned if connection is not open (HY010). DM cases
 ///   (async, etc.) are driver-manager-handled; not returned here.
 /// - HY013: Memory management error; returned if underlying allocation fails.
-/// - HY090: Invalid string or buffer length (DM) (driver-manager-handled; not returned by this
-///   driver).
+/// - HY090: Invalid string or buffer length — the row has two sentences and only the first
+///   carries `(DM)`: a name length argument less than 0 but not equal to `SQL_NTS`. The
+///   second is the driver's — a name length exceeding "the maximum length value for the
+///   corresponding name" — and it cannot arise here, because core declares no maximum name
+///   lengths. `SQL_MAX_CATALOG_NAME_LEN`, `SQL_MAX_SCHEMA_NAME_LEN`,
+///   `SQL_MAX_TABLE_NAME_LEN` and `SQL_MAX_COLUMN_NAME_LEN` all answer `0`, which the
+///   `SQLGetInfo` page defines as "no specified limit or the limit is unknown". A driver
+///   that answers a real maximum for any of those has to add the check.
 /// - HY117: Connection suspended (DM) (driver-manager-handled; not returned here).
 /// - HYC00: Optional feature not implemented; propagated from backend if catalogs/schemas are
 ///   unsupported.
-/// - HYT00: Timeout expired; propagated from backend as `HY000`.
-/// - HYT01: Connection timeout expired; propagated from backend as `HY000`.
+/// - HYT00: Timeout expired — **returned by this driver**, not merely propagated. A backend
+///   that answered `QueryTimeout::CoreCancels` gets core's own timer (`crate::query_timer`),
+///   armed over this call, and `QueryTimer::reclassify` relabels the failing call `HYT00`
+///   when the deadline fired. A backend enforcing its own timeout has its `HYT00` propagated
+///   unchanged.
+/// - HYT01: Connection timeout expired — propagated from the backend unchanged.
 /// - IM001: Driver does not support this function (DM) (driver-manager-handled; not returned here).
-/// - IM017: Polling disabled (DM) (driver-manager-handled; not returned here).
-/// - IM018: SQLCompleteAsync not called (DM) (driver-manager-handled; not returned here).
+/// - IM017: Polling disabled; not returned here (the asynchronous notification model is not
+///   supported — not DM-annotated in the spec).
+/// - IM018: SQLCompleteAsync not called; not returned here (the asynchronous notification model
+///   is not supported — not DM-annotated in the spec).
 ///
 /// # Safety
 ///
@@ -454,8 +468,10 @@ pub unsafe fn sql_tables_w<B: Backend>(
 /// - 08S01: Communication link failure; propagated from the backend when its
 ///   client library reports the link to the data source failed.
 /// - 24000: Invalid cursor state — returned if a cursor is already open on this statement.
-/// - 40001: Serialization failure; propagated from backend as `HY000`.
-/// - 40003: Statement completion unknown; propagated from backend as `HY000`.
+/// - 40001: Serialization failure — propagated from the backend unchanged, as `08S01` is.
+///   Core degrades nothing to `HY000`; that state appears only when the backend's own error
+///   mapping produced no more specific one.
+/// - 40003: Statement completion unknown — propagated from the backend unchanged.
 /// - HY000: General error; returned for any unexpected backend error.
 /// - HY001: Memory allocation error; returned if allocation fails.
 /// - HY008: Operation canceled. The row's first clause — asynchronous processing, then the
@@ -473,16 +489,24 @@ pub unsafe fn sql_tables_w<B: Backend>(
 /// - HY010: Function sequence error — returned if connection is not open (HY010). DM cases
 ///   (async, etc.) are driver-manager-handled; not returned here.
 /// - HY013: Memory management error; returned if underlying allocation fails.
-/// - HY090: Invalid string or buffer length (DM) (driver-manager-handled; not returned by this
-///   driver).
+/// - HY090: Invalid string or buffer length — every clause of this row is `(DM)`
+///   (driver-manager-handled; not returned here). Unlike several of its siblings' rows,
+///   this one has only the name-length-below-zero sentence and no maximum-length
+///   sentence, so nothing in it is the driver's.
 /// - HY117: Connection suspended (DM) (driver-manager-handled; not returned here).
 /// - HYC00: Optional feature not implemented; propagated from backend if catalogs/schemas are
 ///   unsupported.
-/// - HYT00: Timeout expired; propagated from backend as `HY000`.
-/// - HYT01: Connection timeout expired; propagated from backend as `HY000`.
+/// - HYT00: Timeout expired — **returned by this driver**, not merely propagated. A backend
+///   that answered `QueryTimeout::CoreCancels` gets core's own timer (`crate::query_timer`),
+///   armed over this call, and `QueryTimer::reclassify` relabels the failing call `HYT00`
+///   when the deadline fired. A backend enforcing its own timeout has its `HYT00` propagated
+///   unchanged.
+/// - HYT01: Connection timeout expired — propagated from the backend unchanged.
 /// - IM001: Driver does not support this function (DM) (driver-manager-handled; not returned here).
-/// - IM017: Polling disabled (DM) (driver-manager-handled; not returned here).
-/// - IM018: SQLCompleteAsync not called (DM) (driver-manager-handled; not returned here).
+/// - IM017: Polling disabled; not returned here (the asynchronous notification model is not
+///   supported — not DM-annotated in the spec).
+/// - IM018: SQLCompleteAsync not called; not returned here (the asynchronous notification model
+///   is not supported — not DM-annotated in the spec).
 ///
 /// # Safety
 ///
@@ -617,10 +641,16 @@ pub unsafe fn sql_columns_w<B: Backend>(
 /// - 01000: General warning (driver-specific informational message); not returned here.
 /// - 08S01: Communication link failure; propagated from the backend when its
 ///   client library reports the link to the data source failed.
-/// - 24000: Invalid cursor state — returned if a cursor is already open on this statement.
+/// - 24000: Invalid cursor state — **returned by this driver** if a cursor is already open on
+///   this statement. Alone among the twelve catalog functions, this row is `(DM)`-marked, and
+///   only on its first sentence: a cursor open where `SQLFetch` or `SQLFetchScroll` had been
+///   called. The second carries no marker and is the driver's — a cursor open but where
+///   `SQLFetch` or `SQLFetchScroll` had not been called — and it is the one core enforces.
 ///   Note: the spec marks this (DM) for some subcases; the driver also returns it directly.
-/// - 40001: Serialization failure; propagated from backend as `HY000`.
-/// - 40003: Statement completion unknown; propagated from backend as `HY000`.
+/// - 40001: Serialization failure — propagated from the backend unchanged, as `08S01` is.
+///   Core degrades nothing to `HY000`; that state appears only when the backend's own error
+///   mapping produced no more specific one.
+/// - 40003: Statement completion unknown — propagated from the backend unchanged.
 /// - HY000: General error; returned for any unexpected backend error.
 /// - HY001: Memory allocation error; returned if allocation fails.
 /// - HY008: Operation canceled. The row's first clause — asynchronous processing, then the
@@ -645,16 +675,28 @@ pub unsafe fn sql_columns_w<B: Backend>(
 /// - HY010: Function sequence error — returned if connection is not open. DM cases (async, etc.)
 ///   are driver-manager-handled; not returned here.
 /// - HY013: Memory management error; returned if underlying allocation fails.
-/// - HY090: Invalid string or buffer length (DM) (driver-manager-handled; not returned by this
-///   driver).
+/// - HY090: Invalid string or buffer length — the row has two sentences and only the first
+///   carries `(DM)`: a name length argument less than 0 but not equal to `SQL_NTS`. The
+///   second is the driver's — a name length exceeding "the maximum length value for the
+///   corresponding name" — and it cannot arise here, because core declares no maximum name
+///   lengths. `SQL_MAX_CATALOG_NAME_LEN`, `SQL_MAX_SCHEMA_NAME_LEN`,
+///   `SQL_MAX_TABLE_NAME_LEN` and `SQL_MAX_COLUMN_NAME_LEN` all answer `0`, which the
+///   `SQLGetInfo` page defines as "no specified limit or the limit is unknown". A driver
+///   that answers a real maximum for any of those has to add the check.
 /// - HY117: Connection suspended (DM) (driver-manager-handled; not returned here).
 /// - HYC00: Optional feature not implemented; propagated from backend if catalogs/schemas are
 ///   unsupported.
-/// - HYT00: Timeout expired; propagated from backend as `HY000`.
-/// - HYT01: Connection timeout expired; propagated from backend as `HY000`.
+/// - HYT00: Timeout expired — **returned by this driver**, not merely propagated. A backend
+///   that answered `QueryTimeout::CoreCancels` gets core's own timer (`crate::query_timer`),
+///   armed over this call, and `QueryTimer::reclassify` relabels the failing call `HYT00`
+///   when the deadline fired. A backend enforcing its own timeout has its `HYT00` propagated
+///   unchanged.
+/// - HYT01: Connection timeout expired — propagated from the backend unchanged.
 /// - IM001: Driver does not support this function (DM) (driver-manager-handled; not returned here).
-/// - IM017: Polling disabled (DM) (driver-manager-handled; not returned here).
-/// - IM018: SQLCompleteAsync not called (DM) (driver-manager-handled; not returned here).
+/// - IM017: Polling disabled; not returned here (the asynchronous notification model is not
+///   supported — not DM-annotated in the spec).
+/// - IM018: SQLCompleteAsync not called; not returned here (the asynchronous notification model
+///   is not supported — not DM-annotated in the spec).
 ///
 /// # Safety
 ///
@@ -793,8 +835,10 @@ pub unsafe fn sql_primary_keys_w<B: Backend>(
 /// - 08S01: Communication link failure; propagated from the backend when its
 ///   client library reports the link to the data source failed.
 /// - 24000: Invalid cursor state — returned if a cursor is already open on this statement.
-/// - 40001: Serialization failure; propagated from backend as `HY000`.
-/// - 40003: Statement completion unknown; propagated from backend as `HY000`.
+/// - 40001: Serialization failure — propagated from the backend unchanged, as `08S01` is.
+///   Core degrades nothing to `HY000`; that state appears only when the backend's own error
+///   mapping produced no more specific one.
+/// - 40003: Statement completion unknown — propagated from the backend unchanged.
 /// - HY000: General error; returned for any unexpected backend error.
 /// - HY001: Memory allocation error; returned if allocation fails.
 /// - HY008: Operation canceled. The row's first clause — asynchronous processing, then the
@@ -819,16 +863,24 @@ pub unsafe fn sql_primary_keys_w<B: Backend>(
 /// - HY010: Function sequence error — returned if connection is not open. DM cases (async, etc.)
 ///   are driver-manager-handled; not returned here.
 /// - HY013: Memory management error; returned if underlying allocation fails.
-/// - HY090: Invalid string or buffer length (DM) (driver-manager-handled; not returned by this
-///   driver).
+/// - HY090: Invalid string or buffer length — every clause of this row is `(DM)`
+///   (driver-manager-handled; not returned here). Unlike several of its siblings' rows,
+///   this one has only the name-length-below-zero sentence and no maximum-length
+///   sentence, so nothing in it is the driver's.
 /// - HY117: Connection suspended (DM) (driver-manager-handled; not returned here).
 /// - HYC00: Optional feature not implemented; propagated from backend if catalogs/schemas are
 ///   unsupported.
-/// - HYT00: Timeout expired; propagated from backend as `HY000`.
-/// - HYT01: Connection timeout expired; propagated from backend as `HY000`.
+/// - HYT00: Timeout expired — **returned by this driver**, not merely propagated. A backend
+///   that answered `QueryTimeout::CoreCancels` gets core's own timer (`crate::query_timer`),
+///   armed over this call, and `QueryTimer::reclassify` relabels the failing call `HYT00`
+///   when the deadline fired. A backend enforcing its own timeout has its `HYT00` propagated
+///   unchanged.
+/// - HYT01: Connection timeout expired — propagated from the backend unchanged.
 /// - IM001: Driver does not support this function (DM) (driver-manager-handled; not returned here).
-/// - IM017: Polling disabled (DM) (driver-manager-handled; not returned here).
-/// - IM018: SQLCompleteAsync not called (DM) (driver-manager-handled; not returned here).
+/// - IM017: Polling disabled; not returned here (the asynchronous notification model is not
+///   supported — not DM-annotated in the spec).
+/// - IM018: SQLCompleteAsync not called; not returned here (the asynchronous notification model
+///   is not supported — not DM-annotated in the spec).
 ///
 /// # Safety
 ///
@@ -1000,8 +1052,10 @@ pub unsafe fn sql_foreign_keys_w<B: Backend>(
 /// - 08S01: Communication link failure; propagated from the backend when its
 ///   client library reports the link to the data source failed.
 /// - 24000: Invalid cursor state — returned if a cursor is already open on this statement.
-/// - 40001: Serialization failure; propagated from backend as `HY000`.
-/// - 40003: Statement completion unknown; propagated from backend as `HY000`.
+/// - 40001: Serialization failure — propagated from the backend unchanged, as `08S01` is.
+///   Core degrades nothing to `HY000`; that state appears only when the backend's own error
+///   mapping produced no more specific one.
+/// - 40003: Statement completion unknown — propagated from the backend unchanged.
 /// - HY000: General error; returned for any unexpected backend error.
 /// - HY001: Memory allocation error; returned if allocation fails.
 /// - HY008: Operation canceled. The row's first clause — asynchronous processing, then the
@@ -1020,18 +1074,31 @@ pub unsafe fn sql_foreign_keys_w<B: Backend>(
 /// - HY010: Function sequence error — returned if connection is not open. DM cases (async, etc.)
 ///   are driver-manager-handled; not returned here.
 /// - HY013: Memory management error; returned if underlying allocation fails.
-/// - HY090: Invalid string or buffer length (DM) (driver-manager-handled; not returned here).
+/// - HY090: Invalid string or buffer length — the row has two sentences and only the first
+///   carries `(DM)`: a name length argument less than 0 but not equal to `SQL_NTS`. The
+///   second is the driver's — a name length exceeding "the maximum length value for the
+///   corresponding name" — and it cannot arise here, because core declares no maximum name
+///   lengths. `SQL_MAX_CATALOG_NAME_LEN`, `SQL_MAX_SCHEMA_NAME_LEN`,
+///   `SQL_MAX_TABLE_NAME_LEN` and `SQL_MAX_COLUMN_NAME_LEN` all answer `0`, which the
+///   `SQLGetInfo` page defines as "no specified limit or the limit is unknown". A driver
+///   that answers a real maximum for any of those has to add the check.
 /// - HY100: Uniqueness option type out of range (DM) (driver-manager-handled; not returned here).
 /// - HY101: Accuracy option type out of range (DM) (driver-manager-handled; not returned here).
 /// - HY117: Connection suspended (DM) (driver-manager-handled; not returned here).
 /// - HYC00: Optional feature not implemented; propagated from backend if index statistics are
 ///   unsupported for some reason other than the `NotImplemented` fallback (which instead yields
 ///   an empty result set).
-/// - HYT00: Timeout expired; propagated from backend as `HY000`.
-/// - HYT01: Connection timeout expired; propagated from backend as `HY000`.
+/// - HYT00: Timeout expired — **returned by this driver**, not merely propagated. A backend
+///   that answered `QueryTimeout::CoreCancels` gets core's own timer (`crate::query_timer`),
+///   armed over this call, and `QueryTimer::reclassify` relabels the failing call `HYT00`
+///   when the deadline fired. A backend enforcing its own timeout has its `HYT00` propagated
+///   unchanged.
+/// - HYT01: Connection timeout expired — propagated from the backend unchanged.
 /// - IM001: Driver does not support this function (DM) (driver-manager-handled; not returned here).
-/// - IM017: Polling disabled (DM) (driver-manager-handled; not returned here).
-/// - IM018: SQLCompleteAsync not called (DM) (driver-manager-handled; not returned here).
+/// - IM017: Polling disabled; not returned here (the asynchronous notification model is not
+///   supported — not DM-annotated in the spec).
+/// - IM018: SQLCompleteAsync not called; not returned here (the asynchronous notification model
+///   is not supported — not DM-annotated in the spec).
 ///
 /// # Safety
 ///
@@ -1197,8 +1264,10 @@ pub unsafe fn sql_statistics_w<B: Backend>(
 /// - 08S01: Communication link failure; propagated from the backend when its
 ///   client library reports the link to the data source failed.
 /// - 24000: Invalid cursor state — returned if a cursor is already open on this statement.
-/// - 40001: Serialization failure; propagated from backend as `HY000`.
-/// - 40003: Statement completion unknown; propagated from backend as `HY000`.
+/// - 40001: Serialization failure — propagated from the backend unchanged, as `08S01` is.
+///   Core degrades nothing to `HY000`; that state appears only when the backend's own error
+///   mapping produced no more specific one.
+/// - 40003: Statement completion unknown — propagated from the backend unchanged.
 /// - HY000: General error; returned for any unexpected backend error.
 /// - HY001: Memory allocation error; returned if allocation fails.
 /// - HY008: Operation canceled. The row's first clause — asynchronous processing, then the
@@ -1217,8 +1286,14 @@ pub unsafe fn sql_statistics_w<B: Backend>(
 /// - HY010: Function sequence error — returned if connection is not open. DM cases (async, etc.)
 ///   are driver-manager-handled; not returned here.
 /// - HY013: Memory management error; returned if underlying allocation fails.
-/// - HY090: Invalid string or buffer length (DM) (driver-manager-handled; not returned by this
-///   driver).
+/// - HY090: Invalid string or buffer length — the row has two sentences and only the first
+///   carries `(DM)`: a name length argument less than 0 but not equal to `SQL_NTS`. The
+///   second is the driver's — a name length exceeding "the maximum length value for the
+///   corresponding name" — and it cannot arise here, because core declares no maximum name
+///   lengths. `SQL_MAX_CATALOG_NAME_LEN`, `SQL_MAX_SCHEMA_NAME_LEN`,
+///   `SQL_MAX_TABLE_NAME_LEN` and `SQL_MAX_COLUMN_NAME_LEN` all answer `0`, which the
+///   `SQLGetInfo` page defines as "no specified limit or the limit is unknown". A driver
+///   that answers a real maximum for any of those has to add the check.
 /// - HY097: Column type out of range (DM) (driver-manager-handled; not returned here). Should
 ///   not occur, since the Driver Manager validates `IdentifierType`; if an unrecognized value
 ///   somehow reaches the driver, it is treated as an unsupported characteristic and returns an
@@ -1231,11 +1306,17 @@ pub unsafe fn sql_statistics_w<B: Backend>(
 /// - HYC00: Optional feature not implemented; propagated from backend if this characteristic is
 ///   unsupported for some reason other than the `NotImplemented` fallback (which instead yields
 ///   an empty result set).
-/// - HYT00: Timeout expired; propagated from backend as `HY000`.
-/// - HYT01: Connection timeout expired; propagated from backend as `HY000`.
+/// - HYT00: Timeout expired — **returned by this driver**, not merely propagated. A backend
+///   that answered `QueryTimeout::CoreCancels` gets core's own timer (`crate::query_timer`),
+///   armed over this call, and `QueryTimer::reclassify` relabels the failing call `HYT00`
+///   when the deadline fired. A backend enforcing its own timeout has its `HYT00` propagated
+///   unchanged.
+/// - HYT01: Connection timeout expired — propagated from the backend unchanged.
 /// - IM001: Driver does not support this function (DM) (driver-manager-handled; not returned here).
-/// - IM017: Polling disabled (DM) (driver-manager-handled; not returned here).
-/// - IM018: SQLCompleteAsync not called (DM) (driver-manager-handled; not returned here).
+/// - IM017: Polling disabled; not returned here (the asynchronous notification model is not
+///   supported — not DM-annotated in the spec).
+/// - IM018: SQLCompleteAsync not called; not returned here (the asynchronous notification model
+///   is not supported — not DM-annotated in the spec).
 ///
 /// # Safety
 ///
@@ -1446,13 +1527,17 @@ pub unsafe fn sql_special_columns_w<B: Backend>(
 ///   reclassified `HY008` in place of the backend's own SQLSTATE.
 /// - HY010: Function sequence error (DM) (driver-manager-handled; not returned here).
 /// - HY013: Memory management error; returned if underlying allocation fails.
-/// - HY090: Invalid string or buffer length (DM) (driver-manager-handled; not returned by this
-///   driver).
+/// - HY090: Invalid string or buffer length — every clause of this row is `(DM)`
+///   (driver-manager-handled; not returned here). Unlike several of its siblings' rows,
+///   this one has only the name-length-below-zero sentence and no maximum-length
+///   sentence, so nothing in it is the driver's.
 /// - HY117: Connection suspended (DM) (driver-manager-handled; not returned here).
 /// - HYT01: Connection timeout expired; not applicable.
 /// - IM001: Driver does not support this function (DM) (driver-manager-handled; not returned here).
-/// - IM017: Polling disabled (DM) (driver-manager-handled; not returned here).
-/// - IM018: SQLCompleteAsync not called (DM) (driver-manager-handled; not returned here).
+/// - IM017: Polling disabled; not returned here (the asynchronous notification model is not
+///   supported — not DM-annotated in the spec).
+/// - IM018: SQLCompleteAsync not called; not returned here (the asynchronous notification model
+///   is not supported — not DM-annotated in the spec).
 ///
 /// # Safety
 ///
@@ -1626,7 +1711,8 @@ pub unsafe fn sql_describe_col_w<B: Backend>(
 ///   and `field_identifier` is not `SQL_DESC_COUNT`.
 /// - 07009: Invalid descriptor index — spec marks the `column_number == 0` sub-case (DM); this
 ///   driver also checks it defensively since bookmarks are not supported. Returned by the driver
-///   when `column_number` is greater than the number of result set columns (not DM-annotated),
+///   when `column_number` is greater than the number of columns in the result set, which the
+///   row states without a marker,
 ///   which core checks against `StatementBackend::column_count` **before** calling
 ///   `describe_col`, so this state is returned only for the case its message describes.
 /// - 08S01: Communication link failure — **absent from this function's diagnostics table**, yet
@@ -1645,7 +1731,10 @@ pub unsafe fn sql_describe_col_w<B: Backend>(
 ///   reclassified `HY008` in place of the backend's own SQLSTATE.
 /// - HY010: Function sequence error (DM) (driver-manager-handled; not returned here).
 /// - HY013: Memory management error; returned if underlying allocation fails.
-/// - HY090: Invalid string or buffer length (DM) (driver-manager-handled; not returned here).
+/// - HY090: Invalid string or buffer length — every clause of this row is `(DM)`
+///   (driver-manager-handled; not returned here). Unlike several of its siblings' rows,
+///   this one has only the name-length-below-zero sentence and no maximum-length
+///   sentence, so nothing in it is the driver's.
 /// - HY091: Invalid descriptor field identifier — `HYC00` ("driver not capable") is returned
 ///   instead, treating unrecognised field identifiers as unsupported extensions rather than invalid IDs.
 /// - HY117: Connection suspended (DM) (driver-manager-handled; not returned here).
@@ -1871,8 +1960,10 @@ pub(crate) fn procedures_columns(widths: &CatalogResultColumnWidths) -> Vec<Colu
 /// - 08S01: Communication link failure; propagated from the backend when its
 ///   client library reports the link to the data source failed.
 /// - 24000: Invalid cursor state — returned if a cursor is already open on this statement.
-/// - 40001: Serialization failure; propagated from backend as `HY000`.
-/// - 40003: Statement completion unknown; propagated from backend as `HY000`.
+/// - 40001: Serialization failure — propagated from the backend unchanged, as `08S01` is.
+///   Core degrades nothing to `HY000`; that state appears only when the backend's own error
+///   mapping produced no more specific one.
+/// - 40003: Statement completion unknown — propagated from the backend unchanged.
 /// - HY000: General error; returned for any unexpected backend error.
 /// - HY001: Memory allocation error; returned if allocation fails.
 /// - HY008: Operation canceled. The row's first clause — asynchronous processing, then the
@@ -1895,15 +1986,28 @@ pub(crate) fn procedures_columns(widths: &CatalogResultColumnWidths) -> Vec<Colu
 /// - HY010: Function sequence error — returned if connection is not open. DM cases (async, etc.)
 ///   are driver-manager-handled; not returned here.
 /// - HY013: Memory management error; returned if underlying allocation fails.
-/// - HY090: Invalid string or buffer length (DM) (driver-manager-handled; not returned here).
+/// - HY090: Invalid string or buffer length — the row has two sentences and only the first
+///   carries `(DM)`: a name length argument less than 0 but not equal to `SQL_NTS`. The
+///   second is the driver's — a name length exceeding "the maximum length value for the
+///   corresponding name" — and it cannot arise here, because core declares no maximum name
+///   lengths. `SQL_MAX_CATALOG_NAME_LEN`, `SQL_MAX_SCHEMA_NAME_LEN`,
+///   `SQL_MAX_TABLE_NAME_LEN` and `SQL_MAX_COLUMN_NAME_LEN` all answer `0`, which the
+///   `SQLGetInfo` page defines as "no specified limit or the limit is unknown". A driver
+///   that answers a real maximum for any of those has to add the check.
 /// - HY117: Connection suspended (DM) (driver-manager-handled; not returned here).
 /// - HYC00: Optional feature not implemented; propagated from backend if catalogs/schemas or
 ///   search patterns are unsupported.
-/// - HYT00: Timeout expired; propagated from backend as `HY000`.
-/// - HYT01: Connection timeout expired; propagated from backend as `HY000`.
+/// - HYT00: Timeout expired — **returned by this driver**, not merely propagated. A backend
+///   that answered `QueryTimeout::CoreCancels` gets core's own timer (`crate::query_timer`),
+///   armed over this call, and `QueryTimer::reclassify` relabels the failing call `HYT00`
+///   when the deadline fired. A backend enforcing its own timeout has its `HYT00` propagated
+///   unchanged.
+/// - HYT01: Connection timeout expired — propagated from the backend unchanged.
 /// - IM001: Driver does not support this function (DM) (driver-manager-handled; not returned here).
-/// - IM017: Polling disabled (DM) (driver-manager-handled; not returned here).
-/// - IM018: SQLCompleteAsync not called (DM) (driver-manager-handled; not returned here).
+/// - IM017: Polling disabled; not returned here (the asynchronous notification model is not
+///   supported — not DM-annotated in the spec).
+/// - IM018: SQLCompleteAsync not called; not returned here (the asynchronous notification model
+///   is not supported — not DM-annotated in the spec).
 ///
 /// # Safety
 ///
@@ -2077,8 +2181,10 @@ pub(crate) fn procedure_columns_columns(
 /// - 08S01: Communication link failure; propagated from the backend when its
 ///   client library reports the link to the data source failed.
 /// - 24000: Invalid cursor state — returned if a cursor is already open on this statement.
-/// - 40001: Serialization failure; propagated from backend as `HY000`.
-/// - 40003: Statement completion unknown; propagated from backend as `HY000`.
+/// - 40001: Serialization failure — propagated from the backend unchanged, as `08S01` is.
+///   Core degrades nothing to `HY000`; that state appears only when the backend's own error
+///   mapping produced no more specific one.
+/// - 40003: Statement completion unknown — propagated from the backend unchanged.
 /// - HY000: General error; returned for any unexpected backend error.
 /// - HY001: Memory allocation error; returned if allocation fails.
 /// - HY008: Operation canceled. The row's first clause — asynchronous processing, then the
@@ -2100,16 +2206,31 @@ pub(crate) fn procedure_columns_columns(
 ///   `the_procedure_functions_do_not_check_null_name_arguments`.
 /// - HY010: Function sequence error — returned if connection is not open. DM cases (async, etc.)
 ///   are driver-manager-handled; not returned here.
-/// - HY013: Memory management error; returned if underlying allocation fails.
-/// - HY090: Invalid string or buffer length (DM) (driver-manager-handled; not returned here).
+/// - HY013: Memory management error — **absent from this function's diagnostics table**,
+///   which is the one difference from its eleven siblings' tables. Core would report it the
+///   same way regardless, if an underlying allocation failed.
+/// - HY090: Invalid string or buffer length — the row has two sentences and only the first
+///   carries `(DM)`: a name length argument less than 0 but not equal to `SQL_NTS`. The
+///   second is the driver's — a name length exceeding "the maximum length value for the
+///   corresponding name" — and it cannot arise here, because core declares no maximum name
+///   lengths. `SQL_MAX_CATALOG_NAME_LEN`, `SQL_MAX_SCHEMA_NAME_LEN`,
+///   `SQL_MAX_TABLE_NAME_LEN` and `SQL_MAX_COLUMN_NAME_LEN` all answer `0`, which the
+///   `SQLGetInfo` page defines as "no specified limit or the limit is unknown". A driver
+///   that answers a real maximum for any of those has to add the check.
 /// - HY117: Connection suspended (DM) (driver-manager-handled; not returned here).
 /// - HYC00: Optional feature not implemented; propagated from backend if catalogs/schemas or
 ///   search patterns are unsupported.
-/// - HYT00: Timeout expired; propagated from backend as `HY000`.
-/// - HYT01: Connection timeout expired; propagated from backend as `HY000`.
+/// - HYT00: Timeout expired — **returned by this driver**, not merely propagated. A backend
+///   that answered `QueryTimeout::CoreCancels` gets core's own timer (`crate::query_timer`),
+///   armed over this call, and `QueryTimer::reclassify` relabels the failing call `HYT00`
+///   when the deadline fired. A backend enforcing its own timeout has its `HYT00` propagated
+///   unchanged.
+/// - HYT01: Connection timeout expired — propagated from the backend unchanged.
 /// - IM001: Driver does not support this function (DM) (driver-manager-handled; not returned here).
-/// - IM017: Polling disabled (DM) (driver-manager-handled; not returned here).
-/// - IM018: SQLCompleteAsync not called (DM) (driver-manager-handled; not returned here).
+/// - IM017: Polling disabled; not returned here (the asynchronous notification model is not
+///   supported — not DM-annotated in the spec).
+/// - IM018: SQLCompleteAsync not called; not returned here (the asynchronous notification model
+///   is not supported — not DM-annotated in the spec).
 ///
 /// # Safety
 ///
@@ -2271,8 +2392,10 @@ pub(crate) fn column_privileges_columns(
 /// - 08S01: Communication link failure; propagated from the backend when its
 ///   client library reports the link to the data source failed.
 /// - 24000: Invalid cursor state — returned if a cursor is already open on this statement.
-/// - 40001: Serialization failure; propagated from backend as `HY000`.
-/// - 40003: Statement completion unknown; propagated from backend as `HY000`.
+/// - 40001: Serialization failure — propagated from the backend unchanged, as `08S01` is.
+///   Core degrades nothing to `HY000`; that state appears only when the backend's own error
+///   mapping produced no more specific one.
+/// - 40003: Statement completion unknown — propagated from the backend unchanged.
 /// - HY000: General error; returned for any unexpected backend error.
 /// - HY001: Memory allocation error; returned if allocation fails.
 /// - HY008: Operation canceled. The row's first clause — asynchronous processing, then the
@@ -2300,15 +2423,24 @@ pub(crate) fn column_privileges_columns(
 /// - HY010: Function sequence error — returned if connection is not open. DM cases (async, etc.)
 ///   are driver-manager-handled; not returned here.
 /// - HY013: Memory management error; returned if underlying allocation fails.
-/// - HY090: Invalid string or buffer length (DM) (driver-manager-handled; not returned here).
+/// - HY090: Invalid string or buffer length — every clause of this row is `(DM)`
+///   (driver-manager-handled; not returned here). Unlike several of its siblings' rows,
+///   this one has only the name-length-below-zero sentence and no maximum-length
+///   sentence, so nothing in it is the driver's.
 /// - HY117: Connection suspended (DM) (driver-manager-handled; not returned here).
 /// - HYC00: Optional feature not implemented; propagated from backend if catalogs/schemas or
 ///   search patterns are unsupported.
-/// - HYT00: Timeout expired; propagated from backend as `HY000`.
-/// - HYT01: Connection timeout expired; propagated from backend as `HY000`.
+/// - HYT00: Timeout expired — **returned by this driver**, not merely propagated. A backend
+///   that answered `QueryTimeout::CoreCancels` gets core's own timer (`crate::query_timer`),
+///   armed over this call, and `QueryTimer::reclassify` relabels the failing call `HYT00`
+///   when the deadline fired. A backend enforcing its own timeout has its `HYT00` propagated
+///   unchanged.
+/// - HYT01: Connection timeout expired — propagated from the backend unchanged.
 /// - IM001: Driver does not support this function (DM) (driver-manager-handled; not returned here).
-/// - IM017: Polling disabled (DM) (driver-manager-handled; not returned here).
-/// - IM018: SQLCompleteAsync not called (DM) (driver-manager-handled; not returned here).
+/// - IM017: Polling disabled; not returned here (the asynchronous notification model is not
+///   supported — not DM-annotated in the spec).
+/// - IM018: SQLCompleteAsync not called; not returned here (the asynchronous notification model
+///   is not supported — not DM-annotated in the spec).
 ///
 /// # Safety
 ///
@@ -2477,8 +2609,10 @@ pub(crate) fn table_privileges_columns(
 /// - 08S01: Communication link failure; propagated from the backend when its
 ///   client library reports the link to the data source failed.
 /// - 24000: Invalid cursor state — returned if a cursor is already open on this statement.
-/// - 40001: Serialization failure; propagated from backend as `HY000`.
-/// - 40003: Statement completion unknown; propagated from backend as `HY000`.
+/// - 40001: Serialization failure — propagated from the backend unchanged, as `08S01` is.
+///   Core degrades nothing to `HY000`; that state appears only when the backend's own error
+///   mapping produced no more specific one.
+/// - 40003: Statement completion unknown — propagated from the backend unchanged.
 /// - HY000: General error; returned for any unexpected backend error.
 /// - HY001: Memory allocation error; returned if allocation fails.
 /// - HY008: Operation canceled. The row's first clause — asynchronous processing, then the
@@ -2502,15 +2636,28 @@ pub(crate) fn table_privileges_columns(
 /// - HY010: Function sequence error — returned if connection is not open. DM cases (async, etc.)
 ///   are driver-manager-handled; not returned here.
 /// - HY013: Memory management error; returned if underlying allocation fails.
-/// - HY090: Invalid string or buffer length (DM) (driver-manager-handled; not returned here).
+/// - HY090: Invalid string or buffer length — the row has two sentences and only the first
+///   carries `(DM)`: a name length argument less than 0 but not equal to `SQL_NTS`. The
+///   second is the driver's — a name length exceeding "the maximum length value for the
+///   corresponding name" — and it cannot arise here, because core declares no maximum name
+///   lengths. `SQL_MAX_CATALOG_NAME_LEN`, `SQL_MAX_SCHEMA_NAME_LEN`,
+///   `SQL_MAX_TABLE_NAME_LEN` and `SQL_MAX_COLUMN_NAME_LEN` all answer `0`, which the
+///   `SQLGetInfo` page defines as "no specified limit or the limit is unknown". A driver
+///   that answers a real maximum for any of those has to add the check.
 /// - HY117: Connection suspended (DM) (driver-manager-handled; not returned here).
 /// - HYC00: Optional feature not implemented; propagated from backend if catalogs/schemas or
 ///   search patterns are unsupported.
-/// - HYT00: Timeout expired; propagated from backend as `HY000`.
-/// - HYT01: Connection timeout expired; propagated from backend as `HY000`.
+/// - HYT00: Timeout expired — **returned by this driver**, not merely propagated. A backend
+///   that answered `QueryTimeout::CoreCancels` gets core's own timer (`crate::query_timer`),
+///   armed over this call, and `QueryTimer::reclassify` relabels the failing call `HYT00`
+///   when the deadline fired. A backend enforcing its own timeout has its `HYT00` propagated
+///   unchanged.
+/// - HYT01: Connection timeout expired — propagated from the backend unchanged.
 /// - IM001: Driver does not support this function (DM) (driver-manager-handled; not returned here).
-/// - IM017: Polling disabled (DM) (driver-manager-handled; not returned here).
-/// - IM018: SQLCompleteAsync not called (DM) (driver-manager-handled; not returned here).
+/// - IM017: Polling disabled; not returned here (the asynchronous notification model is not
+///   supported — not DM-annotated in the spec).
+/// - IM018: SQLCompleteAsync not called; not returned here (the asynchronous notification model
+///   is not supported — not DM-annotated in the spec).
 ///
 /// # Safety
 ///
