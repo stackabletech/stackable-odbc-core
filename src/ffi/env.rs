@@ -31,8 +31,11 @@ use crate::types::{
 ///
 /// # Spec compliance
 ///
-/// - 01000: General warning (driver-manager-handled; not returned here).
-/// - 01S02: Option value changed (driver-manager-handled; not returned here).
+/// - 01000: General warning. The row carries no `(DM)` marker: not returned, because core
+///   emits no driver-specific informational message from this function.
+/// - 01S02: Option value changed. The row carries no `(DM)` marker: not returned, because
+///   core substitutes no environment attribute value; an attribute it cannot honour is
+///   refused rather than quietly changed.
 /// - HY000: General error — returned for unexpected internal failures.
 /// - HY001: Memory allocation failure (not returned here; Rust panics on
 ///   allocation failure).
@@ -62,9 +65,12 @@ use crate::types::{
 /// - HY092: Invalid attribute/option identifier (driver-manager-handled; unsupported
 ///   attributes return `HYC00` rather than `HY092`).
 /// - HY117: Connection suspended state (driver-manager-handled; not returned here).
-/// - HYC00: Returns `SQL_ERROR` for `SQL_ATTR_OUTPUT_NTS = SQL_FALSE` (optional feature
-///   not implemented) or for any unrecognised attribute identifier (see implementation
-///   comment; this is deliberate for DM compatibility).
+/// - HYC00: Returns `SQL_ERROR` for `SQL_ATTR_OUTPUT_NTS = SQL_FALSE`, which is the row's
+///   second clause and is `(DM)`-marked; it is guarded defensively here. The first clause
+///   carries no marker and is the driver's — an attribute that is a valid ODBC environment
+///   attribute for the driver's ODBC version but is not supported by the driver — and core
+///   returns it for any unrecognised attribute identifier (see the implementation comment;
+///   this is deliberate for DM compatibility).
 ///
 /// # Safety
 ///
@@ -183,9 +189,12 @@ pub unsafe fn sql_set_env_attr<B: Backend>(
 ///
 /// # Spec compliance
 ///
-/// - 01000: General warning (driver-manager-handled; not returned here).
-/// - 01004: String data right truncated (driver-manager-handled; all supported attributes
-///   are integer-valued so truncation cannot occur).
+/// - 01000: General warning. The row carries no `(DM)` marker: not returned, because core
+///   emits no driver-specific informational message from this function.
+/// - 01004: String data right truncated — not returned here, and the row carries no `(DM)`
+///   marker: reporting truncation through the output buffer is the driver's duty. It
+///   cannot arise because every environment attribute core supports is integer-valued, so
+///   nothing is written that a short buffer could truncate.
 /// - HY000: General error — returned for unexpected internal failures.
 /// - HY001: Memory allocation failure (not returned here; Rust panics on
 ///   allocation failure).

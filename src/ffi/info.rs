@@ -534,7 +534,12 @@ pub(crate) fn type_info_columns(widths: &CatalogResultColumnWidths) -> Vec<Colum
 /// # Spec compliance
 ///
 /// - 01000 (general warning): not returned; driver does not produce informational messages here.
-/// - 01S02 (option value changed): (driver-manager-handled; not returned here)
+/// - 01S02 (option value changed): not returned here, and the row carries no `(DM)`
+///   marker. Core makes its `01S02` substitutions where the value is set — a
+///   `SQL_ATTR_ROW_ARRAY_SIZE` or `SQL_ROWSET_SIZE` other than 1 is substituted back at
+///   `SQLSetStmtAttr` time, and a `SQL_ATTR_MAX_ROWS` an unimplemented hook refused is
+///   substituted there too — so by the time this result set is built there is no value
+///   left to change.
 /// - 08S01 (communication link failure): propagated from the backend via `OdbcError`.
 /// - 24000 (invalid cursor state): **returned by this driver** when a cursor is already open
 ///   on the statement. The row's first clause is the Driver Manager's — it answers while
@@ -553,8 +558,10 @@ pub(crate) fn type_info_columns(widths: &CatalogResultColumnWidths) -> Vec<Colum
 ///   `Backend::get_type_info` returns its rows infallibly, as a `Cow` — so there is no error for a
 ///   cancellation to be reported through. The asynchronous clause is inapplicable: core never
 ///   returns `SQL_STILL_EXECUTING`.
-/// - HY010 (function sequence error): returned if the connection is not open (checked here).
-///   DM cases (async, etc.) are driver-manager-handled; not returned here.
+/// - HY010 (function sequence error): `(DM)`-marked on every clause, and **returned by this
+///   driver** anyway: a statement whose connection is not open has no data source to name a
+///   type list, so this function answers `HY010` rather than building a result set from
+///   nothing. Guarded defensively, as `SQLAllocHandle`'s `(DM)` rows are.
 /// - HY013 (memory management error): not explicitly returned; Rust panics on OOM.
 /// - HY117 (connection suspended): (driver-manager-handled; not returned here)
 /// - HYC00 (optional feature not implemented): not returned; the full type-info result set
@@ -562,8 +569,10 @@ pub(crate) fn type_info_columns(widths: &CatalogResultColumnWidths) -> Vec<Colum
 /// - HYT00 (timeout expired): not returned; result set is built synchronously in-driver.
 /// - HYT01 (connection timeout): propagated from the backend via `OdbcError`.
 /// - IM001 (driver does not support function): (driver-manager-handled; not returned here)
-/// - IM017 (polling disabled): (driver-manager-handled; not returned here)
-/// - IM018 (SQLCompleteAsync not called): (driver-manager-handled; not returned here)
+/// - IM017 (polling disabled): not returned here (the asynchronous notification model is
+///   not supported — not DM-annotated in the spec).
+/// - IM018 (SQLCompleteAsync not called): not returned here (the asynchronous notification
+///   model is not supported — not DM-annotated in the spec).
 ///
 /// # Safety
 ///
@@ -683,9 +692,10 @@ pub unsafe fn sql_get_type_info<B: Backend>(
 /// - HY010 (function sequence error — called before connect): (driver-manager-handled;
 ///   not returned here)
 /// - HY013 (memory management error): not explicitly returned; Rust panics on OOM.
-/// - HY095 (function type out of range — invalid FunctionId): not returned as
-///   SQL_ERROR; unknown single function IDs resolve to `SQL_FALSE` (unsupported),
-///   which is safe and compatible with DM behavior.
+/// - HY095 (function type out of range — invalid FunctionId): every clause of this row is
+///   `(DM)` (driver-manager-handled; not returned here). Core does not guard it even
+///   defensively: an unknown single function ID resolves to `SQL_FALSE` (unsupported),
+///   which answers the question the application asked rather than refusing it.
 /// - HY117 (connection suspended): (driver-manager-handled; not returned here)
 /// - HYT01 (connection timeout): propagated from the backend via `OdbcError`.
 ///

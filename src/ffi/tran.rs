@@ -302,8 +302,12 @@ enum EndTranOutcome {
 ///   Not currently surfaced. Backends return `Ok(())` with no info diagnostics; returning
 ///   01000 would require a new backend API variant for informational messages. Deferred.
 ///
-/// - **08003** — Connection not open: returned when `HandleType` is `SQL_HANDLE_DBC` and
-///   the connection is not in a connected state (`conn.connection` is `None`).
+/// - **08003** — Connection not open: `(DM)`-marked, and guarded defensively here for
+///   `SQL_HANDLE_DBC`, when the connection is not in a connected state (`conn.connection`
+///   is `None`). The check is load-bearing beyond the spec: the `SQL_HANDLE_ENV` arm walks
+///   the environment's connections and uses the same test to skip the ones that were never
+///   connected, so removing it would make an environment-wide commit fail on the first
+///   idle connection.
 ///
 /// - **08007** — Connection failure during transaction. Returned by the backend if the
 ///   connection fails during COMMIT/ROLLBACK and it is unknown whether the operation
@@ -350,14 +354,18 @@ enum EndTranOutcome {
 ///   reach one. The asynchronous clause is likewise inapplicable: core never returns
 ///   `SQL_STILL_EXECUTING`.
 ///
-/// - **HY010** — Function sequence error (async). Not applicable; the `Backend` trait is
-///   synchronous and has no async execution path.
+/// - **HY010** — Function sequence error (async). Every clause of this row is `(DM)`
+///   (driver-manager-handled; not returned here). None could arise anyway: the `Backend`
+///   trait is synchronous and has no async execution path.
 ///
 /// - **HY012** — Invalid transaction operation code. Returned when `completion_type` is
 ///   neither `SQL_COMMIT` nor `SQL_ROLLBACK`. Implemented: the raw value is parsed before
 ///   any handle is touched; an unrecognised value returns `SQL_ERROR`.
-///   Note: the spec says this is a DM-only SQLSTATE; `SQL_ERROR` is returned without
-///   a SQLSTATE record because no handle is available at that point.
+///   The spec marks this `(DM)`; it is guarded defensively here. `SQL_ERROR` is returned
+///   without a diagnostic record because the raw value is parsed before the handle
+///   argument has been resolved — the handle is available, but neither its kind nor its
+///   validity is established, so there is no queue yet known to be the right one to post
+///   to.
 ///
 /// - **HY013** — Memory management error. Not specifically implemented; covered by
 ///   general Rust memory safety.
@@ -370,20 +378,27 @@ enum EndTranOutcome {
 ///   SQLSTATE record — the handle cannot be trusted to carry a diagnostic
 ///   queue matching the claimed type.
 ///
-/// - **HY115** — SQLEndTran not allowed for environment with async connection. Not
-///   applicable; the `Backend` trait has no async connection functions.
+/// - **HY115** — SQLEndTran not allowed for environment with async connection. `(DM)`
+///   (driver-manager-handled; not returned here). It could not arise anyway: the `Backend`
+///   trait has no async connection functions.
 ///
-/// - **HY117** — Connection suspended due to unknown transaction state. Not applicable;
-///   the Windows 7+ suspended-connection state is not tracked.
+/// - **HY117** — Connection suspended due to unknown transaction state. `(DM)`
+///   (driver-manager-handled; not returned here); the Windows 7+ suspended-connection
+///   state is not tracked here.
 ///
 /// - **HYC00** — Optional feature not implemented. Returned by the backend if ROLLBACK
 ///   is not supported.
 ///
 /// - **HYT01** — Connection timeout expired. May be returned by the backend.
 ///
-/// - **IM001** — Driver does not support this function. Not applicable.
+/// - **IM001** — Driver does not support this function
+///   (driver-manager-handled; not returned here).
 ///
-/// - **IM017 / IM018** — Async notification polling. Not applicable.
+/// - **IM017** — Polling disabled; not returned here (the asynchronous notification model
+///   is not supported — not DM-annotated in the spec).
+///
+/// - **IM018** — SQLCompleteAsync not called; not returned here (the asynchronous
+///   notification model is not supported — not DM-annotated in the spec).
 ///
 /// # Safety
 ///

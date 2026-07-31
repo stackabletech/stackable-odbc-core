@@ -427,10 +427,12 @@ fn read_ird_field<B: Backend>(
 /// - `01S02` Option value changed — returned for `SQL_DESC_ARRAY_SIZE` above 1, which core
 ///   substitutes back to 1. It is the same value and the same substitution
 ///   `SQLSetStmtAttr(SQL_ATTR_ROW_ARRAY_SIZE)` applies, through the other door
-/// - `07009` Invalid descriptor index — returned for a negative `record_number` on an ARD or
-///   an APD, and for a record field at `record_number` 0 on an IPD. The `(DM)` markers on
-///   this row precede the `SQL_DESC_COUNT` and implicitly-allocated-APD clauses only; read
-///   them clause by clause
+/// - `07009` Invalid descriptor index — **returned by this driver** for the two clauses this
+///   row states without a `(DM)` marker: a `RecNumber` less than 0 where the
+///   `DescriptorHandle` referred to an ARD or an APD, and a record field at `RecNumber` 0
+///   where it referred to an IPD. The `(DM)` markers on this row precede the
+///   `SQL_DESC_COUNT` and implicitly-allocated-APD clauses only, so it has to be read
+///   clause by clause
 /// - `08S01` Communication link failure — (not returned here; this function performs no I/O)
 /// - `22001` String data, right truncated — returned when `SQL_DESC_NAME` is longer than
 ///   `SQL_MAX_IDENTIFIER_LEN`, which core answers per backend from
@@ -810,8 +812,12 @@ fn read_desc_rec_field<B: Backend>(
 ///
 /// - `01000` General warning — (not returned here; core raises no general warning)
 /// - `01004` String data, right truncated — returned when `SQL_DESC_NAME` does not fit `name`
-/// - `07009` Invalid descriptor index — returned for a negative `record_number` on an ARD or
-///   an APD, and for a record number outside the current result set on an IRD
+/// - `07009` Invalid descriptor index — the row's first clause carries no marker and is the
+///   driver's: a record field at `RecNumber` 0 on an IPD handle. Core returns `07009` for
+///   a negative `record_number` on an ARD or an APD, and for a record number outside the
+///   current result set on an IRD. The clauses that follow are `(DM)`-marked — a bookmark
+///   record with `SQL_UB_OFF`, and a `RecNumber` above `SQL_DESC_COUNT` — and are not
+///   returned here
 /// - `08S01` Communication link failure — (not returned here; this function performs no I/O)
 /// - `HY000` General error — returned only for an internal panic caught by `panic_safe`
 /// - `HY001` Memory allocation error — (not returned here; nothing is allocated)
@@ -987,7 +993,7 @@ unsafe fn write_small_int(ptr: *mut i16, value: isize) {
 ///
 /// - `01000` General warning — (not returned here; core raises no general warning)
 /// - `07009` Invalid descriptor index — returned for a negative `record_number` on **any**
-///   role, and for `record_number` 0 on an IPD. No clause of this row is annotated `(DM)`,
+///   role, and for `record_number` 0 on an IPD. This row has no `(DM)`-marked clause,
 ///   and the negative clause names no descriptor role — so it is reported ahead of the
 ///   `HY016` an IRD would otherwise get
 /// - `08S01` Communication link failure — (not returned here; this function performs no I/O)
