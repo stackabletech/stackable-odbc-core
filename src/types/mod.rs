@@ -159,6 +159,12 @@ pub use result_cols::{
     PrimaryKeysResultCol, TablesResultCol, special_columns_columns, statistics_columns,
 };
 
+mod catalog_queries;
+pub use catalog_queries::{
+    ColumnPrivilegesQuery, ColumnsQuery, ForeignKeysQuery, PrimaryKeysQuery, ProcedureColumnsQuery,
+    ProceduresQuery, SpecialColumnsQuery, StatisticsQuery, TablePrivilegesQuery, TablesQuery,
+};
+
 mod catalog_rows;
 pub use catalog_rows::{
     ColumnPrivilegeRow, ColumnRow, ForeignKeyRow, PrimaryKeyRow, ProcedureColumnRow, ProcedureRow,
