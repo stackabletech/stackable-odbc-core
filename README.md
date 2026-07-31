@@ -17,86 +17,123 @@
 
 [Stackable Data Platform](https://stackable.tech/) | [Platform Docs](https://docs.stackable.tech/) | [Discussions](https://github.com/orgs/stackabletech/discussions) | [Discord](https://discord.gg/7kZ3BNnCAF)
 
-`stackable-odbc-core` provides ODBC protocol logic, handle allocation and token
-validation, UTF-16 marshalling, diagnostics, panic safety, and the generic
-implementations of the ODBC FFI entry points. A concrete driver crate implements
-the `Backend` and `StatementBackend` traits, then calls the `forward_ffi!` macro
-to export the `SQL*` C ABI entry points, plus `ConfigDSNW` on Windows.
+**What is this?** ODBC is the standard way desktop tools — Excel, Tableau,
+Power BI, Python's pyodbc — talk to a database. Each database needs its own
+*driver*: a shared library the tool loads, which translates those standard calls
+into whatever that database actually speaks.
 
-This is a library crate, not a loadable ODBC driver on its own. For the
-architecture, the call-flow walkthrough and the spec-compliance rules, see
-[AGENTS.md](AGENTS.md).
+Most of a driver is the same work every time, and none of it is about your
+database: handing out and validating handles, converting strings to and from
+UTF-16, reporting errors in the exact format the standard demands, copying
+values into buffers the application supplied, and not crashing when it lies
+about their size. `stackable-odbc-core` is that shared part, written once.
+
+You write only the part that *is* about your database — how to connect, how to
+run a query, how to read a row — by implementing two Rust traits. One macro then
+generates the 59 C functions the standard requires.
+
+This is a library, not a driver you can load on its own. For the architecture,
+a walkthrough of how one call flows through the layers, and the
+spec-compliance rules, see [AGENTS.md](AGENTS.md).
 
 ## Highlights
 
-- **A backend is a trait, not a fork.** Implement `Backend` and
-  `StatementBackend`, then one `forward_ffi!` call exports all 59 C ABI entry
-  points. Core holds zero database-specific code.
+- **Adding a database means filling in two traits.** Implement `Backend` and
+  `StatementBackend`; the compiler tells you exactly what is still missing until
+  you are done. Then one line — `forward_ffi!` — generates all 59 C entry points
+  the standard requires. Core contains no database-specific code at all, so you
+  never fork it or patch it.
 
-- **Handles are tokens, not pointers.** An application-facing `SQLHANDLE` is a
-  generation-tagged slot index, validated against a driver-owned registry
-  without ever dereferencing the pointer the application passed. Freeing bumps
-  the slot's generation, so a use-after-free or a double-free is *rejected*
-  rather than undefined.
+- **A handle is a ticket number, not a memory address.** ODBC gives the
+  application a `SQLHANDLE` to refer to a connection or a running query. The
+  obvious way to build one is a raw pointer — and then an application that uses
+  a handle after freeing it, or frees it twice, corrupts the driver's memory.
+  That is *undefined behaviour*: the program may crash, or may quietly return a
+  wrong answer, which is worse.
 
-- **Thread-safe by construction.** Handle contents are guarded by
-  per-connection lock groups, so one acquisition covers a statement and its
-  parent connection and there is no ordering to get wrong. `SQLAllocHandle`
-  requires this ("drivers must therefore support safe, multithread access to
-  this information"); it is usually left to the Driver Manager. `SQLCancel` is
-  deliberately lock-free, so cancelling a query never waits on the query it was
-  asked to cancel.
+  Here a handle is a ticket: a slot number plus a counter. The driver looks the
+  ticket up in its own table and never follows the pointer the application
+  passed. Freeing bumps that slot's counter, so every ticket still referring to
+  it stops matching. Use-after-free and double-free become a clean "invalid
+  handle" error instead of memory corruption.
 
-- **A query timeout that bounds the fetch, not just the execute.**
-  `SQL_ATTR_QUERY_TIMEOUT` is armed at `SQLFetch` as well, because a data source
-  is free to answer with column metadata long before it has computed a row.
-  Measured against a live Trino coordinator under a two-second deadline: the
-  `SQLExecDirect` returned in 0.1 s and the following `SQLFetch` took 24.6 s, so
-  an execute-only timer bounded nothing.
+- **Two threads can share one connection safely.** ODBC requires this — "drivers
+  must therefore support safe, multithread access to this information" — and
+  most drivers leave it to the Driver Manager instead. Here each connection has
+  one lock, shared with every query started on it, so a call touching both takes
+  a single lock and there is no ordering rule to get wrong. (Getting lock
+  ordering wrong is how programs deadlock.) `SQLCancel` deliberately takes no
+  lock at all: cancelling a slow query must not wait for the very query it is
+  cancelling.
 
-- **Core owns the catalog result sets.** The ten catalog hooks return typed row
-  structs, and core applies the spec-mandated ordering, the column layout and
-  the `SQL_ATTR_METADATA_ID` identifier normalisation. A backend fills named
-  fields, so it cannot get column order or count wrong, and a column added to a
-  spec result set is a core-only change.
+- **The query timeout covers waiting for rows, not just sending the query.** An
+  application sets `SQL_ATTR_QUERY_TIMEOUT` to say "give up after N seconds".
+  Most drivers run that clock only while the query is being submitted — but a
+  database may reply "here are the column names" instantly and then take half a
+  minute to produce the first row. Measured against a real Trino server with a
+  two-second deadline: submitting returned in 0.1 s, and fetching the first row
+  took 24.6 s. A timer covering only submission bounds nothing, so this one runs
+  during `SQLFetch` too.
 
-- **All three C-to-SQL conversion tables transcribed.** Character, binary and
-  numeric, including the interval row and its optional `01S07` fractional
-  truncation warning.
+- **Core builds the "what tables exist?" answers.** For questions like that, the
+  standard dictates the exact columns, their order, and how the rows must be
+  sorted. Your backend returns ordinary Rust structs with named fields; core
+  puts the columns in order, sorts the rows, and normalises identifier case. You
+  cannot get the column order or count wrong, because you never write them — and
+  when a column is added to one of those result sets, only core changes.
 
-- **Verified, not just tested.** 1335 unit tests, plus Miri for undefined
-  behaviour and leaked handles, loom for the lock discipline under every
-  interleaving, and cargo-fuzz under AddressSanitizer on the marshalling hot
-  paths. All four run on every pull request.
+- **Value conversion is already done.** When an application hands over a
+  parameter as text and says "treat this as a number", the standard has three
+  large tables specifying exactly what each conversion does, down to which
+  warning to raise when precision is lost. All three are implemented — character,
+  binary and numeric — including the awkward interval row and its optional
+  `01S07` "your fractional seconds were rounded" warning.
 
-- **Windows is a real target.** `extern "system"` resolves to the correct ABI on
-  each platform, the ODBC installer entry point `ConfigDSNW` is exported behind
-  `#[cfg(windows)]`, and the Windows Driver Manager's stricter requirements are
-  handled explicitly: the pre-connect `SQL_DRIVER_ODBC_VER` query, the complete
-  3.x function bitmap, and *not* exporting the deprecated ODBC 2.x functions, so
-  the Driver Manager's better-informed mapping wins. See the [Windows Driver
+- **Checked by more than unit tests.** 1345 unit tests, plus three tools that
+  catch what ordinary tests cannot: Miri runs the code in an interpreter that
+  detects undefined behaviour and leaked handles, loom re-runs the locking code
+  under every possible thread interleaving rather than the one that happened to
+  occur, and cargo-fuzz throws random input at the buffer-copying code under
+  AddressSanitizer. All four run on every pull request.
+
+- **Windows is a first-class target.** Its Driver Manager is much stricter than
+  Linux's unixODBC, and it fails *quietly*: miss one requirement and a feature
+  simply stops working with no error to explain why. The known traps are handled
+  — answering the version query it makes *before* connecting, reporting the
+  complete function list it uses to build its dispatch table, and deliberately
+  *not* exporting the old ODBC 2.x functions, since exporting one replaces the
+  Driver Manager's own better implementation with yours. See the [Windows Driver
   Manager compatibility
   checklist](AGENTS.md#windows-driver-manager-compatibility-checklist).
 
 ## Conformance and scope
 
-ODBC 3.80, reporting `SQL_OIC_CORE` interface conformance. All four handle types
-allocate and free. All five descriptor functions are implemented, including
-explicitly allocated descriptors shared across statements on a connection. 59 C
-ABI entry points are exported; Appendix G's deprecated ODBC 2.x functions are
-deliberately not among them, because exporting one suppresses the Driver
-Manager's own mapping rather than adding a capability.
+This implements ODBC 3.80 at the `SQL_OIC_CORE` level — the base of the
+standard's three interface-conformance levels, and the one applications can
+assume of any driver. All four handle types can be allocated and freed, and all
+five *descriptor* functions work (descriptors are the standard's own way of
+describing a bound column or parameter, and can be shared between queries on one
+connection).
+
+59 C entry points are exported. The deprecated ODBC 2.x functions are
+deliberately left out: the Driver Manager already emulates them on top of the
+modern ones, usually better than a driver would, and exporting your own version
+switches that off rather than adding anything.
 
 Deliberately out of scope:
 
-- **Forward-only cursors** (`SQL_SO_FORWARD_ONLY`). `SQLFetchScroll` accepts
-  `SQL_FETCH_NEXT` and rejects every other orientation with `HY106`.
-- **No block cursors.** `SQL_ATTR_ROW_ARRAY_SIZE` is fixed at 1 (a larger value
-  is substituted back with `01S02`), so `SQL_GD_BLOCK` is never reported.
-- **No bookmark records**, and no automatic population of the IPD:
-  `SQL_ATTR_AUTO_IPD` is `SQL_FALSE`.
-- **No async execution.** `Backend` is synchronous; a driver wrapping an async
-  client library bridges to it internally.
+- **Results are read front to back only** (`SQL_SO_FORWARD_ONLY`) — no jumping
+  to a row or going backwards. `SQLFetchScroll` accepts `SQL_FETCH_NEXT` and
+  rejects every other direction with `HY106`.
+- **One row at a time.** No block cursors: `SQL_ATTR_ROW_ARRAY_SIZE` is fixed at
+  1 (ask for more and you get 1 back with an `01S02` warning), so `SQL_GD_BLOCK`
+  is never reported.
+- **No bookmarks** — saved row positions you can return to later — and no
+  automatic filling-in of parameter metadata (`SQL_ATTR_AUTO_IPD` is
+  `SQL_FALSE`).
+- **No async.** `Backend` is synchronous. A driver built on an async client
+  library bridges to it internally, for example with a current-thread tokio
+  runtime and `block_on`.
 
 ## Creating a new driver
 
@@ -144,16 +181,20 @@ Adding a new database backend requires three steps:
    }
    ```
 
-   The sketch above is deliberately incomplete — `Backend` has 3 associated
-   types and 35 required methods, most of them one-line *capability
-   declarations* (`supports_catalogs`, `identifier_case`, `sql_conformance`, …).
-   They are required rather than defaulted because each states a falsifiable
-   fact about the data source that core cannot know, and a wrong default is
-   invisible: the compiler asking is the point. `StatementBackend` has one
-   associated type and no required methods.
+   The sketch above is deliberately incomplete. `Backend` has 3 associated types
+   and 35 required methods, but most are one-line *capability declarations* —
+   `supports_catalogs`, `identifier_case`, `sql_conformance` — each answering a
+   single yes/no or pick-a-value question about your database.
 
-   The compiler lists exactly what is missing, so the practical route is to
-   write the three associated types and let `cargo check` drive the rest.
+   They are required rather than optional on purpose. Any default core supplied
+   would be a claim about *your* database that nobody ever checked, and a wrong
+   one is invisible: your driver would confidently tell applications something
+   untrue, and nothing would ever complain. Making the compiler ask is the point.
+   `StatementBackend`, by contrast, has one associated type and no required
+   methods at all — override only what your backend supports.
+
+   In practice you do not look this list up. Write the three associated types,
+   run `cargo check`, and the compiler names exactly what is still missing.
 
 3. **Generate the FFI entry points** in `lib.rs` using the `forward_ffi!` macro:
 
