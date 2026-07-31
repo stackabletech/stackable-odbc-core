@@ -55,8 +55,10 @@ static CURSOR_NAME_COUNTER: AtomicU32 = AtomicU32::new(1);
 /// - HY117 (connection suspended): (driver-manager-handled; not returned here)
 /// - HYT01 (connection timeout): not applicable; the framework is in-process.
 /// - IM001 (driver does not support function): (driver-manager-handled; not returned here)
-/// - IM017 (polling disabled in async notification mode): (driver-manager-handled; not returned here)
-/// - IM018 (SQLCompleteAsync not called): (driver-manager-handled; not returned here)
+/// - IM017 (polling disabled): not returned here (the asynchronous notification model is not
+///   supported — not DM-annotated in the spec).
+/// - IM018 (SQLCompleteAsync not called): not returned here (the asynchronous notification
+///   model is not supported — not DM-annotated in the spec).
 ///
 /// # Safety
 ///
@@ -240,8 +242,10 @@ pub unsafe fn sql_row_count<B: Backend>(
 /// - HY117 (connection suspended): (driver-manager-handled; not returned here)
 /// - HYT01 (connection timeout): not applicable; the framework is in-process.
 /// - IM001 (driver does not support function): (driver-manager-handled; not returned here)
-/// - IM017 (polling disabled in async notification mode): (driver-manager-handled; not returned here)
-/// - IM018 (SQLCompleteAsync not called): (driver-manager-handled; not returned here)
+/// - IM017 (polling disabled): not returned here (the asynchronous notification model is not
+///   supported — not DM-annotated in the spec).
+/// - IM018 (SQLCompleteAsync not called): not returned here (the asynchronous notification
+///   model is not supported — not DM-annotated in the spec).
 ///
 /// # Safety
 ///
@@ -615,8 +619,13 @@ fn signal_cancel<B: Backend>(
 ///   `panic_safe`.
 /// - HY010 (function sequence error): (driver-manager-handled; not returned here)
 /// - HY013 (memory management error): not applicable; Rust memory access cannot fail silently.
-/// - HY015 (no cursor name available): not applicable; this implementation auto-generates a
-///   name when none has been set.
+/// - HY015 (no cursor name available): every clause of this row is `(DM)`, and its single
+///   clause describes an ODBC 2.x driver; core is a 3.x driver
+///   (driver-manager-handled; not returned here). It could not arise anyway, because this
+///   implementation auto-generates a name when none has been set.
+/// - HY090 (invalid string or buffer length): every clause of this row is `(DM)`
+///   (driver-manager-handled; not returned here). A short but non-negative buffer is not an
+///   error: `write_utf16` reports it as `01004` and writes what fits.
 /// - HY117 (connection suspended): (driver-manager-handled; not returned here)
 /// - HYT01 (connection timeout): not applicable; the framework is in-process.
 /// - IM001 (driver does not support function): (driver-manager-handled; not returned here)
@@ -903,6 +912,8 @@ pub unsafe fn sql_set_cursor_name_w<B: Backend>(
 /// - 01000 (general warning): driver-specific informational message — not produced here.
 /// - 01004 (string data, right truncated): not applicable; no data movement occurs.
 /// - 01S01 (error in row): not applicable; HYC00 is returned before any row processing.
+/// - 01S07 (fractional truncation): not applicable; `HYC00` is returned before any value is
+///   converted.
 /// - 07006 (restricted data type attribute violation): not applicable; HYC00 precedes data conversion.
 /// - 07009 (invalid descriptor index): not applicable; HYC00 precedes column access.
 /// - 21S02 (degree of derived table does not match column list): not applicable.
@@ -926,18 +937,29 @@ pub unsafe fn sql_set_cursor_name_w<B: Backend>(
 ///   cancellation to be reported through. The asynchronous clause is inapplicable: core never
 ///   returns `SQL_STILL_EXECUTING`.
 /// - HY010 (function sequence error): (driver-manager-handled; not returned here)
-/// - HY011 (attribute cannot be set now): not applicable.
+/// - HY011 (attribute cannot be set now): every clause of this row is `(DM)` and describes an
+///   ODBC 2.x driver (driver-manager-handled; not returned here).
 /// - HY013 (memory management error): not applicable; Rust memory access cannot fail silently.
 /// - HY090 (invalid string or buffer length): not applicable; HYC00 precedes buffer access.
-/// - HY092 (invalid attribute/option identifier): returned when `operation` is not one of the
-///   four valid values defined by the spec (`SQL_ADD`, `SQL_UPDATE_BY_BOOKMARK`,
-///   `SQL_DELETE_BY_BOOKMARK`, `SQL_FETCH_BY_BOOKMARK`).
+/// - HY092 (invalid attribute/option identifier): **returned by this driver** when `operation`
+///   is not one of the four valid values defined by the spec (`SQL_ADD`,
+///   `SQL_UPDATE_BY_BOOKMARK`, `SQL_DELETE_BY_BOOKMARK`, `SQL_FETCH_BY_BOOKMARK`). Only that
+///   first clause is `(DM)`-marked, and it is guarded defensively here: `odbc_sys` models
+///   `Operation` as a newtype over a private `i16` with no accessor, so core validates
+///   against the named constants in `types/constants.rs` — the documented exception to the
+///   raw-value conversion rule, recorded in `AGENTS.md`. The two clauses that carry no
+///   marker are the driver's, and neither can arise: one needs `SQL_CONCUR_READ_ONLY`
+///   concurrency and the other a bound bookmark column, and core supports neither.
 /// - HY117 (connection suspended): (driver-manager-handled; not returned here)
 /// - HYC00 (optional feature not implemented): returned for all valid `operation` values —
 ///   this driver does not support bulk operations or bookmarks.
 /// - HYT00 (timeout expired): not applicable; the framework is in-process.
 /// - HYT01 (connection timeout): not applicable; the framework is in-process.
 /// - IM001 (driver does not support function): (driver-manager-handled; not returned here)
+/// - IM017 (polling disabled): not returned here (the asynchronous notification model is not
+///   supported — not DM-annotated in the spec).
+/// - IM018 (SQLCompleteAsync not called): not returned here (the asynchronous notification
+///   model is not supported — not DM-annotated in the spec).
 ///
 /// # Safety
 ///
@@ -1007,7 +1029,8 @@ pub unsafe fn sql_bulk_operations<B: Backend>(
 /// - 01001 (cursor operation conflict): not applicable; HYC00 is returned before any operation.
 /// - 01004 (string data, right truncated): not applicable.
 /// - 01S01 (error in row): not applicable.
-/// - 01S07 (fractional truncation): not applicable.
+/// - 01S07 (fractional truncation): not applicable; `HYC00` is returned before any value is
+///   converted.
 /// - 07006 (restricted data type attribute violation): not applicable.
 /// - 07009 (invalid descriptor index): not applicable.
 /// - 21S02 (degree of derived table does not match column list): not applicable.
@@ -1018,7 +1041,12 @@ pub unsafe fn sql_bulk_operations<B: Backend>(
 /// - 22015 (interval field overflow): not applicable.
 /// - 22018 (invalid character value for cast specification): not applicable.
 /// - 23000 (integrity constraint violation): not applicable.
-/// - 24000 (invalid cursor state): not applicable; HYC00 is returned first.
+/// - 24000 (invalid cursor state): not applicable; `HYC00` is returned first. Only the second
+///   of the row's four clauses is `(DM)`-marked — a cursor open where `SQLFetch` or
+///   `SQLFetchScroll` had not been called. The other three carry no marker and are the
+///   driver's, including the two that describe a cursor positioned before the start of the
+///   result set or after its end; none is reached, because this function refuses every
+///   operation before it looks at the cursor.
 /// - 40001 (serialization failure): not applicable.
 /// - 40003 (statement completion unknown): not applicable.
 /// - 42000 (syntax error or access violation): not applicable.
@@ -1031,20 +1059,35 @@ pub unsafe fn sql_bulk_operations<B: Backend>(
 ///   cancellation to be reported through. The asynchronous clause is inapplicable: core never
 ///   returns `SQL_STILL_EXECUTING`.
 /// - HY010 (function sequence error): (driver-manager-handled; not returned here)
-/// - HY011 (attribute cannot be set now): not applicable.
+/// - HY011 (attribute cannot be set now): every clause of this row is `(DM)` and describes an
+///   ODBC 2.x driver (driver-manager-handled; not returned here).
 /// - HY013 (memory management error): not applicable; Rust memory access cannot fail silently.
 /// - HY090 (invalid string or buffer length): not applicable.
-/// - HY092 (invalid attribute/option identifier): returned when `operation` is not one of
-///   `SQL_POSITION`, `SQL_REFRESH`, `SQL_UPDATE`, `SQL_DELETE`, or when `lock_type` is not
-///   one of `SQL_LOCK_NO_CHANGE`, `SQL_LOCK_EXCLUSIVE`, `SQL_LOCK_UNLOCK`.
+/// - HY092 (invalid attribute/option identifier): **returned by this driver** when `operation`
+///   is not one of `SQL_POSITION`, `SQL_REFRESH`, `SQL_UPDATE`, `SQL_DELETE`, or when
+///   `lock_type` is not one of `SQL_LOCK_NO_CHANGE`, `SQL_LOCK_EXCLUSIVE`,
+///   `SQL_LOCK_UNLOCK`. Both of those clauses are `(DM)`-marked and are guarded defensively
+///   here: `odbc_sys` models `Operation` and `Lock` as newtypes over a private `i16` with no
+///   accessor, so core validates against the named constants in `types/constants.rs` — the
+///   documented exception to the raw-value conversion rule, recorded in `AGENTS.md`. The
+///   third clause carries no marker and is the driver's; it needs `SQL_ATTR_CONCUR_READ_ONLY`
+///   concurrency, which core does not support.
 /// - HY107 (row value out of range): not applicable; HYC00 is returned before row validation.
-/// - HY109 (invalid cursor position): not applicable; HYC00 is returned before cursor checks.
+/// - HY109 (invalid cursor position): not applicable; `HYC00` is returned before cursor checks.
+///   Only the third of the row's four clauses is `(DM)`-marked, a `RowNumber` of 0 with
+///   `SQL_POSITION`. The rest carry no marker and are the driver's — including the first,
+///   which describes a cursor "defined as forward-only, so the cursor could not be positioned
+///   within the rowset", the condition that would apply to every cursor this driver creates.
 /// - HY117 (connection suspended): (driver-manager-handled; not returned here)
 /// - HYC00 (optional feature not implemented): returned for all valid `operation`/`lock_type`
 ///   combinations — this driver does not support scrollable cursors or positioned operations.
 /// - HYT00 (timeout expired): not applicable; the framework is in-process.
 /// - HYT01 (connection timeout): not applicable; the framework is in-process.
 /// - IM001 (driver does not support function): (driver-manager-handled; not returned here)
+/// - IM017 (polling disabled): not returned here (the asynchronous notification model is not
+///   supported — not DM-annotated in the spec).
+/// - IM018 (SQLCompleteAsync not called): not returned here (the asynchronous notification
+///   model is not supported — not DM-annotated in the spec).
 ///
 /// # Safety
 ///
