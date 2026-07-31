@@ -354,10 +354,10 @@ fn connection_has_result_set_pending<B: Backend>(
 ///   returned here).
 /// - IM009 Unable to load translation DLL: not applicable; translation DLLs are
 ///   not supported (`SQL_ATTR_TRANSLATE_LIB` is accepted silently).
-/// - IM017 Polling is disabled in asynchronous notification mode:
-///   (driver-manager-handled; not returned here).
-/// - IM018 SQLCompleteAsync has not been called:
-///   (driver-manager-handled; not returned here).
+/// - IM017 Polling is disabled in asynchronous notification mode: not returned here
+///   (the asynchronous notification model is not supported — not DM-annotated in the spec).
+/// - IM018 SQLCompleteAsync has not been called: not returned here (the asynchronous
+///   notification model is not supported — not DM-annotated in the spec).
 /// - S1118 Driver does not support asynchronous notification: not applicable;
 ///   asynchronous notification is not supported.
 ///

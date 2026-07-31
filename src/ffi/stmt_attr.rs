@@ -362,7 +362,7 @@ fn reset_at_data_source<B: Backend, T>(
 /// - HY024 Invalid attribute value: returned when `SQL_ATTR_APP_ROW_DESC` or
 ///   `SQL_ATTR_APP_PARAM_DESC` is given a value that is not a descriptor on this
 ///   statement's connection — a descriptor allocated on another connection, or a
-///   value that names no live descriptor at all. This row is **not** (DM): it
+///   value that names no live descriptor at all. The row carries no `(DM)` marker: it
 ///   states the case verbatim, and closes with the general rule that makes it
 ///   core's, "For all other connection and statement attributes, the driver must
 ///   verify the value specified in *ValuePtr*". The check compares the parent
@@ -402,6 +402,9 @@ fn reset_at_data_source<B: Backend, T>(
 ///   connection timeout of its own.
 /// - IM001 Driver does not support this function: (driver-manager-handled; not
 ///   returned here).
+/// - S1118 Driver does not support asynchronous notification: not returned here, and the
+///   row carries no `(DM)` marker. Core implements no asynchronous notification, so an
+///   application has no way to ask for it and nothing to be refused.
 ///
 /// # Safety
 ///

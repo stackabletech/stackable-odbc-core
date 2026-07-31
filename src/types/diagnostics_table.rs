@@ -167,19 +167,13 @@ const NO_SPEC_DIAGNOSTICS_TABLE: &[&str] = &[
     // `every_false_return_from_config_dsn_w_posts_an_installer_error` in
     // `ffi/setup.rs` already guards.
     "config_dsn_w",
-];
-
-/// Functions this sweep has not reached yet. **This list only ever shrinks**,
-/// and the change that empties it deletes it and the assertion that reads it.
-/// It exists so the sweep can land file by file, each commit reviewable on its
-/// own, without leaving the guard switched off in between.
-const NOT_YET_TRANSCRIBED: &[&str] = &[
-    "sql_get_connect_attr_w",
-    "sql_get_diag_field_w",
+    // The two diagnostic-retrieval functions have a "Diagnostics" heading with
+    // no SQLSTATE table under it. Both pages open that section with the same
+    // sentence — "does not post diagnostic records for itself" — and then list
+    // return codes instead, because a function that reads the diagnostic queue
+    // cannot report through it.
     "sql_get_diag_rec_w",
-    "sql_get_stmt_attr_w",
-    "sql_set_connect_attr_w",
-    "sql_set_stmt_attr_w",
+    "sql_get_diag_field_w",
 ];
 
 /// The `///` lines of `func`'s doc comment, in source order, with the leading
@@ -1904,6 +1898,118 @@ FunctionDiagnostics {
         DiagnosticsRow { sqlstate: "IM001", dm: DmMarking::All },
     ],
 },
+FunctionDiagnostics {
+    func: "sql_set_connect_attr_w",
+    odbc_name: "SQLSetConnectAttr",
+    module: "src/ffi/connect_attr.rs",
+    source: CONNECT_ATTR_RS,
+    // <https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlsetconnectattr-function>
+    rows: &[
+        DiagnosticsRow { sqlstate: "01000", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "01S02", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "08002", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "08003", dm: DmMarking::All },
+        DiagnosticsRow { sqlstate: "08S01", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "24000", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "25000", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "3D000", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "HY000", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "HY001", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "HY008", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "HY009", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "HY010", dm: DmMarking::All },
+        DiagnosticsRow { sqlstate: "HY011", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "HY013", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "HY024", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "HY090", dm: DmMarking::All },
+        DiagnosticsRow { sqlstate: "HY092", dm: DmMarking::All },
+        DiagnosticsRow { sqlstate: "HY114", dm: DmMarking::All },
+        DiagnosticsRow { sqlstate: "HY117", dm: DmMarking::All },
+        DiagnosticsRow { sqlstate: "HY121", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "HYC00", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "HYT01", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "IM001", dm: DmMarking::All },
+        DiagnosticsRow { sqlstate: "IM009", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "IM017", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "IM018", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "S1118", dm: DmMarking::None },
+    ],
+},
+FunctionDiagnostics {
+    func: "sql_get_connect_attr_w",
+    odbc_name: "SQLGetConnectAttr",
+    module: "src/ffi/connect_attr.rs",
+    source: CONNECT_ATTR_RS,
+    // <https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlgetconnectattr-function>
+    rows: &[
+        DiagnosticsRow { sqlstate: "01000", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "01004", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "08003", dm: DmMarking::All },
+        DiagnosticsRow { sqlstate: "08S01", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "HY000", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "HY001", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "HY010", dm: DmMarking::All },
+        DiagnosticsRow { sqlstate: "HY013", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "HY090", dm: DmMarking::All },
+        DiagnosticsRow { sqlstate: "HY092", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "HY114", dm: DmMarking::All },
+        DiagnosticsRow { sqlstate: "HY117", dm: DmMarking::All },
+        DiagnosticsRow { sqlstate: "HYC00", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "HYT01", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "IM001", dm: DmMarking::All },
+    ],
+},
+FunctionDiagnostics {
+    func: "sql_set_stmt_attr_w",
+    odbc_name: "SQLSetStmtAttr",
+    module: "src/ffi/stmt_attr.rs",
+    source: STMT_ATTR_RS,
+    // <https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlsetstmtattr-function>
+    rows: &[
+        DiagnosticsRow { sqlstate: "01000", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "01S02", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "08S01", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "24000", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "HY000", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "HY001", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "HY009", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "HY010", dm: DmMarking::All },
+        DiagnosticsRow { sqlstate: "HY011", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "HY013", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "HY017", dm: DmMarking::All },
+        DiagnosticsRow { sqlstate: "HY024", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "HY090", dm: DmMarking::All },
+        DiagnosticsRow { sqlstate: "HY092", dm: DmMarking::All },
+        DiagnosticsRow { sqlstate: "HY117", dm: DmMarking::All },
+        DiagnosticsRow { sqlstate: "HYC00", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "HYT01", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "IM001", dm: DmMarking::All },
+        DiagnosticsRow { sqlstate: "S1118", dm: DmMarking::None },
+    ],
+},
+FunctionDiagnostics {
+    func: "sql_get_stmt_attr_w",
+    odbc_name: "SQLGetStmtAttr",
+    module: "src/ffi/stmt_attr.rs",
+    source: STMT_ATTR_RS,
+    // <https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlgetstmtattr-function>
+    rows: &[
+        DiagnosticsRow { sqlstate: "01000", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "01004", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "24000", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "HY000", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "HY001", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "HY010", dm: DmMarking::All },
+        DiagnosticsRow { sqlstate: "HY013", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "HY090", dm: DmMarking::All },
+        DiagnosticsRow { sqlstate: "HY092", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "HY109", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "HY117", dm: DmMarking::All },
+        DiagnosticsRow { sqlstate: "HYC00", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "HYT01", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "IM001", dm: DmMarking::All },
+    ],
+},
 ];
 
 #[test]
@@ -2044,7 +2150,6 @@ fn every_exported_ffi_function_has_a_transcribed_diagnostics_table() {
             };
             let func: &str = rest.split(['<', '(']).next().unwrap_or(rest);
             if NO_SPEC_DIAGNOSTICS_TABLE.contains(&func)
-                || NOT_YET_TRANSCRIBED.contains(&func)
                 || DIAGNOSTICS_TABLES.iter().any(|e| e.func == func)
             {
                 continue;
