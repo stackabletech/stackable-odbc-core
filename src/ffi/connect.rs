@@ -48,7 +48,10 @@ use crate::utf16::{utf16_to_string, write_utf16};
 ///   (unknown attributes are silently ignored by `ConnectParams::parse`).
 /// - 01S02: Option value changed — not returned here (no connection attribute substitution is
 ///   performed during connect).
-/// - 01S08: Error saving file DSN — (driver-manager-handled; not returned here).
+/// - 01S08: Error saving file DSN — not returned here, and the row carries no `(DM)`
+///   marker. The Comments section assigns the writing to the Driver Manager: a `SAVEFILE`
+///   keyword makes the DM create the file DSN from the connection string this function
+///   returns, so core never opens it and has no write to fail.
 /// - 01S09: Invalid keyword (SAVEFILE without DRIVER/FILEDSN) — (driver-manager-handled; not returned here).
 /// - 08001: Client unable to establish connection — returned by the backend via `B::connect`.
 /// - 08002: Connection name in use — (driver-manager-handled; not returned here).
@@ -65,14 +68,23 @@ use crate::utf16::{utf16_to_string, write_utf16};
 ///   its connection failed for an unrelated reason would be worse than naming a state this table
 ///   omits. The spec notes interoperable applications set this attribute *before* connecting, so
 ///   this is the path that matters most.
-/// - HY000: General error — returned for any backend error with no specific SQLSTATE.
+/// - HY000: General error — **returned by this driver** for any backend error with no
+///   specific SQLSTATE, which is the clause this row states without a `(DM)` marker. The
+///   page prints two further `HY000` rows that *are* marked, both about a `FILEDSN`
+///   keyword naming a `.dsn` file the Driver Manager could not find or read; core never
+///   opens one.
 /// - HY001: Memory allocation failure — not returned here (Rust panics on alloc failure).
 /// - HY008: Operation canceled; not returned here. Cancelling a connection-level call needs
 ///   `SQLCancelHandle` on a connection handle, which this driver does not export, so no cancel
 ///   token exists for this call to observe — `SQLCancel` takes a statement handle and cannot
 ///   reach one. The asynchronous clause is likewise inapplicable: core never returns
 ///   `SQL_STILL_EXECUTING`.
-/// - HY009: Invalid use of null pointer — returned when `in_connection_string` is null.
+/// - HY009: Invalid use of null pointer — **absent from this function's diagnostics table**,
+///   yet returned by this driver when `in_connection_string` is null. A null string
+///   argument reaches `utf16_to_string`, which reports `HY009` rather than reading through
+///   it. The check is a soundness guard, not a spec check, and is kept for the reason
+///   `SQLAllocHandle`'s `(DM)` guards are kept: core is also linked directly, with no
+///   Driver Manager in front of it.
 /// - HY010: Function sequence error (async in progress) — (driver-manager-handled; not returned here).
 /// - HY013: Memory management error — not returned here (Rust panics on alloc failure).
 /// - HY090: Invalid string or buffer length — returned when `string_length1 < 0 && != SQL_NTS`,
@@ -95,8 +107,26 @@ use crate::utf16::{utf16_to_string, write_utf16};
 ///   and tears it down. Nothing in the connect path itself produces it.
 /// - HYT00: Login timeout expired — not returned here (login timeout not enforced).
 /// - HYT01: Connection timeout expired — not returned here (connection timeout not enforced).
-/// - S1118: Driver does not support asynchronous notification (driver-manager-handled; not returned here).
-/// - IM001–IM018: All Driver Manager internal codes — (driver-manager-handled; not returned here).
+/// - S1118: Driver does not support asynchronous notification — not returned here, and the
+///   row carries no `(DM)` marker. Core implements no connection-level asynchronous
+///   notification, so an application has no way to ask for it and nothing to be refused.
+/// - IM001–IM006: Driver Manager internal codes — (driver-manager-handled; not returned
+///   here). Core resolves a DSN through `merge_dsn_params` and never loads, translates or
+///   negotiates with another driver, so none of the block's conditions can arise in it.
+/// - IM009: Unable to load translation DLL — not returned here, and the row carries no
+///   `(DM)` marker. Core loads no translation DLL: it implements no
+///   `SQL_ATTR_TRANSLATE_LIB`, so there is nothing to fail to load.
+/// - IM010–IM012: Driver Manager internal codes — (driver-manager-handled; not returned
+///   here).
+/// - IM014: Invalid name of File DSN — (driver-manager-handled; not returned here).
+/// - IM015: Driver's SQLDriverConnect on SQL_HANDLE_DBC_INFO_TOKEN failed — not returned
+///   here, and the row carries no `(DM)` marker. Core exports no
+///   `SQL_HANDLE_DBC_INFO_TOKEN` entry point, so the call this row describes cannot be
+///   made against it.
+/// - IM017: Polling disabled; not returned here (the asynchronous notification model is not
+///   supported — not DM-annotated in the spec).
+/// - IM018: SQLCompleteAsync not called; not returned here (the asynchronous notification
+///   model is not supported — not DM-annotated in the spec).
 ///
 /// # Safety
 ///
@@ -281,13 +311,36 @@ pub unsafe fn sql_driver_connect_w<B: Backend>(
 ///   `SQL_STILL_EXECUTING`.
 /// - HY010: Function sequence error (async in progress) — (driver-manager-handled; not returned here).
 /// - HY013: Memory management error — not returned here (Rust panics on alloc failure).
-/// - HY090: Invalid string or buffer length — returned when `name_length1`, `name_length2`, or
-///   `name_length3` is negative and not equal to `SQL_NTS` (-3).
+/// - HY090: Invalid string or buffer length — both clauses of this row are `(DM)`-marked;
+///   the first is guarded defensively here, returning `HY090` when `name_length1`,
+///   `name_length2` or `name_length3` is negative and not equal to `SQL_NTS` (-3). The
+///   second, a data source name over the maximum length, is not: core declares no maximum.
 /// - HYT00: Login timeout expired — not returned here (login timeout not enforced).
 /// - HY114: Driver does not support connection-level async — (driver-manager-handled; not returned here).
 /// - HYT01: Connection timeout expired — not returned here (connection timeout not enforced).
-/// - S1118: Driver does not support asynchronous notification (driver-manager-handled; not returned here).
-/// - IM001–IM018: All Driver Manager internal codes — (driver-manager-handled; not returned here).
+/// - S1118: Driver does not support asynchronous notification — not returned here, and the
+///   row carries no `(DM)` marker. Core implements no connection-level asynchronous
+///   notification, so an application has no way to ask for it and nothing to be refused.
+/// - IM001–IM005: Driver Manager internal codes — (driver-manager-handled; not returned
+///   here). Core resolves a DSN through `merge_dsn_params` and never loads, translates or
+///   negotiates with another driver, so none of the block's conditions can arise in it.
+/// - IM006: Driver's SQLSetConnectAttr failed — not returned here, and the row carries no
+///   `(DM)` marker. Core calls no other driver's `SQLSetConnectAttr`; a connection
+///   attribute set before connecting is applied through a `Backend` hook, whose failure is
+///   propagated with the hook's own state.
+/// - IM009: Unable to load translation DLL — not returned here, and the row carries no
+///   `(DM)` marker. Core loads no translation DLL: it implements no
+///   `SQL_ATTR_TRANSLATE_LIB`, so there is nothing to fail to load.
+/// - IM010: Data source name too long — (driver-manager-handled; not returned here).
+/// - IM014: Invalid name of File DSN — (driver-manager-handled; not returned here).
+/// - IM015: Driver's SQLDriverConnect on SQL_HANDLE_DBC_INFO_TOKEN failed — not returned
+///   here, and the row carries no `(DM)` marker. Core exports no
+///   `SQL_HANDLE_DBC_INFO_TOKEN` entry point, so the call this row describes cannot be
+///   made against it.
+/// - IM017: Polling disabled; not returned here (the asynchronous notification model is not
+///   supported — not DM-annotated in the spec).
+/// - IM018: SQLCompleteAsync not called; not returned here (the asynchronous notification
+///   model is not supported — not DM-annotated in the spec).
 ///
 /// # Safety
 ///
@@ -475,27 +528,48 @@ pub unsafe fn sql_connect_w<B: Backend>(
 ///   omits. The spec notes interoperable applications set this attribute *before* connecting, so
 ///   this is the path that matters most.
 /// - HY000: General error — returned for any backend error with no specific SQLSTATE.
-/// - HY001: Memory allocation failure — not returned here (Rust panics on alloc failure).
+/// - HY001: Memory allocation failure — every clause of this row is `(DM)`
+///   (driver-manager-handled; not returned here). It could not arise anyway: Rust's
+///   allocator aborts on OOM rather than returning an error.
 /// - HY008: Operation canceled; not returned here. Cancelling a connection-level call needs
 ///   `SQLCancelHandle` on a connection handle, which this driver does not export, so no cancel
 ///   token exists for this call to observe — `SQLCancel` takes a statement handle and cannot
 ///   reach one. The asynchronous clause is likewise inapplicable: core never returns
 ///   `SQL_STILL_EXECUTING`.
-/// - HY009: Invalid use of null pointer — returned when `in_connection_string` is null.
+/// - HY009: Invalid use of null pointer — **absent from this function's diagnostics table**,
+///   yet returned by this driver when `in_connection_string` is null, for the reason
+///   `SQLDriverConnectW`'s identical guard gives.
 /// - HY010: Function sequence error (async in progress) — (driver-manager-handled; not returned here).
 /// - HY013: Memory management error — not returned here (Rust panics on alloc failure).
 /// - HY090: Invalid string or buffer length — returned when `string_length1 < 0 && != SQL_NTS`,
 ///   or when `buffer_length < 0`. Note: spec marks these as `(DM)`, but checked here as
 ///   defence-in-depth when called outside a full Driver Manager stack.
-/// - HYC00: Optional feature not implemented — **returned by this driver**, but only from a
+/// - HYC00: Optional feature not implemented — **absent from this function's diagnostics
+///   table**, yet returned by this driver, but only from a
 ///   connection attribute set before the connect. Core applies those here (see
 ///   `apply_pending_connect_attrs`), and an unimplemented hook — most often the defaulted
 ///   [`crate::backend::Backend::set_current_catalog`] — reports `HYC00`, which fails the connect
 ///   and tears it down. Nothing in the connect path itself produces it.
 /// - HYT00: Login timeout expired — not returned here (login timeout not enforced).
 /// - HYT01: Connection timeout expired — not returned here (connection timeout not enforced).
-/// - IM001: Driver does not support this function — (driver-manager-handled; not returned here).
-/// - IM009: Unable to load translation DLL — (driver-manager-handled; not returned here).
+/// - HY114: Driver does not support connection-level asynchronous function execution —
+///   (driver-manager-handled; not returned here).
+/// - S1118: Driver does not support asynchronous notification — not returned here, and the
+///   row carries no `(DM)` marker. Core implements no connection-level asynchronous
+///   notification, so an application has no way to ask for it and nothing to be refused.
+/// - IM001–IM006: Driver Manager internal codes — (driver-manager-handled; not returned
+///   here). Core resolves a DSN through `merge_dsn_params` and never loads, translates or
+///   negotiates with another driver, so none of the block's conditions can arise in it.
+/// - IM009: Unable to load translation DLL — not returned here, and the row carries no
+///   `(DM)` marker. Core loads no translation DLL: it implements no
+///   `SQL_ATTR_TRANSLATE_LIB`, so there is nothing to fail to load.
+/// - IM010–IM012: Driver Manager internal codes — (driver-manager-handled; not returned
+///   here).
+/// - IM014: Invalid name of File DSN — (driver-manager-handled; not returned here).
+/// - IM017: Polling disabled; not returned here (the asynchronous notification model is not
+///   supported — not DM-annotated in the spec).
+/// - IM018: SQLCompleteAsync not called; not returned here (the asynchronous notification
+///   model is not supported — not DM-annotated in the spec).
 ///
 /// # Safety
 ///
@@ -854,8 +928,10 @@ fn read_dsn_keys(dsn: &str) -> Vec<(String, String)> {
 /// - HY117: Connection suspended due to unknown transaction state — (driver-manager-handled; not returned here).
 /// - HYT01: Connection timeout expired — not returned here (connection timeout not enforced).
 /// - IM001: Driver does not support this function — (driver-manager-handled; not returned here).
-/// - IM017: Polling disabled in async notification mode — (driver-manager-handled; not returned here).
-/// - IM018: SQLCompleteAsync not called — (driver-manager-handled; not returned here).
+/// - IM017: Polling disabled; not returned here (the asynchronous notification model is not
+///   supported — not DM-annotated in the spec).
+/// - IM018: SQLCompleteAsync not called; not returned here (the asynchronous notification
+///   model is not supported — not DM-annotated in the spec).
 ///
 /// # Safety
 ///
@@ -964,11 +1040,15 @@ pub unsafe fn sql_disconnect<B: Backend>(connection_handle: *mut c_void) -> SqlR
 ///   table has no `42000` or `HYC00` entries, so those cases are reported as `HY000`
 ///   here rather than propagating the codes `translate_escapes` uses elsewhere.
 /// - HY001: Memory allocation failure — not returned here (Rust panics on alloc failure).
-/// - HY009: Invalid use of null pointer — returned when `in_statement_text` is null.
+/// - HY009: Invalid use of null pointer — the spec annotates this `(DM)`, and its single
+///   clause is a null `InStatementText`; it is guarded defensively here, because a null
+///   pointer that reaches `utf16_to_string` is a soundness question rather than a spec one.
 /// - HY010: Function sequence error (async in progress) — (driver-manager-handled; not returned here).
 /// - HY013: Memory management error — not returned here (Rust panics on alloc failure).
-/// - HY090: Invalid string or buffer length — returned when `text_length1 < 0 && != SQL_NTS`,
-///   or when `buffer_length < 0` and `out_statement_text` is not null.
+/// - HY090: Invalid string or buffer length — every clause of this row is `(DM)`, and it is
+///   guarded defensively here for the reason `HY009` gives: returned when
+///   `text_length1 < 0 && != SQL_NTS`, or when `buffer_length < 0` and `out_statement_text`
+///   is not null.
 /// - HY109: Invalid cursor position — not returned here (no cursor involvement in NativeSql).
 /// - HY117: Connection suspended due to unknown transaction state — (driver-manager-handled; not returned here).
 /// - HYT01: Connection timeout expired — not returned here (connection timeout not enforced).
