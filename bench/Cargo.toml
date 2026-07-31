@@ -17,7 +17,11 @@ rust-version = "1.95.0"
 [workspace]
 
 [dependencies]
-stackable-odbc-core = { path = ".." }
+# test-support: `ffi_fetch`'s two benchmarks install a connection through
+# `attach_connection` instead of parsing a real connection string, the same
+# shortcut a driver's own test suite uses to reach the connected path without
+# a data source.
+stackable-odbc-core = { path = "..", features = ["test-support"] }
 odbc-sys = "0.31"
 
 [dev-dependencies]
@@ -29,4 +33,8 @@ harness = false
 
 [[bench]]
 name = "handle_lookup"
+harness = false
+
+[[bench]]
+name = "ffi_fetch"
 harness = false

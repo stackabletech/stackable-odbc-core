@@ -1201,27 +1201,47 @@ See [`fuzz/README.md`](fuzz/README.md) for what is and is not worth fuzzing.
 
 ### Benchmarks
 
-Core has two Criterion benchmarks, both in `bench/`, its own detached crate,
+Core has three Criterion benchmarks, all in `bench/`, its own detached crate,
 for the same reason `fuzz/` does:
 
 ```bash
 cd bench && cargo bench
 ```
 
-- **`fetch_throughput`** — drives `SyntheticStatement` directly (in-memory, no
-  backend), measuring the marshalling path. `BENCH_ROWS` overrides the row
-  count.
+- **`fetch_throughput`** — drives `SyntheticStatement::fetch()`/`get_data()`
+  directly (in-memory, no backend) and never enters the FFI layer at all: no
+  `panic_safe`, no handle registry lookup, no descriptor, no
+  `write_column_value`. What it measures is `SyntheticStatement`'s own
+  row-cloning and `ColumnValue` construction cost, not the marshalling into an
+  application's buffer — that is `ffi_fetch`'s job, below. `BENCH_ROWS`
+  overrides the row count.
 - **`handle_lookup`** — goes through the FFI entry points, so it is the only one
-  that sees the handle registry. `fetch_throughput` never touches it, which is
-  why a lookup that ran twice per FFI call went unnoticed. Two shapes, because
-  the error path is not the success path scaled: `get` (one `HandleScope::get`,
-  then trivial work) and `get_then_push_diagnostic` (the error path, where
-  `panic_safe` also has to find the handle again).
+  of the first two that sees the handle registry. Neither of its benchmarked
+  functions ever opens a result set (`BenchBackend::exec_direct` is never
+  called), so it measures `HandleScope::get`'s cost in isolation, with no
+  binding, fetch, or data marshalling anywhere on the path. Two shapes,
+  because the error path is not the success path scaled: `get` (one
+  `HandleScope::get`, then trivial work) and `get_then_push_diagnostic` (the
+  error path, where `panic_safe` also has to find the handle again).
+- **`ffi_fetch`** — the one benchmark that goes through the FFI entry points
+  *and* drives a real result set, closing the gap the other two leave: a
+  connection is installed with the `test-support` feature's
+  `attach_connection`, so `sql_bind_col`, `sql_fetch` and `sql_get_data` run
+  for real against a backend-produced `StatementBackend`, with `panic_safe`,
+  the handle registry, the ARD and `write_column_value` all on the measured
+  path. Two groups: `ffi_fetch_bound` (`SQLBindCol` three columns — one
+  `i64`, one 1 KiB string, one 1 KiB bytes — then loop `SQLFetch` over
+  `BENCH_ROWS` rows) and `ffi_get_data_chunked` (`SQLFetch` one row, then
+  drain a 64 KiB string column through a 512-byte `SQLGetData` buffer until
+  `SQL_NO_DATA`, exercising the `GetDataCursor` chunking loop that a bound
+  column never reaches).
 
 Pick the one that can actually see what you changed. A registry or locking
-change is invisible to `fetch_throughput`; a `ColumnValue` conversion is
-invisible to `handle_lookup`. If neither covers it, that is a reason to add a
-third rather than to quote a number from the wrong one.
+change is invisible to `fetch_throughput`; a `ColumnValue` conversion inside
+`SyntheticStatement` is invisible to `handle_lookup`; and anything in
+`write_column_value`, the ARD, or the `SQLGetData` chunking cursor is invisible
+to both — only `ffi_fetch` reaches those. If nothing covers it, that is a
+reason to add a fourth rather than to quote a number from the wrong one.
 
 Keeping it out of core's manifest is deliberate. A `[[bench]]` target that is
 excluded from the published package makes `cargo package` warn on every
