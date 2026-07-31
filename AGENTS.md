@@ -686,7 +686,13 @@ MIRIFLAGS="-Zmiri-disable-isolation" \
   cargo +nightly miri test -p stackable-odbc-core --lib -- --skip proptest
 ```
 
-Takes about 110 seconds for 675 tests, with warm build artifacts. Notes:
+Takes about 5 to 6 minutes for ~1320 tests, with warm build artifacts; the CI
+job, whose artifacts are never warm and whose core is slower, runs about twice
+that. **Re-measure this figure rather than trusting it** — it was "110 seconds
+for 675 tests" for four days after it stopped being true, and the run had
+reached 28.5 minutes against a `timeout-minutes: 30` budget before anyone
+noticed. `-Z unstable-options --report-time` after the `--` gives the per-test
+breakdown that tells you which test is responsible. Notes:
 
 - **Nightly only.** Miri cannot run on the pinned stable toolchain.
 - **Pure Rust.** All the raw-pointer marshalling lives in `stackable-odbc-core`, so
@@ -702,6 +708,17 @@ Takes about 110 seconds for 675 tests, with warm build artifacts. Notes:
   `MAX_ESCAPE_DEPTH ± 1` tests cover the limit on both recursion paths.
   Before adding a big-input test, ask whether the code under it is `unsafe` at
   all; if not, Miri is not the tool that should be paying for it.
+
+  **A big input does not have to look big.** The two guards in
+  `types/diagnostics_table.rs` are the case to learn from: they take no
+  parameters and read no files at runtime, so nothing about them reads as
+  expensive, and they finish in 0.018 s and 0.003 s natively. But they scan the
+  1.72 MB of FFI source that module `include_str!`s, and Miri interprets that
+  byte by byte — **553 s and 136 s**, together 68% of the whole run, on a module
+  containing no `unsafe` whatsoever. The signal to watch for is `include_str!`,
+  a full-`u16`-space scan, or any other input baked in at compile time rather
+  than passed in; the native runtime will not warn you, because the ratio, not
+  the absolute time, is what Miri multiplies.
 - **Leak reporting is deliberately left on.** It is what catches a handle or
   descriptor allocation that a teardown path forgets to free. If you add a
   test that allocates handles, it must free them or the job goes red.

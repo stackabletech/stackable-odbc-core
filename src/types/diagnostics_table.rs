@@ -2051,6 +2051,18 @@ fn the_transcription_is_well_formed() {
 /// The guard. Compares each FFI function's `# Spec compliance` list against the
 /// spec's own Diagnostics table, transcribed above. See the module docs for the
 /// three properties it proves and the one it deliberately does not.
+///
+/// Skipped under Miri, on the same grounds as
+/// `escape::tests::pathological_nesting_returns_an_error_rather_than_killing_the_process`:
+/// the cost is algorithmic rather than memory-safety-related. This module holds
+/// no `unsafe` at all — it scans the 1.72 MB of `include_str!`'d FFI source
+/// above as `&'static str` — so Miri has nothing here to check, and interpreting
+/// that byte by byte cost **553 seconds** against 0.018 seconds native. It and
+/// its neighbour below were together 68% of the entire Miri run.
+#[cfg_attr(
+    miri,
+    ignore = "1.72 MB string scan; no unsafe in this module for Miri to check"
+)]
 #[test]
 fn every_doc_comment_matches_the_spec_diagnostics_table() {
     let mut problems: Vec<String> = Vec::new();
@@ -2139,6 +2151,14 @@ fn every_doc_comment_matches_the_spec_diagnostics_table() {
     );
 }
 
+/// Skipped under Miri for the same reason as the guard above: it scans the same
+/// `include_str!`'d source for `pub unsafe fn` lines, cost 136 seconds under
+/// Miri against 0.003 seconds native, and there is no `unsafe` in this module
+/// for Miri to check.
+#[cfg_attr(
+    miri,
+    ignore = "1.72 MB string scan; no unsafe in this module for Miri to check"
+)]
 #[test]
 fn every_exported_ffi_function_has_a_transcribed_diagnostics_table() {
     let mut missing: Vec<String> = Vec::new();
