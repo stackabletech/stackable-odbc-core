@@ -9,9 +9,9 @@ use odbc_sys::CDataType;
 use crate::errors::OdbcError;
 use crate::types::{
     CatalogResultColumnWidths, ColumnDescriptor, ColumnPrivilegeRow, ColumnRow, ColumnValue,
-    ConnectParams, ExecuteOutcome, FetchResult, ForeignKeyRow, IdentifierType, InfoValue, Nullable,
-    PrimaryKeyRow, ProcedureColumnRow, ProcedureRow, Scope, SpecialColumnRow, StatisticsRow,
-    TablePrivilegeRow, TableRow, TypeInfoRow,
+    ConnectParams, ExecuteOutcome, FetchResult, ForeignKeyRow, InfoValue, PrimaryKeyRow,
+    ProcedureColumnRow, ProcedureRow, SpecialColumnRow, StatisticsRow, TablePrivilegeRow, TableRow,
+    TypeInfoRow,
 };
 
 /// Core abstraction for database-specific logic.
@@ -637,9 +637,7 @@ pub trait Backend: Sized + Send + Sync + 'static {
     fn primary_keys(
         _conn: &Self::Connection,
         _cancel: &Self::CancelToken,
-        _catalog: Option<&str>,
-        _schema: Option<&str>,
-        _table: Option<&str>,
+        _query: &crate::types::PrimaryKeysQuery<'_>,
     ) -> Result<Vec<PrimaryKeyRow>, Self::Error> {
         Err(OdbcError::NotImplemented {
             feature: "primary_keys".into(),
@@ -649,7 +647,8 @@ pub trait Backend: Sized + Send + Sync + 'static {
 
     /// Return foreign key relationships.
     ///
-    /// Called by `SQLForeignKeysW`. Either `pk_table` or `fk_table` (or both) may be supplied.
+    /// Called by `SQLForeignKeysW`. Either `query.pk_table()` or
+    /// `query.fk_table()` (or both) may be supplied.
     /// Backends that do not support this can leave the default implementation which returns
     /// `NotImplemented`. `cancel` is this statement's token; record whatever
     /// `Backend::cancel` will need to identify this work.
@@ -658,18 +657,17 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// and builds the result set, so a backend does not need an ORDER BY for
     /// correctness. Which of the two orders the spec defines applies is
     /// decided by core from the arguments: FKTABLE_CAT, FKTABLE_SCHEM,
-    /// FKTABLE_NAME, KEY_SEQ when `pk_table` was supplied, and PKTABLE_CAT,
-    /// PKTABLE_SCHEM, PKTABLE_NAME, KEY_SEQ otherwise.
-    #[allow(clippy::too_many_arguments)]
+    /// FKTABLE_NAME, KEY_SEQ when `query.pk_table()` was supplied, and
+    /// PKTABLE_CAT, PKTABLE_SCHEM, PKTABLE_NAME, KEY_SEQ otherwise.
+    ///
+    /// The two identifier trios arrive as a
+    /// [`ForeignKeysQuery`](crate::types::ForeignKeysQuery) rather than six
+    /// positional `Option<&str>`, where crossing a PK argument with its FK
+    /// counterpart compiled without complaint.
     fn foreign_keys(
         _conn: &Self::Connection,
         _cancel: &Self::CancelToken,
-        _pk_catalog: Option<&str>,
-        _pk_schema: Option<&str>,
-        _pk_table: Option<&str>,
-        _fk_catalog: Option<&str>,
-        _fk_schema: Option<&str>,
-        _fk_table: Option<&str>,
+        _query: &crate::types::ForeignKeysQuery<'_>,
     ) -> Result<Vec<ForeignKeyRow>, Self::Error> {
         Err(OdbcError::NotImplemented {
             feature: "foreign_keys".into(),
@@ -679,8 +677,8 @@ pub trait Backend: Sized + Send + Sync + 'static {
 
     /// Return index statistics for a single table.
     ///
-    /// Called by `SQLStatisticsW`. `unique_only` reflects `SQL_INDEX_UNIQUE`
-    /// (true) vs `SQL_INDEX_ALL` (false). Backends that do not expose index
+    /// Called by `SQLStatisticsW`. `query.unique_only()` reflects
+    /// `SQL_INDEX_UNIQUE` (true) vs `SQL_INDEX_ALL` (false). Backends that do not expose index
     /// metadata leave the default; the FFI layer then returns a spec-legitimate
     /// empty result set (a table with no indexes is a valid empty response).
     /// `cancel` is this statement's token; record whatever `Backend::cancel`
@@ -693,10 +691,7 @@ pub trait Backend: Sized + Send + Sync + 'static {
     fn statistics(
         _conn: &Self::Connection,
         _cancel: &Self::CancelToken,
-        _catalog: Option<&str>,
-        _schema: Option<&str>,
-        _table: Option<&str>,
-        _unique_only: bool,
+        _query: &crate::types::StatisticsQuery<'_>,
     ) -> Result<Vec<StatisticsRow>, Self::Error> {
         Err(OdbcError::NotImplemented {
             feature: "statistics".into(),
@@ -716,16 +711,10 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// **Return the rows in any order.** Core sorts them into the spec's order
     /// (SCOPE) and builds the result set, so a backend does not need an ORDER
     /// BY for correctness.
-    #[allow(clippy::too_many_arguments)]
     fn special_columns(
         _conn: &Self::Connection,
         _cancel: &Self::CancelToken,
-        _identifier_type: IdentifierType,
-        _catalog: Option<&str>,
-        _schema: Option<&str>,
-        _table: Option<&str>,
-        _scope: Scope,
-        _nullable: Nullable,
+        _query: &crate::types::SpecialColumnsQuery<'_>,
     ) -> Result<Vec<SpecialColumnRow>, Self::Error> {
         Err(OdbcError::NotImplemented {
             feature: "special_columns".into(),
@@ -755,9 +744,7 @@ pub trait Backend: Sized + Send + Sync + 'static {
     fn procedures(
         _conn: &Self::Connection,
         _cancel: &Self::CancelToken,
-        _catalog: Option<&str>,
-        _schema: Option<&str>,
-        _proc_name: Option<&str>,
+        _query: &crate::types::ProceduresQuery<'_>,
     ) -> Result<Vec<ProcedureRow>, Self::Error> {
         Ok(Vec::new())
     }
@@ -776,10 +763,7 @@ pub trait Backend: Sized + Send + Sync + 'static {
     fn procedure_columns(
         _conn: &Self::Connection,
         _cancel: &Self::CancelToken,
-        _catalog: Option<&str>,
-        _schema: Option<&str>,
-        _proc_name: Option<&str>,
-        _column: Option<&str>,
+        _query: &crate::types::ProcedureColumnsQuery<'_>,
     ) -> Result<Vec<ProcedureColumnRow>, Self::Error> {
         Ok(Vec::new())
     }
@@ -796,10 +780,7 @@ pub trait Backend: Sized + Send + Sync + 'static {
     fn column_privileges(
         _conn: &Self::Connection,
         _cancel: &Self::CancelToken,
-        _catalog: Option<&str>,
-        _schema: Option<&str>,
-        _table: Option<&str>,
-        _column: Option<&str>,
+        _query: &crate::types::ColumnPrivilegesQuery<'_>,
     ) -> Result<Vec<ColumnPrivilegeRow>, Self::Error> {
         Ok(Vec::new())
     }
@@ -817,9 +798,7 @@ pub trait Backend: Sized + Send + Sync + 'static {
     fn table_privileges(
         _conn: &Self::Connection,
         _cancel: &Self::CancelToken,
-        _catalog: Option<&str>,
-        _schema: Option<&str>,
-        _table: Option<&str>,
+        _query: &crate::types::TablePrivilegesQuery<'_>,
     ) -> Result<Vec<TablePrivilegeRow>, Self::Error> {
         Ok(Vec::new())
     }

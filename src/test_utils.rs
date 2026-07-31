@@ -12,11 +12,11 @@ use crate::backend::{Backend, StatementBackend};
 use crate::errors::OdbcError;
 use crate::ffi::handle::{sql_alloc_handle, sql_free_handle};
 use crate::types::{
-    ColumnPrivilegeRow, ColumnRow, ConnectParams, ForeignKeyRow, IdentifierType, InfoValue,
-    Nullable, ParamType, PrimaryKeyRow, ProcedureColumnRow, ProcedureRow, SQL_FALSE,
-    SQL_INDEX_OTHER, SQL_PC_NOT_PSEUDO, SQL_PT_PROCEDURE, SQL_SCOPE_CURROW, SQL_SCOPE_SESSION,
-    SQL_SCOPE_TRANSACTION, SQL_TRUE, Scope, SpecialColumnRow, SqlDataType, SqlReturn,
-    StatisticsRow, TablePrivilegeRow, TableRow, TypeInfoRow,
+    ColumnPrivilegeRow, ColumnRow, ConnectParams, ForeignKeyRow, InfoValue, Nullable, ParamType,
+    PrimaryKeyRow, ProcedureColumnRow, ProcedureRow, SQL_FALSE, SQL_INDEX_OTHER, SQL_PC_NOT_PSEUDO,
+    SQL_PT_PROCEDURE, SQL_SCOPE_CURROW, SQL_SCOPE_SESSION, SQL_SCOPE_TRANSACTION, SQL_TRUE,
+    SpecialColumnRow, SqlDataType, SqlReturn, StatisticsRow, TablePrivilegeRow, TableRow,
+    TypeInfoRow,
 };
 
 // ---------------------------------------------------------------------------
@@ -2087,9 +2087,7 @@ impl Backend for MockCatalogBackend {
     fn primary_keys(
         _: &MockConnection,
         _: &Self::CancelToken,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
+        _: &crate::types::PrimaryKeysQuery<'_>,
     ) -> Result<Vec<PrimaryKeyRow>, MockError> {
         let pk = |table: &str, column: &str, key_seq: i16| PrimaryKeyRow {
             catalog: Some("cat".into()),
@@ -2112,12 +2110,7 @@ impl Backend for MockCatalogBackend {
     fn foreign_keys(
         _: &MockConnection,
         _: &Self::CancelToken,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
+        _: &crate::types::ForeignKeysQuery<'_>,
     ) -> Result<Vec<ForeignKeyRow>, MockError> {
         let fk = |pk_table: &str, fk_table: &str, label: &str| ForeignKeyRow {
             pk_catalog: Some("cat".into()),
@@ -2143,10 +2136,7 @@ impl Backend for MockCatalogBackend {
     fn statistics(
         _: &MockConnection,
         _: &Self::CancelToken,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: bool,
+        _: &crate::types::StatisticsQuery<'_>,
     ) -> Result<Vec<StatisticsRow>, MockError> {
         let stat = |non_unique: i16, index_name: &str, ordinal: i16, column: &str| StatisticsRow {
             catalog: Some("cat".into()),
@@ -2171,12 +2161,7 @@ impl Backend for MockCatalogBackend {
     fn special_columns(
         _: &MockConnection,
         _: &Self::CancelToken,
-        _: IdentifierType,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Scope,
-        _: Nullable,
+        _: &crate::types::SpecialColumnsQuery<'_>,
     ) -> Result<Vec<SpecialColumnRow>, MockError> {
         let special = |scope: i16, column: &str| SpecialColumnRow {
             scope: Some(scope),
@@ -2198,9 +2183,7 @@ impl Backend for MockCatalogBackend {
     fn procedures(
         _: &MockConnection,
         _: &Self::CancelToken,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
+        _: &crate::types::ProceduresQuery<'_>,
     ) -> Result<Vec<ProcedureRow>, MockError> {
         let proc = |name: &str| ProcedureRow {
             catalog: Some("cat".into()),
@@ -2222,10 +2205,7 @@ impl Backend for MockCatalogBackend {
     fn procedure_columns(
         _: &MockConnection,
         _: &Self::CancelToken,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
+        _: &crate::types::ProcedureColumnsQuery<'_>,
     ) -> Result<Vec<ProcedureColumnRow>, MockError> {
         let col = |column_type: ParamType, name: &str| ProcedureColumnRow {
             catalog: Some("cat".into()),
@@ -2254,10 +2234,7 @@ impl Backend for MockCatalogBackend {
     fn column_privileges(
         _: &MockConnection,
         _: &Self::CancelToken,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
+        _: &crate::types::ColumnPrivilegesQuery<'_>,
     ) -> Result<Vec<ColumnPrivilegeRow>, MockError> {
         let priv_row = |column: &str, privilege: &str, label: &str| ColumnPrivilegeRow {
             catalog: Some("cat".into()),
@@ -2285,9 +2262,7 @@ impl Backend for MockCatalogBackend {
     fn table_privileges(
         _: &MockConnection,
         _: &Self::CancelToken,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
+        _: &crate::types::TablePrivilegesQuery<'_>,
     ) -> Result<Vec<TablePrivilegeRow>, MockError> {
         let priv_row = |privilege: &str, grantee: &str, label: &str| TablePrivilegeRow {
             catalog: Some("cat".into()),
@@ -2488,36 +2463,28 @@ impl Backend for MockCatalogArgsBackend {
     fn primary_keys(
         _: &MockConnection,
         _: &Self::CancelToken,
-        catalog: Option<&str>,
-        schema: Option<&str>,
-        table: Option<&str>,
+        query: &crate::types::PrimaryKeysQuery<'_>,
     ) -> Result<Vec<PrimaryKeyRow>, MockError> {
         Self::record(RecordedCatalogArgs {
-            catalog: catalog.map(str::to_string),
-            schema: schema.map(str::to_string),
-            table: table.map(str::to_string),
+            catalog: query.catalog().map(str::to_string),
+            schema: query.schema().map(str::to_string),
+            table: query.table().map(str::to_string),
             ..Default::default()
         });
         Ok(Vec::new())
     }
-    #[allow(clippy::too_many_arguments)]
     fn foreign_keys(
         _: &MockConnection,
         _: &Self::CancelToken,
-        pk_catalog: Option<&str>,
-        pk_schema: Option<&str>,
-        pk_table: Option<&str>,
-        fk_catalog: Option<&str>,
-        fk_schema: Option<&str>,
-        fk_table: Option<&str>,
+        query: &crate::types::ForeignKeysQuery<'_>,
     ) -> Result<Vec<ForeignKeyRow>, MockError> {
         Self::record(RecordedCatalogArgs {
-            catalog: pk_catalog.map(str::to_string),
-            schema: pk_schema.map(str::to_string),
-            table: pk_table.map(str::to_string),
-            fk_catalog: fk_catalog.map(str::to_string),
-            fk_schema: fk_schema.map(str::to_string),
-            fk_table: fk_table.map(str::to_string),
+            catalog: query.pk_catalog().map(str::to_string),
+            schema: query.pk_schema().map(str::to_string),
+            table: query.pk_table().map(str::to_string),
+            fk_catalog: query.fk_catalog().map(str::to_string),
+            fk_schema: query.fk_schema().map(str::to_string),
+            fk_table: query.fk_table().map(str::to_string),
             ..Default::default()
         });
         Ok(Vec::new())
@@ -2525,34 +2492,25 @@ impl Backend for MockCatalogArgsBackend {
     fn statistics(
         _: &MockConnection,
         _: &Self::CancelToken,
-        catalog: Option<&str>,
-        schema: Option<&str>,
-        table: Option<&str>,
-        _: bool,
+        query: &crate::types::StatisticsQuery<'_>,
     ) -> Result<Vec<StatisticsRow>, MockError> {
         Self::record(RecordedCatalogArgs {
-            catalog: catalog.map(str::to_string),
-            schema: schema.map(str::to_string),
-            table: table.map(str::to_string),
+            catalog: query.catalog().map(str::to_string),
+            schema: query.schema().map(str::to_string),
+            table: query.table().map(str::to_string),
             ..Default::default()
         });
         Ok(Vec::new())
     }
-    #[allow(clippy::too_many_arguments)]
     fn special_columns(
         _: &MockConnection,
         _: &Self::CancelToken,
-        _: IdentifierType,
-        catalog: Option<&str>,
-        schema: Option<&str>,
-        table: Option<&str>,
-        _: Scope,
-        _: Nullable,
+        query: &crate::types::SpecialColumnsQuery<'_>,
     ) -> Result<Vec<SpecialColumnRow>, MockError> {
         Self::record(RecordedCatalogArgs {
-            catalog: catalog.map(str::to_string),
-            schema: schema.map(str::to_string),
-            table: table.map(str::to_string),
+            catalog: query.catalog().map(str::to_string),
+            schema: query.schema().map(str::to_string),
+            table: query.table().map(str::to_string),
             ..Default::default()
         });
         Ok(Vec::new())
@@ -2561,14 +2519,12 @@ impl Backend for MockCatalogArgsBackend {
     fn procedures(
         _: &MockConnection,
         _: &Self::CancelToken,
-        catalog: Option<&str>,
-        schema: Option<&str>,
-        proc_name: Option<&str>,
+        query: &crate::types::ProceduresQuery<'_>,
     ) -> Result<Vec<ProcedureRow>, MockError> {
         Self::record(RecordedCatalogArgs {
-            catalog: catalog.map(str::to_string),
-            schema: schema.map(str::to_string),
-            proc: proc_name.map(str::to_string),
+            catalog: query.catalog().map(str::to_string),
+            schema: query.schema().map(str::to_string),
+            proc: query.proc_name().map(str::to_string),
             ..Default::default()
         });
         Ok(Vec::new())
@@ -2576,16 +2532,13 @@ impl Backend for MockCatalogArgsBackend {
     fn procedure_columns(
         _: &MockConnection,
         _: &Self::CancelToken,
-        catalog: Option<&str>,
-        schema: Option<&str>,
-        proc_name: Option<&str>,
-        column: Option<&str>,
+        query: &crate::types::ProcedureColumnsQuery<'_>,
     ) -> Result<Vec<ProcedureColumnRow>, MockError> {
         Self::record(RecordedCatalogArgs {
-            catalog: catalog.map(str::to_string),
-            schema: schema.map(str::to_string),
-            proc: proc_name.map(str::to_string),
-            column: column.map(str::to_string),
+            catalog: query.catalog().map(str::to_string),
+            schema: query.schema().map(str::to_string),
+            proc: query.proc_name().map(str::to_string),
+            column: query.column().map(str::to_string),
             ..Default::default()
         });
         Ok(Vec::new())
@@ -2593,16 +2546,13 @@ impl Backend for MockCatalogArgsBackend {
     fn column_privileges(
         _: &MockConnection,
         _: &Self::CancelToken,
-        catalog: Option<&str>,
-        schema: Option<&str>,
-        table: Option<&str>,
-        column: Option<&str>,
+        query: &crate::types::ColumnPrivilegesQuery<'_>,
     ) -> Result<Vec<ColumnPrivilegeRow>, MockError> {
         Self::record(RecordedCatalogArgs {
-            catalog: catalog.map(str::to_string),
-            schema: schema.map(str::to_string),
-            table: table.map(str::to_string),
-            column: column.map(str::to_string),
+            catalog: query.catalog().map(str::to_string),
+            schema: query.schema().map(str::to_string),
+            table: query.table().map(str::to_string),
+            column: query.column().map(str::to_string),
             ..Default::default()
         });
         Ok(Vec::new())
@@ -2610,14 +2560,12 @@ impl Backend for MockCatalogArgsBackend {
     fn table_privileges(
         _: &MockConnection,
         _: &Self::CancelToken,
-        catalog: Option<&str>,
-        schema: Option<&str>,
-        table: Option<&str>,
+        query: &crate::types::TablePrivilegesQuery<'_>,
     ) -> Result<Vec<TablePrivilegeRow>, MockError> {
         Self::record(RecordedCatalogArgs {
-            catalog: catalog.map(str::to_string),
-            schema: schema.map(str::to_string),
-            table: table.map(str::to_string),
+            catalog: query.catalog().map(str::to_string),
+            schema: query.schema().map(str::to_string),
+            table: query.table().map(str::to_string),
             ..Default::default()
         });
         Ok(Vec::new())
@@ -3584,10 +3532,7 @@ impl Backend for MockCancelAwareBackend {
     fn statistics(
         _: &MockConnection,
         cancel: &Self::CancelToken,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: bool,
+        _: &crate::types::StatisticsQuery<'_>,
     ) -> Result<Vec<StatisticsRow>, MockError> {
         let _ = Self::take_call_outcome(cancel);
         Err(MockError)

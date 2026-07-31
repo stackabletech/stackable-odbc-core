@@ -772,13 +772,11 @@ pub unsafe fn sql_primary_keys_w<B: Backend>(
             let schema = normalise_catalog_arg::<B>(connection, schema, metadata_id);
             let table = normalise_catalog_arg::<B>(connection, table, metadata_id);
 
-            let rows = B::primary_keys(
-                connection,
-                cancel,
-                catalog.as_deref(),
-                schema.as_deref(),
-                table.as_deref(),
-            );
+            let query = crate::types::PrimaryKeysQuery::default()
+                .with_catalog(catalog.as_deref())
+                .with_schema(schema.as_deref())
+                .with_table(table.as_deref());
+            let rows = B::primary_keys(connection, cancel, &query);
             let rows = timer.check::<B, _, _>(rows, cancel)?;
 
             let mut values: Vec<Vec<ColumnValue>> =
@@ -981,16 +979,14 @@ pub unsafe fn sql_foreign_keys_w<B: Backend>(
             let fk_schema = normalise_catalog_arg::<B>(connection, fk_schema, metadata_id);
             let fk_table = normalise_catalog_arg::<B>(connection, fk_table, metadata_id);
 
-            let rows = B::foreign_keys(
-                connection,
-                cancel,
-                pk_catalog.as_deref(),
-                pk_schema.as_deref(),
-                pk_table.as_deref(),
-                fk_catalog.as_deref(),
-                fk_schema.as_deref(),
-                fk_table.as_deref(),
-            );
+            let query = crate::types::ForeignKeysQuery::default()
+                .with_pk_catalog(pk_catalog.as_deref())
+                .with_pk_schema(pk_schema.as_deref())
+                .with_pk_table(pk_table.as_deref())
+                .with_fk_catalog(fk_catalog.as_deref())
+                .with_fk_schema(fk_schema.as_deref())
+                .with_fk_table(fk_table.as_deref());
+            let rows = B::foreign_keys(connection, cancel, &query);
             let rows = timer.check::<B, _, _>(rows, cancel)?;
 
             let mut values: Vec<Vec<ColumnValue>> =
@@ -1185,17 +1181,14 @@ pub unsafe fn sql_statistics_w<B: Backend>(
             let timer =
                 crate::query_timer::QueryTimer::arm::<B>(stmt.core_query_timeout, &cancel_token);
 
-            match B::statistics(
-                connection,
-                cancel,
-                catalog.as_deref(),
-                schema.as_deref(),
-                table.as_deref(),
-                unique_only,
-            )
-            // Converted before matching, so the `NotImplemented` arm below can
-            // still recognise core's own variant inside the backend's error.
-            .into_odbc()
+            let query = crate::types::StatisticsQuery::new(unique_only)
+                .with_catalog(catalog.as_deref())
+                .with_schema(schema.as_deref())
+                .with_table(table.as_deref());
+            match B::statistics(connection, cancel, &query)
+                // Converted before matching, so the `NotImplemented` arm below can
+                // still recognise core's own variant inside the backend's error.
+                .into_odbc()
             {
                 Ok(rows) => {
                     let mut values: Vec<Vec<ColumnValue>> =
@@ -1436,19 +1429,14 @@ pub unsafe fn sql_special_columns_w<B: Backend>(
             let timer =
                 crate::query_timer::QueryTimer::arm::<B>(stmt.core_query_timeout, &cancel_token);
 
-            match B::special_columns(
-                connection,
-                cancel,
-                identifier_type,
-                catalog.as_deref(),
-                schema.as_deref(),
-                table.as_deref(),
-                scope,
-                nullable,
-            )
-            // Converted before matching, so the `NotImplemented` arm below can
-            // still recognise core's own variant inside the backend's error.
-            .into_odbc()
+            let query = crate::types::SpecialColumnsQuery::new(identifier_type, scope, nullable)
+                .with_catalog(catalog.as_deref())
+                .with_schema(schema.as_deref())
+                .with_table(table.as_deref());
+            match B::special_columns(connection, cancel, &query)
+                // Converted before matching, so the `NotImplemented` arm below can
+                // still recognise core's own variant inside the backend's error.
+                .into_odbc()
             {
                 Ok(rows) => {
                     let mut values: Vec<Vec<ColumnValue>> =
@@ -2085,13 +2073,11 @@ pub unsafe fn sql_procedures_w<B: Backend>(
             let schema = normalise_catalog_arg::<B>(connection, schema, metadata_id);
             let proc = normalise_catalog_arg::<B>(connection, proc, metadata_id);
 
-            let rows = B::procedures(
-                connection,
-                cancel,
-                catalog.as_deref(),
-                schema.as_deref(),
-                proc.as_deref(),
-            );
+            let query = crate::types::ProceduresQuery::default()
+                .with_catalog(catalog.as_deref())
+                .with_schema(schema.as_deref())
+                .with_proc_name(proc.as_deref());
+            let rows = B::procedures(connection, cancel, &query);
             let rows = timer.check::<B, _, _>(rows, cancel)?;
 
             let mut values: Vec<Vec<ColumnValue>> =
@@ -2312,14 +2298,12 @@ pub unsafe fn sql_procedure_columns_w<B: Backend>(
             let proc = normalise_catalog_arg::<B>(connection, proc, metadata_id);
             let column = normalise_catalog_arg::<B>(connection, column, metadata_id);
 
-            let rows = B::procedure_columns(
-                connection,
-                cancel,
-                catalog.as_deref(),
-                schema.as_deref(),
-                proc.as_deref(),
-                column.as_deref(),
-            );
+            let query = crate::types::ProcedureColumnsQuery::default()
+                .with_catalog(catalog.as_deref())
+                .with_schema(schema.as_deref())
+                .with_proc_name(proc.as_deref())
+                .with_column(column.as_deref());
+            let rows = B::procedure_columns(connection, cancel, &query);
             let rows = timer.check::<B, _, _>(rows, cancel)?;
 
             let mut values: Vec<Vec<ColumnValue>> =
@@ -2526,14 +2510,12 @@ pub unsafe fn sql_column_privileges_w<B: Backend>(
             let table = normalise_catalog_arg::<B>(connection, table, metadata_id);
             let column = normalise_catalog_arg::<B>(connection, column, metadata_id);
 
-            let rows = B::column_privileges(
-                connection,
-                cancel,
-                catalog.as_deref(),
-                schema.as_deref(),
-                table.as_deref(),
-                column.as_deref(),
-            );
+            let query = crate::types::ColumnPrivilegesQuery::default()
+                .with_catalog(catalog.as_deref())
+                .with_schema(schema.as_deref())
+                .with_table(table.as_deref())
+                .with_column(column.as_deref());
+            let rows = B::column_privileges(connection, cancel, &query);
             let rows = timer.check::<B, _, _>(rows, cancel)?;
 
             let mut values: Vec<Vec<ColumnValue>> =
@@ -2732,13 +2714,11 @@ pub unsafe fn sql_table_privileges_w<B: Backend>(
             let schema = normalise_catalog_arg::<B>(connection, schema, metadata_id);
             let table = normalise_catalog_arg::<B>(connection, table, metadata_id);
 
-            let rows = B::table_privileges(
-                connection,
-                cancel,
-                catalog.as_deref(),
-                schema.as_deref(),
-                table.as_deref(),
-            );
+            let query = crate::types::TablePrivilegesQuery::default()
+                .with_catalog(catalog.as_deref())
+                .with_schema(schema.as_deref())
+                .with_table(table.as_deref());
+            let rows = B::table_privileges(connection, cancel, &query);
             let rows = timer.check::<B, _, _>(rows, cancel)?;
 
             let mut values: Vec<Vec<ColumnValue>> =
