@@ -31,6 +31,13 @@ use crate::{
 /// Passing a null `parameter_value_ptr` **and** a null `str_len_or_ind_ptr`
 /// removes an existing binding for that parameter number.
 ///
+/// The addresses stored here are the *base* of the binding.
+/// `SQL_ATTR_PARAM_BIND_OFFSET_PTR` is added to both of them at execution time,
+/// per this page's "Rebinding with Offsets" section, so an application can move
+/// between parameter rows by writing a new offset instead of binding again. A
+/// null pointer is never offset: the attribute shifts a buffer, and a pointer
+/// with no buffer behind it has nothing to shift (`descriptor::BindOffset`).
+///
 /// # Parameters
 ///
 /// - `statement_handle`: Statement handle.
@@ -713,25 +720,35 @@ impl From<ColumnValue> for ParamValue {
 /// # Safety
 ///
 /// `binding.value_ptr` and `binding.str_len_or_ind_ptr` must point to valid
-/// memory of the appropriate type and size.
+/// memory of the appropriate type and size, at the offset
+/// `SQL_ATTR_PARAM_BIND_OFFSET_PTR` names as well as at the bound address —
+/// which is the application's undertaking, the spec making the sum its
+/// responsibility to keep in bounds exactly as the unoffset pointer is.
 pub(crate) unsafe fn read_param_value(rec: ParamRecord<'_>) -> Result<ParamValue, OdbcError> {
     use odbc_sys::CDataType;
 
     // The APD says where the value is and how it is laid out; the IPD says what
     // it is declared to be. Destructured once so the reads below name which
     // descriptor each field came from.
-    let ParamRecord { apd, ipd } = rec;
+    //
+    // The two *pointers* come from the accessors instead, because
+    // `SQL_ATTR_PARAM_BIND_OFFSET_PTR` shifts them and `data_ptr` is the
+    // address before that shift. Bound once here so no arm below can reach for
+    // the unoffset field by habit.
+    let ParamRecord { apd, ipd, .. } = rec;
+    let data_ptr = rec.data_ptr();
+    let indicator_ptr = rec.indicator_ptr();
 
     // Check indicator for NULL.
-    if !apd.indicator_ptr.is_null() {
+    if !indicator_ptr.is_null() {
         // SAFETY: str_len_or_ind_ptr is non-null and the caller guarantees it points to a valid isize.
-        let indicator = unsafe { std::ptr::read_unaligned(apd.indicator_ptr) };
+        let indicator = unsafe { std::ptr::read_unaligned(indicator_ptr) };
         if indicator == SQL_NULL_DATA {
             return Ok(ColumnValue::Null.into());
         }
     }
 
-    if apd.data_ptr.is_null() {
+    if data_ptr.is_null() {
         return Ok(ColumnValue::Null.into());
     }
 
@@ -747,7 +764,7 @@ pub(crate) unsafe fn read_param_value(rec: ParamRecord<'_>) -> Result<ParamValue
     if crate::numeric_convert::is_numeric_c_type(c_type) {
         // SAFETY: data_ptr is non-null (guarded above) and the caller
         // guarantees it points to a valid value of that C type.
-        let param = unsafe { read_numeric_param(c_type, apd.data_ptr) }?;
+        let param = unsafe { read_numeric_param(c_type, data_ptr) }?;
         let converted = crate::numeric_convert::numeric_to_sql_type(
             param,
             ipd.sql_type(),
@@ -763,16 +780,16 @@ pub(crate) unsafe fn read_param_value(rec: ParamRecord<'_>) -> Result<ParamValue
 
     Ok(ParamValue::from(match c_type {
         CDataType::Bit => {
-            ColumnValue::Bool(unsafe { std::ptr::read_unaligned(apd.data_ptr as *const u8) } != 0)
+            ColumnValue::Bool(unsafe { std::ptr::read_unaligned(data_ptr as *const u8) } != 0)
         }
         CDataType::Char => {
-            let ptr = apd.data_ptr as *const u8;
-            let byte_len = if apd.indicator_ptr.is_null() {
+            let ptr = data_ptr as *const u8;
+            let byte_len = if indicator_ptr.is_null() {
                 None
             } else {
                 // SAFETY: str_len_or_ind_ptr is non-null and the caller guarantees it points
                 // to a valid isize provided by the ODBC caller.
-                let l = unsafe { std::ptr::read_unaligned(apd.indicator_ptr) };
+                let l = unsafe { std::ptr::read_unaligned(indicator_ptr) };
                 if l == SQL_NTS as isize || l < 0 {
                     None
                 } else {
@@ -798,8 +815,8 @@ pub(crate) unsafe fn read_param_value(rec: ParamRecord<'_>) -> Result<ParamValue
             .map(ParamValue::from);
         }
         CDataType::WChar => {
-            let ptr = apd.data_ptr as *const u16;
-            let code_units = if apd.indicator_ptr.is_null() {
+            let ptr = data_ptr as *const u16;
+            let code_units = if indicator_ptr.is_null() {
                 // Indicator pointer absent: treat as null-terminated (SQL_NTS).
                 // Use utf16_to_string which bounds the scan to MAX_NTS_SCAN code units.
                 // SAFETY: caller guarantees ptr is a valid, null-terminated UTF-16 string.
@@ -815,7 +832,7 @@ pub(crate) unsafe fn read_param_value(rec: ParamRecord<'_>) -> Result<ParamValue
             } else {
                 // SAFETY: str_len_or_ind_ptr is non-null and the caller guarantees it points
                 // to a valid isize provided by the ODBC caller.
-                let l = unsafe { std::ptr::read_unaligned(apd.indicator_ptr) };
+                let l = unsafe { std::ptr::read_unaligned(indicator_ptr) };
                 if l == SQL_NTS as isize || l < 0 {
                     // Null-terminated: delegate to bounded NTS scan helper.
                     // SAFETY: caller guarantees ptr is a valid, null-terminated UTF-16 string.
@@ -852,13 +869,13 @@ pub(crate) unsafe fn read_param_value(rec: ParamRecord<'_>) -> Result<ParamValue
             .map(ParamValue::from);
         }
         CDataType::Binary => {
-            let ptr = apd.data_ptr as *const u8;
-            let byte_len = if apd.indicator_ptr.is_null() {
+            let ptr = data_ptr as *const u8;
+            let byte_len = if indicator_ptr.is_null() {
                 None
             } else {
                 // SAFETY: str_len_or_ind_ptr is non-null and the caller guarantees it points
                 // to a valid isize provided by the ODBC caller.
-                let l = unsafe { std::ptr::read_unaligned(apd.indicator_ptr) };
+                let l = unsafe { std::ptr::read_unaligned(indicator_ptr) };
                 if l < 0 {
                     None
                 } else {
@@ -895,8 +912,7 @@ pub(crate) unsafe fn read_param_value(rec: ParamRecord<'_>) -> Result<ParamValue
         // tolerates the arbitrary offsets row-wise binding can place an
         // application buffer at, where a plain dereference would be UB.
         CDataType::TypeTimestamp | CDataType::TimeStamp => {
-            let ts =
-                unsafe { std::ptr::read_unaligned(apd.data_ptr as *const odbc_sys::Timestamp) };
+            let ts = unsafe { std::ptr::read_unaligned(data_ptr as *const odbc_sys::Timestamp) };
             ColumnValue::Timestamp {
                 year: ts.year,
                 month: ts.month,
@@ -908,7 +924,7 @@ pub(crate) unsafe fn read_param_value(rec: ParamRecord<'_>) -> Result<ParamValue
             }
         }
         CDataType::TypeDate | CDataType::Date => {
-            let d = unsafe { std::ptr::read_unaligned(apd.data_ptr as *const odbc_sys::Date) };
+            let d = unsafe { std::ptr::read_unaligned(data_ptr as *const odbc_sys::Date) };
             ColumnValue::Date {
                 year: d.year,
                 month: d.month,
@@ -917,7 +933,7 @@ pub(crate) unsafe fn read_param_value(rec: ParamRecord<'_>) -> Result<ParamValue
         }
         CDataType::TypeTime | CDataType::Time => {
             // SQL_TIME_STRUCT carries no fractional seconds; report 0.
-            let t = unsafe { std::ptr::read_unaligned(apd.data_ptr as *const odbc_sys::Time) };
+            let t = unsafe { std::ptr::read_unaligned(data_ptr as *const odbc_sys::Time) };
             ColumnValue::Time {
                 hour: t.hour,
                 minute: t.minute,
@@ -928,7 +944,7 @@ pub(crate) unsafe fn read_param_value(rec: ParamRecord<'_>) -> Result<ParamValue
         // `SQL_C_NUMERIC` is handled by the numeric table above, which is why
         // it is absent here.
         CDataType::Guid => {
-            let g = unsafe { std::ptr::read_unaligned(apd.data_ptr as *const odbc_sys::Guid) };
+            let g = unsafe { std::ptr::read_unaligned(data_ptr as *const odbc_sys::Guid) };
             ColumnValue::Guid(guid_struct_to_bytes(&g))
         }
         // Interval and SQL Server extended C types are not marshalled. Emitting
@@ -1163,13 +1179,17 @@ pub(crate) unsafe fn write_output_params(
         // output value) is intentionally dropped: this helper has no diagnostic
         // queue to raise 01004 on, and no in-tree backend produces output
         // parameters yet. See the TODO(spec) note above.
+        // The offset applies in this direction too: it shifts the binding, and
+        // an output parameter is written into the same buffer an input one is
+        // read from. Writing at the unoffset address would put the result in the
+        // row the application had already moved past.
         let _ = unsafe {
             crate::column_value::write_column_value(
                 &out.value,
                 rec.apd.c_type()?,
-                rec.apd.data_ptr,
+                rec.data_ptr(),
                 rec.apd.octet_length,
-                rec.apd.indicator_ptr,
+                rec.indicator_ptr(),
             )
         }?;
     }
@@ -1257,9 +1277,16 @@ pub(crate) unsafe fn find_data_at_exec_params(
 
     for i in 1..=param_count {
         if let Some(rec) = records.get(i)? {
-            let is_dae = if !rec.apd.indicator_ptr.is_null() {
+            // Through the accessor, so this reader sees the same address
+            // `read_param_value` will: `SQL_ATTR_PARAM_BIND_OFFSET_PTR` decides
+            // *which* indicator says data-at-execution, and reading the
+            // unoffset one here would let the two disagree about the same
+            // parameter — executing immediately on a parameter the application
+            // asked to stream, or the reverse.
+            let indicator_ptr = rec.indicator_ptr();
+            let is_dae = if !indicator_ptr.is_null() {
                 // SAFETY: caller guarantees str_len_or_ind_ptr points to valid memory.
-                let indicator = unsafe { std::ptr::read_unaligned(rec.apd.indicator_ptr) };
+                let indicator = unsafe { std::ptr::read_unaligned(indicator_ptr) };
                 is_data_at_exec(indicator)
             } else {
                 false
@@ -1756,6 +1783,43 @@ pub unsafe fn sql_param_data<B: Backend>(
 
                 // Write the value_ptr from the binding to *value_ptr_ptr so the app
                 // can identify which parameter is being requested.
+                //
+                // **This echo does not carry `SQL_ATTR_PARAM_BIND_OFFSET_PTR`**,
+                // unlike every other read of a parameter binding in this module.
+                // A settled decision rather than an oversight, and pinned by
+                // `param_data_echo_is_not_shifted_by_the_param_bind_offset`. The
+                // evidence it was settled on:
+                //
+                // - The spec's *ValuePtrPtr* argument description says the
+                //   driver returns "the address of the *ParameterValuePtr*
+                //   buffer specified in **SQLBindParameter** ... **as contained
+                //   in the SQL_DESC_DATA_PTR descriptor record field**" — that
+                //   field, before any offset. The offset is a separate header
+                //   field the spec is explicit is never folded into it: "The new
+                //   offset is not added to the field value plus any earlier
+                //   offsets."
+                // - Its Comments section gives the arithmetic
+                //   `Bound Address + Binding Offset + ((Row Number - 1) x
+                //   Element Size)` only for the **column** case
+                //   (`SQLBulkOperations`/`SQLSetPos`), and defines *Binding
+                //   Offset* there as `SQL_ATTR_ROW_BIND_OFFSET_PTR` — the row
+                //   attribute, not this one. For the parameter case the same
+                //   paragraph says only that the driver returns "the value that
+                //   the application put in the rowset buffer".
+                // - psqlODBC echoes the **unoffset** buffer in the
+                //   single-parameter-set case, adding the offset only under
+                //   `stmt->execute_delegate`, its array-of-parameters path
+                //   (`PGAPI_ParamData`, `execute.c`).
+                //
+                // **MySQL Connector/ODBC does the opposite** and always adds it:
+                // `*token = ptr_offset_adjust(aprec->data_ptr,
+                // apd->bind_offset_ptr, apd->bind_type, default_size, 0)`
+                // (`find_next_dae_param`, `driver/execute.cc`). Core pins
+                // `SQL_ATTR_PARAMSET_SIZE` at 1, so this is exactly the
+                // single-set configuration the two drivers answer differently.
+                // The disagreement was considered and resolved in favour of the
+                // spec's own wording and psqlODBC; it is recorded here so a
+                // future reader knows it was weighed rather than missed.
                 if !value_ptr_ptr.is_null() {
                     if let Some(rec) = records.get(next_param)? {
                         std::ptr::write_unaligned(value_ptr_ptr, rec.apd.data_ptr);
@@ -1941,6 +2005,10 @@ mod tests {
             read_param_value(ParamRecord {
                 apd: &apd,
                 ipd: &ipd,
+                // These exercise the conversions, not the offset; the offset
+                // has its own tests at the FFI boundary, where the attribute
+                // is actually set.
+                bind_offset: BindOffset::NONE,
             })
         }
     }
@@ -1970,6 +2038,7 @@ mod tests {
             ParamRecords {
                 apd: &self.apd,
                 ipd: &self.ipd,
+                bind_offset: BindOffset::NONE,
             }
         }
     }
@@ -1978,11 +2047,13 @@ mod tests {
 
     use super::*;
     use crate::{
+        descriptor::BindOffset,
         ffi::{execute::sql_prepare_w, handle::sql_free_handle},
         handles::ConnectionHandle,
         test_utils::{
-            MockBackend, MockCancelAwareBackend, MockConnection, MockLongDataBackend,
-            alloc_env_conn_stmt, with_descriptor, with_handle,
+            MockBackend, MockCancelAwareBackend, MockCancelToken, MockConnection,
+            MockLongDataBackend, MockRecordingBackend, alloc_env_conn_stmt, with_descriptor,
+            with_handle,
         },
         types::{CDataType, ParamType, SQL_INTERVAL_YEAR, SQL_INTERVAL_YEAR_TO_MONTH},
     };
@@ -3957,6 +4028,7 @@ mod tests {
             read_param_value(ParamRecord {
                 apd: &apd,
                 ipd: &ipd,
+                bind_offset: BindOffset::NONE,
             })
         }
         .err()
@@ -3969,6 +4041,7 @@ mod tests {
             read_param_value(ParamRecord {
                 apd: &apd,
                 ipd: &ipd,
+                bind_offset: BindOffset::NONE,
             })
         }
         .expect("an undeclared precision checks nothing");
@@ -5053,5 +5126,410 @@ mod tests {
             .unwrap(),
             ColumnValue::String("abc".to_string())
         );
+    }
+
+    // -------------------------------------------------------------------
+    // SQL_ATTR_PARAM_BIND_OFFSET_PTR
+    // -------------------------------------------------------------------
+    //
+    // Spec, `SQLBindParameter`'s "Rebinding with Offsets": "The
+    // SQL_DESC_BIND_OFFSET_PTR header field in the APD points to the binding
+    // offset. If the field is non-null, the driver dereferences the pointer
+    // and, if none of the values in the SQL_DESC_DATA_PTR,
+    // SQL_DESC_INDICATOR_PTR, and SQL_DESC_OCTET_LENGTH_PTR fields is a null
+    // pointer, adds the dereferenced value to those fields in the descriptor
+    // records at execution time."
+    //
+    // These go through the real FFI entry points rather than calling
+    // `collect_params` with an offset in hand, because the bug was that nothing
+    // *applied* the attribute: `SQLSetStmtAttrW` stored it on the APD header
+    // and every reader ignored it. A unit test handed the offset directly would
+    // have passed against the broken code.
+
+    /// The byte offset these tests set `SQL_ATTR_PARAM_BIND_OFFSET_PTR` to.
+    ///
+    /// Two `i64`s clear of the base, so a read at the base and a read at the
+    /// offset cannot land on the same bytes, and the indicator arrays below
+    /// stay a whole number of `isize` slots wide.
+    const PARAM_BIND_OFFSET: usize = 16;
+
+    /// The value at the base of the arena — what a driver ignoring the offset
+    /// sends.
+    const BASE_VALUE: i64 = -1;
+    /// The value at `PARAM_BIND_OFFSET` — what the application asked for.
+    const OFFSET_VALUE: i64 = 4242;
+
+    /// Bind parameter 1 as a `SQL_C_SBIGINT` / `SQL_BIGINT` at `data`, with
+    /// `indicator`, then point `SQL_ATTR_PARAM_BIND_OFFSET_PTR` at `offset`.
+    ///
+    /// # Safety
+    ///
+    /// `stmt` must be a live statement of [`MockRecordingBackend`], and the
+    /// three buffers must outlive the execution that reads them.
+    unsafe fn bind_bigint_with_offset(
+        stmt: *mut c_void,
+        data: *mut c_void,
+        indicator: *mut isize,
+        offset: *mut usize,
+    ) {
+        unsafe {
+            assert_eq!(
+                sql_bind_parameter::<MockRecordingBackend>(
+                    stmt,
+                    1,
+                    ParamType::Input as i16,
+                    CDataType::SBigInt as i16,
+                    SqlDataType::EXT_BIG_INT.0,
+                    0,
+                    0,
+                    data,
+                    size_of::<i64>() as isize,
+                    indicator,
+                ),
+                SqlReturn::SUCCESS,
+                "precondition: the parameter binds",
+            );
+            assert_eq!(
+                crate::ffi::stmt_attr::sql_set_stmt_attr_w::<MockRecordingBackend>(
+                    stmt,
+                    odbc_sys::StatementAttribute::ParamBindOffsetPtr as i32,
+                    offset.cast::<c_void>(),
+                    0,
+                ),
+                SqlReturn::SUCCESS,
+                "precondition: the attribute is accepted",
+            );
+        }
+    }
+
+    /// Execute a one-parameter statement and return the values the backend was
+    /// handed.
+    ///
+    /// Read out of the statement's cancel token, which is where
+    /// [`MockRecordingBackend::execute`] puts them — see
+    /// [`MockCancelToken::executed_params`].
+    ///
+    /// # Safety
+    ///
+    /// `stmt` must be a live statement of [`MockRecordingBackend`] whose bound
+    /// parameter buffers are valid.
+    unsafe fn execute_and_recover_params(stmt: *mut c_void) -> Vec<ColumnValue> {
+        let wide: Vec<u16> = "INSERT INTO t VALUES (?)".encode_utf16().collect();
+        let ret = unsafe {
+            crate::ffi::execute::sql_exec_direct_w::<MockRecordingBackend>(
+                stmt,
+                wide.as_ptr(),
+                i16::try_from(wide.len())
+                    .expect("the fixed test statement is short")
+                    .into(),
+            )
+        };
+        assert_eq!(ret, SqlReturn::SUCCESS, "precondition: the execution runs");
+        let token = crate::handles::registry::registry()
+            .cancel_of(stmt)
+            .expect("an execution mints a token");
+        let token = token
+            .downcast_ref::<MockCancelToken>()
+            .expect("the backend's own token type");
+        token
+            .executed_params
+            .lock()
+            .expect("no test panics while holding this")
+            .clone()
+    }
+
+    /// B3: the offset moves the address a bound parameter's value is read
+    /// from.
+    ///
+    /// The whole point of the attribute: an application binds `&row.field`
+    /// once and moves between parameter rows by writing a new offset, without
+    /// calling `SQLBindParameter` again. Before the fix the attribute was
+    /// stored on the APD header and never read, so every execution sent the
+    /// value at the base address and the application's second row silently
+    /// repeated its first.
+    #[test]
+    fn param_bind_offset_moves_the_read_address() {
+        unsafe {
+            let (env, conn, stmt) =
+                crate::test_utils::alloc_connected_env_conn_stmt::<MockRecordingBackend>();
+
+            // Three `i64`s: the base value, the gap the offset crosses, and
+            // the value at the offset.
+            let mut arena: [i64; 3] = [BASE_VALUE, 0, OFFSET_VALUE];
+            assert_eq!(
+                PARAM_BIND_OFFSET,
+                2 * size_of::<i64>(),
+                "the offset must name arena[2]",
+            );
+            // Zero, not SQL_NULL_DATA, at both the base and the offset: this
+            // test is about the *data* address, and an indicator that differed
+            // between the two would let a NULL stand in for a moved read.
+            let mut indicators: [isize; 3] = [0, 0, 0];
+            let mut offset: usize = PARAM_BIND_OFFSET;
+
+            bind_bigint_with_offset(
+                stmt,
+                arena.as_mut_ptr().cast::<c_void>(),
+                indicators.as_mut_ptr(),
+                &mut offset,
+            );
+
+            assert_eq!(
+                execute_and_recover_params(stmt),
+                vec![ColumnValue::I64(OFFSET_VALUE)],
+                "the backend must receive the value at base + \
+                 SQL_ATTR_PARAM_BIND_OFFSET_PTR, not the one at the base",
+            );
+
+            crate::test_utils::cleanup_connected_env_conn_stmt::<MockRecordingBackend>(
+                env, conn, stmt,
+            );
+        }
+    }
+
+    /// B3: the offset moves the indicator address too, not only the data
+    /// address.
+    ///
+    /// The spec names `SQL_DESC_INDICATOR_PTR` alongside `SQL_DESC_DATA_PTR`,
+    /// and an application moving between rows moves both together — its
+    /// indicator lives in the same row structure. Pinned through `SQL_NULL_DATA`
+    /// because that is the one indicator value whose effect is visible in what
+    /// the backend receives: the base slot carries an ordinary length, so a
+    /// driver reading the unoffset indicator sends `OFFSET_VALUE` rather than
+    /// NULL and the assertion below fails on a value rather than on a crash.
+    #[test]
+    fn param_bind_offset_applies_to_the_indicator_pointer() {
+        unsafe {
+            let (env, conn, stmt) =
+                crate::test_utils::alloc_connected_env_conn_stmt::<MockRecordingBackend>();
+
+            let mut arena: [i64; 3] = [BASE_VALUE, 0, OFFSET_VALUE];
+            // Base: an ordinary length. Offset: NULL. Only an offset indicator
+            // read can see the second.
+            let mut indicators: [isize; 3] = [size_of::<i64>() as isize, 0, SQL_NULL_DATA];
+            let mut offset: usize = PARAM_BIND_OFFSET;
+
+            bind_bigint_with_offset(
+                stmt,
+                arena.as_mut_ptr().cast::<c_void>(),
+                indicators.as_mut_ptr(),
+                &mut offset,
+            );
+
+            assert_eq!(
+                execute_and_recover_params(stmt),
+                vec![ColumnValue::Null],
+                "the SQL_NULL_DATA at base + SQL_ATTR_PARAM_BIND_OFFSET_PTR \
+                 must be the indicator that is read",
+            );
+
+            crate::test_utils::cleanup_connected_env_conn_stmt::<MockRecordingBackend>(
+                env, conn, stmt,
+            );
+        }
+    }
+
+    /// B3: the offset reaches the indicator `find_data_at_exec_params` reads to
+    /// decide whether a parameter is data-at-execution.
+    ///
+    /// A second reader of the same APD pointers, and the one whose omission is
+    /// least visible: it runs *before* `collect_params` and decides whether the
+    /// execution happens at all. An application that puts `SQL_DATA_AT_EXEC` in
+    /// the offset row's indicator is asking to stream that parameter, and a
+    /// driver reading the base row instead executes immediately with whatever
+    /// the base indicator described.
+    #[test]
+    fn param_bind_offset_applies_when_detecting_data_at_execution() {
+        unsafe {
+            let (env, conn, stmt) =
+                crate::test_utils::alloc_connected_env_conn_stmt::<MockRecordingBackend>();
+
+            let mut arena: [i64; 3] = [BASE_VALUE, 0, OFFSET_VALUE];
+            let mut indicators: [isize; 3] = [size_of::<i64>() as isize, 0, SQL_DATA_AT_EXEC];
+            let mut offset: usize = PARAM_BIND_OFFSET;
+
+            bind_bigint_with_offset(
+                stmt,
+                arena.as_mut_ptr().cast::<c_void>(),
+                indicators.as_mut_ptr(),
+                &mut offset,
+            );
+
+            let wide: Vec<u16> = "INSERT INTO t VALUES (?)".encode_utf16().collect();
+            assert_eq!(
+                crate::ffi::execute::sql_exec_direct_w::<MockRecordingBackend>(
+                    stmt,
+                    wide.as_ptr(),
+                    i16::try_from(wide.len())
+                        .expect("the fixed test statement is short")
+                        .into(),
+                ),
+                SqlReturn::NEED_DATA,
+                "the SQL_DATA_AT_EXEC at base + SQL_ATTR_PARAM_BIND_OFFSET_PTR \
+                 must be seen, so the execution asks for the data",
+            );
+
+            // The sequence the NEED_DATA opened is abandoned; freeing the
+            // statement discards it.
+            crate::test_utils::cleanup_connected_env_conn_stmt::<MockRecordingBackend>(
+                env, conn, stmt,
+            );
+        }
+    }
+
+    /// B3, the one exception: `SQLParamData`'s echoed pointer is **not** shifted
+    /// by `SQL_ATTR_PARAM_BIND_OFFSET_PTR`.
+    ///
+    /// Every other read of a parameter binding in this module applies the
+    /// offset; this one deliberately does not, and the reasoning is recorded in
+    /// full at the write site in `sql_param_data`. In short: the spec's
+    /// *ValuePtrPtr* description returns the address "**as contained in the
+    /// SQL_DESC_DATA_PTR descriptor record field**", and the offset formula in
+    /// its Comments section is given only for the *column* case and defined
+    /// there in terms of `SQL_ATTR_ROW_BIND_OFFSET_PTR`. psqlODBC agrees for the
+    /// single-parameter-set configuration core supports; MySQL Connector/ODBC
+    /// does not, and that disagreement was weighed rather than missed.
+    ///
+    /// This exists so the exception cannot be "tidied up" into consistency with
+    /// its neighbours by someone who reads the other four tests and assumes the
+    /// offset belongs everywhere. It fails if the echo ever gains the offset.
+    #[test]
+    fn param_data_echo_is_not_shifted_by_the_param_bind_offset() {
+        unsafe {
+            let (env, conn, stmt) =
+                crate::test_utils::alloc_connected_env_conn_stmt::<MockRecordingBackend>();
+
+            let mut arena: [i64; 3] = [BASE_VALUE, 0, OFFSET_VALUE];
+            let mut indicators: [isize; 3] = [size_of::<i64>() as isize, 0, SQL_DATA_AT_EXEC];
+            let mut offset: usize = PARAM_BIND_OFFSET;
+            let base = arena.as_mut_ptr().cast::<c_void>();
+
+            bind_bigint_with_offset(stmt, base, indicators.as_mut_ptr(), &mut offset);
+
+            // A live offset that the *value* reads do honour — the preceding
+            // test pins that the SQL_DATA_AT_EXEC at the offset is what puts
+            // this statement into the data-at-execution state at all. So the
+            // echo below is unoffset while an offset is genuinely in force,
+            // which is the only way this assertion means anything.
+            let wide: Vec<u16> = "INSERT INTO t VALUES (?)".encode_utf16().collect();
+            assert_eq!(
+                crate::ffi::execute::sql_exec_direct_w::<MockRecordingBackend>(
+                    stmt,
+                    wide.as_ptr(),
+                    i16::try_from(wide.len())
+                        .expect("the fixed test statement is short")
+                        .into(),
+                ),
+                SqlReturn::NEED_DATA,
+                "precondition: the parameter is data-at-execution",
+            );
+
+            let mut token: *mut c_void = std::ptr::null_mut();
+            assert_eq!(
+                sql_param_data::<MockRecordingBackend>(stmt, &mut token),
+                SqlReturn::NEED_DATA,
+                "precondition: SQLParamData asks for the parameter",
+            );
+
+            assert_eq!(
+                token, base,
+                "SQLParamData must echo SQL_DESC_DATA_PTR as bound",
+            );
+            assert_ne!(
+                token,
+                base.wrapping_byte_add(PARAM_BIND_OFFSET),
+                "the echo must not carry SQL_ATTR_PARAM_BIND_OFFSET_PTR",
+            );
+
+            crate::test_utils::cleanup_connected_env_conn_stmt::<MockRecordingBackend>(
+                env, conn, stmt,
+            );
+        }
+    }
+
+    /// B3, the null rule: a null `SQL_DESC_DATA_PTR` must not become
+    /// `null + offset`.
+    ///
+    /// The rule `SQLFetch` already follows on the row side, and the spec states
+    /// it for the parameter side in as many words — "if none of the values in
+    /// the SQL_DESC_DATA_PTR, SQL_DESC_INDICATOR_PTR, and
+    /// SQL_DESC_OCTET_LENGTH_PTR fields is a null pointer, adds the
+    /// dereferenced value". The offset shifts a *buffer*, and a null pointer
+    /// has none behind it.
+    ///
+    /// A null `ParameterValuePtr` with a live indicator is the spec-legal way
+    /// every client binds a NULL (`SQLBindParameter`'s *ParameterValuePtr*
+    /// section, and pyodbc's `None`), so this is not a contrived shape. The
+    /// indicator deliberately does *not* say `SQL_NULL_DATA`: that would return
+    /// early and leave the data pointer unread, which is precisely the read this
+    /// test exists to reach. With the offset resurrecting the null pointer,
+    /// `read_numeric_param` reads a `SQL_C_SBIGINT` from address `0x10`.
+    #[test]
+    fn param_bind_offset_does_not_offset_a_null_data_pointer() {
+        unsafe {
+            let (env, conn, stmt) =
+                crate::test_utils::alloc_connected_env_conn_stmt::<MockRecordingBackend>();
+
+            let mut indicators: [isize; 3] = [0, 0, size_of::<i64>() as isize];
+            let mut offset: usize = PARAM_BIND_OFFSET;
+
+            bind_bigint_with_offset(
+                stmt,
+                std::ptr::null_mut(),
+                indicators.as_mut_ptr(),
+                &mut offset,
+            );
+
+            assert_eq!(
+                execute_and_recover_params(stmt),
+                vec![ColumnValue::Null],
+                "a null data pointer stays null under an offset, so the \
+                 parameter is NULL rather than read from the offset address",
+            );
+
+            crate::test_utils::cleanup_connected_env_conn_stmt::<MockRecordingBackend>(
+                env, conn, stmt,
+            );
+        }
+    }
+
+    /// B3, the null rule in the other direction: a null
+    /// `SQL_DESC_INDICATOR_PTR` must not become `null + offset`.
+    ///
+    /// A parameter bound with no indicator at all is the commonest binding
+    /// there is for a fixed-width C type — `SQLBindParameter`'s
+    /// *StrLen_or_IndPtr* may be a null pointer, and the spec then says the
+    /// driver "assumes that all input parameter values are non-NULL". The data
+    /// pointer must still move, so this also pins that the null rule is
+    /// **per pointer**: resurrecting the indicator would have
+    /// `read_param_value` read an `isize` from address `0x10` and compare it
+    /// against `SQL_NULL_DATA`.
+    #[test]
+    fn param_bind_offset_does_not_offset_a_null_indicator_pointer() {
+        unsafe {
+            let (env, conn, stmt) =
+                crate::test_utils::alloc_connected_env_conn_stmt::<MockRecordingBackend>();
+
+            let mut arena: [i64; 3] = [BASE_VALUE, 0, OFFSET_VALUE];
+            let mut offset: usize = PARAM_BIND_OFFSET;
+
+            bind_bigint_with_offset(
+                stmt,
+                arena.as_mut_ptr().cast::<c_void>(),
+                std::ptr::null_mut(),
+                &mut offset,
+            );
+
+            assert_eq!(
+                execute_and_recover_params(stmt),
+                vec![ColumnValue::I64(OFFSET_VALUE)],
+                "the data pointer moves even though the indicator is absent, \
+                 and the absent indicator is not read at all",
+            );
+
+            crate::test_utils::cleanup_connected_env_conn_stmt::<MockRecordingBackend>(
+                env, conn, stmt,
+            );
+        }
     }
 }

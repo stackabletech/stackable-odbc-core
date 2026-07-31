@@ -52,6 +52,91 @@ pub enum DescriptorRole {
     App,
 }
 
+/// The byte offset `SQL_DESC_BIND_OFFSET_PTR` currently names, resolved.
+///
+/// The header field holds a *pointer to* an `SQLULEN` rather than the offset
+/// itself, so an application can move a whole binding set between calls by
+/// writing through that one pointer — no `SQLBindCol` or `SQLBindParameter`
+/// again, and no `SQLSetDescField` either. `SQLSetStmtAttr`'s mapping table
+/// makes it one field with two names: `SQL_ATTR_ROW_BIND_OFFSET_PTR` on an ARD,
+/// `SQL_ATTR_PARAM_BIND_OFFSET_PTR` on an APD.
+///
+/// A resolved value rather than the raw pointer, because the spec fixes *when*
+/// the dereference happens — `SQLBindParameter`'s "Rebinding with Offsets":
+/// the driver "adds the dereferenced value to those fields in the descriptor
+/// records **at execution time**". One read per call, applied to every pointer
+/// of that call, is what keeps a data pointer and its indicator from being
+/// shifted by two different offsets.
+///
+/// The type exists so the null rule below cannot be forgotten at a call site:
+/// there is no way to get the `usize` back out and add it by hand.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BindOffset(usize);
+
+impl BindOffset {
+    /// No offset in force — the state of a descriptor whose
+    /// `SQL_DESC_BIND_OFFSET_PTR` is null, which is the default.
+    pub const NONE: Self = Self(0);
+
+    /// Resolve a descriptor header's `SQL_DESC_BIND_OFFSET_PTR`.
+    ///
+    /// `attrs` is [`crate::handles::Descriptor::attrs`], keyed by
+    /// `SQL_DESC_*` field identifier. A missing or zero entry is [`Self::NONE`].
+    ///
+    /// # Safety
+    ///
+    /// The stored value must be null or a pointer to a valid `SQLULEN`, which
+    /// is the application's undertaking when it sets the attribute.
+    pub unsafe fn read(attrs: &std::collections::HashMap<u16, usize>) -> Self {
+        let raw = attrs
+            .get(&(Desc::BindOffsetPtr as u16))
+            .copied()
+            .unwrap_or(0);
+        if raw == 0 {
+            return Self::NONE;
+        }
+        // SAFETY: non-zero means the application set it to a pointer it promised
+        // is a valid SQLULEN. `read_unaligned` because ODBC applications place
+        // these in packed structures.
+        Self(unsafe { std::ptr::read_unaligned(raw as *const usize) })
+    }
+
+    /// Apply the offset to one bound pointer, leaving a null pointer null.
+    ///
+    /// The offset shifts a *buffer* the application bound; a null
+    /// `SQL_DESC_DATA_PTR` or `SQL_DESC_INDICATOR_PTR` means there is no buffer,
+    /// so there is nothing to shift. `wrapping_byte_add` on a null pointer would
+    /// otherwise turn "no buffer" into a non-null address built from the offset
+    /// alone — not a real allocation — and every reader downstream treats
+    /// non-null as "there is a buffer here": `SQLFetch`'s `22002` check,
+    /// `write_column_value`, and `read_param_value`'s `SQL_NULL_DATA` test.
+    ///
+    /// The spec states the rule for the parameter side outright, in
+    /// `SQLBindParameter`'s "Rebinding with Offsets": the driver dereferences
+    /// the pointer and, "if none of the values in the SQL_DESC_DATA_PTR,
+    /// SQL_DESC_INDICATOR_PTR, and SQL_DESC_OCTET_LENGTH_PTR fields is a null
+    /// pointer, adds the dereferenced value to those fields".
+    ///
+    /// **Read per pointer, not all-or-nothing.** Taken literally, that sentence
+    /// would withhold the offset from a record's data pointer merely because its
+    /// *indicator* is absent — and a fixed-width parameter bound with a null
+    /// `StrLen_or_IndPtr` is the commonest binding there is, so the literal
+    /// reading disables the attribute for exactly the case it was added to
+    /// serve. MySQL Connector/ODBC resolves it the same way, per pointer, in
+    /// `ptr_offset_adjust` (`driver/utility.cc`), whose contract is stated in
+    /// its own doc comment — "If the base pointer is NULL, NULL is returned" —
+    /// and whose body is `return ptr ? ((SQLCHAR *) ptr) + offset : NULL;`.
+    /// psqlODBC guards the same way at its one parameter-side site, `bind.c`:
+    /// `if (pcbValue && apdopts->param_offset_ptr)`.
+    pub fn apply<T>(self, ptr: *mut T) -> *mut T {
+        if ptr.is_null() {
+            ptr
+        } else {
+            ptr.wrapping_byte_add(self.0)
+        }
+    }
+}
+
 /// One descriptor record: every `SQL_DESC_*` record field, whatever the role.
 ///
 /// Fields the spec initialises "ND" (no default) still have a Rust value here,

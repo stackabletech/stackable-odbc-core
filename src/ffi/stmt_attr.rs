@@ -997,9 +997,13 @@ pub unsafe fn sql_set_stmt_attr_w<B: Backend>(
                 // SQL_ATTR_ROWS_FETCHED_PTR, SQL_ATTR_ROW_STATUS_PTR and
                 // SQL_ATTR_ROW_BIND_OFFSET_PTR reach here and are stored
                 // verbatim, which is correct because `SQLFetch` now reads and
-                // honours all three. They are deliberately *not* substituted:
-                // the spec's 01S02 list is closed and names none of them, and
-                // there is no "similar value" to substitute for a pointer.
+                // honours all three. So does SQL_ATTR_PARAM_BIND_OFFSET_PTR,
+                // which is the same descriptor field on the APD rather than the
+                // ARD and is applied by every execution that reads a bound
+                // parameter (`ffi::params::read_param_value`). They are
+                // deliberately *not* substituted: the spec's 01S02 list is
+                // closed and names none of them, and there is no "similar
+                // value" to substitute for a pointer.
                 Some(_) => {
                     scope.attr_set::<B>(statement_handle, attribute, int_val)?;
                     Ok(SqlReturn::SUCCESS)

@@ -60,7 +60,16 @@ fn zero_row_searched_dml<B: Backend>(stmt: &StatementHandle<B>) -> bool {
 /// Spec: <https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlexecdirect-function>
 ///
 /// Parses the UTF-16 SQL statement, calls `B::exec_direct`, and stores the
-/// resulting statement in the handle.
+/// resulting statement in the handle. A statement carrying parameter markers
+/// goes through `B::prepare` plus `B::execute` instead, because
+/// `Backend::exec_direct` takes no parameters.
+///
+/// On that path each bound buffer is read at its bound address plus
+/// `SQL_ATTR_PARAM_BIND_OFFSET_PTR`, dereferenced once per execution — the
+/// parameter-side counterpart of what `SQLFetch` does with
+/// `SQL_ATTR_ROW_BIND_OFFSET_PTR`, and identical to [`sql_execute`]'s handling.
+/// See `SQLBindParameter`'s "Rebinding with Offsets", and
+/// `descriptor::BindOffset` for why a null pointer is left unshifted.
 ///
 /// # Parameters
 ///
@@ -576,6 +585,13 @@ pub unsafe fn sql_prepare_w<B: Backend>(
 /// Collects the current values from all bound parameter buffers (in order
 /// `1..=param_count`), then calls `B::execute` with those values. The backend
 /// modifies the statement in-place to hold the resulting cursor or DML count.
+///
+/// Each buffer is read at its bound address plus
+/// `SQL_ATTR_PARAM_BIND_OFFSET_PTR`, dereferenced once per execution — the
+/// parameter-side counterpart of what `SQLFetch` does with
+/// `SQL_ATTR_ROW_BIND_OFFSET_PTR`. See `SQLBindParameter`'s "Rebinding with
+/// Offsets", and `descriptor::BindOffset` for why a null pointer is left
+/// unshifted.
 ///
 /// # Parameters
 ///

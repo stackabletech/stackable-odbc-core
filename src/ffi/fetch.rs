@@ -68,51 +68,6 @@ const SQL_ROW_SUCCESS: u16 = 0;
 /// `SQL_ROW_SUCCESS_WITH_INFO` — fetched, but a diagnostic was raised for it.
 const SQL_ROW_SUCCESS_WITH_INFO: u16 = 6;
 
-/// The current value of `SQL_ATTR_ROW_BIND_OFFSET_PTR`, in bytes, or `0`.
-///
-/// The attribute holds a *pointer to* an `SQLULEN`, not the offset itself, so
-/// the application can move the whole binding set between fetches by writing
-/// through that one pointer.
-///
-/// # Safety
-///
-/// The stored attribute must be null or a pointer to a valid `usize`, which is
-/// the application's undertaking when it sets the attribute.
-unsafe fn row_bind_offset(ard: &Descriptor) -> usize {
-    // On the ARD's own header, not `stmt.attrs`: `SQL_ATTR_ROW_BIND_OFFSET_PTR`
-    // *is* `SQL_DESC_BIND_OFFSET_PTR` — see `HeaderOwner`.
-    let raw = ard
-        .attrs
-        .get(&(odbc_sys::Desc::BindOffsetPtr as u16))
-        .copied()
-        .unwrap_or(0);
-    if raw == 0 {
-        return 0;
-    }
-    // SAFETY: non-zero means the application set it to a pointer it promised is
-    // a valid SQLULEN. `read_unaligned` because ODBC applications place these in
-    // packed structures.
-    unsafe { std::ptr::read_unaligned(raw as *const usize) }
-}
-
-/// Applies `SQL_ATTR_ROW_BIND_OFFSET_PTR` to a bound pointer, leaving a null
-/// pointer null.
-///
-/// The offset shifts a *buffer* the application bound; a null
-/// `SQL_DESC_DATA_PTR` or `SQL_DESC_INDICATOR_PTR` means there is no buffer,
-/// so there is nothing to shift. `ptr.wrapping_byte_add(off)` on a null `ptr`
-/// would otherwise turn "no buffer" into a non-null address built from the
-/// offset alone — not a real allocation — and every caller downstream
-/// (`SQLFetch`'s 22002 check, `write_column_value`) treats non-null as "there
-/// is a buffer here."
-fn offset_non_null(ptr: *mut c_void, off: usize) -> *mut c_void {
-    if ptr.is_null() {
-        ptr
-    } else {
-        ptr.wrapping_byte_add(off)
-    }
-}
-
 /// Where a fetch reports its row count and row status.
 ///
 /// `SQLFetch` and `SQLFetchScroll` report through the `SQL_ATTR_ROWS_FETCHED_PTR`
@@ -329,14 +284,18 @@ unsafe fn fetch_with_report<B: Backend>(
             // application may change between fetches; the spec has the driver add
             // that value to every bound address rather than fold it into the
             // binding once. Read once per fetch so one row uses one offset
-            // throughout.
+            // throughout. It lives on the ARD's own header, not `stmt.attrs` —
+            // the attribute *is* `SQL_DESC_BIND_OFFSET_PTR`, see `HeaderOwner` —
+            // and `Descriptor::bind_offset` is the same reader the parameter side
+            // uses for `SQL_ATTR_PARAM_BIND_OFFSET_PTR`, which is that same field
+            // on the APD.
             //
-            // SAFETY: `row_bind_offset`'s contract — the stored attribute is null
-            // or a pointer to a valid `SQLULEN`, which is the application's
-            // undertaking when it sets the attribute.
+            // SAFETY: `Descriptor::bind_offset`'s contract — the stored attribute
+            // is null or a pointer to a valid `SQLULEN`, which is the
+            // application's undertaking when it sets the attribute.
             let (bind_offset, bindings) = {
                 let ard = scope.desc_of::<B>(statement_handle, DescriptorRole::Ard)?;
-                (row_bind_offset(ard), collect_bindings(ard))
+                (ard.bind_offset(), collect_bindings(ard))
             };
 
             let stmt = scope.get::<StatementHandle<B>>(statement_handle)?;
@@ -424,15 +383,13 @@ unsafe fn fetch_with_report<B: Backend>(
                     // keep in bounds — the same contract as the unoffset pointer.
                     // Byte arithmetic, because the offset is in bytes.
                     //
-                    // A null pointer is left alone rather than shifted:
-                    // `SQL_ATTR_ROW_BIND_OFFSET_PTR` shifts a *buffer*, and a
-                    // null `SQL_DESC_DATA_PTR` or `SQL_DESC_INDICATOR_PTR` means
-                    // there is no buffer to shift. `collect_bindings` admits a
-                    // record with either pointer null — the indicator-only
-                    // binding the spec allows — and offsetting `0` would turn
-                    // that absence into a non-null address the 22002 check and
-                    // `write_column_value` would then treat as real, writing
-                    // through whatever the offset happens to land on.
+                    // A null pointer is left alone rather than shifted, which is
+                    // `BindOffset::apply`'s business and not restated here:
+                    // `collect_bindings` admits a record with either pointer
+                    // null — the indicator-only binding the spec allows — and
+                    // offsetting `0` would turn that absence into a non-null
+                    // address the 22002 check and `write_column_value` would
+                    // then treat as real.
                     let binding_info: Vec<(
                         u16,
                         odbc_sys::CDataType,
@@ -446,10 +403,9 @@ unsafe fn fetch_with_report<B: Backend>(
                                 Ok((
                                     col,
                                     c_type_of(concise_type)?,
-                                    offset_non_null(data_ptr, bind_offset),
+                                    bind_offset.apply(data_ptr),
                                     octet_length,
-                                    offset_non_null(indicator_ptr.cast::<c_void>(), bind_offset)
-                                        .cast::<isize>(),
+                                    bind_offset.apply(indicator_ptr),
                                 ))
                             },
                         )

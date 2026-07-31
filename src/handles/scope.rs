@@ -661,7 +661,17 @@ impl<'a> HandleScope<'a> {
     /// each is a separate registry slot, and none is reachable from any other. A
     /// statement holds only opaque tokens; a `ConnectionHandle` holds no list of
     /// its statements; a [`Descriptor`] holds no back-pointer at all.
-    pub fn stmt_with_parent_and_params<B: Backend>(
+    ///
+    /// # Safety
+    ///
+    /// The APD's `SQL_DESC_BIND_OFFSET_PTR` must be null or point to a valid
+    /// `SQLULEN` — the application's undertaking when it set
+    /// `SQL_ATTR_PARAM_BIND_OFFSET_PTR`. This function dereferences it, because
+    /// the offset belongs to the call rather than to any one binding and the
+    /// spec resolves it once, at execution time (see
+    /// [`crate::descriptor::BindOffset`]). Every caller is already an FFI entry
+    /// point marshalling application pointers under that same contract.
+    pub unsafe fn stmt_with_parent_and_params<B: Backend>(
         &mut self,
         stmt_token: *mut c_void,
     ) -> Result<
@@ -680,6 +690,9 @@ impl<'a> HandleScope<'a> {
             )
         };
         let apd = std::ptr::from_mut(self.descriptor(apd_token)?);
+        // SAFETY: forwarded from this function's own contract. Read here rather
+        // than per record so one call applies one offset to every parameter.
+        let bind_offset = unsafe { (*apd).bind_offset() };
         let ipd = std::ptr::from_mut(self.descriptor(ipd_token)?);
         let (stmt, conn) = self.stmt_with_parent::<B>(stmt_token)?;
         let stmt_addr = std::ptr::from_mut(stmt);
@@ -700,6 +713,7 @@ impl<'a> HandleScope<'a> {
                 ParamRecords {
                     apd: &(*apd).records,
                     ipd: &(*ipd).records,
+                    bind_offset,
                 },
             )
         })

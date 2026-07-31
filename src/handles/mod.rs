@@ -37,7 +37,7 @@ use std::sync::Arc as StdArc;
 use odbc_sys::Desc;
 
 use crate::backend::{Backend, StatementBackend};
-use crate::descriptor::{DescriptorRecord, DescriptorRole};
+use crate::descriptor::{BindOffset, DescriptorRecord, DescriptorRole};
 use crate::diagnostics::DiagnosticQueue;
 use crate::errors::{IntoOdbc, OdbcError};
 use crate::sync::Arc;
@@ -200,6 +200,24 @@ impl Descriptor {
     /// statement was freed.
     pub fn token(&self) -> *mut c_void {
         self.header.token()
+    }
+
+    /// This descriptor's `SQL_DESC_BIND_OFFSET_PTR`, resolved to a byte offset.
+    ///
+    /// The one reader of that header field, for both of the statement attributes
+    /// that name it: `SQL_ATTR_ROW_BIND_OFFSET_PTR` on the ARD, which `SQLFetch`
+    /// applies to its column bindings, and `SQL_ATTR_PARAM_BIND_OFFSET_PTR` on
+    /// the APD, which an execution applies to its parameter bindings. One field,
+    /// one reader — two copies of the lookup would be two chances to key it
+    /// wrongly or to skip the null check in [`BindOffset::apply`].
+    ///
+    /// # Safety
+    ///
+    /// As [`BindOffset::read`]: the stored value must be null or a pointer to a
+    /// valid `SQLULEN`.
+    pub unsafe fn bind_offset(&self) -> BindOffset {
+        // SAFETY: forwarded from this function's own contract.
+        unsafe { BindOffset::read(&self.attrs) }
     }
 }
 
@@ -495,9 +513,42 @@ impl<B: Backend> StatementBackend for StatementData<B> {
 #[derive(Clone, Copy)]
 pub(crate) struct ParamRecord<'a> {
     /// The APD half: where the value is and how it is laid out.
+    ///
+    /// Its two pointers are the *unoffset* `SQL_DESC_DATA_PTR` and
+    /// `SQL_DESC_INDICATOR_PTR`, as `SQLBindParameter` stored them. Read them
+    /// through [`Self::data_ptr`] and [`Self::indicator_ptr`], which apply
+    /// `SQL_ATTR_PARAM_BIND_OFFSET_PTR`; the field is public only because the
+    /// other half of it — the C type, the buffer length — carries no offset.
     pub apd: &'a DescriptorRecord,
     /// The IPD half: what the value is declared to be.
     pub ipd: &'a DescriptorRecord,
+    /// The APD header's `SQL_DESC_BIND_OFFSET_PTR`, resolved for this call.
+    ///
+    /// Carried on the record rather than passed beside it so that a reader
+    /// cannot hold a binding without also holding the offset that binding is
+    /// to be read at. The bug this closes was the absence of exactly that: the
+    /// attribute was stored, readable and never applied.
+    ///
+    /// Never applied by hand — [`Self::data_ptr`] and [`Self::indicator_ptr`]
+    /// are the readers, so the null rule is in one place.
+    pub bind_offset: BindOffset,
+}
+
+impl ParamRecord<'_> {
+    /// Where this parameter's value is, with
+    /// `SQL_ATTR_PARAM_BIND_OFFSET_PTR` applied.
+    ///
+    /// Null when the application bound none — the offset never resurrects a
+    /// null pointer. See [`BindOffset::apply`].
+    pub(crate) fn data_ptr(&self) -> *mut c_void {
+        self.bind_offset.apply(self.apd.data_ptr)
+    }
+
+    /// Where this parameter's length or indicator is, with
+    /// `SQL_ATTR_PARAM_BIND_OFFSET_PTR` applied. Null when absent.
+    pub(crate) fn indicator_ptr(&self) -> *mut isize {
+        self.bind_offset.apply(self.apd.indicator_ptr)
+    }
 }
 
 /// The two parameter descriptors' record maps, borrowed together.
@@ -511,6 +562,14 @@ pub(crate) struct ParamRecords<'a> {
     pub apd: &'a std::collections::HashMap<u16, DescriptorRecord>,
     /// The IPD's records.
     pub ipd: &'a std::collections::HashMap<u16, DescriptorRecord>,
+    /// The APD header's `SQL_DESC_BIND_OFFSET_PTR`, resolved once for this call
+    /// and handed to every [`ParamRecord`] this yields.
+    ///
+    /// Resolved once rather than per record because the spec fixes the
+    /// dereference at execution time (see [`BindOffset`]), and because two reads
+    /// of a value the application can change at will could shift one parameter
+    /// by one offset and the next by another.
+    pub bind_offset: BindOffset,
 }
 
 impl<'a> ParamRecords<'a> {
@@ -554,7 +613,11 @@ impl<'a> ParamRecords<'a> {
             // `SQLSetDescField` can create one by setting any single field, so
             // presence in the map stopped answering this question.
             (Some(apd), Some(_)) if !apd.is_bound() && apd.indicator_ptr.is_null() => Ok(None),
-            (Some(apd), Some(ipd)) => Ok(Some(ParamRecord { apd, ipd })),
+            (Some(apd), Some(ipd)) => Ok(Some(ParamRecord {
+                apd,
+                ipd,
+                bind_offset: self.bind_offset,
+            })),
             (None, None) => Ok(None),
             (apd, _) => Err(OdbcError::general(
                 format!(

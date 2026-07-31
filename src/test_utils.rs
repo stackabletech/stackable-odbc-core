@@ -198,11 +198,21 @@ pub struct MockStatement;
 /// read only by the tests exercising it — proof that the token a
 /// statement-producing call is handed is the same one `SQLCancel` would
 /// later read back out of the registry, not merely some token.
+///
+/// `executed_params` is the same trick applied to [`Backend::execute`]'s
+/// parameter slice: a test that must assert *what the backend received* needs
+/// somewhere per-statement to put it, and the cancel token is the one piece of
+/// backend-owned state a test can already read back out of the registry
+/// (`Registry::cancel_of`). A `static` would be the alternative and would race,
+/// because `cargo test` runs these in parallel threads.
 #[derive(Debug, Default)]
 pub struct MockCancelToken {
     pub cancelled: std::sync::atomic::AtomicBool,
     pub should_fail: std::sync::atomic::AtomicBool,
     pub saw_execution: std::sync::atomic::AtomicBool,
+    /// The parameter values the last [`Backend::execute`] on this statement was
+    /// handed, in parameter order.
+    pub executed_params: crate::sync::Mutex<Vec<crate::types::ColumnValue>>,
 }
 
 #[derive(Debug)]
@@ -3290,10 +3300,17 @@ impl Backend for MockRecordingBackend {
     }
     fn execute(
         _: &MockConnection,
-        _: &Self::CancelToken,
+        cancel: &Self::CancelToken,
         _: &mut MockStatement,
-        _: &[crate::types::ColumnValue],
+        params: &[crate::types::ColumnValue],
     ) -> Result<crate::types::ExecuteOutcome, MockError> {
+        // Recorded so a test can assert what the backend was actually handed:
+        // a bound parameter's value is not observable anywhere else, and
+        // "the call succeeded" says nothing about which address it read.
+        // See `MockCancelToken::executed_params`.
+        if let Ok(mut recorded) = cancel.executed_params.lock() {
+            *recorded = params.to_vec();
+        }
         Ok(crate::types::ExecuteOutcome::default())
     }
     fn get_info(_: &MockConnection, _: crate::types::InfoType) -> Result<InfoValue, MockError> {

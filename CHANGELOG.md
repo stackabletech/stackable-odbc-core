@@ -3111,4 +3111,43 @@ call `SQLCloseCursor` or `SQLFreeStmt(SQL_CLOSE)` first, as it already must for
   `BufferLength`, or any bound column with a real `BufferLength`, is
   unaffected.
 
+- **`SQL_ATTR_PARAM_BIND_OFFSET_PTR` is now applied when reading bound
+  parameters.** `SQLSetStmtAttrW` accepted the attribute, stored it on the APD
+  header as `SQL_DESC_BIND_OFFSET_PTR` and handed it back from
+  `SQLGetStmtAttrW` — and nothing ever read it. Every execution therefore sent
+  the value at the *bound* address, so an application that binds `&row.field`
+  once and moves between parameter rows by writing a new offset (which is the
+  entire purpose of the attribute, per `SQLBindParameter`'s "Rebinding with
+  Offsets") silently sent its first row's values over and over, with no
+  diagnostic. The offset is now dereferenced once per execution and added to
+  both `SQL_DESC_DATA_PTR` and `SQL_DESC_INDICATOR_PTR` at every reader: the
+  bound-parameter read, the data-at-execution scan that decides whether a
+  parameter is streamed, and the write-back of output parameters.
+
+  A null pointer is still never offset, matching the rule `SQLFetch` follows on
+  the row side: the attribute shifts a *buffer*, and `null + offset` would turn
+  an absent buffer into a wild address. The spec states this for the parameter
+  side outright — the offset is added "if none of the values in the
+  SQL_DESC_DATA_PTR, SQL_DESC_INDICATOR_PTR, and SQL_DESC_OCTET_LENGTH_PTR
+  fields is a null pointer". Core reads that per pointer rather than
+  all-or-nothing, as MySQL Connector/ODBC's `ptr_offset_adjust` does, because
+  the literal reading would withhold the offset from a data buffer merely
+  because the parameter was bound with no indicator — the commonest binding
+  there is for a fixed-width C type.
+
+  `SQLParamData`'s echoed data-at-execution pointer is the one deliberate
+  exception: it stays the **unoffset** `SQL_DESC_DATA_PTR`. The spec's
+  *ValuePtrPtr* description returns the address "as contained in the
+  SQL_DESC_DATA_PTR descriptor record field", and the offset arithmetic in its
+  Comments section is given only for the *column* case and defined there in terms
+  of `SQL_ATTR_ROW_BIND_OFFSET_PTR`. psqlODBC agrees for the single-parameter-set
+  configuration core supports; MySQL Connector/ODBC does not, and the reasoning
+  for preferring the spec's wording is recorded at the write site in
+  `ffi/params.rs`.
+
+  **For driver authors:** a backend that previously received the base row's
+  values from an application using this attribute now receives the row the
+  application actually selected. No `Backend` method changed, and a driver whose
+  applications never set the attribute is unaffected.
+
 [Unreleased]: https://github.com/stackabletech/stackable-odbc-core/commits/HEAD
