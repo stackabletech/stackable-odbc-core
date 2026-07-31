@@ -616,13 +616,12 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// **Return the rows in any order.** Core sorts them into the spec's order
     /// (TABLE_CAT, TABLE_SCHEM, TABLE_NAME, ORDINAL_POSITION) and builds the
     /// result set, so a backend does not need an ORDER BY for correctness.
+    /// The arguments arrive as a [`ColumnsQuery`](crate::types::ColumnsQuery),
+    /// for the same reason [`Backend::tables`] takes a `TablesQuery`.
     fn columns(
         conn: &Self::Connection,
         cancel: &Self::CancelToken,
-        catalog: Option<&str>,
-        schema: Option<&str>,
-        table: Option<&str>,
-        column: Option<&str>,
+        query: &crate::types::ColumnsQuery<'_>,
     ) -> Result<Vec<ColumnRow>, Self::Error>;
 
     /// Return the primary key columns for the given table.

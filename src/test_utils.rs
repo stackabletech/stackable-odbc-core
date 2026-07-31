@@ -497,10 +497,7 @@ impl Backend for MockBackend {
     fn columns(
         _: &MockConnection,
         _: &Self::CancelToken,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
+        _: &crate::types::ColumnsQuery<'_>,
     ) -> Result<Vec<ColumnRow>, MockError> {
         Err(MockError)
     }
@@ -734,10 +731,7 @@ impl Backend for MockNoCatalogBackend {
     fn columns(
         _: &MockConnection,
         _: &Self::CancelToken,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
+        _: &crate::types::ColumnsQuery<'_>,
     ) -> Result<Vec<ColumnRow>, MockError> {
         Err(MockError)
     }
@@ -846,10 +840,7 @@ macro_rules! mock_keywords_backend {
             fn columns(
                 _: &MockConnection,
                 _: &Self::CancelToken,
-                _: Option<&str>,
-                _: Option<&str>,
-                _: Option<&str>,
-                _: Option<&str>,
+                _: &crate::types::ColumnsQuery<'_>,
             ) -> Result<Vec<ColumnRow>, MockError> {
                 Err(MockError)
             }
@@ -987,10 +978,7 @@ impl Backend for MockAltBackend {
     fn columns(
         _: &MockConnection,
         _: &Self::CancelToken,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
+        _: &crate::types::ColumnsQuery<'_>,
     ) -> Result<Vec<ColumnRow>, MockError> {
         Err(MockError)
     }
@@ -1233,10 +1221,7 @@ macro_rules! mock_isolation_backend {
             fn columns(
                 _: &MockIsolationConnection,
                 _: &Self::CancelToken,
-                _: Option<&str>,
-                _: Option<&str>,
-                _: Option<&str>,
-                _: Option<&str>,
+                _: &crate::types::ColumnsQuery<'_>,
             ) -> Result<Vec<ColumnRow>, MockError> {
                 Err(MockError)
             }
@@ -1471,10 +1456,7 @@ macro_rules! mock_applied_backend {
             fn columns(
                 _: &MockAppliedConnection,
                 _: &Self::CancelToken,
-                _: Option<&str>,
-                _: Option<&str>,
-                _: Option<&str>,
-                _: Option<&str>,
+                _: &crate::types::ColumnsQuery<'_>,
             ) -> Result<Vec<ColumnRow>, $err> {
                 Err(MockError.into())
             }
@@ -1737,10 +1719,7 @@ macro_rules! mock_txn_backend {
             fn columns(
                 _: &MockTxnConnection,
                 _: &Self::CancelToken,
-                _: Option<&str>,
-                _: Option<&str>,
-                _: Option<&str>,
-                _: Option<&str>,
+                _: &crate::types::ColumnsQuery<'_>,
             ) -> Result<Vec<ColumnRow>, OdbcError> {
                 Err(OdbcError::NotImplemented {
                     feature: "mock txn backend".into(),
@@ -1941,10 +1920,7 @@ impl Backend for MockTypeInfoBackend {
     fn columns(
         _: &MockConnection,
         _: &Self::CancelToken,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
+        _: &crate::types::ColumnsQuery<'_>,
     ) -> Result<Vec<ColumnRow>, MockError> {
         Err(MockError)
     }
@@ -2090,10 +2066,7 @@ impl Backend for MockCatalogBackend {
     fn columns(
         _: &MockConnection,
         _: &Self::CancelToken,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
+        _: &crate::types::ColumnsQuery<'_>,
     ) -> Result<Vec<ColumnRow>, MockError> {
         let col = |table: &str, name: &str, ordinal: i32| ColumnRow {
             catalog: Some("cat".into()),
@@ -2501,16 +2474,13 @@ impl Backend for MockCatalogArgsBackend {
     fn columns(
         _: &MockConnection,
         _: &Self::CancelToken,
-        catalog: Option<&str>,
-        schema: Option<&str>,
-        table: Option<&str>,
-        column: Option<&str>,
+        query: &crate::types::ColumnsQuery<'_>,
     ) -> Result<Vec<ColumnRow>, MockError> {
         Self::record(RecordedCatalogArgs {
-            catalog: catalog.map(str::to_string),
-            schema: schema.map(str::to_string),
-            table: table.map(str::to_string),
-            column: column.map(str::to_string),
+            catalog: query.catalog().map(str::to_string),
+            schema: query.schema().map(str::to_string),
+            table: query.table().map(str::to_string),
+            column: query.column().map(str::to_string),
             ..Default::default()
         });
         Ok(Vec::new())
@@ -2776,10 +2746,7 @@ impl Backend for MockFunctionsBackend {
     fn columns(
         _: &MockConnection,
         _: &Self::CancelToken,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
+        _: &crate::types::ColumnsQuery<'_>,
     ) -> Result<Vec<ColumnRow>, MockError> {
         Err(MockError)
     }
@@ -2919,10 +2886,7 @@ impl Backend for MockFailingCloseBackend {
     fn columns(
         _: &MockConnection,
         _: &Self::CancelToken,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
+        _: &crate::types::ColumnsQuery<'_>,
     ) -> Result<Vec<ColumnRow>, OdbcError> {
         Err(OdbcError::NotImplemented {
             feature: "columns".into(),
@@ -3126,10 +3090,7 @@ impl Backend for MockLongDataBackend {
     fn columns(
         _: &MockConnection,
         _: &Self::CancelToken,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
+        _: &crate::types::ColumnsQuery<'_>,
     ) -> Result<Vec<ColumnRow>, OdbcError> {
         Err(OdbcError::NotImplemented {
             feature: "columns".into(),
@@ -3294,10 +3255,7 @@ impl Backend for MockRowCountBackend {
     fn columns(
         _: &MockConnection,
         _: &Self::CancelToken,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
+        _: &crate::types::ColumnsQuery<'_>,
     ) -> Result<Vec<ColumnRow>, OdbcError> {
         Err(OdbcError::NotImplemented {
             feature: "columns".into(),
@@ -3409,10 +3367,7 @@ impl Backend for MockRecordingBackend {
     fn columns(
         _: &MockConnection,
         _: &Self::CancelToken,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
+        _: &crate::types::ColumnsQuery<'_>,
     ) -> Result<Vec<ColumnRow>, MockError> {
         Err(MockError)
     }
@@ -3611,10 +3566,7 @@ impl Backend for MockCancelAwareBackend {
     fn columns(
         _: &MockConnection,
         cancel: &Self::CancelToken,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
+        _: &crate::types::ColumnsQuery<'_>,
     ) -> Result<Vec<ColumnRow>, MockError> {
         if Self::take_call_outcome(cancel) {
             return Err(MockError);
@@ -3782,10 +3734,7 @@ impl Backend for MockBlockingBackend {
     fn columns(
         _: &MockConnection,
         _: &Self::CancelToken,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
+        _: &crate::types::ColumnsQuery<'_>,
     ) -> Result<Vec<ColumnRow>, MockError> {
         Err(MockError)
     }
@@ -3954,10 +3903,7 @@ impl Backend for MockFetchTimeoutBackend {
     fn columns(
         _: &MockConnection,
         _: &Self::CancelToken,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
+        _: &crate::types::ColumnsQuery<'_>,
     ) -> Result<Vec<ColumnRow>, MockError> {
         Ok(Vec::new())
     }
@@ -4096,10 +4042,7 @@ impl Backend for MockFailingDescribeBackend {
     fn columns(
         _: &MockConnection,
         _: &Self::CancelToken,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
+        _: &crate::types::ColumnsQuery<'_>,
     ) -> Result<Vec<ColumnRow>, OdbcError> {
         Ok(Vec::new())
     }
@@ -4210,10 +4153,7 @@ impl Backend for MockCatalogRejectingBackend {
     fn columns(
         _: &MockConnection,
         _: &Self::CancelToken,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
+        _: &crate::types::ColumnsQuery<'_>,
     ) -> Result<Vec<ColumnRow>, OdbcError> {
         Ok(Vec::new())
     }
@@ -4318,10 +4258,7 @@ impl Backend for MockBrowseBackend {
     fn columns(
         _: &MockConnection,
         _: &Self::CancelToken,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
+        _: &crate::types::ColumnsQuery<'_>,
     ) -> Result<Vec<ColumnRow>, MockError> {
         Err(MockError)
     }
@@ -4462,10 +4399,7 @@ impl Backend for MockPrompterBackend {
     fn columns(
         _: &Self::Connection,
         _: &Self::CancelToken,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
+        _: &crate::types::ColumnsQuery<'_>,
     ) -> Result<Vec<ColumnRow>, MockError> {
         Err(MockError)
     }

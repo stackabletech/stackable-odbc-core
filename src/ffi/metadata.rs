@@ -592,14 +592,12 @@ pub unsafe fn sql_columns_w<B: Backend>(
             let table = normalise_catalog_arg::<B>(connection, table, metadata_id);
             let column = normalise_catalog_arg::<B>(connection, column, metadata_id);
 
-            let rows = B::columns(
-                connection,
-                cancel,
-                catalog.as_deref(),
-                schema.as_deref(),
-                table.as_deref(),
-                column.as_deref(),
-            );
+            let query = crate::types::ColumnsQuery::default()
+                .with_catalog(catalog.as_deref())
+                .with_schema(schema.as_deref())
+                .with_table(table.as_deref())
+                .with_column(column.as_deref());
+            let rows = B::columns(connection, cancel, &query);
             let rows = timer.check::<B, _, _>(rows, cancel)?;
 
             let mut values: Vec<Vec<ColumnValue>> = rows.iter().map(ColumnRow::to_values).collect();
@@ -4391,6 +4389,43 @@ mod tests {
             let args = MockCatalogArgsBackend::recorded().expect("Backend::columns was called");
             assert_eq!(args.table.as_deref(), Some("MY\\_TABLE"));
             assert_eq!(args.column.as_deref(), Some("COL\\_1"));
+            cleanup_for::<MockCatalogArgsBackend>(env, conn, stmt);
+        }
+    }
+
+    /// Core fills each `ColumnsQuery` field from the `SQLColumns` argument of
+    /// the same name.
+    ///
+    /// The `METADATA_ID` test above pins the table and column arguments but
+    /// passes an empty catalog and schema, so crossing those two was invisible
+    /// to the suite. Same gap, same fix, as for `SQLTables`.
+    #[test]
+    fn sql_columns_fills_each_query_field_from_its_own_argument() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCatalogArgsBackend>();
+
+            let catalog = utf16_of("cat");
+            let schema = utf16_of("sch");
+            let table = utf16_of("tbl");
+            let column = utf16_of("col");
+            let ret = sql_columns_w::<MockCatalogArgsBackend>(
+                stmt,
+                catalog.as_ptr(),
+                SQL_NTS_I16,
+                schema.as_ptr(),
+                SQL_NTS_I16,
+                table.as_ptr(),
+                SQL_NTS_I16,
+                column.as_ptr(),
+                SQL_NTS_I16,
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+
+            let args = MockCatalogArgsBackend::recorded().expect("Backend::columns was called");
+            assert_eq!(args.catalog.as_deref(), Some("cat"));
+            assert_eq!(args.schema.as_deref(), Some("sch"));
+            assert_eq!(args.table.as_deref(), Some("tbl"));
+            assert_eq!(args.column.as_deref(), Some("col"));
             cleanup_for::<MockCatalogArgsBackend>(env, conn, stmt);
         }
     }
