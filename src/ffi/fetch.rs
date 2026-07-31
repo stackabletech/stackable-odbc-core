@@ -95,6 +95,24 @@ unsafe fn row_bind_offset(ard: &Descriptor) -> usize {
     unsafe { std::ptr::read_unaligned(raw as *const usize) }
 }
 
+/// Applies `SQL_ATTR_ROW_BIND_OFFSET_PTR` to a bound pointer, leaving a null
+/// pointer null.
+///
+/// The offset shifts a *buffer* the application bound; a null
+/// `SQL_DESC_DATA_PTR` or `SQL_DESC_INDICATOR_PTR` means there is no buffer,
+/// so there is nothing to shift. `ptr.wrapping_byte_add(off)` on a null `ptr`
+/// would otherwise turn "no buffer" into a non-null address built from the
+/// offset alone — not a real allocation — and every caller downstream
+/// (`SQLFetch`'s 22002 check, `write_column_value`) treats non-null as "there
+/// is a buffer here."
+fn offset_non_null(ptr: *mut c_void, off: usize) -> *mut c_void {
+    if ptr.is_null() {
+        ptr
+    } else {
+        ptr.wrapping_byte_add(off)
+    }
+}
+
 /// Where a fetch reports its row count and row status.
 ///
 /// `SQLFetch` and `SQLFetchScroll` report through the `SQL_ATTR_ROWS_FETCHED_PTR`
@@ -405,6 +423,16 @@ unsafe fn fetch_with_report<B: Backend>(
                     // offset, and the spec makes the sum its responsibility to
                     // keep in bounds — the same contract as the unoffset pointer.
                     // Byte arithmetic, because the offset is in bytes.
+                    //
+                    // A null pointer is left alone rather than shifted:
+                    // `SQL_ATTR_ROW_BIND_OFFSET_PTR` shifts a *buffer*, and a
+                    // null `SQL_DESC_DATA_PTR` or `SQL_DESC_INDICATOR_PTR` means
+                    // there is no buffer to shift. `collect_bindings` admits a
+                    // record with either pointer null — the indicator-only
+                    // binding the spec allows — and offsetting `0` would turn
+                    // that absence into a non-null address the 22002 check and
+                    // `write_column_value` would then treat as real, writing
+                    // through whatever the offset happens to land on.
                     let binding_info: Vec<(
                         u16,
                         odbc_sys::CDataType,
@@ -418,9 +446,10 @@ unsafe fn fetch_with_report<B: Backend>(
                                 Ok((
                                     col,
                                     c_type_of(concise_type)?,
-                                    data_ptr.wrapping_byte_add(bind_offset),
+                                    offset_non_null(data_ptr, bind_offset),
                                     octet_length,
-                                    indicator_ptr.wrapping_byte_add(bind_offset),
+                                    offset_non_null(indicator_ptr.cast::<c_void>(), bind_offset)
+                                        .cast::<isize>(),
                                 ))
                             },
                         )
@@ -1085,12 +1114,14 @@ pub unsafe fn sql_get_data<B: Backend>(
 
 #[cfg(test)]
 mod tests {
+    use std::borrow::Cow;
+
     use super::*;
     use crate::ffi::handle::{sql_alloc_handle, sql_free_handle};
     use crate::test_utils::{
-        LONG_BYTES, LONG_TEXT, MockBackend, MockCancelAwareBackend, MockFetchTimeoutBackend,
-        MockLongDataBackend, alloc_env_conn_stmt, cleanup_env_conn_stmt, with_descriptor,
-        with_handle,
+        LONG_BYTES, LONG_TEXT, MockBackend, MockCancelAwareBackend, MockCancelToken,
+        MockConnection, MockError, MockFetchTimeoutBackend, MockLongDataBackend,
+        alloc_env_conn_stmt, cleanup_env_conn_stmt, with_descriptor, with_handle,
     };
     use crate::types::CDataType;
     use odbc_sys::HandleType;
@@ -2054,14 +2085,413 @@ mod tests {
         }
     }
 
+    // -------------------------------------------------------------------
+    // MockNullBackend — a single row whose one column is `ColumnValue::Null`
+    // -------------------------------------------------------------------
+
+    /// A one-column statement whose row is always `ColumnValue::Null`.
+    ///
+    /// No mock in `test_utils.rs` returns `ColumnValue::Null` from `get_data`
+    /// — every one of them stands for a real value `SQLGetData` can read —
+    /// and this module's tests are scoped to `fetch.rs`, so this one is local
+    /// rather than added there.
+    struct MockNullStatement {
+        rows_left: u8,
+    }
+
+    impl StatementBackend for MockNullStatement {
+        type Error = MockError;
+
+        fn column_count(&self) -> i16 {
+            1
+        }
+
+        fn fetch(&mut self) -> Result<FetchResult, Self::Error> {
+            if self.rows_left == 0 {
+                return Ok(FetchResult::NoData);
+            }
+            self.rows_left -= 1;
+            Ok(FetchResult::Row)
+        }
+
+        fn get_data(
+            &mut self,
+            _col: u16,
+            _target_type: CDataType,
+        ) -> Result<Cow<'_, ColumnValue>, Self::Error> {
+            Ok(Cow::Owned(ColumnValue::Null))
+        }
+    }
+
+    /// Hands out one [`MockNullStatement`] per execution. Every capability
+    /// declaration below is the least-capable value the spec defines (see
+    /// `test_utils.rs`'s `minimal_capability_decls!` for the same list) —
+    /// this mock exists only to drive `get_data` down the `ColumnValue::Null`
+    /// branch, so none of them is exercised by the tests that use it.
+    struct MockNullBackend;
+
+    impl Backend for MockNullBackend {
+        type Connection = MockConnection;
+        type Statement = MockNullStatement;
+        type Error = MockError;
+        type CancelToken = MockCancelToken;
+
+        fn connect(_: &crate::types::ConnectParams) -> Result<Self::Connection, Self::Error> {
+            Ok(MockConnection)
+        }
+        fn disconnect(_: &mut Self::Connection) -> Result<(), Self::Error> {
+            Ok(())
+        }
+        fn cancel_token(_conn: &Self::Connection) -> Self::CancelToken {
+            MockCancelToken::default()
+        }
+        fn exec_direct(
+            _: &Self::Connection,
+            _: &Self::CancelToken,
+            _: &str,
+        ) -> Result<Self::Statement, Self::Error> {
+            Ok(MockNullStatement { rows_left: 1 })
+        }
+        fn prepare(
+            _: &Self::Connection,
+            _: &Self::CancelToken,
+            _: &str,
+        ) -> Result<Self::Statement, Self::Error> {
+            Ok(MockNullStatement { rows_left: 1 })
+        }
+        fn execute(
+            _: &Self::Connection,
+            _: &Self::CancelToken,
+            _: &mut Self::Statement,
+            _: &[ColumnValue],
+        ) -> Result<crate::types::ExecuteOutcome, Self::Error> {
+            Ok(crate::types::ExecuteOutcome::default())
+        }
+        fn get_info(
+            _: &Self::Connection,
+            _: crate::types::InfoType,
+        ) -> Result<crate::types::InfoValue, Self::Error> {
+            Err(MockError)
+        }
+        fn get_functions() -> Cow<'static, [crate::function_id::FunctionId]> {
+            Cow::Borrowed(&[])
+        }
+        fn get_type_info(_conn: &Self::Connection) -> Cow<'static, [crate::types::TypeInfoRow]> {
+            Cow::Borrowed(&[])
+        }
+        fn tables(
+            _: &Self::Connection,
+            _: &Self::CancelToken,
+            _: &crate::types::TablesQuery<'_>,
+        ) -> Result<Vec<crate::types::TableRow>, Self::Error> {
+            Err(MockError)
+        }
+        fn columns(
+            _: &Self::Connection,
+            _: &Self::CancelToken,
+            _: &crate::types::ColumnsQuery<'_>,
+        ) -> Result<Vec<crate::types::ColumnRow>, Self::Error> {
+            Err(MockError)
+        }
+        fn table_types(_conn: &Self::Connection) -> Vec<Cow<'static, str>> {
+            Vec::new()
+        }
+
+        fn supports_catalogs(_conn: &Self::Connection) -> bool {
+            false
+        }
+        fn supports_schemas(_conn: &Self::Connection) -> bool {
+            false
+        }
+        fn alter_table_support(_conn: &Self::Connection) -> u32 {
+            0
+        }
+        fn outer_join_capabilities(_conn: &Self::Connection) -> u32 {
+            0
+        }
+        fn default_txn_isolation(_conn: &Self::Connection) -> u32 {
+            0
+        }
+        fn txn_isolation_options(_conn: &Self::Connection) -> u32 {
+            0
+        }
+        fn group_by(_conn: &Self::Connection) -> u16 {
+            crate::types::SQL_GB_NOT_SUPPORTED
+        }
+        fn null_collation(_conn: &Self::Connection) -> u16 {
+            crate::types::SQL_NC_HIGH
+        }
+        fn identifier_case(_conn: &Self::Connection) -> u16 {
+            crate::types::SQL_IC_SENSITIVE
+        }
+        fn correlation_name(_conn: &Self::Connection) -> u16 {
+            crate::types::SQL_CN_NONE
+        }
+        fn non_nullable_columns(_conn: &Self::Connection) -> u16 {
+            crate::types::SQL_NNC_NULL
+        }
+        fn expressions_in_order_by(_conn: &Self::Connection) -> bool {
+            false
+        }
+        fn sql_conformance(_conn: &Self::Connection) -> u32 {
+            0
+        }
+        fn timedate_add_intervals(_conn: &Self::Connection) -> u32 {
+            0
+        }
+        fn timedate_diff_intervals(_conn: &Self::Connection) -> u32 {
+            0
+        }
+        fn subqueries(_conn: &Self::Connection) -> u32 {
+            0
+        }
+        fn column_alias(_conn: &Self::Connection) -> bool {
+            false
+        }
+        fn concat_null_behavior(_conn: &Self::Connection) -> u16 {
+            crate::types::SQL_CB_NULL
+        }
+        fn union_support(_conn: &Self::Connection) -> u32 {
+            0
+        }
+        fn convert_functions(_conn: &Self::Connection) -> u32 {
+            0
+        }
+        fn order_by_columns_in_select(_conn: &Self::Connection) -> bool {
+            true
+        }
+        fn accessible_tables(_conn: &Self::Connection) -> bool {
+            false
+        }
+        fn data_source_read_only(_conn: &Self::Connection) -> bool {
+            false
+        }
+        fn search_pattern_escape(_conn: &Self::Connection) -> Cow<'static, str> {
+            Cow::Borrowed("")
+        }
+        fn keywords(_conn: &Self::Connection) -> Cow<'static, [Cow<'static, str>]> {
+            Cow::Borrowed(&[])
+        }
+        fn quoted_identifier_case(_conn: &Self::Connection) -> u16 {
+            crate::types::SQL_IC_SENSITIVE
+        }
+        fn txn_capable(_conn: &Self::Connection) -> u16 {
+            crate::types::SQL_TC_NONE as u16
+        }
+        fn integrity(_conn: &Self::Connection) -> bool {
+            false
+        }
+        fn multiple_active_txn(_conn: &Self::Connection) -> bool {
+            false
+        }
+        fn special_characters(_conn: &Self::Connection) -> Cow<'static, str> {
+            Cow::Borrowed("")
+        }
+        fn accessible_procedures(_conn: &Self::Connection) -> bool {
+            false
+        }
+        fn driver_name() -> Cow<'static, str> {
+            Cow::Borrowed("Mock ODBC Driver")
+        }
+        fn driver_version() -> Cow<'static, str> {
+            Cow::Borrowed("00.00.0000")
+        }
+        fn dbms_name(_conn: &Self::Connection) -> Cow<'static, str> {
+            Cow::Borrowed("MockDB")
+        }
+        fn dbms_version(_conn: &Self::Connection) -> Cow<'static, str> {
+            Cow::Borrowed("00.00.0000")
+        }
+    }
+
+    /// Env + connection + statement for [`MockNullBackend`], executed but with
+    /// the cursor still before the first row — the same shape as
+    /// `long_data_stmt_no_fetch`, for a backend whose one row is NULL instead
+    /// of a real value.
+    unsafe fn null_stmt_no_fetch() -> (*mut c_void, *mut c_void, *mut c_void) {
+        let mut env: *mut c_void = std::ptr::null_mut();
+        let mut conn: *mut c_void = std::ptr::null_mut();
+        let mut stmt: *mut c_void = std::ptr::null_mut();
+        unsafe {
+            let _ = sql_alloc_handle::<MockNullBackend>(
+                HandleType::Env as i16,
+                std::ptr::null_mut(),
+                &mut env,
+            );
+            let _ = sql_alloc_handle::<MockNullBackend>(HandleType::Dbc as i16, env, &mut conn);
+            let mut wide: Vec<u16> = "DRIVER=mock;".encode_utf16().collect();
+            wide.push(0);
+            let _ = crate::ffi::connect::sql_driver_connect_w::<MockNullBackend>(
+                conn,
+                std::ptr::null_mut(),
+                wide.as_ptr(),
+                crate::types::SQL_NTS as i16,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                0,
+            );
+            let _ = sql_alloc_handle::<MockNullBackend>(HandleType::Stmt as i16, conn, &mut stmt);
+
+            let mut sql: Vec<u16> = "SELECT a FROM t".encode_utf16().collect();
+            sql.push(0);
+            let ret = crate::ffi::execute::sql_exec_direct_w::<MockNullBackend>(
+                stmt,
+                sql.as_ptr(),
+                crate::types::SQL_NTS,
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS, "precondition: execute");
+        }
+        (env, conn, stmt)
+    }
+
+    unsafe fn cleanup_null_stmt(env: *mut c_void, conn: *mut c_void, stmt: *mut c_void) {
+        unsafe {
+            let _ = sql_free_handle::<MockNullBackend>(HandleType::Stmt as i16, stmt);
+            let _ = crate::ffi::connect::sql_disconnect::<MockNullBackend>(conn);
+            let _ = sql_free_handle::<MockNullBackend>(HandleType::Dbc as i16, conn);
+            let _ = sql_free_handle::<MockNullBackend>(HandleType::Env as i16, env);
+        }
+    }
+
+    /// B1: `SQL_ATTR_ROW_BIND_OFFSET_PTR` must not turn a null
+    /// `SQL_DESC_INDICATOR_PTR` into a non-null one.
+    ///
+    /// The column has a real, bound data buffer but no indicator — the
+    /// application never supplied one — so the fetched `NULL` value must be
+    /// reported as spec 22002 ("indicator variable required but not
+    /// supplied"), exactly as it would be with no offset in force at all. Before
+    /// the fix, `indicator_ptr.wrapping_byte_add(64)` turned the null pointer
+    /// into address `0x40`: the 22002 check saw a non-null pointer and skipped
+    /// the error, and `write_column_value` then wrote the `SQL_NULL_DATA`
+    /// sentinel through that wild address.
+    #[test]
+    fn row_bind_offset_does_not_offset_a_null_indicator_pointer() {
+        unsafe {
+            let (env, conn, stmt) = null_stmt_no_fetch();
+
+            let mut data_buf: i32 = -1;
+            assert_eq!(
+                crate::ffi::bind::sql_bind_col::<MockNullBackend>(
+                    stmt,
+                    1,
+                    CDataType::SLong as i16,
+                    std::ptr::from_mut(&mut data_buf).cast::<c_void>(),
+                    4,
+                    std::ptr::null_mut(),
+                ),
+                SqlReturn::SUCCESS,
+            );
+
+            // A live SQLULEN the driver reads through on every fetch.
+            let mut bind_offset: usize = 64;
+            assert_eq!(
+                crate::ffi::stmt_attr::sql_set_stmt_attr_w::<MockNullBackend>(
+                    stmt,
+                    odbc_sys::StatementAttribute::RowBindOffsetPtr as i32,
+                    std::ptr::from_mut(&mut bind_offset).cast::<c_void>(),
+                    0,
+                ),
+                SqlReturn::SUCCESS,
+            );
+
+            assert_eq!(sql_fetch::<MockNullBackend>(stmt), SqlReturn::ERROR);
+            assert_eq!(
+                first_sqlstate::<MockNullBackend>(stmt),
+                "22002",
+                "a bound column with no indicator must report 22002 for a NULL \
+                 value regardless of SQL_ATTR_ROW_BIND_OFFSET_PTR",
+            );
+
+            cleanup_null_stmt(env, conn, stmt);
+        }
+    }
+
+    /// B1: `SQL_ATTR_ROW_BIND_OFFSET_PTR` must not turn a null
+    /// `SQL_DESC_DATA_PTR` into a non-null one.
+    ///
+    /// Indicator-only binding — `TargetValuePtr` is null, `StrLen_or_IndPtr` is
+    /// real — is the spec-legal state
+    /// [`fetch_writes_the_indicator_of_an_indicator_only_binding`] already
+    /// covers without an offset; this pins the same behaviour with a non-zero
+    /// `SQL_ATTR_ROW_BIND_OFFSET_PTR` in force. Before the fix,
+    /// `data_ptr.wrapping_byte_add(offset)` turned the null data pointer into a
+    /// non-null address, and `write_column_value` attempted to write the
+    /// column's real (non-NULL) value through it.
+    ///
+    /// `data_canary` stands in for the Miri wild-write demonstration the plan
+    /// called for: it is never bound to anything, so if a future regression
+    /// resurrected the null data pointer and wrote through the wrong address,
+    /// this is the buffer most likely to sit in the corrupted neighbourhood.
+    #[test]
+    fn row_bind_offset_does_not_offset_a_null_data_pointer() {
+        unsafe {
+            let (env, conn, stmt) = long_data_stmt_no_fetch();
+
+            let data_canary: [u8; 8] = [0xAB; 8];
+
+            // Two slots, so the offset can be proven to have moved the write
+            // from slot 0 to slot 1 rather than merely "somewhere".
+            let mut indicators: [isize; 2] = [0, 0];
+            let indicators_ptr = indicators.as_mut_ptr();
+            let offset = std::mem::size_of::<isize>();
+
+            assert_eq!(
+                crate::ffi::bind::sql_bind_col::<MockLongDataBackend>(
+                    stmt,
+                    2,
+                    CDataType::SLong as i16,
+                    std::ptr::null_mut(),
+                    0,
+                    indicators_ptr,
+                ),
+                SqlReturn::SUCCESS,
+            );
+
+            let mut bind_offset: usize = offset;
+            assert_eq!(
+                crate::ffi::stmt_attr::sql_set_stmt_attr_w::<MockLongDataBackend>(
+                    stmt,
+                    odbc_sys::StatementAttribute::RowBindOffsetPtr as i32,
+                    std::ptr::from_mut(&mut bind_offset).cast::<c_void>(),
+                    0,
+                ),
+                SqlReturn::SUCCESS,
+            );
+
+            assert_eq!(sql_fetch::<MockLongDataBackend>(stmt), SqlReturn::SUCCESS);
+            assert_eq!(
+                (
+                    std::ptr::read(indicators_ptr),
+                    std::ptr::read(indicators_ptr.add(1))
+                ),
+                (0, 4),
+                "the indicator must land at base + offset, carrying column 2's \
+                 4-byte length, and slot 0 must stay untouched",
+            );
+            assert_eq!(
+                data_canary, [0xAB; 8],
+                "a null SQL_DESC_DATA_PTR must stay null under an offset; no \
+                 write should have reached this buffer at all",
+            );
+
+            cleanup_long_data(env, conn, stmt);
+        }
+    }
+
     /// Read the SQLSTATE of the statement's first diagnostic record.
-    unsafe fn first_sqlstate(stmt: *mut c_void) -> String {
+    ///
+    /// Generic over the backend because the token names a
+    /// `StatementHandle<B>`, and reading it back as any other `B` is unsound —
+    /// see `handles/scope.rs`. Every call site must name the same backend it
+    /// allocated the statement against.
+    unsafe fn first_sqlstate<B: Backend>(stmt: *mut c_void) -> String {
         let mut state = [0u16; 6];
         let mut native: i32 = 0;
         let mut msg = [0u16; 256];
         let mut msg_len: i16 = 0;
         let ret = unsafe {
-            crate::ffi::diag::sql_get_diag_rec_w::<MockBackend>(
+            crate::ffi::diag::sql_get_diag_rec_w::<B>(
                 HandleType::Stmt as i16,
                 stmt,
                 1,
@@ -2117,7 +2547,7 @@ mod tests {
 
             // Prepared but not executed: states S2/S3, no cursor.
             assert_eq!(sql_fetch::<MockBackend>(stmt), SqlReturn::ERROR);
-            assert_eq!(first_sqlstate(stmt), "24000");
+            assert_eq!(first_sqlstate::<MockBackend>(stmt), "24000");
 
             // Executed, produced no result set: state S4, still no cursor.
             assert_eq!(
@@ -2125,7 +2555,7 @@ mod tests {
                 SqlReturn::SUCCESS
             );
             assert_eq!(sql_fetch::<MockBackend>(stmt), SqlReturn::ERROR);
-            assert_eq!(first_sqlstate(stmt), "24000");
+            assert_eq!(first_sqlstate::<MockBackend>(stmt), "24000");
 
             // SQLDisconnect frees every statement on the connection as a side
             // effect, so `stmt` is already gone by here — pass null rather

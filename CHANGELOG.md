@@ -3053,4 +3053,17 @@ call `SQLCloseCursor` or `SQLFreeStmt(SQL_CLOSE)` first, as it already must for
   `SQLParamData` was missing `22026`, and `SQLDescribeParam` was missing
   `21S01`.
 
+- **`SQLFetch` no longer offsets a null `SQL_DESC_DATA_PTR` or
+  `SQL_DESC_INDICATOR_PTR` by `SQL_ATTR_ROW_BIND_OFFSET_PTR`.** The offset was
+  applied to every bound pointer unconditionally, including the ones
+  `collect_bindings` deliberately admits with one pointer null — an
+  indicator-only binding, or a data buffer with no indicator supplied. Adding a
+  non-zero offset to a null pointer produces a non-null address built from the
+  offset alone, so a live `SQL_ATTR_ROW_BIND_OFFSET_PTR` turned an absent
+  pointer into a wild one: the `22002` check saw a "supplied" indicator that was
+  never there, and `write_column_value` wrote through whatever address the
+  offset happened to name. Both are now left null, matching the spec's own
+  framing of the attribute as shifting a *buffer* — a pointer with no buffer
+  behind it has nothing to shift.
+
 [Unreleased]: https://github.com/stackabletech/stackable-odbc-core/commits/HEAD
