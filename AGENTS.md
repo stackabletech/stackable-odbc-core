@@ -54,6 +54,24 @@ framework itself and, where relevant, how a downstream driver crate consumes it.
   Manager can do; it closes the compile-and-lint half, which is where the
   regressions actually are.
 
+- **`bench/` and `fuzz/` are separate Cargo workspaces, so nothing at the repo
+  root compiles them.** Not `cargo test`, not `cargo clippy --all-targets`, and
+  not a single `pre-commit` hook. `bench/benches/handle_lookup.rs` contains a
+  full `impl Backend`, so **any change to the `Backend` or `StatementBackend`
+  trait breaks it silently** — every local check passes and CI's "Compile
+  benchmarks" step fails. That has already happened once, when the catalog hooks
+  moved to query types. After touching either trait:
+
+  ```bash
+  (cd bench && cargo build --benches)
+  (cd fuzz && cargo +nightly build --target x86_64-unknown-linux-gnu)
+  ```
+
+  The generalisable form: `pre-commit run --all-files` is the source of truth
+  for everything *in the root workspace*, and these two directories are outside
+  it by design (see the Benchmarks and Fuzzing sections for why). A detached
+  workspace is invisible to exactly the checks you would expect to catch it.
+
 ### Changelog
 
 This project keeps a [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)

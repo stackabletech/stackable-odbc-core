@@ -90,20 +90,14 @@ impl Backend for BenchBackend {
     fn tables(
         _: &Self::Connection,
         _: &Self::CancelToken,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: &[String],
+        _: &stackable_odbc_core::types::TablesQuery<'_>,
     ) -> Result<Vec<stackable_odbc_core::types::TableRow>, Self::Error> {
         Ok(Vec::new())
     }
     fn columns(
         _: &Self::Connection,
         _: &Self::CancelToken,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
+        _: &stackable_odbc_core::types::ColumnsQuery<'_>,
     ) -> Result<Vec<stackable_odbc_core::types::ColumnRow>, Self::Error> {
         Ok(Vec::new())
     }
