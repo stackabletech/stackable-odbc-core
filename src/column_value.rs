@@ -895,15 +895,37 @@ unsafe fn write_wchar(
         unsafe { std::ptr::write_unaligned(len_ind_ptr, total_bytes) };
     }
 
-    if target_ptr.is_null() || buf_len <= 0 {
+    // A null target is not something SQLGetData's own spec sanctions — its
+    // Arguments section is explicit that "TargetValuePtr cannot be NULL."
+    // The case that actually reaches this branch comes from this function's
+    // *other* caller: `sql_fetch`'s bound-column loop (`ffi/fetch.rs`)
+    // legitimately passes a null data pointer when `SQL_DESC_DATA_PTR` is
+    // null but `SQL_DESC_INDICATOR_PTR` is not — the indicator-only binding
+    // the spec allows ("An application can unbind the data buffer for a
+    // column but still have a length/indicator buffer bound for the
+    // column"), which `collect_bindings` deliberately keeps and
+    // `fetch_writes_the_indicator_of_an_indicator_only_binding` pins. That
+    // caller still wants the length written to `len_ind_ptr` above, with
+    // nothing written to a buffer that does not exist, so this returns
+    // SUCCESS rather than treating the null pointer as an error this deep in
+    // the call stack; `SQLGetData`'s own `target_value_ptr` null case is
+    // `HY009`, deliberately left unchecked at the FFI boundary (see
+    // `sql_get_data`'s doc comment) rather than enforced here.
+    if target_ptr.is_null() {
         return Ok((SqlReturn::SUCCESS, 0));
     }
 
-    // The null terminator is one UTF-16 code unit, so a buffer of fewer than
-    // two bytes cannot hold it. Writing one anyway would overrun the caller's
-    // buffer. Spec: "If the data buffer supplied is too small to hold the
-    // null-termination character, SQLGetData returns SQL_SUCCESS_WITH_INFO
-    // and SQLSTATE 01004."
+    // A non-null target with fewer than two bytes of room — including
+    // exactly zero, the standard "how big a buffer do I need" probe — cannot
+    // hold even the one-UTF-16-code-unit null terminator. That is total
+    // truncation, not a length query: the application supplied somewhere to
+    // write and nothing was written there. Spec: "If the data buffer
+    // supplied is too small to hold the null-termination character,
+    // SQLGetData returns SQL_SUCCESS_WITH_INFO and SQLSTATE 01004." Reporting
+    // plain SUCCESS here (as a shared branch with the null-target case above
+    // used to) made SQLGetData indistinguishable from "this column is fully
+    // delivered," which permanently stranded the data behind a `buf_len == 0`
+    // probe: `cursor.done` is derived from this return value.
     if buf_len < 2 {
         return Ok((SqlReturn::SUCCESS_WITH_INFO, 0));
     }
@@ -957,8 +979,19 @@ unsafe fn write_char(
         unsafe { std::ptr::write_unaligned(len_ind_ptr, total_bytes) };
     }
 
-    if target_ptr.is_null() || buf_len <= 0 {
+    // A null target here is the bound-column caller's indicator-only
+    // binding, not something SQLGetData's own spec permits — see
+    // `write_wchar`'s full reasoning.
+    if target_ptr.is_null() {
         return Ok((SqlReturn::SUCCESS, 0));
+    }
+
+    // A non-null target with no room in it — including exactly zero, the
+    // standard length-probe — cannot hold even the one-byte null terminator,
+    // which is total truncation (SUCCESS_WITH_INFO / 01004), not a length
+    // query. See `write_wchar`'s identical split.
+    if buf_len <= 0 {
+        return Ok((SqlReturn::SUCCESS_WITH_INFO, 0));
     }
 
     let out_ptr = target_ptr.cast::<u8>();
@@ -1001,8 +1034,21 @@ unsafe fn write_binary(
         unsafe { std::ptr::write_unaligned(len_ind_ptr, total_bytes) };
     }
 
-    if target_ptr.is_null() || buf_len <= 0 {
+    // A null target here is the bound-column caller's indicator-only
+    // binding, not something SQLGetData's own spec permits — see
+    // `write_wchar`'s full reasoning.
+    if target_ptr.is_null() {
         return Ok((SqlReturn::SUCCESS, 0));
+    }
+
+    // A non-null target with no room in it — including exactly zero, the
+    // standard length-probe — cannot hold any of the data, which is total
+    // truncation (SUCCESS_WITH_INFO / 01004), not a length query. Binary
+    // reserves no terminator, so unlike the two character writers there is no
+    // extra "room for one more byte" boundary; `buf_len <= 0` is the whole
+    // condition. See `write_wchar`'s identical split.
+    if buf_len <= 0 {
+        return Ok((SqlReturn::SUCCESS_WITH_INFO, 0));
     }
 
     let out_ptr = target_ptr.cast::<u8>();
@@ -1888,7 +1934,10 @@ mod tests {
 
     #[test]
     fn wchar_zero_length_buffer_reports_size_and_writes_nothing() {
-        // buf_len == 0 is a length query: report the byte count, write nothing.
+        // A non-null target with buf_len == 0 has no room for even the null
+        // terminator, which is total truncation (SUCCESS_WITH_INFO / 01004),
+        // not a length query. Only a null target is a length query
+        // (SUCCESS) — see `write_utf16`'s identical split.
         let mut buf = [0xAAu8; 4];
         let mut ind: isize = 0;
         let ret = unsafe {
@@ -1900,8 +1949,71 @@ mod tests {
                 &mut ind,
             )
         };
-        assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
+        assert_eq!(ret.unwrap(), SqlReturn::SUCCESS_WITH_INFO);
         assert_eq!(ind, 10); // 5 chars * 2 bytes, still reported
+        assert_eq!(buf, [0xAA; 4], "wrote into a zero-length buffer");
+    }
+
+    #[test]
+    fn wchar_null_target_with_zero_length_is_a_pure_length_query() {
+        // A null target pointer stays SUCCESS regardless of buf_len. Not
+        // something SQLGetData's own spec sanctions directly — its Arguments
+        // section says "TargetValuePtr cannot be NULL" — but this writer is
+        // shared with `sql_fetch`'s bound-column loop, where a null
+        // `SQL_DESC_DATA_PTR` paired with a live indicator pointer is the
+        // spec-legal indicator-only binding (see `write_wchar`'s doc
+        // comment on this branch for the full reasoning).
+        let mut ind: isize = 0;
+        let ret = unsafe {
+            write_column_value(
+                &ColumnValue::String("hello".into()),
+                CDataType::WChar,
+                std::ptr::null_mut(),
+                0,
+                &mut ind,
+            )
+        };
+        assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
+        assert_eq!(ind, 10);
+    }
+
+    #[test]
+    fn char_zero_length_buffer_reports_size_and_writes_nothing() {
+        // The write_char sibling of the wchar case above.
+        let mut buf = [0xAAu8; 4];
+        let mut ind: isize = 0;
+        let ret = unsafe {
+            write_column_value(
+                &ColumnValue::String("hello".into()),
+                CDataType::Char,
+                buf.as_mut_ptr() as *mut c_void,
+                0,
+                &mut ind,
+            )
+        };
+        assert_eq!(ret.unwrap(), SqlReturn::SUCCESS_WITH_INFO);
+        assert_eq!(ind, 5);
+        assert_eq!(buf, [0xAA; 4], "wrote into a zero-length buffer");
+    }
+
+    #[test]
+    fn binary_zero_length_buffer_reports_size_and_writes_nothing() {
+        // The write_binary sibling of the wchar case above. Binary has no
+        // null terminator, so the "no room to make progress" condition is
+        // simply buf_len <= 0 rather than needing 2 bytes.
+        let mut buf = [0xAAu8; 4];
+        let mut ind: isize = 0;
+        let ret = unsafe {
+            write_column_value(
+                &ColumnValue::Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF]),
+                CDataType::Binary,
+                buf.as_mut_ptr() as *mut c_void,
+                0,
+                &mut ind,
+            )
+        };
+        assert_eq!(ret.unwrap(), SqlReturn::SUCCESS_WITH_INFO);
+        assert_eq!(ind, 4);
         assert_eq!(buf, [0xAA; 4], "wrote into a zero-length buffer");
     }
 

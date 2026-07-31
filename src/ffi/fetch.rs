@@ -852,7 +852,14 @@ pub unsafe fn sql_extended_fetch<B: Backend>(
 /// while ((rc = SQLGetData(...)) == SQL_SUCCESS_WITH_INFO) { /* append */ }
 /// ```
 ///
-/// terminate.
+/// terminate. A call with a non-null buffer and `buffer_length` 0 — the
+/// standard length-probe idiom, used to size a buffer before a second call
+/// fetches the value — is one iteration of this same loop, not a special
+/// case: it reports `SQL_SUCCESS_WITH_INFO` with `01004` and the byte length
+/// still needed, and the column remains fully readable afterwards. A
+/// **null** buffer also stays plain `SQL_SUCCESS`, but this function's own
+/// spec has no such case (`target_value_ptr` "cannot be NULL"); see the
+/// `01004` entry below for where that branch is actually exercised.
 ///
 /// Three limits come straight from the spec rather than from this
 /// implementation. Fixed-width targets cannot be read in parts at all — the
@@ -879,6 +886,22 @@ pub unsafe fn sql_extended_fetch<B: Backend>(
 ///   generated.
 /// - 01004 (string data right truncated): returned via `write_column_value` when character
 ///   or binary data does not fit the buffer; diagnostic is pushed to the statement queue.
+///   **`buffer_length == 0` with a non-null `target_value_ptr` is this case, not
+///   `SQL_SUCCESS`** — the standard "how large a buffer do I need" probe supplies somewhere
+///   to write and nothing is written there, which is total truncation per the spec's own step
+///   5: "If the data buffer supplied is too small to hold the null-termination character,
+///   SQLGetData returns SQL_SUCCESS_WITH_INFO and SQLSTATE 01004." A **null** `target_value_ptr`
+///   still stays plain `SQL_SUCCESS`, but that is not this function's own spec sanctioning a null
+///   buffer — the Arguments section says plainly "TargetValuePtr cannot be NULL," and the
+///   `HY009` clause for that below is simply not checked. The writers
+///   (`write_wchar`/`write_char`/`write_binary` in `column_value.rs`) are shared with
+///   `sql_fetch`'s bound-column loop, where a null `SQL_DESC_DATA_PTR` paired with a live
+///   `SQL_DESC_INDICATOR_PTR` is the spec-legal indicator-only binding, and that caller still
+///   needs the length written with nothing to write the data into. Getting the `buffer_length ==
+///   0` half of this wrong made the second half of the documented probe-then-fetch idiom —
+///   `SQLGetData(col, type, buf, 0, &ind)` to size the buffer, then a second call with a
+///   `buf`-sized allocation — return `SQL_NO_DATA`, because `SQL_SUCCESS` marks a chunkable
+///   column exhausted (`cursor.done` below).
 /// - 01S07 (fractional truncation): returned via `write_column_value` for numeric fractional
 ///   truncation, and when a non-zero `ColumnValue::Time` fraction is dropped writing to
 ///   `SQL_C_TYPE_TIME` (`SQL_TIME_STRUCT` has no fraction field).
@@ -944,10 +967,13 @@ pub unsafe fn sql_extended_fetch<B: Backend>(
 ///   the Arguments section attributes it to the driver in as many words: "**SQLGetData**
 ///   returns SQLSTATE HY090 (Invalid string or buffer length) when *BufferLength* is less
 ///   than 0 but not when *BufferLength* is 0." So a negative length is refused here and a
-///   zero length is accepted, which is what that sentence asks for. The row's second clause
-///   carries no marker and is the driver's — a `BufferLength` less than 4 with
-///   `Col_or_Param_Num` 0 on an ODBC 2.x driver — and cannot arise, since core is a 3.x
-///   driver and refuses column 0 regardless.
+///   zero length is accepted, which is what that sentence asks for — "accepted" meaning this
+///   check does not fire and the call proceeds, not that it always answers `SQL_SUCCESS`: for a
+///   chunkable target a zero length still reaches the writer, which now reports `01004` (see
+///   above) rather than silently discarding the column. The row's second clause carries no
+///   marker and is the driver's — a `BufferLength` less than 4 with `Col_or_Param_Num` 0 on an
+///   ODBC 2.x driver — and cannot arise, since core is a 3.x driver and refuses column 0
+///   regardless.
 /// - HY109 (invalid cursor position): not checked; detecting deleted/unfetchable rows
 ///   requires backend support.
 /// - HY117 (connection suspended): driver-manager-handled; not returned here.
@@ -1451,6 +1477,178 @@ mod tests {
             // And it stays NO_DATA rather than restarting.
             let (ret, _, _) = get_char_chunk(stmt, 1, 8);
             assert_eq!(ret, SqlReturn::NO_DATA);
+
+            cleanup_long_data(env, conn, stmt);
+        }
+    }
+
+    /// Task 1.3 / B2: a length-probe call — `SQLGetData` with a non-null
+    /// buffer and `BufferLength` 0, the documented idiom for "tell me how
+    /// much room I need" — must not consume the column. Spec step 5: "If the
+    /// data buffer supplied is too small to hold the null-termination
+    /// character, SQLGetData returns SQL_SUCCESS_WITH_INFO and SQLSTATE
+    /// 01004." A zero-length buffer is always too small to hold it, so this
+    /// is the same case as any other total truncation and must leave the
+    /// cursor resumable (`cursor.done` false), not mark the column
+    /// exhausted the way a bare `SQL_SUCCESS` would.
+    #[test]
+    fn get_data_length_probe_with_zero_buffer_keeps_the_column_readable_wchar() {
+        unsafe {
+            let (env, conn, stmt) = long_data_stmt();
+
+            // Non-null target, zero BufferLength: the probe.
+            let mut probe_buf = [0xAAu16; 4];
+            let mut ind: isize = 0;
+            let ret = sql_get_data::<MockLongDataBackend>(
+                stmt,
+                1,
+                CDataType::WChar as i16,
+                probe_buf.as_mut_ptr().cast::<c_void>(),
+                0,
+                &mut ind,
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS_WITH_INFO);
+            assert_eq!(
+                first_sqlstate::<MockLongDataBackend>(stmt),
+                "01004",
+                "a zero-length buffer is total truncation, not a plain success"
+            );
+            assert_eq!(ind, (LONG_TEXT.len() * 2) as isize, "byte length reported");
+            assert_eq!(
+                probe_buf, [0xAAu16; 4],
+                "nothing written into the probe buffer"
+            );
+
+            // The column must still be readable: a full-size buffer now gets
+            // the complete value, not SQL_NO_DATA.
+            let mut full_buf = vec![0u16; LONG_TEXT.len() + 1];
+            let mut ind2: isize = -1;
+            let ret2 = sql_get_data::<MockLongDataBackend>(
+                stmt,
+                1,
+                CDataType::WChar as i16,
+                full_buf.as_mut_ptr().cast::<c_void>(),
+                (full_buf.len() * 2) as isize,
+                &mut ind2,
+            );
+            assert_eq!(
+                ret2,
+                SqlReturn::SUCCESS,
+                "the data must still be retrievable"
+            );
+            let end = full_buf
+                .iter()
+                .position(|&c| c == 0)
+                .unwrap_or(full_buf.len());
+            assert_eq!(
+                String::from_utf16(&full_buf[..end]).unwrap(),
+                LONG_TEXT,
+                "the complete value must arrive, not an empty or partial one"
+            );
+            assert_eq!(ind2, (LONG_TEXT.len() * 2) as isize);
+
+            cleanup_long_data(env, conn, stmt);
+        }
+    }
+
+    /// `SQL_C_CHAR` sibling of
+    /// `get_data_length_probe_with_zero_buffer_keeps_the_column_readable_wchar`.
+    #[test]
+    fn get_data_length_probe_with_zero_buffer_keeps_the_column_readable_char() {
+        unsafe {
+            let (env, conn, stmt) = long_data_stmt();
+
+            let mut probe_buf = [0xAAu8; 4];
+            let mut ind: isize = 0;
+            let ret = sql_get_data::<MockLongDataBackend>(
+                stmt,
+                1,
+                CDataType::Char as i16,
+                probe_buf.as_mut_ptr().cast::<c_void>(),
+                0,
+                &mut ind,
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS_WITH_INFO);
+            assert_eq!(first_sqlstate::<MockLongDataBackend>(stmt), "01004");
+            assert_eq!(ind, LONG_TEXT.len() as isize);
+            assert_eq!(
+                probe_buf, [0xAAu8; 4],
+                "nothing written into the probe buffer"
+            );
+
+            let mut full_buf = vec![0u8; LONG_TEXT.len() + 1];
+            let mut ind2: isize = -1;
+            let ret2 = sql_get_data::<MockLongDataBackend>(
+                stmt,
+                1,
+                CDataType::Char as i16,
+                full_buf.as_mut_ptr().cast::<c_void>(),
+                full_buf.len() as isize,
+                &mut ind2,
+            );
+            assert_eq!(
+                ret2,
+                SqlReturn::SUCCESS,
+                "the data must still be retrievable"
+            );
+            let end = full_buf
+                .iter()
+                .position(|&b| b == 0)
+                .unwrap_or(full_buf.len());
+            assert_eq!(
+                std::str::from_utf8(&full_buf[..end]).unwrap(),
+                LONG_TEXT,
+                "the complete value must arrive, not an empty or partial one"
+            );
+            assert_eq!(ind2, LONG_TEXT.len() as isize);
+
+            cleanup_long_data(env, conn, stmt);
+        }
+    }
+
+    /// `SQL_C_BINARY` sibling. Binary reserves no null terminator, so the
+    /// "no room to make progress" condition is `buf_len <= 0` alone, and the
+    /// second call's buffer is sized exactly to the data (no `+1`).
+    #[test]
+    fn get_data_length_probe_with_zero_buffer_keeps_the_column_readable_binary() {
+        unsafe {
+            let (env, conn, stmt) = long_data_stmt();
+
+            let mut probe_buf = [0xAAu8; 4];
+            let mut ind: isize = 0;
+            let ret = sql_get_data::<MockLongDataBackend>(
+                stmt,
+                3,
+                CDataType::Binary as i16,
+                probe_buf.as_mut_ptr().cast::<c_void>(),
+                0,
+                &mut ind,
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS_WITH_INFO);
+            assert_eq!(first_sqlstate::<MockLongDataBackend>(stmt), "01004");
+            assert_eq!(ind, LONG_BYTES.len() as isize);
+            assert_eq!(
+                probe_buf, [0xAAu8; 4],
+                "nothing written into the probe buffer"
+            );
+
+            let mut full_buf = vec![0u8; LONG_BYTES.len()];
+            let mut ind2: isize = -1;
+            let ret2 = sql_get_data::<MockLongDataBackend>(
+                stmt,
+                3,
+                CDataType::Binary as i16,
+                full_buf.as_mut_ptr().cast::<c_void>(),
+                full_buf.len() as isize,
+                &mut ind2,
+            );
+            assert_eq!(
+                ret2,
+                SqlReturn::SUCCESS,
+                "the data must still be retrievable"
+            );
+            assert_eq!(full_buf, LONG_BYTES, "the complete value must arrive");
+            assert_eq!(ind2, LONG_BYTES.len() as isize);
 
             cleanup_long_data(env, conn, stmt);
         }

@@ -3085,4 +3085,30 @@ call `SQLCloseCursor` or `SQLFreeStmt(SQL_CLOSE)` first, as it already must for
   function returns changed; the previously-unguarded path now returns one
   (`HY000`) instead of aborting.
 
+- **`SQLGetData` with a zero-length buffer no longer consumes the column.**
+  `write_wchar`, `write_char` and `write_binary` shared one branch for a null
+  `target_value_ptr` (a pure length query) and a non-null one with
+  `buffer_length` 0 (the standard "how large a buffer do I need" probe): both
+  returned plain `SQL_SUCCESS`. `SQLGetData`'s own `cursor.done` is derived
+  from that return value — anything other than `SQL_SUCCESS_WITH_INFO` marks a
+  chunkable column exhausted — so the probe's `SQL_SUCCESS` silently closed the
+  column, and the documented follow-up call with a buffer sized from the
+  reported length got `SQL_NO_DATA` instead of the value. The spec's own step
+  5 already draws this line: "If the data buffer supplied is too small to hold
+  the null-termination character, SQLGetData returns SQL_SUCCESS_WITH_INFO and
+  SQLSTATE 01004" — a zero-length buffer is always too small to hold it, so
+  it is the same case as any other partial write, not a length query. The
+  three writers now split the same way `write_utf16` already does elsewhere in
+  this crate: null target stays `SQL_SUCCESS`, non-null target with no room
+  (`buffer_length <= 0`, or `< 2` for `SQL_C_WCHAR`'s two-byte terminator)
+  becomes `SQL_SUCCESS_WITH_INFO` with `01004` and the cursor left resumable.
+
+  **For driver authors:** the same three writers also serve `SQLFetch`'s
+  bound-column path (`SQLBindCol` with `BufferLength` 0), which now reports
+  `SQL_SUCCESS_WITH_INFO`/`01004` for that row instead of silently discarding
+  the value — the same shared-branch bug, on a call shape no test in this
+  crate previously exercised. A `SQLGetData` call with a non-zero
+  `BufferLength`, or any bound column with a real `BufferLength`, is
+  unaffected.
+
 [Unreleased]: https://github.com/stackabletech/stackable-odbc-core/commits/HEAD
