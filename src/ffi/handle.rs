@@ -5,7 +5,7 @@ use crate::descriptor::DescriptorRole;
 use crate::errors::OdbcError;
 use crate::handles::registry::{HandleKind, registry};
 use crate::handles::{
-    AllocType, ConnectionHandle, StatementHandle, alloc_connection, alloc_descriptor,
+    AllocFailure, AllocType, ConnectionHandle, StatementHandle, alloc_connection, alloc_descriptor,
     alloc_environment, alloc_statement, free_connection, free_descriptor, free_environment,
     free_statement, revert_statements_using,
 };
@@ -13,6 +13,32 @@ use crate::panic::panic_safe;
 use crate::types::{SqlReturn, free_stmt_option_from_raw, handle_type_from_raw};
 use odbc_sys::{FreeStmtOption, HandleType};
 use std::ffi::c_void;
+/// The error every registry-exhaustion path reports.
+///
+/// `SQLAllocHandle`'s table lists `HY014` ("limit on the number of handles
+/// exceeded") and this is the only condition in this function that means it.
+fn registry_exhausted() -> OdbcError {
+    OdbcError::general(
+        "SQLAllocHandle: the handle registry is exhausted",
+        crate::types::SqlState::limit_on_handles_exceeded(),
+    )
+}
+
+/// Turn an `alloc_*` outcome into this function's return value.
+///
+/// The exhaustion arm becomes an `Err`, so `panic_safe` posts `HY014` to
+/// `InputHandle` — the queue the spec names as this call's output channel.
+/// `SQL_HANDLE_ENV` is the one arm where that posts nothing, because its
+/// `InputHandle` is `SQL_NULL_HANDLE` and the handle the diagnostic would be
+/// read from does not exist yet; it still fails with `SQL_ERROR`.
+fn finish_alloc(outcome: Result<(), AllocFailure>) -> Result<SqlReturn, OdbcError> {
+    match outcome {
+        Ok(()) => Ok(SqlReturn::SUCCESS),
+        Err(AllocFailure::InvalidHandle) => Ok(SqlReturn::INVALID_HANDLE),
+        Err(AllocFailure::RegistryExhausted) => Err(registry_exhausted()),
+    }
+}
+
 /// Generic implementation of SQLAllocHandle.
 ///
 /// Spec: <https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlallochandle-function>
@@ -45,13 +71,19 @@ use std::ffi::c_void;
 /// - HY010: Function sequence error (driver-manager-handled; not returned here).
 /// - HY013: Memory management error. The row carries no `(DM)` marker, so this is
 ///   the driver's answer to give: not returned, for the same reason as `HY001`.
-/// - HY014: Limit on the number of handles exceeded. Not returned, though a limit
-///   does exist: a token packs a slot index into half a `usize`, so the registry
-///   holds at most `MAX_SLOT_INDEX` live handles (`handles/registry.rs`). At
-///   `2^32 - 1` slots on a 64-bit target the limit is not reachable in practice,
-///   and the exhaustion paths currently answer `SQL_ERROR` — with `HY000` for
-///   `SQL_HANDLE_DESC` and with no diagnostic at all for the other three. See the
-///   `TODO(spec)` at those sites.
+/// - HY014: Limit on the number of handles exceeded. **Returned by this driver**
+///   when the handle registry has no slot left. A token packs a slot index into
+///   half a `usize`, so the ceiling is `MAX_SLOT_INDEX` live handles
+///   (`handles/registry.rs`): `2^32 - 1` on a 64-bit target, but **65 535 on a
+///   32-bit one**, which ODBC still very much has — Excel and Access are 32-bit
+///   on Windows — so a handle-leaking application can reach it. The diagnostic
+///   goes to `InputHandle`, this call's output channel: the environment for a
+///   connection, the connection for a statement or an explicit descriptor.
+///   `SQL_HANDLE_ENV` is the one arm that cannot carry it, because its
+///   `InputHandle` is `SQL_NULL_HANDLE` and the handle the application would
+///   read the diagnostic from does not exist yet; it returns `SQL_ERROR` with no
+///   record, which `env_allocation_exhaustion_fails_with_no_diagnostic_to_post_to`
+///   pins.
 /// - HY092: Returns `SQL_ERROR` if `handle_type` is not a recognized value.
 ///   Sets `*output_handle` to null on error (unless `output_handle` itself is
 ///   null). The spec annotates this (DM); it is guarded defensively here.
@@ -156,7 +188,7 @@ pub unsafe fn sql_alloc_handle<B: Backend>(
                     }
                     // SAFETY: output_handle_ptr was verified non-null above; alloc_environment
                     // writes a Box<EnvironmentHandle<B>> pointer and transfers ownership to the caller.
-                    alloc_environment::<B>(output_handle_ptr)
+                    finish_alloc(alloc_environment::<B>(output_handle_ptr))?
                 }
                 HandleType::Dbc => {
                     // Spec: InputHandle must be a valid environment handle.
@@ -170,7 +202,7 @@ pub unsafe fn sql_alloc_handle<B: Backend>(
                     // it up in the registry, which validates liveness and that it names an
                     // environment specifically, without ever dereferencing it. output_handle_ptr
                     // is non-null.
-                    alloc_connection::<B>(input_handle, output_handle_ptr)
+                    finish_alloc(alloc_connection::<B>(input_handle, output_handle_ptr))?
                 }
                 HandleType::Stmt => {
                     // Spec: InputHandle must be a valid connection handle.
@@ -204,7 +236,11 @@ pub unsafe fn sql_alloc_handle<B: Backend>(
                     // it up in the registry, which validates liveness and that it names a
                     // connection specifically, without ever dereferencing it. output_handle_ptr
                     // is non-null.
-                    alloc_statement::<B>(input_handle, output_handle_ptr, inherited_metadata_id)
+                    finish_alloc(alloc_statement::<B>(
+                        input_handle,
+                        output_handle_ptr,
+                        inherited_metadata_id,
+                    ))?
                 }
                 HandleType::Desc => {
                     // An explicit descriptor belongs to a **connection**, not a
@@ -232,10 +268,7 @@ pub unsafe fn sql_alloc_handle<B: Backend>(
                         &group,
                         input_handle,
                     ) else {
-                        return Err(OdbcError::general(
-                            "SQLAllocHandle: the handle registry is exhausted",
-                            crate::types::SqlState::general_error(),
-                        ));
+                        return Err(registry_exhausted());
                     };
                     tracing::debug!(
                         "SQLAllocHandle: allocated explicit descriptor {:?} on connection {:?}",
@@ -820,6 +853,157 @@ mod tests {
             let _ = stmt;
             crate::test_utils::cleanup_env_conn_stmt(env, conn, std::ptr::null_mut());
         }
+    }
+
+    /// The first SQLSTATE on a handle's diagnostic queue, as `SQLGetDiagRec`
+    /// would report it, or `None` if the queue is empty.
+    fn first_sqlstate_of_kind(kind: HandleType, handle: *mut c_void) -> Option<String> {
+        let mut state = [0u16; 6];
+        let mut native: i32 = 0;
+        let mut msg = [0u16; 256];
+        let mut msg_len: i16 = 0;
+        let ret = unsafe {
+            crate::ffi::diag::sql_get_diag_rec_w::<MockBackend>(
+                kind as i16,
+                handle,
+                1,
+                state.as_mut_ptr(),
+                &mut native,
+                msg.as_mut_ptr(),
+                256,
+                &mut msg_len,
+            )
+        };
+        (ret == SqlReturn::SUCCESS).then(|| String::from_utf16_lossy(&state[..5]))
+    }
+
+    /// Registry exhaustion is `SQLAllocHandle`'s `HY014`, and the diagnostic
+    /// goes to `InputHandle` — the environment, for a connection.
+    #[test]
+    fn dbc_allocation_exhaustion_posts_hy014_on_the_environment() {
+        let mut env: *mut c_void = std::ptr::null_mut();
+        let ret = unsafe {
+            sql_alloc_handle::<MockBackend>(HandleType::Env as i16, std::ptr::null_mut(), &mut env)
+        };
+        assert_eq!(ret, SqlReturn::SUCCESS);
+
+        let mut conn: *mut c_void = std::ptr::null_mut();
+        crate::handles::registry::fail_next_registration::arm();
+        let ret =
+            unsafe { sql_alloc_handle::<MockBackend>(HandleType::Dbc as i16, env, &mut conn) };
+        crate::handles::registry::fail_next_registration::disarm();
+
+        assert_eq!(
+            ret,
+            SqlReturn::ERROR,
+            "an exhausted registry must fail the alloc"
+        );
+        assert!(
+            conn.is_null(),
+            "OutputHandlePtr must be SQL_NULL_HANDLE on error"
+        );
+        assert_eq!(
+            first_sqlstate_of_kind(HandleType::Env, env).as_deref(),
+            Some("HY014"),
+            "the environment must carry HY014, the listed code for this condition"
+        );
+
+        unsafe {
+            let _ = sql_free_handle::<MockBackend>(HandleType::Env as i16, env);
+        }
+    }
+
+    /// The same, one level down: the diagnostic goes to the connection.
+    #[test]
+    fn stmt_allocation_exhaustion_posts_hy014_on_the_connection() {
+        let mut env: *mut c_void = std::ptr::null_mut();
+        unsafe {
+            let _ = sql_alloc_handle::<MockBackend>(
+                HandleType::Env as i16,
+                std::ptr::null_mut(),
+                &mut env,
+            );
+        }
+        let mut conn: *mut c_void = std::ptr::null_mut();
+        unsafe {
+            let _ = sql_alloc_handle::<MockBackend>(HandleType::Dbc as i16, env, &mut conn);
+        }
+
+        let mut stmt: *mut c_void = std::ptr::null_mut();
+        crate::handles::registry::fail_next_registration::arm();
+        let ret =
+            unsafe { sql_alloc_handle::<MockBackend>(HandleType::Stmt as i16, conn, &mut stmt) };
+        crate::handles::registry::fail_next_registration::disarm();
+
+        assert_eq!(ret, SqlReturn::ERROR);
+        assert!(stmt.is_null());
+        assert_eq!(
+            first_sqlstate_of_kind(HandleType::Dbc, conn).as_deref(),
+            Some("HY014")
+        );
+
+        unsafe {
+            let _ = sql_free_handle::<MockBackend>(HandleType::Dbc as i16, conn);
+            let _ = sql_free_handle::<MockBackend>(HandleType::Env as i16, env);
+        }
+    }
+
+    /// An explicit descriptor answered `HY000` for the same condition. It is
+    /// registry exhaustion like the other three, so it answers `HY014` too.
+    #[test]
+    fn explicit_descriptor_exhaustion_posts_hy014_on_the_connection() {
+        let mut env: *mut c_void = std::ptr::null_mut();
+        unsafe {
+            let _ = sql_alloc_handle::<MockBackend>(
+                HandleType::Env as i16,
+                std::ptr::null_mut(),
+                &mut env,
+            );
+        }
+        let mut conn: *mut c_void = std::ptr::null_mut();
+        unsafe {
+            let _ = sql_alloc_handle::<MockBackend>(HandleType::Dbc as i16, env, &mut conn);
+        }
+
+        let mut desc: *mut c_void = std::ptr::null_mut();
+        crate::handles::registry::fail_next_registration::arm();
+        let ret =
+            unsafe { sql_alloc_handle::<MockBackend>(HandleType::Desc as i16, conn, &mut desc) };
+        crate::handles::registry::fail_next_registration::disarm();
+
+        assert_eq!(ret, SqlReturn::ERROR);
+        assert!(desc.is_null());
+        assert_eq!(
+            first_sqlstate_of_kind(HandleType::Dbc, conn).as_deref(),
+            Some("HY014"),
+            "this path posted HY000 before; HY014 is the listed code"
+        );
+
+        unsafe {
+            let _ = sql_free_handle::<MockBackend>(HandleType::Dbc as i16, conn);
+            let _ = sql_free_handle::<MockBackend>(HandleType::Env as i16, env);
+        }
+    }
+
+    /// The environment is the one arm that cannot carry the diagnostic, and
+    /// this pins that rather than leaving it to a comment. `InputHandle` is
+    /// `SQL_NULL_HANDLE` for an environment allocation, so there is no queue
+    /// to post to — the spec's own `Handle` for this call's diagnostic does
+    /// not exist yet. It still fails.
+    #[test]
+    fn env_allocation_exhaustion_fails_with_no_diagnostic_to_post_to() {
+        let mut env: *mut c_void = std::ptr::null_mut();
+        crate::handles::registry::fail_next_registration::arm();
+        let ret = unsafe {
+            sql_alloc_handle::<MockBackend>(HandleType::Env as i16, std::ptr::null_mut(), &mut env)
+        };
+        crate::handles::registry::fail_next_registration::disarm();
+
+        assert_eq!(ret, SqlReturn::ERROR);
+        assert!(
+            env.is_null(),
+            "OutputHandlePtr must be SQL_NULL_HANDLE on error"
+        );
     }
 
     /// The first SQLSTATE on a handle's diagnostic queue, as `SQLGetDiagRec`

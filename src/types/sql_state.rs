@@ -136,6 +136,9 @@ pub const FUNCTION_SEQUENCE_ERROR: &str = "HY010";
 /// Attribute cannot be set now — HY011
 pub const ATTRIBUTE_CANNOT_BE_SET_NOW: &str = "HY011";
 
+/// Limit on the number of handles exceeded — HY014
+pub const LIMIT_ON_HANDLES_EXCEEDED: &str = "HY014";
+
 /// Cannot modify an implementation row descriptor — HY016
 pub const CANNOT_MODIFY_IRD: &str = "HY016";
 
@@ -335,6 +338,16 @@ impl SqlState {
     /// Function sequence error — HY010
     pub fn function_sequence_error() -> Self {
         Self::new(FUNCTION_SEQUENCE_ERROR)
+    }
+
+    /// Limit on the number of handles exceeded — HY014
+    ///
+    /// The handle registry has no slot left. A token packs a slot index into
+    /// half a `usize`, so the ceiling is `2^32 - 1` on a 64-bit target and
+    /// 65 535 on a 32-bit one — which ODBC still very much has, since Excel
+    /// and Access are 32-bit on Windows.
+    pub fn limit_on_handles_exceeded() -> Self {
+        Self::new(LIMIT_ON_HANDLES_EXCEEDED)
     }
 
     /// Operation canceled — HY008

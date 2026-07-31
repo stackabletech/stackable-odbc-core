@@ -1007,7 +1007,22 @@ impl<B: Backend> StatementHandle<B> {
 /// `output` must be a valid, non-null pointer to a `*mut c_void`.
 /// The caller (`sql_alloc_handle`) is responsible for validating that `output`
 /// is non-null before calling this function.
-pub unsafe fn alloc_environment<B: Backend>(output: *mut *mut c_void) -> SqlReturn {
+/// Why an `alloc_*` function produced no handle.
+///
+/// A distinct type rather than a bare [`SqlReturn`] so that the exhaustion arm
+/// cannot be confused with any other failure: `SQLAllocHandle` answers `HY014`
+/// for that one and nothing else, and a future error path added to one of these
+/// functions has to say which it is rather than inheriting a SQLSTATE by
+/// accident.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum AllocFailure {
+    /// The parent token did not name a live handle of the required kind.
+    InvalidHandle,
+    /// The registry has no slot left — `SQLAllocHandle`'s `HY014`.
+    RegistryExhausted,
+}
+
+pub unsafe fn alloc_environment<B: Backend>(output: *mut *mut c_void) -> Result<(), AllocFailure> {
     let handle = Box::new(EnvironmentHandle::<B> {
         header: HandleHeader::PLACEHOLDER,
         odbc_version: crate::types::DeclaredOdbcVersion::Odbc3,
@@ -1021,16 +1036,11 @@ pub unsafe fn alloc_environment<B: Backend>(output: *mut *mut c_void) -> SqlRetu
         Some((token, slot, generation)) => unsafe {
             (*ptr).header = HandleHeader { slot, generation };
             std::ptr::write_unaligned(output, token);
-            SqlReturn::SUCCESS
+            Ok(())
         },
         None => {
-            // TODO(spec): registry exhaustion is the SQLAllocHandle table's HY014
-            // ("limit on the number of handles exceeded"), and this arm posts no
-            // diagnostic at all. Left as-is deliberately: the limit is MAX_SLOT_INDEX,
-            // 2^32 - 1 on a 64-bit target, so no test can reach this branch without
-            // changing the token layout the registry's soundness argument rests on.
             drop(unsafe { Box::from_raw(ptr) });
-            SqlReturn::ERROR
+            Err(AllocFailure::RegistryExhausted)
         }
     }
 }
@@ -1047,13 +1057,13 @@ pub unsafe fn alloc_environment<B: Backend>(output: *mut *mut c_void) -> SqlRetu
 pub unsafe fn alloc_connection<B: Backend>(
     env_ptr: *mut c_void,
     output: *mut *mut c_void,
-) -> SqlReturn {
+) -> Result<(), AllocFailure> {
     // Validates that the environment is live and really is an environment,
     // without dereferencing it. There is no list on the environment to push
     // this connection's token onto: `register` below records the parentage
     // the registry needs.
     if registry().group_of_kind(env_ptr, HandleKind::Env).is_none() {
-        return SqlReturn::INVALID_HANDLE;
+        return Err(AllocFailure::InvalidHandle);
     }
     let handle = Box::new(ConnectionHandle::<B> {
         header: HandleHeader::PLACEHOLDER,
@@ -1078,16 +1088,11 @@ pub unsafe fn alloc_connection<B: Backend>(
         Some((token, slot, generation)) => unsafe {
             (*ptr).header = HandleHeader { slot, generation };
             std::ptr::write_unaligned(output, token);
-            SqlReturn::SUCCESS
+            Ok(())
         },
         None => {
-            // TODO(spec): registry exhaustion is the SQLAllocHandle table's HY014
-            // ("limit on the number of handles exceeded"), and this arm posts no
-            // diagnostic at all. Left as-is deliberately: the limit is MAX_SLOT_INDEX,
-            // 2^32 - 1 on a 64-bit target, so no test can reach this branch without
-            // changing the token layout the registry's soundness argument rests on.
             drop(unsafe { Box::from_raw(ptr) });
-            SqlReturn::ERROR
+            Err(AllocFailure::RegistryExhausted)
         }
     }
 }
@@ -1121,7 +1126,7 @@ pub unsafe fn alloc_statement<B: Backend>(
     conn_ptr: *mut c_void,
     output: *mut *mut c_void,
     inherited_metadata_id: Option<usize>,
-) -> SqlReturn {
+) -> Result<(), AllocFailure> {
     // Statements and their descriptors share the connection's lock. One
     // acquisition then covers a call that touches a statement and its parent.
     // `group_of_kind` validates that `conn_ptr` is live and really is a
@@ -1129,7 +1134,7 @@ pub unsafe fn alloc_statement<B: Backend>(
     // the parent.
     let group = match registry().group_of_kind(conn_ptr, HandleKind::Dbc) {
         Some(g) => g,
-        None => return SqlReturn::INVALID_HANDLE,
+        None => return Err(AllocFailure::InvalidHandle),
     };
     // Each descriptor is its own allocation with its own registry slot:
     // `SQLGetStmtAttrW` hands these out to the application, so they need tokens
@@ -1180,13 +1185,8 @@ pub unsafe fn alloc_statement<B: Backend>(
         Arc::clone(&group),
         Some(conn_ptr as usize),
     ) else {
-        // TODO(spec): registry exhaustion is the SQLAllocHandle table's HY014
-        // ("limit on the number of handles exceeded"), and this arm posts no
-        // diagnostic at all. Left as-is deliberately: the limit is MAX_SLOT_INDEX,
-        // 2^32 - 1 on a 64-bit target, so no test can reach this branch without
-        // changing the token layout the registry's soundness argument rests on.
         drop(unsafe { Box::from_raw(ptr) });
-        return SqlReturn::ERROR;
+        return Err(AllocFailure::RegistryExhausted);
     };
     unsafe {
         (*ptr).header = HandleHeader { slot, generation };
@@ -1217,7 +1217,7 @@ pub unsafe fn alloc_statement<B: Backend>(
             // SAFETY: `ptr` came from `Box::into_raw` above and its slot has
             // just been retired, so no token can reach it any more.
             drop(unsafe { Box::from_raw(ptr) });
-            return SqlReturn::ERROR;
+            return Err(AllocFailure::RegistryExhausted);
         };
         implicit[index] = desc;
     }
@@ -1225,7 +1225,7 @@ pub unsafe fn alloc_statement<B: Backend>(
         (*ptr).implicit_desc = implicit;
         std::ptr::write_unaligned(output, token);
     }
-    SqlReturn::SUCCESS
+    Ok(())
 }
 
 /// Resolve the cancel token for `stmt_token`, creating it on first use.
@@ -1737,7 +1737,7 @@ mod tests {
         unsafe {
             let mut output: *mut c_void = std::ptr::null_mut();
             let result = alloc_environment::<MockBackend>(&mut output as *mut *mut c_void);
-            assert_eq!(result, SqlReturn::SUCCESS);
+            assert_eq!(result, Ok(()));
             assert!(!output.is_null());
             let result = free_env(output);
             assert_eq!(result, SqlReturn::SUCCESS);
@@ -1752,7 +1752,7 @@ mod tests {
 
             let mut conn_ptr: *mut c_void = std::ptr::null_mut();
             let result = alloc_connection::<MockBackend>(env_ptr, &mut conn_ptr as *mut _);
-            assert_eq!(result, SqlReturn::SUCCESS);
+            assert_eq!(result, Ok(()));
             assert!(!conn_ptr.is_null());
 
             let _ = free_conn(conn_ptr);
@@ -1780,7 +1780,7 @@ mod tests {
             let result = alloc_connection::<MockBackend>(stmt, &mut out as *mut _);
             assert_eq!(
                 result,
-                SqlReturn::INVALID_HANDLE,
+                Err(AllocFailure::InvalidHandle),
                 "a statement token must not be accepted as a connection's parent environment"
             );
             assert!(out.is_null(), "no connection should have been allocated");
@@ -1810,7 +1810,7 @@ mod tests {
             let result = alloc_statement::<MockBackend>(env_ptr, &mut out as *mut _, None);
             assert_eq!(
                 result,
-                SqlReturn::INVALID_HANDLE,
+                Err(AllocFailure::InvalidHandle),
                 "an environment token must not be accepted as a statement's parent connection"
             );
             assert!(out.is_null(), "no statement should have been allocated");
@@ -1932,7 +1932,7 @@ mod tests {
             let _ = alloc_connection::<MockBackend>(env_ptr, &mut conn_ptr as *mut _);
             let mut stmt_ptr: *mut c_void = std::ptr::null_mut();
             let result = alloc_statement::<MockBackend>(conn_ptr, &mut stmt_ptr as *mut _, None);
-            assert_eq!(result, SqlReturn::SUCCESS);
+            assert_eq!(result, Ok(()));
 
             let _ = free_statement::<MockBackend>(stmt_ptr);
             let _ = free_conn(conn_ptr);
@@ -2099,10 +2099,7 @@ mod tests {
         unsafe {
             let (env, conn, stmt_a) = alloc_env_conn_stmt();
             let mut out: *mut c_void = std::ptr::null_mut();
-            assert_eq!(
-                alloc_statement::<MockBackend>(conn, &mut out, None),
-                SqlReturn::SUCCESS
-            );
+            assert_eq!(alloc_statement::<MockBackend>(conn, &mut out, None), Ok(()));
             let stmt_b = out;
 
             let snapshot = registry::registry().children_of(conn);

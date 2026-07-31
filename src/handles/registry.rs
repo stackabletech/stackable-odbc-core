@@ -179,6 +179,44 @@ pub(crate) struct Registry {
     slots: RwLock<Vec<Slot>>,
 }
 
+/// Makes the next [`Registry::register`] behave as though the table were full.
+///
+/// Exhaustion is otherwise unreachable from a test. `MAX_SLOT_INDEX` is
+/// `2^32 - 1` on a 64-bit target, and the alternative — shrinking it — would
+/// change the token layout the registry's soundness argument rests on, so the
+/// test would no longer be exercising the code that ships. Failing one
+/// registration changes nothing but the answer that one call gives.
+///
+/// It is not reachable outside tests: the whole module is `#[cfg(test)]`.
+#[cfg(test)]
+pub(crate) mod fail_next_registration {
+    use std::cell::Cell;
+
+    thread_local! {
+        /// Thread-local, not a `static`: the test binary runs tests in
+        /// parallel and the registry is process-wide, so a global flag would
+        /// let one test's arming be consumed by another test's allocation.
+        /// Registration happens on the thread that made the FFI call, so a
+        /// thread-local is both sufficient and immune to that.
+        static ARMED: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// Arm the next registration on this thread to fail.
+    pub(crate) fn arm() {
+        ARMED.set(true);
+    }
+
+    /// Consume the arming, if any. Returns whether this call should fail.
+    pub(crate) fn take() -> bool {
+        ARMED.replace(false)
+    }
+
+    /// Disarm, for a test whose allocation unexpectedly succeeded.
+    pub(crate) fn disarm() {
+        ARMED.set(false);
+    }
+}
+
 impl Registry {
     /// An empty table.
     pub(crate) fn new() -> Self {
@@ -268,6 +306,11 @@ impl Registry {
         group: Arc<GroupLock>,
         parent: Option<usize>,
     ) -> Option<(*mut c_void, u32, u32)> {
+        #[cfg(test)]
+        if fail_next_registration::take() {
+            return None;
+        }
+
         let mut slots = self.write();
 
         if let Some((index, slot)) = slots

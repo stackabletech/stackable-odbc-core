@@ -1513,6 +1513,33 @@ call `SQLCloseCursor` or `SQLFreeStmt(SQL_CLOSE)` first, as it already must for
 
 ### Fixed
 
+- **`SQLAllocHandle` now answers `HY014` when the handle registry is
+  exhausted.** It previously returned `SQL_ERROR` with *no diagnostic record at
+  all* for `SQL_HANDLE_ENV`, `SQL_HANDLE_DBC` and `SQL_HANDLE_STMT`, and with
+  `HY000` for `SQL_HANDLE_DESC`. `HY014` ("limit on the number of handles
+  exceeded") is the code the function's own diagnostics table lists for exactly
+  this condition, and the doc comment claimed no limit was imposed.
+
+  A limit does exist. A token packs a slot index into half a `usize`, so the
+  ceiling is `2^32 - 1` live handles on a 64-bit target — but **65 535 on a
+  32-bit one**, which is not a hypothetical: Excel and Access are 32-bit on
+  Windows, and a handle-leaking application reaches 65 535.
+
+  The diagnostic goes to `InputHandle`, which the spec names as this call's
+  output channel — the environment for a connection, the connection for a
+  statement or an explicit descriptor. **`SQL_HANDLE_ENV` is the one arm that
+  cannot carry it**, because its `InputHandle` is `SQL_NULL_HANDLE` and the
+  handle an application would read the diagnostic from does not exist yet; it
+  still fails with `SQL_ERROR`, and a test pins that rather than leaving it to
+  a comment.
+
+  **For driver authors:** `alloc_environment`, `alloc_connection` and
+  `alloc_statement` are `pub(crate)`, so nothing outside core calls them, but
+  they now return `Result<(), AllocFailure>` instead of `SqlReturn`. The new
+  type exists so registry exhaustion cannot be confused with a bad parent
+  handle — a future error path has to say which it is rather than inheriting a
+  SQLSTATE by accident.
+
 - **The `# Spec compliance` SQLSTATE list on every FFI function now matches the
   spec's own Diagnostics table**, and a test keeps it that way. An audit of all
   sixty exported functions found roughly forty defects with one root cause: the
