@@ -541,16 +541,17 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// (TABLE_TYPE, TABLE_CAT, TABLE_SCHEM, TABLE_NAME) and builds the result
     /// set, so a backend does not need an ORDER BY for correctness.
     ///
-    /// `table_types` is the parsed `TableType` value list — core has already
-    /// split it on commas and stripped the optional single quotes, so a backend
-    /// never parses it. An empty slice means no table-type filter.
+    /// `query.table_types()` is the parsed `TableType` value list — core has
+    /// already split it on commas and stripped the optional single quotes, so a
+    /// backend never parses it. An empty slice means no table-type filter.
+    ///
+    /// The arguments arrive as a [`TablesQuery`](crate::types::TablesQuery) so
+    /// that core can add one later without breaking every driver, and so that
+    /// the run of same-typed filters cannot be transposed at a call site.
     fn tables(
         conn: &Self::Connection,
         cancel: &Self::CancelToken,
-        catalog: Option<&str>,
-        schema: Option<&str>,
-        table: Option<&str>,
-        table_types: &[String],
+        query: &crate::types::TablesQuery<'_>,
     ) -> Result<Vec<TableRow>, Self::Error>;
 
     /// The table types this data source has, for `SQLTables`'

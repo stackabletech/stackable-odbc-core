@@ -419,14 +419,12 @@ pub unsafe fn sql_tables_w<B: Backend>(
                 .map(crate::catalog_ident::parse_table_type_list)
                 .unwrap_or_default();
 
-            let rows = B::tables(
-                connection,
-                cancel,
-                catalog.as_deref(),
-                schema.as_deref(),
-                table.as_deref(),
-                &table_types,
-            );
+            let query = crate::types::TablesQuery::default()
+                .with_catalog(catalog.as_deref())
+                .with_schema(schema.as_deref())
+                .with_table(table.as_deref())
+                .with_table_types(table_types.as_slice());
+            let rows = B::tables(connection, cancel, &query);
             let rows = timer.check::<B, _, _>(rows, cancel)?;
 
             let mut values: Vec<Vec<ColumnValue>> = rows.iter().map(TableRow::to_values).collect();
@@ -4073,6 +4071,45 @@ mod tests {
 
             let args = MockCatalogArgsBackend::recorded().expect("Backend::tables was called");
             assert_eq!(args.table.as_deref(), Some("my_table"));
+            cleanup_for::<MockCatalogArgsBackend>(env, conn, stmt);
+        }
+    }
+
+    /// Core fills each `TablesQuery` field from the `SQLTables` argument of the
+    /// same name.
+    ///
+    /// The two `METADATA_ID` tests above supply an empty catalog and schema and
+    /// assert only on the table, so transposing any two of the three was
+    /// invisible to the entire suite. `TablesQuery` makes that mistake
+    /// unwritable inside a backend; this pins the one place that still fills
+    /// the fields in positionally, where it remains writable.
+    #[test]
+    fn sql_tables_fills_each_query_field_from_its_own_argument() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCatalogArgsBackend>();
+
+            let catalog = utf16_of("cat");
+            let schema = utf16_of("sch");
+            let table = utf16_of("tbl");
+            let table_type = utf16_of("VIEW");
+            let ret = sql_tables_w::<MockCatalogArgsBackend>(
+                stmt,
+                catalog.as_ptr(),
+                SQL_NTS_I16,
+                schema.as_ptr(),
+                SQL_NTS_I16,
+                table.as_ptr(),
+                SQL_NTS_I16,
+                table_type.as_ptr(),
+                SQL_NTS_I16,
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+
+            let args = MockCatalogArgsBackend::recorded().expect("Backend::tables was called");
+            assert_eq!(args.catalog.as_deref(), Some("cat"));
+            assert_eq!(args.schema.as_deref(), Some("sch"));
+            assert_eq!(args.table.as_deref(), Some("tbl"));
+            assert_eq!(args.table_types, vec![String::from("VIEW")]);
             cleanup_for::<MockCatalogArgsBackend>(env, conn, stmt);
         }
     }

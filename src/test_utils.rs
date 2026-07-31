@@ -490,10 +490,7 @@ impl Backend for MockBackend {
     fn tables(
         _: &MockConnection,
         _: &Self::CancelToken,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: &[String],
+        _: &crate::types::TablesQuery<'_>,
     ) -> Result<Vec<TableRow>, MockError> {
         Err(MockError)
     }
@@ -730,10 +727,7 @@ impl Backend for MockNoCatalogBackend {
     fn tables(
         _: &MockConnection,
         _: &Self::CancelToken,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: &[String],
+        _: &crate::types::TablesQuery<'_>,
     ) -> Result<Vec<TableRow>, MockError> {
         Err(MockError)
     }
@@ -845,10 +839,7 @@ macro_rules! mock_keywords_backend {
             fn tables(
                 _: &MockConnection,
                 _: &Self::CancelToken,
-                _: Option<&str>,
-                _: Option<&str>,
-                _: Option<&str>,
-                _: &[String],
+                _: &crate::types::TablesQuery<'_>,
             ) -> Result<Vec<TableRow>, MockError> {
                 Err(MockError)
             }
@@ -989,10 +980,7 @@ impl Backend for MockAltBackend {
     fn tables(
         _: &MockConnection,
         _: &Self::CancelToken,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: &[String],
+        _: &crate::types::TablesQuery<'_>,
     ) -> Result<Vec<TableRow>, MockError> {
         Err(MockError)
     }
@@ -1238,10 +1226,7 @@ macro_rules! mock_isolation_backend {
             fn tables(
                 _: &MockIsolationConnection,
                 _: &Self::CancelToken,
-                _: Option<&str>,
-                _: Option<&str>,
-                _: Option<&str>,
-                _: &[String],
+                _: &crate::types::TablesQuery<'_>,
             ) -> Result<Vec<TableRow>, MockError> {
                 Err(MockError)
             }
@@ -1479,10 +1464,7 @@ macro_rules! mock_applied_backend {
             fn tables(
                 _: &MockAppliedConnection,
                 _: &Self::CancelToken,
-                _: Option<&str>,
-                _: Option<&str>,
-                _: Option<&str>,
-                _: &[String],
+                _: &crate::types::TablesQuery<'_>,
             ) -> Result<Vec<TableRow>, $err> {
                 Err(MockError.into())
             }
@@ -1746,10 +1728,7 @@ macro_rules! mock_txn_backend {
             fn tables(
                 _: &MockTxnConnection,
                 _: &Self::CancelToken,
-                _: Option<&str>,
-                _: Option<&str>,
-                _: Option<&str>,
-                _: &[String],
+                _: &crate::types::TablesQuery<'_>,
             ) -> Result<Vec<TableRow>, OdbcError> {
                 Err(OdbcError::NotImplemented {
                     feature: "mock txn backend".into(),
@@ -1955,10 +1934,7 @@ impl Backend for MockTypeInfoBackend {
     fn tables(
         _: &MockConnection,
         _: &Self::CancelToken,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: &[String],
+        _: &crate::types::TablesQuery<'_>,
     ) -> Result<Vec<TableRow>, MockError> {
         Err(MockError)
     }
@@ -2081,10 +2057,7 @@ impl Backend for MockCatalogBackend {
     fn tables(
         _: &MockConnection,
         _: &Self::CancelToken,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: &[String],
+        _: &crate::types::TablesQuery<'_>,
     ) -> Result<Vec<TableRow>, MockError> {
         Ok(vec![
             TableRow {
@@ -2514,16 +2487,13 @@ impl Backend for MockCatalogArgsBackend {
     fn tables(
         _: &MockConnection,
         _: &Self::CancelToken,
-        catalog: Option<&str>,
-        schema: Option<&str>,
-        table: Option<&str>,
-        table_types: &[String],
+        query: &crate::types::TablesQuery<'_>,
     ) -> Result<Vec<TableRow>, MockError> {
         Self::record(RecordedCatalogArgs {
-            catalog: catalog.map(str::to_string),
-            schema: schema.map(str::to_string),
-            table: table.map(str::to_string),
-            table_types: table_types.to_vec(),
+            catalog: query.catalog().map(str::to_string),
+            schema: query.schema().map(str::to_string),
+            table: query.table().map(str::to_string),
+            table_types: query.table_types().to_vec(),
             ..Default::default()
         });
         Ok(Vec::new())
@@ -2799,10 +2769,7 @@ impl Backend for MockFunctionsBackend {
     fn tables(
         _: &MockConnection,
         _: &Self::CancelToken,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: &[String],
+        _: &crate::types::TablesQuery<'_>,
     ) -> Result<Vec<TableRow>, MockError> {
         Err(MockError)
     }
@@ -2943,10 +2910,7 @@ impl Backend for MockFailingCloseBackend {
     fn tables(
         _: &MockConnection,
         _: &Self::CancelToken,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: &[String],
+        _: &crate::types::TablesQuery<'_>,
     ) -> Result<Vec<TableRow>, OdbcError> {
         Err(OdbcError::NotImplemented {
             feature: "tables".into(),
@@ -3153,10 +3117,7 @@ impl Backend for MockLongDataBackend {
     fn tables(
         _: &MockConnection,
         _: &Self::CancelToken,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: &[String],
+        _: &crate::types::TablesQuery<'_>,
     ) -> Result<Vec<TableRow>, OdbcError> {
         Err(OdbcError::NotImplemented {
             feature: "tables".into(),
@@ -3324,10 +3285,7 @@ impl Backend for MockRowCountBackend {
     fn tables(
         _: &MockConnection,
         _: &Self::CancelToken,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: &[String],
+        _: &crate::types::TablesQuery<'_>,
     ) -> Result<Vec<TableRow>, OdbcError> {
         Err(OdbcError::NotImplemented {
             feature: "tables".into(),
@@ -3444,10 +3402,7 @@ impl Backend for MockRecordingBackend {
     fn tables(
         _: &MockConnection,
         _: &Self::CancelToken,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: &[String],
+        _: &crate::types::TablesQuery<'_>,
     ) -> Result<Vec<TableRow>, MockError> {
         Err(MockError)
     }
@@ -3646,10 +3601,7 @@ impl Backend for MockCancelAwareBackend {
     fn tables(
         _: &MockConnection,
         cancel: &Self::CancelToken,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: &[String],
+        _: &crate::types::TablesQuery<'_>,
     ) -> Result<Vec<TableRow>, MockError> {
         if Self::take_call_outcome(cancel) {
             return Err(MockError);
@@ -3823,10 +3775,7 @@ impl Backend for MockBlockingBackend {
     fn tables(
         _: &MockConnection,
         _: &Self::CancelToken,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: &[String],
+        _: &crate::types::TablesQuery<'_>,
     ) -> Result<Vec<TableRow>, MockError> {
         Err(MockError)
     }
@@ -3998,10 +3947,7 @@ impl Backend for MockFetchTimeoutBackend {
     fn tables(
         _: &MockConnection,
         _: &Self::CancelToken,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: &[String],
+        _: &crate::types::TablesQuery<'_>,
     ) -> Result<Vec<TableRow>, MockError> {
         Ok(Vec::new())
     }
@@ -4143,10 +4089,7 @@ impl Backend for MockFailingDescribeBackend {
     fn tables(
         _: &MockConnection,
         _: &Self::CancelToken,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: &[String],
+        _: &crate::types::TablesQuery<'_>,
     ) -> Result<Vec<TableRow>, OdbcError> {
         Ok(Vec::new())
     }
@@ -4260,10 +4203,7 @@ impl Backend for MockCatalogRejectingBackend {
     fn tables(
         _: &MockConnection,
         _: &Self::CancelToken,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: &[String],
+        _: &crate::types::TablesQuery<'_>,
     ) -> Result<Vec<TableRow>, OdbcError> {
         Ok(Vec::new())
     }
@@ -4371,10 +4311,7 @@ impl Backend for MockBrowseBackend {
     fn tables(
         _: &MockConnection,
         _: &Self::CancelToken,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: &[String],
+        _: &crate::types::TablesQuery<'_>,
     ) -> Result<Vec<TableRow>, MockError> {
         Err(MockError)
     }
@@ -4518,10 +4455,7 @@ impl Backend for MockPrompterBackend {
     fn tables(
         _: &Self::Connection,
         _: &Self::CancelToken,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: &[String],
+        _: &crate::types::TablesQuery<'_>,
     ) -> Result<Vec<TableRow>, MockError> {
         Err(MockError)
     }
