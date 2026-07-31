@@ -155,24 +155,37 @@ fn zero_row_searched_dml<B: Backend>(stmt: &StatementHandle<B>) -> bool {
 ///   driver**: the row carries no `(DM)` marker, and when a backend call fails with
 ///   `Backend::is_cancelled` reporting its token signalled, core reports `HY008` in place of
 ///   the backend's own SQLSTATE.
-/// - HY009: Invalid use of null pointer — fails if `StatementText` is null (checked here).
+/// - HY009: Invalid use of null pointer — the spec annotates the "`StatementText` was a null
+///   pointer" clause `(DM)`, and it is the row's only clause; it is guarded defensively here.
+///   Core is also linked directly, by its own tests and by an embedder with no Driver Manager
+///   in front of it, and a null pointer that reaches `utf16_to_string` is a soundness question
+///   rather than a spec question.
 /// - HY010: Function sequence error — (DM cases for async/NEED_DATA: driver-manager-handled; not
 ///   returned here); fails if the connection is not open (checked here).
 /// - HY013: Memory management error — propagated from backend.
-/// - HY090: Invalid string or buffer length — (DM case for `TextLength <= 0 and != SQL_NTS`:
-///   driver-manager-handled); fails if `TextLength < 0` and `!= SQL_NTS` (checked here);
-///   parameter-buffer-length cases propagated from backend.
+/// - HY090: Invalid string or buffer length — only the first sentence, `TextLength <= 0` and
+///   `!= SQL_NTS`, is `(DM)`-marked; it is guarded defensively here. The three sentences that
+///   follow it are not marked and are the driver's: each describes a parameter length value
+///   set with `SQLBindParameter` that the row rules out. Those are propagated from the
+///   backend.
 /// - HY105: Invalid parameter type — propagated from backend.
 /// - HY109: Invalid cursor position — propagated from backend.
 /// - HY117: Connection suspended — (driver-manager-handled; not returned here).
 /// - HYC00: Optional feature not implemented — propagated from backend; also returned here
 ///   (checked before the backend is called) for a `{call ...}`/`{?= call ...}` stored-procedure
 ///   escape, which this driver does not support, when NOSCAN is off.
-/// - HYT00: Timeout expired — propagated from backend.
+/// - HYT00: Timeout expired — **returned by this driver**, not merely propagated. A backend
+///   whose `Backend::set_query_timeout` answered `QueryTimeout::CoreCancels` gets core's own
+///   timer (`crate::query_timer`), armed here, and `QueryTimer::reclassify` replaces the
+///   failing call's SQLSTATE with `HYT00` when the deadline fired — deliberately after the
+///   cancel pass, so "my deadline passed" wins over "another thread cancelled me". A backend
+///   enforcing its own timeout has its `HYT00` propagated unchanged.
 /// - HYT01: Connection timeout expired — propagated from backend.
 /// - IM001: Driver does not support this function — (driver-manager-handled; not returned here).
-/// - IM017: Polling disabled in async notification mode — (driver-manager-handled; not returned here).
-/// - IM018: SQLCompleteAsync not called — (driver-manager-handled; not returned here).
+/// - IM017: Polling disabled; not returned here (the asynchronous notification model is not
+///   supported — not DM-annotated in the spec).
+/// - IM018: SQLCompleteAsync not called; not returned here (the asynchronous notification model
+///   is not supported — not DM-annotated in the spec).
 ///
 /// # Safety
 ///
@@ -390,9 +403,11 @@ pub unsafe fn sql_exec_direct_w<B: Backend>(
 ///   raises this in `SQLExecute` and `SQLExecDirectW` does not run here.
 /// - 22019: Invalid escape character — propagated from backend.
 /// - 22025: Invalid escape sequence — propagated from backend.
-/// - 24000: Invalid cursor state — (DM case for open cursor with fetched rows:
-///   driver-manager-handled); driver case for open cursor without fetch is not checked here
-///   because re-prepare is allowed and simply replaces the current state.
+/// - 24000: Invalid cursor state — the row's first sentence, a cursor open on the statement
+///   where "`SQLFetch` or `SQLFetchScroll` had been called", is `(DM)`-marked and not returned
+///   here. The second is unmarked and is the driver's: a cursor open on the statement but
+///   where `SQLFetch` or `SQLFetchScroll` had not been called. Core does not return it either,
+///   because re-preparing is allowed and simply replaces the current state.
 /// - 34000: Invalid cursor name — propagated from backend.
 /// - 3D000: Invalid catalog name — propagated from backend.
 /// - 3F000: Invalid schema name — propagated from backend.
@@ -414,7 +429,11 @@ pub unsafe fn sql_exec_direct_w<B: Backend>(
 ///   driver**: the row carries no `(DM)` marker, and when a backend call fails with
 ///   `Backend::is_cancelled` reporting its token signalled, core reports `HY008` in place of
 ///   the backend's own SQLSTATE.
-/// - HY009: Invalid use of null pointer — fails if `StatementText` is null (checked here).
+/// - HY009: Invalid use of null pointer — the spec annotates the "`StatementText` was a null
+///   pointer" clause `(DM)`, and it is the row's only clause; it is guarded defensively here.
+///   Core is also linked directly, by its own tests and by an embedder with no Driver Manager
+///   in front of it, and a null pointer that reaches `utf16_to_string` is a soundness question
+///   rather than a spec question.
 /// - HY010: Function sequence error — (DM cases for async/NEED_DATA: driver-manager-handled; not
 ///   returned here); fails if the connection is not open (checked here).
 /// - HY013: Memory management error — propagated from backend.
@@ -424,11 +443,18 @@ pub unsafe fn sql_exec_direct_w<B: Backend>(
 /// - HYC00: Optional feature not implemented — propagated from backend; also returned here
 ///   (checked before the backend is called) for a `{call ...}`/`{?= call ...}` stored-procedure
 ///   escape, which this driver does not support, when NOSCAN is off.
-/// - HYT00: Timeout expired — propagated from backend.
+/// - HYT00: Timeout expired — **returned by this driver**, not merely propagated. A backend
+///   whose `Backend::set_query_timeout` answered `QueryTimeout::CoreCancels` gets core's own
+///   timer (`crate::query_timer`), armed here, and `QueryTimer::reclassify` replaces the
+///   failing call's SQLSTATE with `HYT00` when the deadline fired — deliberately after the
+///   cancel pass, so "my deadline passed" wins over "another thread cancelled me". A backend
+///   enforcing its own timeout has its `HYT00` propagated unchanged.
 /// - HYT01: Connection timeout expired — propagated from backend.
 /// - IM001: Driver does not support this function — (driver-manager-handled; not returned here).
-/// - IM017: Polling disabled in async notification mode — (driver-manager-handled; not returned here).
-/// - IM018: SQLCompleteAsync not called — (driver-manager-handled; not returned here).
+/// - IM017: Polling disabled; not returned here (the asynchronous notification model is not
+///   supported — not DM-annotated in the spec).
+/// - IM018: SQLCompleteAsync not called; not returned here (the asynchronous notification model
+///   is not supported — not DM-annotated in the spec).
 ///
 /// # Safety
 ///
@@ -633,9 +659,12 @@ pub unsafe fn sql_prepare_w<B: Backend>(
 ///   driver**: the row carries no `(DM)` marker, and when a backend call fails with
 ///   `Backend::is_cancelled` reporting its token signalled, core reports `HY008` in place of
 ///   the backend's own SQLSTATE.
-/// - HY010: Function sequence error — (DM cases for async/NEED_DATA: driver-manager-handled; not
-///   returned here); fails if no SQL has been prepared (checked here); fails if
-///   the connection is not open (checked here).
+/// - HY010: Function sequence error — every clause of this row is `(DM)`, including
+///   "the `StatementHandle` was not prepared", which this row carries and its two siblings do
+///   not. The check is guarded defensively here: without it a backend would be asked to
+///   execute a statement it was never given, which is an internal invariant violation rather
+///   than a spec check the Driver Manager can be relied on to make. The connection-not-open
+///   check is guarded here for the same reason.
 /// - HY013: Memory management error — propagated from backend.
 /// - HY090: Invalid string or buffer length — propagated from backend (parameter buffer length
 ///   validation).
@@ -643,11 +672,18 @@ pub unsafe fn sql_prepare_w<B: Backend>(
 /// - HY109: Invalid cursor position — propagated from backend.
 /// - HY117: Connection suspended — (driver-manager-handled; not returned here).
 /// - HYC00: Optional feature not implemented — propagated from backend.
-/// - HYT00: Timeout expired — propagated from backend.
+/// - HYT00: Timeout expired — **returned by this driver**, not merely propagated. A backend
+///   whose `Backend::set_query_timeout` answered `QueryTimeout::CoreCancels` gets core's own
+///   timer (`crate::query_timer`), armed here, and `QueryTimer::reclassify` replaces the
+///   failing call's SQLSTATE with `HYT00` when the deadline fired — deliberately after the
+///   cancel pass, so "my deadline passed" wins over "another thread cancelled me". A backend
+///   enforcing its own timeout has its `HYT00` propagated unchanged.
 /// - HYT01: Connection timeout expired — propagated from backend.
 /// - IM001: Driver does not support this function — (driver-manager-handled; not returned here).
-/// - IM017: Polling disabled in async notification mode — (driver-manager-handled; not returned here).
-/// - IM018: SQLCompleteAsync not called — (driver-manager-handled; not returned here).
+/// - IM017: Polling disabled; not returned here (the asynchronous notification model is not
+///   supported — not DM-annotated in the spec).
+/// - IM018: SQLCompleteAsync not called; not returned here (the asynchronous notification model
+///   is not supported — not DM-annotated in the spec).
 ///
 /// # Safety
 ///

@@ -99,12 +99,6 @@ enum DmMarking {
     /// phrase from an **unmarked** clause; a doc comment for this row has to
     /// quote it, so that it says *which* half it is talking about rather than
     /// generalising the row away.
-    ///
-    /// The first table to carry one is the catalog functions' `HY090`. Until
-    /// that one is transcribed the variant is read but never built, and the
-    /// `expect` below turns the day it is built into a prompt to delete the
-    /// line rather than a warning to explain away.
-    #[expect(dead_code, reason = "no transcribed table has a split row yet")]
     Split(&'static str),
 }
 
@@ -196,8 +190,6 @@ const NOT_YET_TRANSCRIBED: &[&str] = &[
     "sql_disconnect",
     "sql_driver_connect_w",
     "sql_end_tran",
-    "sql_exec_direct_w",
-    "sql_execute",
     "sql_extended_fetch",
     "sql_fetch",
     "sql_fetch_scroll",
@@ -221,7 +213,6 @@ const NOT_YET_TRANSCRIBED: &[&str] = &[
     "sql_num_params",
     "sql_num_result_cols",
     "sql_param_data",
-    "sql_prepare_w",
     "sql_primary_keys_w",
     "sql_procedure_columns_w",
     "sql_procedures_w",
@@ -408,7 +399,8 @@ fn claims_driver_manager(text: &str) -> bool {
 const OFF_TABLE: &str = "absent from this function's diagnostics table";
 
 #[rustfmt::skip]
-const DIAGNOSTICS_TABLES: &[FunctionDiagnostics] = &[FunctionDiagnostics {
+const DIAGNOSTICS_TABLES: &[FunctionDiagnostics] = &[
+FunctionDiagnostics {
     func: "sql_bind_col",
     odbc_name: "SQLBindCol",
     module: "src/ffi/bind.rs",
@@ -429,7 +421,180 @@ const DIAGNOSTICS_TABLES: &[FunctionDiagnostics] = &[FunctionDiagnostics {
         DiagnosticsRow { sqlstate: "HYT01", dm: DmMarking::None },
         DiagnosticsRow { sqlstate: "IM001", dm: DmMarking::All },
     ],
-}];
+},
+FunctionDiagnostics {
+    func: "sql_exec_direct_w",
+    odbc_name: "SQLExecDirect",
+    module: "src/ffi/execute.rs",
+    source: EXECUTE_RS,
+    // <https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlexecdirect-function>
+    rows: &[
+        DiagnosticsRow { sqlstate: "01000", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "01001", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "01003", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "01004", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "01006", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "01007", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "01S02", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "01S07", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "07002", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "07006", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "07007", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "07S01", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "08S01", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "21S01", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "21S02", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "22001", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "22002", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "22003", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "22007", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "22008", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "22012", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "22015", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "22018", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "22019", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "22025", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "23000", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "24000", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "34000", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "3D000", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "3F000", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "40001", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "40003", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "42000", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "42S01", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "42S02", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "42S11", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "42S12", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "42S21", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "42S22", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "44000", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "HY000", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "HY001", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "HY008", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "HY009", dm: DmMarking::All },
+        DiagnosticsRow { sqlstate: "HY010", dm: DmMarking::All },
+        DiagnosticsRow { sqlstate: "HY013", dm: DmMarking::None },
+        // Only the `TextLength` sentence is marked. The three that follow it
+        // describe a parameter bound by `SQLBindParameter`, and are the
+        // driver's.
+        DiagnosticsRow { sqlstate: "HY090", dm: DmMarking::Split("parameter length value") },
+        DiagnosticsRow { sqlstate: "HY105", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "HY109", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "HY117", dm: DmMarking::All },
+        DiagnosticsRow { sqlstate: "HYC00", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "HYT00", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "HYT01", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "IM001", dm: DmMarking::All },
+        DiagnosticsRow { sqlstate: "IM017", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "IM018", dm: DmMarking::None },
+    ],
+},
+FunctionDiagnostics {
+    func: "sql_prepare_w",
+    odbc_name: "SQLPrepare",
+    module: "src/ffi/execute.rs",
+    source: EXECUTE_RS,
+    // <https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlprepare-function>
+    rows: &[
+        DiagnosticsRow { sqlstate: "01000", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "01S02", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "08S01", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "21S01", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "21S02", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "22018", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "22019", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "22025", dm: DmMarking::None },
+        // "(DM) A cursor was open ... and SQLFetch or SQLFetchScroll had been
+        // called. A cursor was open ... but SQLFetch or SQLFetchScroll had not
+        // been called." The second sentence is unmarked and is the driver's.
+        DiagnosticsRow { sqlstate: "24000", dm: DmMarking::Split("had not been called") },
+        DiagnosticsRow { sqlstate: "34000", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "3D000", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "3F000", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "42000", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "42S01", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "42S02", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "42S11", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "42S12", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "42S21", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "42S22", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "HY000", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "HY001", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "HY008", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "HY009", dm: DmMarking::All },
+        DiagnosticsRow { sqlstate: "HY010", dm: DmMarking::All },
+        DiagnosticsRow { sqlstate: "HY013", dm: DmMarking::None },
+        // Unlike SQLExecDirect's, this row has the `TextLength` clause and
+        // nothing else, so the whole row is the Driver Manager's.
+        DiagnosticsRow { sqlstate: "HY090", dm: DmMarking::All },
+        DiagnosticsRow { sqlstate: "HY117", dm: DmMarking::All },
+        DiagnosticsRow { sqlstate: "HYC00", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "HYT00", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "HYT01", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "IM001", dm: DmMarking::All },
+        DiagnosticsRow { sqlstate: "IM017", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "IM018", dm: DmMarking::None },
+    ],
+},
+FunctionDiagnostics {
+    func: "sql_execute",
+    odbc_name: "SQLExecute",
+    module: "src/ffi/execute.rs",
+    source: EXECUTE_RS,
+    // <https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlexecute-function>
+    rows: &[
+        DiagnosticsRow { sqlstate: "01000", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "01001", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "01003", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "01004", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "01006", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "01007", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "01S02", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "01S07", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "07002", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "07006", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "07007", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "07S01", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "08S01", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "21S02", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "22001", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "22002", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "22003", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "22007", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "22008", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "22012", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "22015", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "22018", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "22019", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "22025", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "23000", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "24000", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "40001", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "40003", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "42000", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "44000", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "HY000", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "HY001", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "HY008", dm: DmMarking::None },
+        // This row has a fifth clause its two siblings lack, and it carries the
+        // marker too: "(DM) The StatementHandle was not prepared."
+        DiagnosticsRow { sqlstate: "HY010", dm: DmMarking::All },
+        DiagnosticsRow { sqlstate: "HY013", dm: DmMarking::None },
+        // No `TextLength` clause here, so nothing in this row is marked.
+        DiagnosticsRow { sqlstate: "HY090", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "HY105", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "HY109", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "HY117", dm: DmMarking::All },
+        DiagnosticsRow { sqlstate: "HYC00", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "HYT00", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "HYT01", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "IM001", dm: DmMarking::All },
+        DiagnosticsRow { sqlstate: "IM017", dm: DmMarking::None },
+        DiagnosticsRow { sqlstate: "IM018", dm: DmMarking::None },
+    ],
+},
+];
 
 #[test]
 fn the_transcription_is_well_formed() {
