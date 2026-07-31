@@ -237,6 +237,13 @@ trait is shaped so it can arrive later without changing the backend-facing API.
    /// Spec: <https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlallochandle-function>
    ```
 
+   The doc comment's SQLSTATE list is checked against the spec's own
+   Diagnostics table by `every_doc_comment_matches_the_spec_diagnostics_table`
+   (`src/types/diagnostics_table.rs`), so a new function needs its table
+   transcribed there before it will build. That module's docs give the four
+   verdict phrasings the guard recognises, and state the one thing it does not
+   check: whether the *reason* a row is not returned is true.
+
 4. **Implement the generic function** in `src/ffi/` (in the appropriate module)
 5. **Add a `Backend` (or `StatementBackend`) trait method** if the function needs database-specific logic. Prefer a defaulted method so existing drivers keep compiling.
 6. **Each driver implements the new trait method** in its own backend.
@@ -1187,7 +1194,7 @@ ODBC Application (e.g. isql)
           -> utf16_to_string(...)              # convert UTF-16 input to Rust String
           -> merge_dsn_params(...)             # parse "Key=Value;..."; if DSN= is present, resolve its keys from odbc.ini (explicit values win) and re-parse
           -> params.set_prompter(prompter_for::<B>(completion))  # B::prompter(), unless DriverCompletion is SQL_DRIVER_NOPROMPT
-          -> B::connect(&params)               # Backend trait method (database-specific); the one method not called under the group lock
+          -> B::connect(&params)               # Backend trait method (database-specific); runs under the connection's group lock, like every other Backend method
           -> handle.connection = Some(conn)    # store result in handle
           -> apply_pending_autocommit::<B>(..) # apply a SQL_ATTR_AUTOCOMMIT set before connect; tears the connection down on failure
           -> write_utf16(...)                  # echo connection string to output buffer

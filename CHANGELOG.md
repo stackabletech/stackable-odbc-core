@@ -1513,6 +1513,51 @@ call `SQLCloseCursor` or `SQLFreeStmt(SQL_CLOSE)` first, as it already must for
 
 ### Fixed
 
+- **The `# Spec compliance` SQLSTATE list on every FFI function now matches the
+  spec's own Diagnostics table**, and a test keeps it that way. An audit of all
+  sixty exported functions found roughly forty defects with one root cause: the
+  `(DM)` annotations had never been checked against the tables they claimed to
+  transcribe. They ran in both directions — unmarked rows written off as the
+  Driver Manager's (`01000`, `HY001`, `HY013`, `HYT01` across the binding and
+  parameter functions; `IM017`/`IM018` across nineteen functions; `01S08` and
+  `IM009` in `SQLDriverConnect`), and `(DM)`-marked rows presented as ordinary
+  driver checks (`SQLFreeHandle`'s and `SQLNumResultCols`' `HY010`,
+  `SQLEndTran`'s `08003`, and a dozen more).
+
+  Twenty rows are marked on only *part* of themselves, and every one of those
+  doc comments generalised the whole row away. `HY090` in the catalog functions
+  is the widest: seven of the twelve pages carry a second, unmarked sentence
+  about a name length exceeding the maximum for that name, and five do not —
+  so the row a single wording covered is really two. `SQLBulkOperations`' and
+  `SQLSetPos`' `HY092`, `SQLSetPos`' `HY109` and `24000`, `SQLGetData`'s
+  `07009`, `24000` and `HY090`, `SQLFetchScroll`'s `HY106`, `SQLPrepare`'s
+  `24000`, and `SQLAllocHandle`'s `HY001` are the rest.
+
+  Several claims the code contradicted are corrected too: `HYT00` is
+  *originated* by core's query timer rather than propagated as `HY000`;
+  `40001`, `40003` and `HYT01` are propagated unchanged rather than degraded;
+  `SQLGetTypeInfo`'s `HY010` and `SQLBindParameter`'s `HY021` are returned by
+  the driver despite being documented otherwise; `SQLDescribeParam`'s `08S01`
+  and `HYT01` said no backend query happens beside a real
+  `Backend::describe_param` call; and `SQLExtendedFetch`'s note had the Driver
+  Manager's mapping direction backwards. Around thirty rows the spec lists were
+  missing from their function's list entirely, and two blanket range bullets —
+  `SQLFetchScroll`'s `22001–22018` and the connect functions' `IM001–IM018` —
+  claimed states their tables do not have.
+
+  **No behaviour changed.** Every driver-side check named above stays exactly as
+  it was — several are load-bearing for memory safety rather than for the spec,
+  which is now what they say. The one substantive addition is a `TODO(spec)` at
+  the handle-registry exhaustion paths, where `HY014` is the listed code and
+  three of the four arms answer `SQL_ERROR` with no diagnostic at all.
+
+  **For driver authors:** the transcription lives in
+  `src/types/diagnostics_table.rs` and is core-internal, so nothing to adopt.
+  But the four verdict phrasings it recognises are worth copying into a driver's
+  own FFI docs, and the module's docs say plainly what the guard does not check —
+  it proves the row set and the `(DM)` attribution, never whether the *reason* a
+  row is not returned is true.
+
 - `SQLSetEnvAttr(SQL_ATTR_ODBC_VERSION, SQL_OV_ODBC2)` is accepted rather than
   rejected with `HY024`. It is one of the three values the attribute's table
   defines, and unixODBC's Driver Manager forwards it to the driver verbatim at
