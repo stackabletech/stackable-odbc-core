@@ -50,7 +50,8 @@ use crate::{
 ///
 /// Diagnostics from the ODBC spec Diagnostics table:
 ///
-/// - `01000` General warning — (driver-manager-handled; not returned here)
+/// - `01000` General warning — not returned here; core emits no driver-specific
+///   informational message from this function. The row carries no `(DM)` marker.
 /// - `07006` Restricted data type attribute violation — returned here when `value_type` is
 ///   `SQL_C_BINARY` and `parameter_type` is a target core cannot convert it to: the
 ///   `DECIMAL`/`NUMERIC` and character rows of the "C to SQL: Binary" table, whose byte
@@ -58,20 +59,25 @@ use crate::{
 ///   fixed at bind and needs no backend metadata, so it is refused before the query runs.
 ///   Every other incompatibility is still detected at execute time by the data source, the
 ///   binding being stored without validating it here.
-/// - `07009` Invalid descriptor index — returned when `parameter_number == 0` (bookmark
-///   parameters are not supported)
+/// - `07009` Invalid descriptor index — the spec annotates this `(DM)`, and its single
+///   clause is a `ParameterNumber` less than 1; it is guarded defensively here, because
+///   parameter numbering is 1-based throughout `ParamRecords` and a zero would key a
+///   record no execution can find.
 /// - `HY000` General error — returned for unexpected failures
-/// - `HY001` Memory allocation error — (driver-manager-handled; not returned here)
+/// - `HY001` Memory allocation error — not applicable: Rust's allocator aborts on OOM
+///   rather than returning an error, and `panic_safe` contains any unwind. The row
+///   carries no `(DM)` marker.
 /// - `HY003` Invalid application buffer type — returned when `value_type` is not a valid
 ///   C data type (`c_data_type_from_raw` returns `None`)
-/// - `HY004` Invalid SQL data type — a driver-returned code (the spec does not mark it (DM)):
-///   the driver is responsible for rejecting a `parameter_type` that is neither a valid ODBC
-///   SQL type nor a driver-specific type it supports. Here `parameter_type` is accepted as-is
+/// - `HY004` Invalid SQL data type — a driver-returned code; the row carries no `(DM)`
+///   marker, so the driver is responsible for rejecting a `parameter_type` that is neither a
+///   valid ODBC SQL type nor a driver-specific type it supports. Here `parameter_type` is accepted as-is
 ///   and any incompatibility surfaces at execute time (`07006`), because the backend exposes no
 ///   bind-time SQL-type metadata to validate against. Validation is intentionally deferred.
 /// - `HY009` Invalid argument value — (driver-manager-handled; not returned here)
 /// - `HY010` Function sequence error — (driver-manager-handled; not returned here)
-/// - `HY013` Memory management error — (driver-manager-handled; not returned here)
+/// - `HY013` Memory management error — not applicable, for the same reason as `HY001`.
+///   The row carries no `(DM)` marker.
 /// - `HY021` Inconsistent descriptor information — **returned by this driver**. The row
 ///   carries no `(DM)` marker, and `SQLSetDescRec`'s "Consistency Checks" section says when
 ///   the check runs: "This check is always performed when **SQLBindParameter** or
@@ -79,8 +85,9 @@ use crate::{
 ///   descriptor is written, so a rejected bind leaves neither changed
 ///   (`crate::descriptor::consistency_check`).
 /// - `HY090` Invalid string or buffer length — (driver-manager-handled; not returned here)
-/// - `HY104` Invalid precision or scale value — a driver-returned code (the spec does not mark it
-///   (DM)): `column_size` and `decimal_digits` are stored verbatim without range validation.
+/// - `HY104` Invalid precision or scale value — a driver-returned code; the row carries no
+///   `(DM)` marker. `column_size` and `decimal_digits` are stored verbatim without range
+///   validation.
 ///   This row is about a precision or scale "outside the range of values supported by the data
 ///   source", which needs backend metadata not available at bind time, so it is not returned.
 ///   The values are not merely stored, though: at execute time the value is checked against
@@ -93,8 +100,13 @@ use crate::{
 ///   receives an unrecognised `input_output_type`, it returns `HY024` (invalid attribute value)
 ///   instead, since the DM should have rejected it first.
 /// - `HY117` Connection is suspended — (driver-manager-handled; not returned here)
-/// - `HYC00` Optional feature not implemented — (driver-manager-handled; not returned here)
-/// - `HYT01` Connection timeout expired — (driver-manager-handled; not returned here)
+/// - `HYC00` Optional feature not implemented — not returned here, and the row carries no
+///   `(DM)` marker. Core refuses a C-type/SQL-type pairing its three conversion tables do
+///   not define with `07006` ("restricted data type attribute violation") at bind time
+///   instead, which is the state those tables' own rows name. See
+///   `numeric_convert::numeric_pairing_is_supported`.
+/// - `HYT01` Connection timeout expired — not returned here; core implements no connection
+///   timeout, so no deadline exists to expire. The row carries no `(DM)` marker.
 /// - `IM001` Driver does not support this function — (driver-manager-handled; not returned
 ///   here)
 ///
@@ -275,25 +287,34 @@ pub unsafe fn sql_bind_parameter<B: Backend>(
 ///
 /// Diagnostics from the ODBC spec Diagnostics table:
 ///
-/// - `01000` General warning — (driver-manager-handled; not returned here)
+/// - `01000` General warning — not returned here; core emits no driver-specific
+///   informational message from this function. The row carries no `(DM)` marker.
 /// - `08S01` Communication link failure — not applicable; parameter count is evaluated
 ///   locally without a round-trip to the data source
 /// - `HY000` General error — returned for unexpected failures
-/// - `HY001` Memory allocation error — (driver-manager-handled; not returned here)
+/// - `HY001` Memory allocation error — not applicable: Rust's allocator aborts on OOM
+///   rather than returning an error, and `panic_safe` contains any unwind. The row
+///   carries no `(DM)` marker.
 /// - HY008: Operation canceled; not returned here. This call makes no fallible backend call —
 ///   `SQLNumParams` reads the parameter count cached at prepare time — so there is no error for a
 ///   cancellation to be reported through. The asynchronous clause is inapplicable: core never
 ///   returns `SQL_STILL_EXECUTING`.
-/// - `HY010` Function sequence error — returned when `sql_num_params` is called before
-///   `SQLPrepare` or `SQLExecDirect` (i.e., `stmt.param_count` is `None`)
-/// - `HY013` Memory management error — (driver-manager-handled; not returned here)
+/// - `HY010` Function sequence error — every clause of this row is `(DM)`, including
+///   "called prior to calling **SQLPrepare** or **SQLExecDirect**". That check is
+///   unavoidable and stays: without a prepared statement there is no parameter count to
+///   report, so the alternative is answering a question about nothing. It fires when
+///   `stmt.param_count` is `None`.
+/// - `HY013` Memory management error — not applicable: Rust's allocator aborts on OOM
+///   rather than returning an error. The row carries no `(DM)` marker.
 /// - `HY117` Connection is suspended — (driver-manager-handled; not returned here)
-/// - `HYT01` Connection timeout expired — (driver-manager-handled; not returned here)
+/// - `HYT01` Connection timeout expired — not returned here; core implements no connection
+///   timeout, so no deadline exists to expire. The row carries no `(DM)` marker.
 /// - `IM001` Driver does not support this function — (driver-manager-handled; not returned
 ///   here)
-/// - `IM017` Polling disabled in async notification mode — (driver-manager-handled; not
-///   returned here)
-/// - `IM018` SQLCompleteAsync not called — (driver-manager-handled; not returned here)
+/// - `IM017` Polling disabled; not returned here (the asynchronous notification model is
+///   not supported — not DM-annotated in the spec).
+/// - `IM018` SQLCompleteAsync not called; not returned here (the asynchronous notification
+///   model is not supported — not DM-annotated in the spec).
 ///
 /// # Safety
 ///
@@ -358,15 +379,23 @@ pub unsafe fn sql_num_params<B: Backend>(
 ///
 /// Diagnostics from the ODBC spec Diagnostics table:
 ///
-/// - 01000: General warning — (driver-manager-handled; not returned here).
-/// - 07009: Invalid descriptor index — returned when `parameter_number` is 0 or exceeds
-///   the number of parameter markers in the prepared statement.
+/// - 01000: General warning — not returned here; core emits no driver-specific
+///   informational message from this function. The row carries no `(DM)` marker.
+/// - 07009: Invalid descriptor index — only the "less than 1" clause is `(DM)`-marked,
+///   and it is guarded defensively here. The three that follow carry no marker and are
+///   the driver's; core returns the first of them, a `ParameterNumber` greater than the
+///   number of parameters in the associated SQL statement, from the `?` markers
+///   `count_params` found. The other two — a parameter marker in a non-DML statement or
+///   in a **SELECT** list — need the data source's own parse and are left to the
+///   backend.
 /// - 21S01: Insert value list does not match column list — not returned here. The row is
 ///   about an `INSERT` whose parameter count differs from the target table's column count,
 ///   which needs the data source's catalog: core parses the statement only far enough to
 ///   count `?` markers (`count_params`) and never resolves a table. A backend that describes
 ///   parameters itself is where this would originate.
-/// - 08S01: Communication link failure — not applicable (no backend query).
+/// - 08S01: Communication link failure — propagated from the backend unchanged.
+///   `Backend::describe_param` is a real, fallible call to the data source, so a failing
+///   link surfaces here.
 /// - HY000: General error — returned for unexpected failures.
 /// - HY001: Memory allocation error — not applicable; Rust allocation panics are caught by `panic_safe`.
 /// - HY008: Operation canceled. The row's first clause — asynchronous processing, then the
@@ -376,13 +405,18 @@ pub unsafe fn sql_num_params<B: Backend>(
 ///   driver**: the row carries no `(DM)` marker, and when a backend call fails with
 ///   `Backend::is_cancelled` reporting its token signalled, core reports `HY008` in place of
 ///   the backend's own SQLSTATE.
-/// - HY010: Function sequence error — returned when no SQL has been prepared.
+/// - HY010: Function sequence error — every clause of this row is `(DM)`, including
+///   "called before calling **SQLPrepare** or **SQLExecDirect**". The check is
+///   unavoidable and stays: with no prepared statement there is no parameter to describe.
 /// - HY013: Memory management error — not applicable.
 /// - HY117: Connection suspended — (DM) (driver-manager-handled; not returned here).
-/// - HYT01: Connection timeout expired — not applicable (no backend query).
+/// - HYT01: Connection timeout expired — propagated from the backend unchanged, for the
+///   same reason as `08S01`. The row carries no `(DM)` marker.
 /// - IM001: Driver does not support this function — (DM) (driver-manager-handled; not returned here).
-/// - IM017: Polling disabled — (DM) (driver-manager-handled; not returned here).
-/// - IM018: SQLCompleteAsync not called — (DM) (driver-manager-handled; not returned here).
+/// - IM017: Polling disabled; not returned here (the asynchronous notification model is
+///   not supported — not DM-annotated in the spec).
+/// - IM018: SQLCompleteAsync not called; not returned here (the asynchronous notification
+///   model is not supported — not DM-annotated in the spec).
 ///
 /// # Safety
 ///
@@ -1310,7 +1344,8 @@ unsafe fn dae_nts_byte_count(c_type: Option<odbc_sys::CDataType>, data_ptr: *con
 ///
 /// # Spec compliance
 ///
-/// - 01000: General warning — (driver-manager-handled; not returned here).
+/// - 01000: General warning — not returned here; core emits no driver-specific
+///   informational message from this function. The row carries no `(DM)` marker.
 /// - 01004: String data, right truncated — not applicable; data is accumulated without
 ///   truncation.
 /// - 07006: Restricted data type attribute violation — not returned here. The pairing is
@@ -1373,12 +1408,14 @@ unsafe fn dae_nts_byte_count(c_type: Option<odbc_sys::CDataType>, data_ptr: *con
 ///   and none of `SQL_NTS`, `SQL_NULL_DATA` or `SQL_DEFAULT_PARAM`, which are the three the
 ///   spec's *StrLen_or_Ind* description lists.
 /// - HY117: Connection suspended — (driver-manager-handled; not returned here).
-/// - HYT01: Connection timeout expired — (driver-manager-handled; not returned here).
+/// - HYT01: Connection timeout expired — not returned here; core implements no connection
+///   timeout, so no deadline exists to expire. The row carries no `(DM)` marker.
 /// - IM001: Driver does not support this function — (driver-manager-handled; not returned
 ///   here).
-/// - IM017: Polling disabled in async notification mode — (driver-manager-handled; not
-///   returned here).
-/// - IM018: SQLCompleteAsync not called — (driver-manager-handled; not returned here).
+/// - IM017: Polling disabled; not returned here (the asynchronous notification model is
+///   not supported — not DM-annotated in the spec).
+/// - IM018: SQLCompleteAsync not called; not returned here (the asynchronous notification
+///   model is not supported — not DM-annotated in the spec).
 ///
 /// # Safety
 ///
@@ -1561,41 +1598,52 @@ pub unsafe fn sql_put_data<B: Backend>(
 ///
 /// # Spec compliance
 ///
+/// Several rows below are **absent from this function's own diagnostics table** and are
+/// documented anyway, because the page grants them: "If **SQLParamData** is called while
+/// sending data for a parameter in a SQL statement, it can return any SQLSTATE that can be
+/// returned by the function called to execute the statement (**SQLExecute** or
+/// **SQLExecDirect**)." Each is marked where it appears.
+///
 /// - 01000: General warning — propagated from backend (during final execution).
-/// - 01004: String data, right truncated — propagated from backend.
+/// - 01004: String data, right truncated — propagated from backend. **Absent from this function's diagnostics table**; inherited, as above.
 /// - 07006: Restricted data type attribute violation — propagated from backend.
 /// - 08S01: Communication link failure — propagated from backend.
-/// - 22001: String data, right truncation — returned here when the accumulated
+/// - 22001: String data, right truncation — **absent from this function's diagnostics
+///   table**, inherited as above. Returned here when the accumulated
 ///   data-at-execution value does not survive conversion to the declared SQL type: text
 ///   truncated by an exact-numeric target, or a value longer than the declared
 ///   `ColumnSize` for a character or binary target. This is the same check `SQLExecute`
 ///   applies to a value delivered in one piece (`crate::param_convert`), because
 ///   `SQLPutData` is only a different way to hand over the same parameter. Also
 ///   propagated from backend.
-/// - 22003: Numeric value out of range — returned here when that text falls outside the
+/// - 22003: Numeric value out of range — **absent from this function's diagnostics
+///   table**, inherited as above. Returned here when that text falls outside the
 ///   range of the declared numeric type (`crate::param_convert`). Also propagated from
 ///   backend.
-/// - 22007: Invalid datetime format — returned here for a datetime literal with an
+/// - 22007: Invalid datetime format — **absent from this function's diagnostics table**,
+///   inherited as above. Returned here for a datetime literal with an
 ///   out-of-range field (`crate::param_convert`). Also propagated from backend.
-/// - 22008: Datetime field overflow — returned here when that text carries a datetime
+/// - 22008: Datetime field overflow — **absent from this function's diagnostics table**,
+///   inherited as above. Returned here when that text carries a datetime
 ///   component the declared type cannot hold (`crate::param_convert`). Also propagated from
 ///   backend.
-/// - 22012: Division by zero — propagated from backend.
-/// - 22015: Interval field overflow — propagated from backend.
-/// - 22018: Invalid character value for cast specification — returned here when the
+/// - 22012: Division by zero — propagated from backend. **Absent from this function's diagnostics table**; inherited, as above.
+/// - 22015: Interval field overflow — propagated from backend. **Absent from this function's diagnostics table**; inherited, as above.
+/// - 22018: Invalid character value for cast specification — **absent from this function's
+///   diagnostics table**, inherited as above. Returned here when the
 ///   accumulated data-at-execution text is not a valid literal of the SQL type declared for
 ///   the parameter at `SQLBindParameter` (`crate::param_convert`). Also propagated from
 ///   backend.
-/// - 23000: Integrity constraint violation — propagated from backend.
-/// - 24000: Invalid cursor state — propagated from backend.
+/// - 23000: Integrity constraint violation — propagated from backend. **Absent from this function's diagnostics table**; inherited, as above.
+/// - 24000: Invalid cursor state — propagated from backend. **Absent from this function's diagnostics table**; inherited, as above.
 /// - 22026: String data, length mismatch — not returned here. The row's condition opens with
 ///   "The SQL_NEED_LONG_DATA_LEN information type in `SQLGetInfo` was 'Y'", and core answers
 ///   `"N"` for it (`default_get_info`), so the driver never asked the application to declare a
 ///   long parameter's length in advance and has nothing to compare against.
 /// - 40001: Serialization failure — propagated from backend.
 /// - 40003: Statement completion unknown — propagated from backend.
-/// - 42000: Syntax error or access violation — propagated from backend.
-/// - 44000: WITH CHECK OPTION violation — propagated from backend.
+/// - 42000: Syntax error or access violation — propagated from backend. **Absent from this function's diagnostics table**; inherited, as above.
+/// - 44000: WITH CHECK OPTION violation — propagated from backend. **Absent from this function's diagnostics table**; inherited, as above.
 /// - HY000: General error — propagated from backend.
 /// - HY001: Memory allocation error — not applicable; Rust allocation panics are caught by
 ///   `panic_safe`.
@@ -1610,20 +1658,23 @@ pub unsafe fn sql_put_data<B: Backend>(
 ///   progress, and, per the row's unmarked sentence "The previous function call was a call to
 ///   SQLParamData", when this call would finalise a parameter for which `SQLPutData` was never
 ///   called. The data-at-execution state survives that error, so the application recovers by
-///   calling `SQLPutData` for the parameter it was already asked for. (DM cases for async:
-///   driver-manager-handled; not returned here.)
+///   calling `SQLPutData` for the parameter it was already asked for. Three of the row's
+///   five clauses are `(DM)`-marked and not returned here; the other unmarked one is the
+///   case where SQLCancel was called before data was sent for all data-at-execution
+///   parameters, which core reports as `HY008` instead.
 /// - HY013: Memory management error — not applicable.
-/// - HY090: Invalid string or buffer length — propagated from backend.
-/// - HY105: Invalid parameter type — propagated from backend.
+/// - HY090: Invalid string or buffer length — propagated from backend. **Absent from this function's diagnostics table**; inherited, as above.
+/// - HY105: Invalid parameter type — propagated from backend. **Absent from this function's diagnostics table**; inherited, as above.
 /// - HY117: Connection suspended — (driver-manager-handled; not returned here).
-/// - HYC00: Optional feature not implemented — propagated from backend.
-/// - HYT00: Timeout expired — propagated from backend.
+/// - HYC00: Optional feature not implemented — propagated from backend. **Absent from this function's diagnostics table**; inherited, as above.
+/// - HYT00: Timeout expired — propagated from backend. **Absent from this function's diagnostics table**; inherited, as above.
 /// - HYT01: Connection timeout expired — propagated from backend.
 /// - IM001: Driver does not support this function — (driver-manager-handled; not returned
 ///   here).
-/// - IM017: Polling disabled in async notification mode — (driver-manager-handled; not
-///   returned here).
-/// - IM018: SQLCompleteAsync not called — (driver-manager-handled; not returned here).
+/// - IM017: Polling disabled; not returned here (the asynchronous notification model is
+///   not supported — not DM-annotated in the spec).
+/// - IM018: SQLCompleteAsync not called; not returned here (the asynchronous notification
+///   model is not supported — not DM-annotated in the spec).
 ///
 /// # Safety
 ///
