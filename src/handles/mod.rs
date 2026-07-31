@@ -1024,6 +1024,11 @@ pub unsafe fn alloc_environment<B: Backend>(output: *mut *mut c_void) -> SqlRetu
             SqlReturn::SUCCESS
         },
         None => {
+            // TODO(spec): registry exhaustion is the SQLAllocHandle table's HY014
+            // ("limit on the number of handles exceeded"), and this arm posts no
+            // diagnostic at all. Left as-is deliberately: the limit is MAX_SLOT_INDEX,
+            // 2^32 - 1 on a 64-bit target, so no test can reach this branch without
+            // changing the token layout the registry's soundness argument rests on.
             drop(unsafe { Box::from_raw(ptr) });
             SqlReturn::ERROR
         }
@@ -1076,6 +1081,11 @@ pub unsafe fn alloc_connection<B: Backend>(
             SqlReturn::SUCCESS
         },
         None => {
+            // TODO(spec): registry exhaustion is the SQLAllocHandle table's HY014
+            // ("limit on the number of handles exceeded"), and this arm posts no
+            // diagnostic at all. Left as-is deliberately: the limit is MAX_SLOT_INDEX,
+            // 2^32 - 1 on a 64-bit target, so no test can reach this branch without
+            // changing the token layout the registry's soundness argument rests on.
             drop(unsafe { Box::from_raw(ptr) });
             SqlReturn::ERROR
         }
@@ -1170,6 +1180,11 @@ pub unsafe fn alloc_statement<B: Backend>(
         Arc::clone(&group),
         Some(conn_ptr as usize),
     ) else {
+        // TODO(spec): registry exhaustion is the SQLAllocHandle table's HY014
+        // ("limit on the number of handles exceeded"), and this arm posts no
+        // diagnostic at all. Left as-is deliberately: the limit is MAX_SLOT_INDEX,
+        // 2^32 - 1 on a 64-bit target, so no test can reach this branch without
+        // changing the token layout the registry's soundness argument rests on.
         drop(unsafe { Box::from_raw(ptr) });
         return SqlReturn::ERROR;
     };
@@ -1354,7 +1369,8 @@ pub unsafe fn free_environment<B: Backend>(
 ///
 /// Fails with `SqlReturn::ERROR` if:
 /// - The connection is still open (HY010: SQLDisconnect must be called first)
-/// - There are still active statements (HY010)
+/// - There are still handles allocated under it — statements or explicitly
+///   allocated descriptors (HY010)
 ///
 /// `scope` must hold `handle`'s own lock group, for the same reason as
 /// [`free_environment`].
@@ -1387,7 +1403,7 @@ pub unsafe fn free_connection<B: Backend>(
     // before connection.
     if !registry().children_of(handle).is_empty() {
         conn.diagnostics.push(&OdbcError::general(
-            "Cannot free connection with active statements",
+            "Cannot free connection with handles still allocated under it",
             crate::types::SqlState::function_sequence_error(),
         ));
         return SqlReturn::ERROR;

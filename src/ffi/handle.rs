@@ -34,23 +34,34 @@ use std::ffi::c_void;
 /// - 08003: Connection not open (driver-manager-handled; not returned here).
 /// - HY000: General error. Returned by the backend if handle setup fails
 ///   without a more specific code.
-/// - HY001: Memory allocation error (driver-manager-handled; allocation here is
-///   an infallible `Box`, so not returned).
+/// - HY001: Memory allocation error. The row has two sentences and only the
+///   first carries `(DM)`, the Driver Manager's own allocation failure. The
+///   second is unmarked and is the driver's: "the driver was unable to allocate
+///   memory for the specified handle". Core still does not return it, because
+///   allocation here is an infallible `Box` — Rust's allocator aborts on OOM
+///   rather than returning an error.
 /// - HY009: Returns `SQL_ERROR` if `output_handle_ptr` is null. The spec
 ///   annotates this (DM); it is guarded defensively here.
 /// - HY010: Function sequence error (driver-manager-handled; not returned here).
-/// - HY013: Memory management error (driver-manager-handled; not returned here).
-/// - HY014: Limit on the number of handles exceeded. Not returned; no fixed
-///   limit is imposed.
+/// - HY013: Memory management error. The row carries no `(DM)` marker, so this is
+///   the driver's answer to give: not returned, for the same reason as `HY001`.
+/// - HY014: Limit on the number of handles exceeded. Not returned, though a limit
+///   does exist: a token packs a slot index into half a `usize`, so the registry
+///   holds at most `MAX_SLOT_INDEX` live handles (`handles/registry.rs`). At
+///   `2^32 - 1` slots on a 64-bit target the limit is not reachable in practice,
+///   and the exhaustion paths currently answer `SQL_ERROR` — with `HY000` for
+///   `SQL_HANDLE_DESC` and with no diagnostic at all for the other three. See the
+///   `TODO(spec)` at those sites.
 /// - HY092: Returns `SQL_ERROR` if `handle_type` is not a recognized value.
 ///   Sets `*output_handle` to null on error (unless `output_handle` itself is
 ///   null). The spec annotates this (DM); it is guarded defensively here.
 /// - HY117: Connection suspended due to unknown transaction state
 ///   (driver-manager-handled; not returned here).
-/// - HYC00: Optional feature not implemented. Returned, with this SQLSTATE
+/// - HYC00: Optional feature not implemented. The row carries no `(DM)` marker, so
+///   it is the driver's to return, and it is. Returned, with this SQLSTATE
 ///   posted, for `SQL_HANDLE_DBC_INFO_TOKEN` allocation. This is the only
 ///   un-annotated code in this function's table covering an unimplemented handle
-///   type; `IM001`, the alternative, is (DM). The spec's own description of the
+///   type; `IM001`, the alternative, is the Driver Manager's. The spec's own description of the
 ///   row names `SQL_HANDLE_DESC`, which core no longer refuses. Note
 ///   `SQLFreeHandle` answers `HY000` for an unimplemented type, because its
 ///   table has no `HYC00` row at all — the asymmetry is what the two tables say.
@@ -99,9 +110,12 @@ pub unsafe fn sql_alloc_handle<B: Backend>(
     // runs Box allocation and backend construction, and a panic must not unwind
     // across the extern "system" boundary (undefined behaviour). input_handle is
     // the new child's parent (null for SQL_HANDLE_ENV, which has none), so this
-    // holds exactly the group the registration below joins — SQL_HANDLE_DBC
-    // locks the environment, SQL_HANDLE_STMT locks the connection, and neither
-    // nests. The output pointer is set to SQL_NULL_HANDLE up front so every
+    // holds the *parent's* group. For SQL_HANDLE_STMT and SQL_HANDLE_DESC that is
+    // also the group the child joins. For SQL_HANDLE_DBC it is not: a connection
+    // starts a fresh `GroupLock` of its own, which is what makes it the unit every
+    // statement and descriptor under it shares. Either way nothing nests, so there
+    // is no ordering to get wrong here — the crate's one nested-lock site is
+    // SQLEndTran(SQL_HANDLE_ENV). The output pointer is set to SQL_NULL_HANDLE up front so every
     // error path, including a caught panic, leaves it null, and only the
     // success paths overwrite it.
     let ret = unsafe {
@@ -272,7 +286,8 @@ pub unsafe fn sql_alloc_handle<B: Backend>(
 ///
 /// # Spec compliance
 ///
-/// - HY000: Returns `SQL_ERROR` with this SQLSTATE in two cases. First, when
+/// - HY000: General error. The row carries no `(DM)` marker, so it is the driver's
+///   to return, and it is. Returns `SQL_ERROR` with this SQLSTATE in two cases. First, when
 ///   `handle_type` is `SQL_HANDLE_DBC_INFO_TOKEN` — a valid handle type this
 ///   driver does not implement. The spec's table for this function lists no
 ///   `HYC00`, so the catch-all is the correct code even though `SQLAllocHandle`
@@ -280,28 +295,34 @@ pub unsafe fn sql_alloc_handle<B: Backend>(
 ///   the four descriptors allocated implicitly with a statement: this function
 ///   allocated only the descriptors whose parent is a connection, and retiring a
 ///   statement's own slot would leave that statement pointing at nothing. The
-///   refusal is expressed as ownership rather than as a spec check, and borrows
-///   no (DM) code to say so — `HY017` is the spec's name for the condition and is
-///   (DM), so core does not return it (see below). Under a real Driver Manager
-///   that branch never fires, since the DM blocks the call first; its observers
+///   refusal is expressed as ownership rather than as a spec check, and borrows no
+///   Driver-Manager-only code to say so — `HY017` is the spec's name for the
+///   condition, and the spec annotates it for the Driver Manager, so core does not
+///   return it (see below). Under a real Driver Manager that branch never fires,
+///   since the Driver Manager blocks the call first; its observers
 ///   are core's own tests and an embedder linking core directly, and for those a
 ///   general error naming the condition is as useful as `HY017`.
 /// - Returns `SQL_INVALID_HANDLE` for `SQL_HANDLE_DESC` with a token that is not
 ///   a live descriptor at all, which is a different question from ownership.
-/// - HY001: Memory allocation error (driver-manager-handled; not returned here).
-/// - HY010: Returns `SQL_ERROR` if `handle_type` is `SQL_HANDLE_ENV` and at least one
-///   connection handle is still allocated under it (`SQLFreeHandle` with `SQL_HANDLE_DBC`
-///   must be called first for every connection). Also returns `SQL_ERROR` if `handle_type`
-///   is `SQL_HANDLE_DBC` and the connection is still open (`SQLDisconnect` must be called
-///   first) or there are still active statement handles. The remaining HY010 conditions
-///   (async execution in progress, data-at-execution pending, etc.) are
-///   driver-manager-handled; not returned here.
-/// - HY013: Memory management error (driver-manager-handled; not returned here).
+/// - HY001: Memory allocation error. The row carries no `(DM)` marker here, unlike
+///   `SQLAllocHandle`'s: not returned, because Rust's allocator aborts on OOM rather
+///   than returning an error.
+/// - HY010: Function sequence error — every clause of this row is `(DM)`. Two of them are
+///   guarded defensively here anyway, because they are load-bearing for memory safety
+///   rather than for the spec: freeing an environment that still has connections, or a
+///   connection that is still open or still has children registered under it, would leave
+///   live handles pointing at a retired parent. The children counted are every handle
+///   registered under that connection — statements and any explicitly allocated
+///   descriptors — not statements alone. The remaining clauses (async in progress,
+///   data-at-execution pending) are driver-manager-handled; not returned here.
+/// - HY013: Memory management error. The row carries no `(DM)` marker: not returned, for
+///   the same reason as `HY001`.
 /// - HY017: Invalid use of an automatically allocated descriptor handle
 ///   (driver-manager-handled; not returned here).
 /// - HY117: Connection suspended due to unknown transaction state
 ///   (driver-manager-handled; not returned here).
-/// - HYT01: Connection timeout expired (driver-manager-handled; not returned here).
+/// - HYT01: Connection timeout expired. The row carries no `(DM)` marker: not returned,
+///   because freeing a handle performs no network I/O.
 /// - IM001: Driver does not support this function (driver-manager-handled; not returned
 ///   here).
 ///
@@ -434,12 +455,16 @@ pub unsafe fn sql_free_handle<B: Backend>(handle_type: i16, handle: *mut c_void)
 ///
 /// # Spec compliance
 ///
-/// - 01000: General warning (driver-manager-handled; not returned here).
-/// - HY000: General error (driver-manager-handled; not returned here).
-/// - HY001: Memory allocation error (driver-manager-handled; not returned here).
+/// - 01000: General warning. The row carries no `(DM)` marker: not returned, because core
+///   emits no driver-specific informational message from this function.
+/// - HY000: General error. The row carries no `(DM)` marker: not returned, because every
+///   failure this function can have already has a more specific state.
+/// - HY001: Memory allocation error. The row carries no `(DM)` marker: not returned,
+///   because Rust's allocator aborts on OOM rather than returning an error.
 /// - HY010: Function sequence error (async execution in progress, data-at-execution pending,
 ///   etc.) — driver-manager-handled; not returned here.
-/// - HY013: Memory management error (driver-manager-handled; not returned here).
+/// - HY013: Memory management error. The row carries no `(DM)` marker: not returned, for
+///   the same reason as `HY001`.
 /// - HY092: Returns `SQL_ERROR` and posts this SQLSTATE if `option` is not one of
 ///   the recognised values (`SQL_CLOSE`, `SQL_UNBIND`, `SQL_RESET_PARAMS`). The
 ///   spec marks this row **(DM)**, so a conforming Driver Manager normally
@@ -450,7 +475,8 @@ pub unsafe fn sql_free_handle<B: Backend>(handle_type: i16, handle: *mut c_void)
 ///   Windows DM compatibility (the Windows DM passes it through to the driver
 ///   instead of mapping it to `SQLFreeHandle`); it is forwarded to
 ///   `sql_free_handle` rather than rejected.
-/// - HYT01: Connection timeout expired (driver-manager-handled; not returned here).
+/// - HYT01: Connection timeout expired. The row carries no `(DM)` marker: not returned,
+///   because core implements no connection timeout, so no deadline exists to expire.
 /// - IM001: Driver does not support this function (driver-manager-handled; not returned
 ///   here).
 ///
