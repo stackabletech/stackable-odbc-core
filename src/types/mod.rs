@@ -135,6 +135,13 @@ pub use column_size::{
 pub mod info_type_shape;
 pub use info_type_shape::{InfoValueKind, expected_kind};
 
+// A spec transcription that audits this crate's own doc comments, so unlike
+// `info_type_shape` no driver consumes it and it is compiled only for tests.
+// That also keeps `include_str!` of a 238 KB `ffi/metadata.rs` out of the
+// shipped rlib.
+#[cfg(test)]
+mod diagnostics_table;
+
 mod version;
 pub use version::{format_odbc_version, parse_dotted_version};
 

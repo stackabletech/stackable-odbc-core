@@ -42,7 +42,9 @@ use crate::types::SqlReturn;
 ///
 /// Diagnostics from the ODBC spec Diagnostics table:
 ///
-/// - `01000` General warning — (driver-manager-handled; not returned here)
+/// - `01000` General warning — not returned here; core emits no driver-specific
+///   informational message from this function. The row carries no `(DM)` marker, so
+///   this is the driver's answer to give.
 /// - `07006` Restricted data type attribute violation — (driver-manager-handled; emitted when
 ///   `column_number == 0` and `target_type` is not `SQL_C_BOOKMARK` or `SQL_C_VARBOOKMARK`;
 ///   not returned here because bookmark columns are not supported)
@@ -52,24 +54,29 @@ use crate::types::SqlReturn;
 ///   called before `SQLExecute`, when there is no column count to compare against, and the row
 ///   carries no `(DM)` marker, so nothing else checks it either. Deferred.
 /// - `HY000` General error — returned for unexpected failures
-/// - `HY001` Memory allocation error — (driver-manager-handled; not returned here)
+/// - `HY001` Memory allocation error — not applicable: Rust's allocator aborts on OOM
+///   rather than returning an error, and `panic_safe` contains any unwind, so there is
+///   no failure for this state to describe. The row carries no `(DM)` marker.
 /// - `HY003` Invalid application buffer type — returned when `target_type` is not a valid
 ///   C data type identifier (`c_data_type_from_raw` returns `None`)
 /// - `HY010` Function sequence error — (driver-manager-handled; not returned here)
-/// - `HY021` Inconsistent descriptor information — **returned by this driver**, although
-///   `SQLBindCol`'s own diagnostics table has no such row. `SQLSetDescRec`'s "Consistency
+/// - `HY021` Inconsistent descriptor information — **absent from this function's
+///   diagnostics table**, yet returned by this driver. `SQLSetDescRec`'s "Consistency
 ///   Checks" section states the mandate: "This check is always performed when
 ///   **SQLBindParameter** or **SQLBindCol** is called". The check runs before the record is
 ///   inserted, so a rejected bind leaves the previous binding — or no binding — in place
 ///   (`crate::descriptor::consistency_check`).
-/// - `HY013` Memory management error — (driver-manager-handled; not returned here)
+/// - `HY013` Memory management error — not applicable, for the same reason as `HY001`.
+///   The row carries no `(DM)` marker.
 /// - `HY090` Invalid string or buffer length — (driver-manager-handled; not returned here;
 ///   the DM checks for `buffer_length < 0`)
 /// - `HY117` Connection is suspended — (driver-manager-handled; not returned here)
 /// - `HYC00` Optional feature not implemented — returned when `column_number == 0`
 ///   (bookmark column; bookmarks are not supported because the `Backend` trait has no
 ///   concept of stable row identifiers)
-/// - `HYT01` Connection timeout expired — (driver-manager-handled; not returned here)
+/// - `HYT01` Connection timeout expired — not returned here; core implements no
+///   connection timeout (`SQL_ATTR_CONNECTION_TIMEOUT` is not supported), so no
+///   deadline exists to expire. The row carries no `(DM)` marker.
 /// - `IM001` Driver does not support this function — (driver-manager-handled; not returned
 ///   here)
 ///
