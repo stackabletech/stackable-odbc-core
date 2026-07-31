@@ -209,8 +209,12 @@ unsafe fn report_rows_fetched_only<B: Backend>(
 ///   diagnostic is pushed by `panic_safe`.
 /// - 07006 (restricted data type attribute violation): returned via `write_column_value` when
 ///   a column value cannot be converted to the bound C type.
-/// - 07009 (invalid descriptor index): column 0 (bookmark) bindings and ODBC 2.x
-///   `SQLExtendedFetch` absence are handled by the Driver Manager; not returned here.
+/// - 07009 (invalid descriptor index): not returned here, and the row carries no `(DM)`
+///   marker, so this is the driver's answer to give. Neither of its two clauses can arise:
+///   a column-0 binding cannot exist to be fetched into, because `sql_bind_col` refuses
+///   column 0 with `HYC00` before a binding is stored (bookmarks are unsupported — the
+///   `Backend` trait has no concept of stable row identifiers), and the other clause
+///   describes an ODBC 2.x driver, which core is not.
 /// - 08S01 (communication link failure): propagated from the backend fetch.
 /// - 22001 (string data right truncated for bookmark): not applicable; bookmarks are not
 ///   supported (the `Backend` trait has no concept of stable row identifiers).
@@ -240,8 +244,10 @@ unsafe fn report_rows_fetched_only<B: Backend>(
 ///   result set is open. (DM) variants (async context, `SQLExtendedFetch` mixing) are
 ///   driver-manager-handled; not returned here.
 /// - HY013 (memory management error): not returned.
-/// - HY090 (invalid string or buffer length): not applicable; bookmark buffer length
-///   validation is driver-manager-handled.
+/// - HY090 (invalid string or buffer length): not applicable, and the row carries no `(DM)`
+///   marker, so this is the driver's answer to give. Its single clause describes a column-0
+///   binding under `SQL_UB_VARIABLE`, and no such binding can exist: `sql_bind_col` refuses
+///   column 0, and `SQL_ATTR_USE_BOOKMARKS` cannot be set away from `SQL_UB_OFF`.
 /// - HY107 (row value out of range): not applicable; keyset cursors are not supported.
 /// - HY117 (connection suspended): driver-manager-handled; not returned here.
 /// - HYC00 (optional feature not implemented): returned via `write_column_value` when an
@@ -256,7 +262,10 @@ unsafe fn report_rows_fetched_only<B: Backend>(
 ///   computes a row, which puts the whole wait on the fetch.
 /// - HYT01 (connection timeout expired): not implemented.
 /// - IM001 (driver does not support this function): driver-manager-handled; not returned here.
-/// - IM017, IM018: driver-manager-handled; not returned here.
+/// - IM017: Polling disabled; not returned here (the asynchronous notification model is not
+///   supported — not DM-annotated in the spec).
+/// - IM018: SQLCompleteAsync not called; not returned here (the asynchronous notification model
+///   is not supported — not DM-annotated in the spec).
 ///
 /// # Safety
 ///
@@ -510,11 +519,22 @@ unsafe fn fetch_with_report<B: Backend>(
 ///   `SQL_FETCH_NEXT` is supported, which cannot reach before-start.
 /// - 01S07 (fractional truncation): delegated to `sql_fetch` for `SQL_FETCH_NEXT`.
 /// - 07006 (restricted data type attribute violation): delegated to `sql_fetch`.
-/// - 07009 (invalid descriptor index): driver-manager-handled; not returned here.
+/// - 07009 (invalid descriptor index): not returned here, and the row carries no `(DM)`
+///   marker; see `sql_fetch`, whose identical row it delegates to.
 /// - 08S01 (communication link failure): delegated to `sql_fetch`.
-/// - 22001–22018: delegated to `sql_fetch` for `SQL_FETCH_NEXT`.
+/// - 22001 (string data right truncated for bookmark): not applicable; bookmarks are not
+///   supported.
+/// - 22002 (indicator variable required but not supplied): delegated to `sql_fetch` for
+///   `SQL_FETCH_NEXT`.
+/// - 22003 (numeric value out of range): delegated to `sql_fetch` for `SQL_FETCH_NEXT`.
+/// - 22007 (invalid datetime format): delegated to `sql_fetch` for `SQL_FETCH_NEXT`.
+/// - 22012 (division by zero): delegated to `sql_fetch` for `SQL_FETCH_NEXT`.
+/// - 22015 (interval field overflow): delegated to `sql_fetch` for `SQL_FETCH_NEXT`.
+/// - 22018 (invalid character value for cast specification): delegated to `sql_fetch` for
+///   `SQL_FETCH_NEXT`.
 /// - 24000 (invalid cursor state): delegated to `sql_fetch` for `SQL_FETCH_NEXT`.
-/// - 40001, 40003: delegated to `sql_fetch`.
+/// - 40001 (serialization failure): delegated to `sql_fetch`.
+/// - 40003 (statement completion unknown): delegated to `sql_fetch`.
 /// - HY000 (general error): propagated from the backend.
 /// - HY001 (memory allocation error): not returned; Rust panics on allocation failure.
 /// - HY008: Operation canceled. The row's first clause — asynchronous processing, then the
@@ -527,11 +547,14 @@ unsafe fn fetch_with_report<B: Backend>(
 /// - HY010 (function sequence error): delegated to `sql_fetch` for `SQL_FETCH_NEXT`. (DM)
 ///   variants are driver-manager-handled; not returned here.
 /// - HY013 (memory management error): not returned.
-/// - HY090 (invalid string or buffer length): driver-manager-handled.
-/// - HY106 (fetch type out of range): returned for any `FetchOrientation` other than
-///   `SQL_FETCH_NEXT`. (DM) variants (invalid value, bookmark with USE_BOOKMARKS=OFF,
-///   forward-only cursor with non-NEXT orientation) overlap with this check; HY106 is
-///   returned directly without distinguishing DM vs. framework context.
+/// - HY090 (invalid string or buffer length): not applicable, and the row carries no `(DM)`
+///   marker; see `sql_fetch`, whose identical row it delegates to.
+/// - HY106 (fetch type out of range): **returned by this driver** for any `FetchOrientation`
+///   other than `SQL_FETCH_NEXT`. The row is `(DM)`-marked on only two of its four clauses —
+///   an invalid value, and `SQL_FETCH_BOOKMARK` with `SQL_UB_OFF` — and the two that are not
+///   are the ones core acts on: `SQL_CURSOR_FORWARD_ONLY` with an orientation that is not
+///   `SQL_FETCH_NEXT`, and the same for `SQL_NONSCROLLABLE`. This driver's cursors are
+///   forward-only and non-scrollable, so both apply and `HY106` is the driver's to return.
 /// - HY107 (row value out of range): not applicable; keyset cursors are not supported.
 /// - HY111 (invalid bookmark value): not applicable; bookmarks are not supported.
 /// - HY117 (connection suspended): driver-manager-handled; not returned here.
@@ -542,7 +565,10 @@ unsafe fn fetch_with_report<B: Backend>(
 ///   the deadline in `sql_fetch` covers this function completely.
 /// - HYT01 (connection timeout expired): not implemented.
 /// - IM001 (driver does not support this function): driver-manager-handled.
-/// - IM017, IM018: driver-manager-handled; not returned here.
+/// - IM017: Polling disabled; not returned here (the asynchronous notification model is not
+///   supported — not DM-annotated in the spec).
+/// - IM018: SQLCompleteAsync not called; not returned here (the asynchronous notification model
+///   is not supported — not DM-annotated in the spec).
 ///
 /// # Safety
 ///
@@ -605,8 +631,12 @@ pub unsafe fn sql_fetch_scroll<B: Backend>(
 /// The ODBC 2.x block-fetch entry point. ODBC 3.x replaced it with
 /// `SQLFetchScroll`, but the spec asks a 3.x driver to keep it: "ODBC 3.x
 /// drivers should support **SQLExtendedFetch** if they want to work with ODBC
-/// 2.x applications that call it." The Driver Manager also maps a 2.x
-/// application's `SQLFetchScroll` onto it.
+/// 2.x applications that call it." So a 2.x application calling it directly is
+/// the only way this function is reached, and it is the only thing standing
+/// between that application and a failed fetch. The Driver Manager's mapping in
+/// the other direction does not help: it maps `SQLFetchScroll` onto
+/// **SQLExtendedFetch** "when working with an ODBC 2.x *driver*", and core is a
+/// 3.x driver, so that mapping never fires here.
 ///
 /// Its Comments open with "the behavior of **SQLExtendedFetch** is identical to
 /// that of **SQLFetchScroll**, with the following exceptions", and for a
@@ -654,9 +684,12 @@ pub unsafe fn sql_fetch_scroll<B: Backend>(
 /// - 01S07 (fractional truncation): delegated to the shared fetch body.
 /// - 07006 (restricted data type attribute violation): delegated, via
 ///   `write_column_value`.
-/// - 07009 (invalid descriptor index): the row describes a column 0 binding with
-///   `SQL_ATTR_USE_BOOKMARKS` off; bookmarks are not supported and the
-///   bookmark-binding check is driver-manager-handled. Not returned here.
+/// - 07009 (invalid descriptor index): the row's single clause describes a
+///   column 0 binding with `SQL_ATTR_USE_BOOKMARKS` off, and it carries no
+///   `(DM)` marker, so this is the driver's answer to give. It cannot arise:
+///   `sql_bind_col` refuses column 0 with `HYC00` before a binding is stored,
+///   so there is no column-0 binding for this row to describe. Not returned
+///   here.
 /// - 08S01 (communication link failure): propagated from the backend.
 /// - 22002 (indicator variable required but not supplied): delegated.
 /// - 22003 (numeric value out of range): delegated, via `write_column_value`.
@@ -824,11 +857,14 @@ pub unsafe fn sql_extended_fetch<B: Backend>(
 ///   two "unsupported conversion" fallthroughs — the column value's variant has no defined
 ///   conversion to the requested C type (e.g. `Bytes` requested as a numeric C type, or any
 ///   value/target-type combination not covered by a specific arm).
-/// - 07009 (invalid descriptor index): returned when `col_or_param_num` is 0 (bookmark). The
-///   column-greater-than-result-set-column-count case is delegated to the backend, which
-///   returns HY000 rather than 07009; a precise 07009 check would require an extra round-trip
-///   to obtain column count. (DM) variants (bound column ordering, ARD count) are
-///   driver-manager-handled; not returned here.
+/// - 07009 (invalid descriptor index): the row's first three clauses carry no `(DM)` marker
+///   and are the driver's. The column-0 one is **returned by this driver**, when
+///   `col_or_param_num` is 0 (bookmark). The one naming a column number greater than the number
+///   of columns in the result set is delegated to the backend, which returns `HY000` rather
+///   than `07009`; a precise check would require an extra round-trip to obtain the column
+///   count. The third names a parameter ordinal, which cannot arise because core returns no
+///   streamed output parameters. The five clauses that follow — bound column, column ordering,
+///   ARD consistency and ARD count — are all `(DM)`-marked and not returned here.
 /// - 08S01 (communication link failure): propagated from the backend.
 /// - 22002 (indicator variable required but not supplied): returned when the column value
 ///   is NULL and `str_len_or_ind_ptr` is null.
@@ -852,8 +888,11 @@ pub unsafe fn sql_extended_fetch<B: Backend>(
 /// - 24000 (invalid cursor state): returned when no cursor is open (`stmt.cursor_open` is
 ///   `false`), which includes a statement that is only prepared, one that executed without
 ///   producing a result set, and one whose cursor `SQLEndTran` closed under `SQL_CB_CLOSE`.
-///   (DM) variants (not yet fetched, before-start, after-end) are driver-manager-handled;
-///   not returned here.
+///   Two of the row's three clauses are `(DM)`-marked — not yet fetched, and an executed
+///   statement with no result set — and are not returned here. The third carries no marker
+///   and is the driver's: a cursor open and fetched, but positioned before the start of the
+///   result set or after its end. It cannot arise, because this driver's cursor is
+///   forward-only and never rests outside the result set with a value still to read.
 /// - HY000 (general error): propagated from the backend; `write_column_value` does not produce
 ///   this code — its coercion-failure paths return 07006 (see above).
 /// - HY001 (memory allocation error): not returned; Rust panics on allocation failure.
@@ -871,8 +910,15 @@ pub unsafe fn sql_extended_fetch<B: Backend>(
 ///   validated. (DM) — driver-manager-handled.
 /// - HY010 (function sequence error): driver-manager-handled; not returned here.
 /// - HY013 (memory management error): not returned.
-/// - HY090 (invalid string or buffer length): returned when `buffer_length < 0`. (DM)
-///   variants (bound column buffer length checks) are driver-manager-handled.
+/// - HY090 (invalid string or buffer length): **returned by this driver** when
+///   `buffer_length < 0`. That clause is `(DM)`-marked, and the check is kept anyway because
+///   the Arguments section attributes it to the driver in as many words: "**SQLGetData**
+///   returns SQLSTATE HY090 (Invalid string or buffer length) when *BufferLength* is less
+///   than 0 but not when *BufferLength* is 0." So a negative length is refused here and a
+///   zero length is accepted, which is what that sentence asks for. The row's second clause
+///   carries no marker and is the driver's — a `BufferLength` less than 4 with
+///   `Col_or_Param_Num` 0 on an ODBC 2.x driver — and cannot arise, since core is a 3.x
+///   driver and refuses column 0 regardless.
 /// - HY109 (invalid cursor position): not checked; detecting deleted/unfetchable rows
 ///   requires backend support.
 /// - HY117 (connection suspended): driver-manager-handled; not returned here.
@@ -886,7 +932,10 @@ pub unsafe fn sql_extended_fetch<B: Backend>(
 ///   the time this function is reachable. The bound-column reads that run *inside* `SQLFetch` are
 ///   a different matter and do fall under that call's deadline.
 /// - IM001 (driver does not support this function): driver-manager-handled.
-/// - IM017, IM018: driver-manager-handled; not returned here.
+/// - IM017: Polling disabled; not returned here (the asynchronous notification model is not
+///   supported — not DM-annotated in the spec).
+/// - IM018: SQLCompleteAsync not called; not returned here (the asynchronous notification model
+///   is not supported — not DM-annotated in the spec).
 ///
 /// # Safety
 ///
