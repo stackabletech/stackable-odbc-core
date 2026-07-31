@@ -15,11 +15,12 @@
 //!    with `HYC00` (see `AGENTS.md`'s Windows Driver Manager compatibility
 //!    checklist).
 //! 3. **Info types that constrain each other agree** — see
-//!    [`info_group_inconsistencies`]. Several `SQLGetInfo` answers are
-//!    statements about one fact under different names, and core cannot police
-//!    a backend's [`crate::backend::Backend::get_info`] at runtime because that
-//!    method is entitled to answer anything. Stating the invariants here lets
-//!    each driver's suite catch a group it overrode only half of.
+//!    [`crate::conformance::info_group_inconsistencies`]. Several `SQLGetInfo`
+//!    answers are statements about one fact under different names, and core
+//!    cannot police a backend's [`crate::backend::Backend::get_info`] at
+//!    runtime because that method is entitled to answer anything. Stating the
+//!    invariants here lets each driver's suite catch a group it overrode only
+//!    half of.
 //!
 //! This module supplies the pieces every such test needs: the *derived* (not
 //! hand-copied) list of every `InfoType` the FFI boundary can produce, the list
