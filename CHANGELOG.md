@@ -720,6 +720,14 @@ call `SQLCloseCursor` or `SQLFreeStmt(SQL_CLOSE)` first, as it already must for
 
 ### Changed
 
+- **Breaking.** `ChunkWrite` has crate-private fields, three accessors and
+  `#[non_exhaustive]`. It was the one public struct in the crate with no
+  extensibility protection at all, so adding a fourth field was a major break.
+  A driver reading `write.delivered` now calls `write.delivered()`; the type is
+  produced by core and only read by a driver, so there is no construction path
+  to replace. Field doc comments moved to the accessors, which is now the only
+  place the API is described, so the two cannot drift.
+
 - `ConfigDSNW` logs a `WARN` when `hwndParent` is non-null. The driver ships no
   setup dialog, so the spec's prompt-on-overwrite behaviour ("If it matches an
   existing name and *hwndParent* is not null, **ConfigDSN** prompts the user to

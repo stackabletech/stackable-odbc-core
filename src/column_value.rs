@@ -46,21 +46,50 @@ pub unsafe fn write_column_value(
 ///
 /// Only `SQLGetData` needs this; the bound-column and `SQLParamData` paths call
 /// [`write_column_value`], which discards it.
+///
+/// The fields are crate-private and the type is `#[non_exhaustive]`, so a field
+/// added here is a source-compatible change for every driver. Read a field back
+/// through its accessor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ChunkWrite {
+    pub(crate) ret: SqlReturn,
+    pub(crate) delivered: usize,
+    pub(crate) chunkable: bool,
+}
+
+/// Field accessors for [`ChunkWrite`].
+///
+/// The fields themselves are crate-private: this type is `#[non_exhaustive]`,
+/// and public fields would have made that advisory. Reading goes through these
+/// instead.
+impl ChunkWrite {
     /// The value to return from the FFI function.
-    pub ret: SqlReturn,
+    ///
+    /// No `#[must_use]`: [`SqlReturn`] already carries one, and clippy's
+    /// `double_must_use` rejects the pair.
+    pub fn ret(&self) -> SqlReturn {
+        self.ret
+    }
+
     /// Units delivered by this call — UTF-16 code units for `SQL_C_WCHAR`,
     /// bytes for `SQL_C_CHAR` and `SQL_C_BINARY`, `0` for a fixed-width target.
     /// The caller adds this to its running offset.
-    pub delivered: usize,
+    #[must_use]
+    pub fn delivered(&self) -> usize {
+        self.delivered
+    }
+
     /// Whether this target type can be read in parts at all.
     ///
     /// `false` for every fixed-width target, which the spec forbids chunking:
     /// "SQLGetData cannot be used to return fixed-length data in parts. If
     /// SQLGetData is called more than one time in a row for a column containing
     /// fixed-length data, it returns SQL_NO_DATA for all calls after the first."
-    pub chunkable: bool,
+    #[must_use]
+    pub fn chunkable(&self) -> bool {
+        self.chunkable
+    }
 }
 
 /// [`write_column_value`], resuming `offset` units into the value.
@@ -1509,6 +1538,23 @@ fn column_value_to_binary(value: &ColumnValue) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The three fields are reachable through accessors rather than directly, so
+    /// the struct can gain a field, or an invariant, without a driver having to
+    /// change. A driver reads a `ChunkWrite` and never builds one, so there is no
+    /// constructor to cover here.
+    #[test]
+    fn chunk_write_exposes_every_field_through_an_accessor() {
+        let write = ChunkWrite {
+            ret: SqlReturn::SUCCESS_WITH_INFO,
+            delivered: 7,
+            chunkable: true,
+        };
+
+        assert_eq!(write.ret(), SqlReturn::SUCCESS_WITH_INFO);
+        assert_eq!(write.delivered(), 7);
+        assert!(write.chunkable());
+    }
 
     #[test]
     fn null_value_writes_null_indicator() {
