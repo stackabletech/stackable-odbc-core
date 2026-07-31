@@ -728,6 +728,30 @@ call `SQLCloseCursor` or `SQLFreeStmt(SQL_CLOSE)` first, as it already must for
   to replace. Field doc comments moved to the accessors, which is now the only
   place the API is described, so the two cannot drift.
 
+- **Breaking.** The ten catalog `Backend` hooks take a single sealed query type
+  instead of five to eight positional arguments: `tables` takes a
+  `&TablesQuery<'_>`, `foreign_keys` a `&ForeignKeysQuery<'_>`, and so on. A
+  driver reads the filters through accessors (`query.catalog()`,
+  `query.pk_table()`, `query.table_types()`).
+
+  Two defects motivated it. Adding an argument to any of the ten was a major
+  break for every driver, and there is no `#[non_exhaustive]` for a function
+  signature, so a parameter object is the only mechanism available. And
+  `foreign_keys` took six consecutive `Option<&str>`, where transposing a
+  primary-key argument with its foreign-key counterpart compiled silently and
+  failed at runtime as a wrong or empty result set. This is the argument the
+  typed row structs already made for the *return* side, applied to the inputs.
+
+  Eight of the ten build from `Default` and `with_*` setters. `StatisticsQuery`
+  and `SpecialColumnsQuery` take their undefaultable arguments through `new`
+  instead: `false` for `unique_only` means `SQL_INDEX_ALL`, and no `Scope` or
+  `IdentifierType` value is a defensible default, so core does not invent one.
+
+  Two call sites turned out to have no test pinning their argument mapping:
+  `SQLTables` and `SQLColumns` both passed an empty catalog and schema in their
+  `SQL_ATTR_METADATA_ID` tests and asserted only on the table, so transposing
+  those two was invisible to the whole suite. Both are pinned now.
+
 - `ConfigDSNW` logs a `WARN` when `hwndParent` is non-null. The driver ships no
   setup dialog, so the spec's prompt-on-overwrite behaviour ("If it matches an
   existing name and *hwndParent* is not null, **ConfigDSN** prompts the user to

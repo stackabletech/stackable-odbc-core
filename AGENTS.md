@@ -323,7 +323,7 @@ cannot, a named constant is the correct answer, not a worse conversion.
 The ten catalog `Backend` methods — `tables`, `columns`, `primary_keys`,
 `foreign_keys`, `statistics`, `special_columns`, `procedures`,
 `procedure_columns`, `column_privileges`, `table_privileges` — return **typed
-row structs** (`TableRow`, `ColumnRow`, …), not a `Self::Statement`. Four
+row structs** (`TableRow`, `ColumnRow`, …), not a `Self::Statement`. Five
 consequences for a driver author:
 
 - **Return the rows in any order.** Core sorts each result set into the order
@@ -362,7 +362,35 @@ consequences for a driver author:
   methods always see ordinary pattern values. `SQLTables`' `TableType` is the
   one exemption in the family — the spec makes it a value list under both
   settings — and even that no longer reaches a driver as a raw string: core
-  parses it and `tables` receives `table_types: &[String]`.
+  parses it and `tables` reads it back from `query.table_types()`.
+- **The arguments arrive as a typed query object.** Each hook takes a single
+  `&XxxQuery<'_>` (`TablesQuery`, `ForeignKeysQuery`, and so on) instead of five
+  to eight positional arguments, read through accessors:
+
+  ```rust
+  fn tables(
+      conn: &Self::Connection,
+      cancel: &Self::CancelToken,
+      query: &TablesQuery<'_>,
+  ) -> Result<Vec<TableRow>, Self::Error> {
+      let _ = (query.catalog(), query.schema(), query.table(), query.table_types());
+      todo!()
+  }
+  ```
+
+  These are sealed exactly as the row types are, so an argument added to a
+  catalog hook is a source-compatible change for every driver. The second reason
+  is `SQLForeignKeys`, which took six consecutive `Option<&str>`: crossing a
+  primary-key argument with its foreign-key counterpart compiled without
+  complaint, and `query.pk_table()` beside `query.fk_table()` cannot.
+
+  Eight are built from `Default` plus `with_*` setters. The other two take the
+  arguments that have no honest default through `new` instead:
+  `StatisticsQuery::new(unique_only)`, because `false` means `SQL_INDEX_ALL`
+  rather than "unspecified", and
+  `SpecialColumnsQuery::new(identifier_type, scope, nullable)`, because no
+  `Scope` or `IdentifierType` value is a defensible default and core does not
+  invent one.
 
 The last four — `procedures`, `procedure_columns`, `column_privileges`,
 `table_privileges` — are **defaulted to `Ok(Vec::new())`**, not to
