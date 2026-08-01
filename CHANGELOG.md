@@ -3175,6 +3175,119 @@ call `SQLCloseCursor` or `SQLFreeStmt(SQL_CLOSE)` first, as it already must for
   deliver `ColumnValue::Bool` or a 0/1 numeric rather than relying on the old
   coercion.
 
+- **Character and `DECIMAL` text reaching an integer C type is now converted
+  exactly, instead of through `f64`.** `parse_numeric_text` tried `i64` first
+  and fell back to `f64`, so any text carrying a fractional part went through a
+  53-bit mantissa on its way to `SQL_C_SBIGINT` and friends. Two things were
+  wrong with that. The value could be silently altered above 2^53 —
+  `"9007199254740993.5"` delivered 9007199254740994 with a clean `SQL_SUCCESS` —
+  and the fraction was *rounded* where the exact-numeric row says "Data
+  converted with truncation of fractional digits", with `01S07`. A value that
+  fits the target only after truncation was rejected outright:
+  `"18446744073709551615.9"` to `SQL_C_UBIGINT` is `u64::MAX`, but the nearest
+  `f64` is 2^64 and the range test answered `22003`.
+
+  Two tables govern this and they agree: [SQL to C: Character] for a
+  `ColumnValue::String` (an `SQL_CHAR`/`SQL_VARCHAR` column) and [SQL to C:
+  Numeric] for a `ColumnValue::Decimal` (`SQL_DECIMAL`/`SQL_NUMERIC`). Their
+  exact-numeric rows list the same twelve C types with the same three outcomes;
+  only the character table adds a fourth, "Data is not a *numeric-literal*" →
+  `22018`, which a numeric SQL source cannot reach.
+
+  Text bound for one of the eight integer C types now goes through
+  `param_convert`'s `DecimalLiteral`, the same exact-digit machinery the
+  parameter side has used since the C-to-SQL tables were transcribed: truncated
+  toward zero, so `"-3.9"` delivers `-3` and not `-4`, with `01S07` when
+  anything was dropped and no diagnostic when the fraction was all zeros.
+  Losing whole digits stays `22003` with nothing written, and text that is not a
+  *numeric-literal* stays `22018`. `SQL_C_FLOAT`, `SQL_C_DOUBLE` and
+  `SQL_C_BIT` keep the `f64` path — the first two because `f64` is where the
+  value is going, the third because its own row of the tables turns on a
+  fraction rather than discarding one.
+
+  **For driver authors:** three observable changes, no `Backend` method touched,
+  and nothing to adjust in a backend returning `ColumnValue::Decimal`.
+
+  - An application fetching a fractional value into an integer C type now gets
+    `SQL_SUCCESS_WITH_INFO`/`01S07` where it previously got `SQL_SUCCESS`.
+  - The delivered integer may differ by one from the old `f64`-rounded answer.
+  - A *negative* fraction above `-1` into an **unsigned** target — `"-0.5"` into
+    `SQL_C_UTINYINT` — now writes `0` with `01S07` where it previously answered
+    `SQL_ERROR`/`22003`. That is an error becoming a success, the most
+    surprising direction, and it is what the row says: only *whole* digits must
+    survive, and `-0.5` has none to lose. The old behaviour came from testing
+    the `f64`'s sign before truncating it.
+
+- **A numeric literal with a pathological exponent is now refused before it is
+  expanded, instead of asking for a multi-gigabyte allocation.**
+  `DecimalLiteral::to_decimal_string` and `DecimalLiteral::to_integer` expand an
+  exponent into plain decimal notation with `"0".repeat(scale)`, and `scale`
+  came straight from the literal's own `i32` exponent. `"1e2147483646"`
+  therefore asked for a 2 GB `String`, with a second copy in the `format!` on
+  the next line; `"1e-2147483647"` took the other branch and panicked inside
+  `format!` instead.
+
+  **A second, narrower panic on the same branch is fixed with it.** That branch
+  padded through `format!`'s `{digits:0>scale$}` width, which Rust caps at
+  `u16::MAX`, so *any* scale from 65 536 up panicked with "Formatting argument
+  out of range" rather than rendering — including scales well inside the new
+  bound, and inside what PostgreSQL `numeric` can hold. It builds its padding
+  with `"0".repeat` now, so every accepted value renders: `"1e-65536"` and
+  `"15e-200000"` return the correct decimal string where they previously
+  brought down the conversion. Lowering the bound to `u16::MAX` instead was
+  rejected — it would have traded a contained panic for wrong answers on
+  legitimate data.
+
+  **This is a security fix, not hardening.** A failed allocation *aborts* the
+  process — it does not unwind — so `panic_safe` cannot turn it into a
+  `SQL_ERROR`, and the host application goes down with the driver. The exponent
+  is not only the application's to choose: since character and `DECIMAL` column
+  text began reaching `DecimalLiteral` (the entry above), a **data source** can
+  reach this by returning `ColumnValue::Decimal("1e2147483646")`, which puts the
+  input outside the driver's trust boundary. Verified: under `ulimit -v
+  1048576`, the test process previously died with `memory allocation of
+  2147483646 bytes failed`.
+
+  A new `MAX_DECIMAL_EXPANSION_DIGITS` (2^20) bounds the digits an expansion may
+  *synthesise* — the zeros the exponent asks for, and not the significant digits
+  the source text already contained. The one exception is leading fractional
+  zeros, which are counted because the renderer really does re-synthesise them
+  (see below). The bound clears PostgreSQL `numeric`'s documented
+  131 072 + 16 383 digits, the widest exact type any mainstream data source
+  offers, by more than seven times, and three `const` assertions hold the
+  derivation from both sides — the bound cannot be tightened onto the ODBC
+  precision alone, nor loosened back into a hazard, without failing to compile.
+  The transient peak is capped at about 2 MiB: each `"0".repeat` is consumed by
+  a `format!` that copies it, so both are briefly live. That is roughly three
+  orders of magnitude below the ~2 GiB one unbounded exponent asks for.
+
+  The bound measures each rendering branch separately, so it refuses only a
+  value that would actually allocate: it costs nothing to render `"0e2147483646"`
+  as `"0"` or to truncate `"1e-2000000"` toward zero, and both still do exactly
+  that. Refused are a non-zero mantissa at a large *non-negative* exponent
+  (`"1e2147483646"`, which expands to 2 GB of trailing zeros) **and** any
+  mantissa, zero included, at a large *negative* one (`"1e-2147483647"`,
+  `"0e-2147483647"` — that branch pads out to the full scale whether the
+  mantissa is zero or not). Leading fractional zeros count toward the bound
+  even when the caller spelled them out, because the renderer re-synthesises
+  them. Every case named here is a magnitude no source in the table above can
+  hold.
+
+  The two conversion directions name different SQLSTATEs for it, and both are
+  their own table's:
+
+  - **Binding** an over-range literal is `22001`. The [C to SQL: Character]
+    table's `SQL_DECIMAL`/`SQL_NUMERIC`/integer row gives `22001` for both of
+    its lossy outcomes and lists no `22003` at all.
+  - **Fetching** one into an integer C type is `22003`, per the exact-numeric
+    row of [SQL to C: Character] and [SQL to C: Numeric], with
+    `*TargetValuePtr` left untouched.
+
+  A literal that is merely *long* is unaffected, as are `SQL_REAL`/`SQL_FLOAT`/
+  `SQL_DOUBLE` and `SQL_BIT`, which never expanded — their rows go through
+  `f64`, where an over-range exponent is already `22003`.
+
+[C to SQL: Character]: https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/c-to-sql-character
 [SQL to C: Numeric]: https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/sql-to-c-numeric
 [SQL to C: Character]: https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/sql-to-c-character
 [Unreleased]: https://github.com/stackabletech/stackable-odbc-core/commits/HEAD

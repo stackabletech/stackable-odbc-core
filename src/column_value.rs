@@ -6,6 +6,7 @@ use std::ffi::c_void;
 use odbc_sys::{Date, NULL_DATA, Time, Timestamp};
 
 use crate::errors::OdbcError;
+use crate::param_convert::{DecimalLiteral, parse_numeric_literal};
 use crate::types::{CDataType, ColumnValue, SqlReturn, SqlState};
 
 // ---------------------------------------------------------------------------
@@ -276,9 +277,10 @@ unsafe fn write_fixed_or_chunked(
         // Applications (e.g. LibreOffice Base) routinely request SQL_C_SLONG for columns
         // that happen to hold i16 values, so all cross-type numeric casts must work.
         //
-        // The pivot (column_value_as_numeric) maps every ColumnValue to either Int(i64) or
-        // Float(f64) without intermediate precision loss. write_numeric_pivot then narrows
-        // to the requested C type at the last possible moment.
+        // The pivot (column_value_as_numeric) maps every ColumnValue to Int(i64), Float(f64)
+        // or, for text bound for an integer target, exact decimal digits — none of which
+        // loses precision on the way in. write_numeric_pivot then narrows to the requested
+        // C type at the last possible moment.
         //
         // column_value_as_numeric uses an exhaustive match (no wildcard), so adding a new
         // ColumnValue variant causes a compile error there, forcing an explicit decision.
@@ -295,7 +297,7 @@ unsafe fn write_fixed_or_chunked(
             | CDataType::Float
             | CDataType::Double
             | CDataType::Bit,
-        ) => match column_value_as_numeric(value) {
+        ) => match column_value_as_numeric(value, target_type) {
             Some(pivot) => unsafe {
                 write_numeric_pivot(pivot, target_type, target_ptr, len_ind_ptr)
             },
@@ -1074,18 +1076,57 @@ unsafe fn write_binary(
 /// Keeping integers as `i64` and floats as `f64` avoids any intermediate precision
 /// loss: the final narrowing cast (`i64 as i8`, `i64 as f64`, etc.) happens once,
 /// at write time, only when the requested C target type requires it.
-enum NumericPivot {
+enum NumericPivot<'a> {
     Int(i64),
     Float(f64),
+    /// `ColumnValue::String` or `ColumnValue::Decimal` text on its way to one of
+    /// the eight integer C targets, carried as exact digits rather than as an
+    /// `f64`. `text` is the trimmed source, used only in the `22003` diagnostic.
+    Exact {
+        literal: DecimalLiteral,
+        text: &'a str,
+    },
 }
 
-/// Parse numeric text into a [`NumericPivot`].
+/// The C targets whose value is an exact integer, so that text reaching one of
+/// them must not pass through `f64`.
 ///
-/// Integer is attempted first so that values beyond `f64`'s 53-bit exact range
-/// (an exact numeric such as `DECIMAL(19,0)`) reach `SQL_C_SBIGINT` intact.
-/// Falls back to `f64` for anything with a fractional part or exponent.
-fn parse_numeric_text(s: &str) -> Option<NumericPivot> {
+/// `SQL_C_BIT` is deliberately absent: it has its own row in both of the tables
+/// [`write_exact_integer`] cites, and its three-way rule turns on a fraction
+/// rather than discarding one. It is implemented on the `Float` arm below.
+const fn is_exact_integer_target(target_type: CDataType) -> bool {
+    matches!(
+        target_type,
+        CDataType::STinyInt
+            | CDataType::SShort
+            | CDataType::SLong
+            | CDataType::SBigInt
+            | CDataType::UTinyInt
+            | CDataType::UShort
+            | CDataType::ULong
+            | CDataType::UBigInt
+    )
+}
+
+/// Parse numeric text into a [`NumericPivot`] for a given C target.
+///
+/// The target decides the representation, because the exact-numeric row of the
+/// two tables [`write_exact_integer`] cites and their float row want different
+/// things. An integer target gets a [`DecimalLiteral`], whose digits survive
+/// both `f64`'s 53-bit mantissa and the rounding an `f64` would apply where the
+/// row says "truncation of fractional digits". A float target keeps the `f64`
+/// path, since `f64` is where the value is going anyway.
+///
+/// The `i64`-then-`f64` fallback still runs for the float targets, and for text
+/// that is not a *numeric-literal* at all — `inf` and `NaN`, which
+/// [`parse_numeric_literal`] rejects and Rust's float parser accepts.
+fn parse_numeric_text(s: &str, target_type: CDataType) -> Option<NumericPivot<'_>> {
     let t = s.trim();
+    if is_exact_integer_target(target_type)
+        && let Some(literal) = parse_numeric_literal(t)
+    {
+        return Some(NumericPivot::Exact { literal, text: t });
+    }
     if let Ok(i) = t.parse::<i64>() {
         return Some(NumericPivot::Int(i));
     }
@@ -1097,7 +1138,10 @@ fn parse_numeric_text(s: &str) -> Option<NumericPivot> {
 /// This match is intentionally exhaustive (no wildcard) so that adding a new
 /// `ColumnValue` variant causes a compile error here, forcing an explicit decision
 /// about whether the new type is numeric.
-fn column_value_as_numeric(value: &ColumnValue) -> Option<NumericPivot> {
+fn column_value_as_numeric(
+    value: &ColumnValue,
+    target_type: CDataType,
+) -> Option<NumericPivot<'_>> {
     match value {
         ColumnValue::I8(v) => Some(NumericPivot::Int(i64::from(*v))),
         ColumnValue::I16(v) => Some(NumericPivot::Int(i64::from(*v))),
@@ -1106,7 +1150,7 @@ fn column_value_as_numeric(value: &ColumnValue) -> Option<NumericPivot> {
         ColumnValue::F32(v) => Some(NumericPivot::Float(f64::from(*v))),
         ColumnValue::F64(v) => Some(NumericPivot::Float(*v)),
         ColumnValue::Bool(v) => Some(NumericPivot::Int(*v as i64)),
-        ColumnValue::Decimal(s) | ColumnValue::String(s) => parse_numeric_text(s),
+        ColumnValue::Decimal(s) | ColumnValue::String(s) => parse_numeric_text(s, target_type),
         // Non-numeric variants: explicitly listed so the compiler flags any new variant
         ColumnValue::Null
         | ColumnValue::Date { .. }
@@ -1130,17 +1174,46 @@ fn column_value_as_numeric(value: &ColumnValue) -> Option<NumericPivot> {
 /// and `SQL_C_BIT`. Returns `SQL_ERROR` with SQLSTATE `22003` (numeric value out of
 /// range) when the value does not fit the target type, and `SQL_SUCCESS_WITH_INFO`
 /// with SQLSTATE `01S07` (fractional truncation) when an `i64` or an `f64` is
-/// narrowed to `f32` with precision loss, or when a fraction between 0 and 2 has
-/// its fractional part dropped to reach `SQL_C_BIT`. Any `CDataType` not covered
-/// by the numeric arms returns `SQL_ERROR` with SQLSTATE `HY003` (invalid
-/// application buffer type).
+/// narrowed to `f32` with precision loss, when a fraction between 0 and 2 has
+/// its fractional part dropped to reach `SQL_C_BIT`, or when an exact decimal
+/// loses a non-zero fraction to reach an integer target (see
+/// [`write_exact_integer`]). Any `CDataType` not covered by the numeric arms
+/// returns `SQL_ERROR` with SQLSTATE `HY003` (invalid application buffer type).
 unsafe fn write_numeric_pivot(
-    pivot: NumericPivot,
+    pivot: NumericPivot<'_>,
     target_type: CDataType,
     target_ptr: *mut c_void,
     len_ind_ptr: *mut isize,
 ) -> Result<SqlReturn, OdbcError> {
     match (pivot, target_type) {
+        // --- Exact pivot → integer targets ---
+        // `parse_numeric_text` builds this variant only for the eight targets
+        // `is_exact_integer_target` names, so the arms below cover every
+        // combination it can produce.
+        (NumericPivot::Exact { literal, text }, CDataType::STinyInt) => unsafe {
+            write_exact_integer::<i8>(&literal, text, target_ptr, len_ind_ptr)
+        },
+        (NumericPivot::Exact { literal, text }, CDataType::SShort) => unsafe {
+            write_exact_integer::<i16>(&literal, text, target_ptr, len_ind_ptr)
+        },
+        (NumericPivot::Exact { literal, text }, CDataType::SLong) => unsafe {
+            write_exact_integer::<i32>(&literal, text, target_ptr, len_ind_ptr)
+        },
+        (NumericPivot::Exact { literal, text }, CDataType::SBigInt) => unsafe {
+            write_exact_integer::<i64>(&literal, text, target_ptr, len_ind_ptr)
+        },
+        (NumericPivot::Exact { literal, text }, CDataType::UTinyInt) => unsafe {
+            write_exact_integer::<u8>(&literal, text, target_ptr, len_ind_ptr)
+        },
+        (NumericPivot::Exact { literal, text }, CDataType::UShort) => unsafe {
+            write_exact_integer::<u16>(&literal, text, target_ptr, len_ind_ptr)
+        },
+        (NumericPivot::Exact { literal, text }, CDataType::ULong) => unsafe {
+            write_exact_integer::<u32>(&literal, text, target_ptr, len_ind_ptr)
+        },
+        (NumericPivot::Exact { literal, text }, CDataType::UBigInt) => unsafe {
+            write_exact_integer::<u64>(&literal, text, target_ptr, len_ind_ptr)
+        },
         // --- Int pivot → signed integer targets ---
         (NumericPivot::Int(v), CDataType::STinyInt) => {
             let n = i8::try_from(v).map_err(|_| {
@@ -1377,6 +1450,61 @@ unsafe fn write_numeric_pivot(
             format!("Unsupported numeric target type: {target_type:?}"),
             SqlState::invalid_application_buffer_type(),
         )),
+    }
+}
+
+/// Write an exact decimal into an integer C target, truncated toward zero.
+///
+/// **Two tables govern this arm, and they agree.** A `ColumnValue::String` comes
+/// from `SQL_CHAR`/`SQL_VARCHAR`, so [SQL to C: Character] applies; a
+/// `ColumnValue::Decimal` comes from `SQL_DECIMAL`/`SQL_NUMERIC`, so [SQL to C:
+/// Numeric] does. Their exact-numeric rows list the same twelve C types and the
+/// same three outcomes, in the same order and with the same SQLSTATEs. The one
+/// difference is a fourth row that only the character table has — "Data is not a
+/// *numeric-literal*" → `22018` — which a numeric SQL source cannot reach, and
+/// which is handled by [`column_value_as_numeric`] returning `None` rather than
+/// here.
+///
+/// The three shared outcomes, in the tables' own order:
+///
+/// - "Data converted without truncation" — `SQL_SUCCESS`, nothing to report.
+/// - "Data converted with truncation of fractional digits" — the truncated
+///   value is written and `01S07` returned. Truncation is toward zero, which is
+///   what [`DecimalLiteral::to_integer`] does, so `-3.9` delivers `-3`.
+/// - "Conversion of data would result in loss of whole (as opposed to
+///   fractional) digits" — `22003`, and the range test runs before the write so
+///   `*TargetValuePtr` is left alone. A magnitude beyond `i128` reaches the same
+///   branch: no integer C type holds it either.
+///
+/// A fraction of zeros loses nothing, so `42.000` is the first row and not the
+/// second. Note what the third row does *not* say: it is whole digits that must
+/// survive, so `-0.5` into an unsigned target is the second row and writes `0`,
+/// not the third.
+///
+/// [SQL to C: Character]: https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/sql-to-c-character
+/// [SQL to C: Numeric]: https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/sql-to-c-numeric
+unsafe fn write_exact_integer<T: Copy + TryFrom<i128>>(
+    literal: &DecimalLiteral,
+    text: &str,
+    target_ptr: *mut c_void,
+    len_ind_ptr: *mut isize,
+) -> Result<SqlReturn, OdbcError> {
+    let n = literal
+        .to_integer()
+        .and_then(|v| T::try_from(v).ok())
+        .ok_or_else(|| {
+            OdbcError::general(
+                format!("Numeric value out of range: {text}"),
+                SqlState::numeric_value_out_of_range(),
+            )
+        })?;
+    unsafe {
+        let _ = write_fixed(target_ptr, len_ind_ptr, n)?;
+    };
+    if literal.fraction_is_zero() {
+        Ok(SqlReturn::SUCCESS)
+    } else {
+        Err(OdbcError::FractionalTruncation)
     }
 }
 
@@ -2865,9 +2993,16 @@ mod tests {
         // over `inf`/`infinity`, so both spellings survive — but nothing pinned
         // that before, and emitting a spelling core cannot read back would be a
         // one-way door.
+        //
+        // An integer target is the interesting one: none of these is a
+        // *numeric-literal*, so the exact path declines them and the `f64`
+        // fallback is what answers.
         for text in ["Infinity", "-Infinity", "inf", "-inf"] {
             assert!(
-                matches!(parse_numeric_text(text), Some(NumericPivot::Float(f)) if f.is_infinite()),
+                matches!(
+                    parse_numeric_text(text, CDataType::SBigInt),
+                    Some(NumericPivot::Float(f)) if f.is_infinite()
+                ),
                 "{text} should parse back to an infinite f64"
             );
         }
@@ -4100,6 +4235,320 @@ mod tests {
             err.sqlstate().as_str(),
             crate::types::sql_state::NUMERIC_VALUE_OUT_OF_RANGE
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Decimal/String text → integer C targets: the exact-numeric row of *SQL to
+    // C: Character* (a String source) and of *SQL to C: Numeric* (a Decimal
+    // source), which agree. "Data converted with truncation of fractional
+    // digits" is 01S07 with the truncated data written; "loss of whole (as
+    // opposed to fractional) digits" is 22003 with nothing written.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn decimal_text_above_2_pow_53_to_sbigint_is_exact() {
+        let mut out = 0i64;
+        let mut ind = 0isize;
+        let err = unsafe {
+            write_column_value(
+                &ColumnValue::Decimal("9007199254740993.5".into()),
+                CDataType::SBigInt,
+                std::ptr::from_mut(&mut out).cast(),
+                size_of::<i64>() as isize,
+                &mut ind,
+            )
+        }
+        .expect_err("a dropped fraction is 01S07, not success");
+        // The nearest f64 to 9007199254740993.5 is 9007199254740994.0, so a
+        // conversion routed through f64 delivers ...94 here.
+        assert_eq!(out, 9_007_199_254_740_993);
+        assert_eq!(
+            err.sqlstate().as_str(),
+            crate::types::sql_state::FRACTIONAL_TRUNCATION
+        );
+    }
+
+    #[test]
+    fn decimal_text_fraction_to_slong_truncates_toward_zero_with_01s07() {
+        let mut out = 0i32;
+        let mut ind = 0isize;
+        let err = unsafe {
+            write_column_value(
+                &ColumnValue::Decimal("-3.9".into()),
+                CDataType::SLong,
+                std::ptr::from_mut(&mut out).cast(),
+                size_of::<i32>() as isize,
+                &mut ind,
+            )
+        }
+        .expect_err("a dropped fraction is 01S07, not success");
+        assert_eq!(out, -3, "truncation is toward zero, not to -4");
+        assert_eq!(
+            err.sqlstate().as_str(),
+            crate::types::sql_state::FRACTIONAL_TRUNCATION
+        );
+    }
+
+    #[test]
+    fn decimal_text_at_u64_max_with_fraction_to_ubigint_is_exact() {
+        let mut out = 0u64;
+        let mut ind = 0isize;
+        let err = unsafe {
+            write_column_value(
+                &ColumnValue::Decimal("18446744073709551615.9".into()),
+                CDataType::UBigInt,
+                std::ptr::from_mut(&mut out).cast(),
+                size_of::<u64>() as isize,
+                &mut ind,
+            )
+        }
+        .expect_err("a dropped fraction is 01S07, not success");
+        // The nearest f64 is 2^64 exactly, which the range test rejects, so a
+        // conversion routed through f64 answers 22003 for a value that fits.
+        assert_eq!(out, u64::MAX);
+        assert_eq!(
+            err.sqlstate().as_str(),
+            crate::types::sql_state::FRACTIONAL_TRUNCATION
+        );
+    }
+
+    #[test]
+    fn decimal_text_with_an_all_zero_fraction_to_slong_is_not_a_truncation() {
+        let mut out = 0i32;
+        let mut ind = 0isize;
+        let ret = unsafe {
+            write_column_value(
+                &ColumnValue::Decimal("42.000".into()),
+                CDataType::SLong,
+                std::ptr::from_mut(&mut out).cast(),
+                size_of::<i32>() as isize,
+                &mut ind,
+            )
+        }
+        .expect("a fraction of zeros loses nothing");
+        assert_eq!(out, 42);
+        assert_eq!(ret, SqlReturn::SUCCESS);
+    }
+
+    #[test]
+    fn decimal_text_in_exponent_form_to_slong_converts() {
+        let mut out = 0i32;
+        let mut ind = 0isize;
+        let ret = unsafe {
+            write_column_value(
+                &ColumnValue::Decimal("1.5e2".into()),
+                CDataType::SLong,
+                std::ptr::from_mut(&mut out).cast(),
+                size_of::<i32>() as isize,
+                &mut ind,
+            )
+        }
+        .expect("an exponent that consumes the fraction loses nothing");
+        assert_eq!(out, 150);
+        assert_eq!(ret, SqlReturn::SUCCESS);
+    }
+
+    #[test]
+    fn decimal_text_below_one_to_slong_writes_zero_with_01s07() {
+        // The whole part is zero and the fraction is all there is, so the row is
+        // "converted with truncation of fractional digits" and not "loss of
+        // whole digits". The two spellings take different branches of
+        // `DecimalLiteral::to_integer`: "0.5" has a digit left of the point to
+        // slice, ".5" has none and falls to its |value| < 1 arm.
+        for text in ["0.5", ".5"] {
+            let mut out = 7i32;
+            let mut ind = 0isize;
+            let err = unsafe {
+                write_column_value(
+                    &ColumnValue::Decimal(text.into()),
+                    CDataType::SLong,
+                    std::ptr::from_mut(&mut out).cast(),
+                    size_of::<i32>() as isize,
+                    &mut ind,
+                )
+            }
+            .expect_err("a dropped fraction is 01S07, not success");
+            assert_eq!(out, 0, "{text} truncates to zero");
+            assert_eq!(
+                err.sqlstate().as_str(),
+                crate::types::sql_state::FRACTIONAL_TRUNCATION,
+                "{text} dropped a fraction"
+            );
+        }
+    }
+
+    #[test]
+    fn negative_decimal_text_above_minus_one_to_utinyint_writes_zero_with_01s07() {
+        // The unsigned targets are where truncating first changes the answer:
+        // -0.5 loses no *whole* digits, so the truncated value is 0 and it fits.
+        // Reading the sign before the truncation makes this 22003 instead.
+        let mut out = 7u8;
+        let mut ind = 0isize;
+        let err = unsafe {
+            write_column_value(
+                &ColumnValue::Decimal("-0.5".into()),
+                CDataType::UTinyInt,
+                std::ptr::from_mut(&mut out).cast(),
+                size_of::<u8>() as isize,
+                &mut ind,
+            )
+        }
+        .expect_err("a dropped fraction is 01S07, not success");
+        assert_eq!(out, 0);
+        assert_eq!(
+            err.sqlstate().as_str(),
+            crate::types::sql_state::FRACTIONAL_TRUNCATION
+        );
+    }
+
+    #[test]
+    fn decimal_text_with_fraction_beyond_target_range_returns_22003_and_writes_nothing() {
+        let mut out = 7i32;
+        let mut ind = 0isize;
+        let err = unsafe {
+            write_column_value(
+                &ColumnValue::Decimal("99999999999.5".into()),
+                CDataType::SLong,
+                std::ptr::from_mut(&mut out).cast(),
+                size_of::<i32>() as isize,
+                &mut ind,
+            )
+        }
+        .expect_err("losing whole digits must not convert");
+        assert_eq!(
+            out, 7,
+            "22003 leaves *TargetValuePtr undefined, so unwritten"
+        );
+        assert_eq!(
+            err.sqlstate().as_str(),
+            crate::types::sql_state::NUMERIC_VALUE_OUT_OF_RANGE
+        );
+    }
+
+    #[test]
+    fn decimal_text_beyond_i128_to_sbigint_returns_22003() {
+        let mut out = 7i64;
+        let mut ind = 0isize;
+        let err = unsafe {
+            write_column_value(
+                &ColumnValue::Decimal("1e40".into()),
+                CDataType::SBigInt,
+                std::ptr::from_mut(&mut out).cast(),
+                size_of::<i64>() as isize,
+                &mut ind,
+            )
+        }
+        .expect_err("losing whole digits must not convert");
+        assert_eq!(out, 7);
+        assert_eq!(
+            err.sqlstate().as_str(),
+            crate::types::sql_state::NUMERIC_VALUE_OUT_OF_RANGE
+        );
+    }
+
+    /// A column value is whatever the data source sent, so its exponent is
+    /// attacker-controlled on a compromised or hostile source. Before
+    /// `param_convert::MAX_DECIMAL_EXPANSION_DIGITS`, this reached
+    /// `"0".repeat(2_147_483_646)` inside `DecimalLiteral::to_integer` — a
+    /// ~2 GB allocation, with a second copy in the `format!` that follows —
+    /// and an allocation failure aborts the process rather than unwinding, so
+    /// `panic_safe` could not contain it.
+    ///
+    /// The SQLSTATE is the one the exact-numeric row of both *SQL to C:
+    /// Character* and *SQL to C: Numeric* gives for "Conversion of data would
+    /// result in loss of whole (as opposed to fractional) digits", and that
+    /// row's `TargetValuePtr` column reads "Undefined", so nothing is written.
+    #[test]
+    fn a_hostile_exponent_from_the_data_source_is_22003_without_expanding() {
+        let mut out = 7i64;
+        let mut ind = 0isize;
+        let err = unsafe {
+            write_column_value(
+                &ColumnValue::Decimal("1e2147483646".into()),
+                CDataType::SBigInt,
+                std::ptr::from_mut(&mut out).cast(),
+                size_of::<i64>() as isize,
+                &mut ind,
+            )
+        }
+        .expect_err("an exponent no integer target can hold must not convert");
+        assert_eq!(out, 7);
+        assert_eq!(
+            err.sqlstate().as_str(),
+            crate::types::sql_state::NUMERIC_VALUE_OUT_OF_RANGE
+        );
+    }
+
+    /// A magnitude far below the target's resolution truncates toward zero at
+    /// no cost — `to_integer`'s positive-scale branch slices digits the source
+    /// supplied rather than expanding anything — so the expansion bound must
+    /// not reach it. `01S07` because a non-zero fraction was dropped.
+    #[test]
+    fn a_pathologically_small_column_value_truncates_to_zero_with_01s07() {
+        let mut out = 7i64;
+        let mut ind = 0isize;
+        let err = unsafe {
+            write_column_value(
+                &ColumnValue::Decimal("1e-2000000".into()),
+                CDataType::SBigInt,
+                std::ptr::from_mut(&mut out).cast(),
+                size_of::<i64>() as isize,
+                &mut ind,
+            )
+        }
+        .expect_err("a dropped fraction is 01S07, not success");
+        assert_eq!(out, 0);
+        assert_eq!(
+            err.sqlstate().as_str(),
+            crate::types::sql_state::FRACTIONAL_TRUNCATION
+        );
+    }
+
+    /// The same, one synthesised digit past the bound rather than at the
+    /// extreme, so the test pins the bound and not merely `i128`'s range.
+    #[test]
+    fn a_column_value_one_digit_past_the_expansion_limit_is_22003() {
+        let text = format!(
+            "1e{}",
+            crate::param_convert::MAX_DECIMAL_EXPANSION_DIGITS + 1
+        );
+        let mut out = 7i64;
+        let mut ind = 0isize;
+        let err = unsafe {
+            write_column_value(
+                &ColumnValue::Decimal(text),
+                CDataType::SBigInt,
+                std::ptr::from_mut(&mut out).cast(),
+                size_of::<i64>() as isize,
+                &mut ind,
+            )
+        }
+        .expect_err("an unexpandable exponent must not convert");
+        assert_eq!(out, 7);
+        assert_eq!(
+            err.sqlstate().as_str(),
+            crate::types::sql_state::NUMERIC_VALUE_OUT_OF_RANGE
+        );
+    }
+
+    #[test]
+    fn decimal_text_above_2_pow_53_to_double_still_goes_through_f64() {
+        // The float targets keep the f64 path: their own row of the table asks
+        // only that the value be within range, and f64 is the destination.
+        let mut out = 0f64;
+        let mut ind = 0isize;
+        let ret = unsafe {
+            write_column_value(
+                &ColumnValue::Decimal("9007199254740993.5".into()),
+                CDataType::Double,
+                std::ptr::from_mut(&mut out).cast(),
+                size_of::<f64>() as isize,
+                &mut ind,
+            )
+        }
+        .expect("a decimal within f64's range converts");
+        assert_eq!(out, 9_007_199_254_740_994.0);
+        assert_eq!(ret, SqlReturn::SUCCESS);
     }
 
     // -----------------------------------------------------------------------
