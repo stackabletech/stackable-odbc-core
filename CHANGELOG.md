@@ -3287,6 +3287,36 @@ call `SQLCloseCursor` or `SQLFreeStmt(SQL_CLOSE)` first, as it already must for
   `SQL_DOUBLE` and `SQL_BIT`, which never expanded — their rows go through
   `f64`, where an over-range exponent is already `22003`.
 
+- **Fetching a float into an integer C type now truncates before it
+  range-checks, and reports `01S07` when it drops a fraction.** Two things
+  change for an application, in opposite directions.
+
+  It sees `SQL_SUCCESS_WITH_INFO` and `01S07` ("fractional truncation") where it
+  previously saw a clean `SQL_SUCCESS`: `ColumnValue::F64(3.9)` fetched as
+  `SQL_C_SLONG` still delivers `3`, but the dropped `.9` is now reported. The
+  exact-numeric row of [SQL to C: Numeric] calls this outcome "Data converted
+  with truncation of fractional digits" and gives it `01S07`, and that table
+  covers `SQL_REAL`, `SQL_FLOAT` and `SQL_DOUBLE` as well as the exact types.
+  Code that treats any non-`SQL_SUCCESS` return as a failure will see these
+  fetches as failing.
+
+  And it sees conversions succeed that previously failed with `22003`. The range
+  test ran against the *untruncated* value, so `127.5` into `SQL_C_STINYINT` was
+  rejected even though its truncation, `127`, fits. What the table's third
+  outcome protects is whole digits, so that value now writes `127` with `01S07`.
+  The same off-by-a-fraction rejection existed at every boundary of all eight
+  integer targets — `SQL_C_STINYINT`, `SQL_C_UTINYINT`, `SQL_C_SSHORT`,
+  `SQL_C_USHORT`, `SQL_C_SLONG`, `SQL_C_ULONG`, `SQL_C_SBIGINT` and
+  `SQL_C_UBIGINT` — and all eight now share one implementation. `-0.5` into an
+  unsigned target is part of this: it has no whole digits to lose, so it writes
+  `0` with `01S07` instead of `22003`, which is the reading the text path
+  already took.
+
+  Unchanged: a value whose *truncation* still does not fit is `22003` with
+  nothing written, and `NaN` and `±infinity` stay `22003` — they have no
+  truncation. `SQL_C_BIT`, `SQL_C_FLOAT` and `SQL_C_DOUBLE` have their own rows
+  and are untouched.
+
 [C to SQL: Character]: https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/c-to-sql-character
 [SQL to C: Numeric]: https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/sql-to-c-numeric
 [SQL to C: Character]: https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/sql-to-c-character

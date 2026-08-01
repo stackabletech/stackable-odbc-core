@@ -1173,12 +1173,14 @@ fn column_value_as_numeric(
 /// Handles all signed and unsigned integer C types, `SQL_C_FLOAT`, `SQL_C_DOUBLE`,
 /// and `SQL_C_BIT`. Returns `SQL_ERROR` with SQLSTATE `22003` (numeric value out of
 /// range) when the value does not fit the target type, and `SQL_SUCCESS_WITH_INFO`
-/// with SQLSTATE `01S07` (fractional truncation) when an `i64` or an `f64` is
-/// narrowed to `f32` with precision loss, when a fraction between 0 and 2 has
-/// its fractional part dropped to reach `SQL_C_BIT`, or when an exact decimal
-/// loses a non-zero fraction to reach an integer target (see
-/// [`write_exact_integer`]). Any `CDataType` not covered by the numeric arms
-/// returns `SQL_ERROR` with SQLSTATE `HY003` (invalid application buffer type).
+/// with SQLSTATE `01S07` (fractional truncation) in the four cases that drop
+/// something: an `i64` or an `f64` narrowed to `f32` with precision loss, a
+/// fraction between 0 and 2 losing its fractional part to reach `SQL_C_BIT`, an
+/// exact decimal losing a non-zero fraction to reach an integer target (see
+/// [`write_exact_integer`]), and an `f64` losing a non-zero fraction to reach
+/// an integer target (see [`write_truncated_float`]). Any `CDataType` not
+/// covered by the numeric arms returns `SQL_ERROR` with SQLSTATE `HY003`
+/// (invalid application buffer type).
 unsafe fn write_numeric_pivot(
     pivot: NumericPivot<'_>,
     target_type: CDataType,
@@ -1312,87 +1314,31 @@ unsafe fn write_numeric_pivot(
             unsafe { write_fixed(target_ptr, len_ind_ptr, u8::from(v == 1)) }
         }
         // --- Float pivot → signed integer targets ---
-        (NumericPivot::Float(v), CDataType::STinyInt) => {
-            if !v.is_finite() || v < i8::MIN as f64 || v > i8::MAX as f64 {
-                return Err(OdbcError::general(
-                    format!("Numeric value out of range: {v}"),
-                    SqlState::numeric_value_out_of_range(),
-                ));
-            }
-            unsafe { write_fixed(target_ptr, len_ind_ptr, v as i8) }
-        }
-        (NumericPivot::Float(v), CDataType::SShort) => {
-            if !v.is_finite() || v < i16::MIN as f64 || v > i16::MAX as f64 {
-                return Err(OdbcError::general(
-                    format!("Numeric value out of range: {v}"),
-                    SqlState::numeric_value_out_of_range(),
-                ));
-            }
-            unsafe { write_fixed(target_ptr, len_ind_ptr, v as i16) }
-        }
-        (NumericPivot::Float(v), CDataType::SLong) => {
-            if !v.is_finite() || v < i32::MIN as f64 || v > i32::MAX as f64 {
-                return Err(OdbcError::general(
-                    format!("Numeric value out of range: {v}"),
-                    SqlState::numeric_value_out_of_range(),
-                ));
-            }
-            unsafe { write_fixed(target_ptr, len_ind_ptr, v as i32) }
-        }
-        (NumericPivot::Float(v), CDataType::SBigInt) => {
-            // i64::MAX is not representable in f64: `i64::MAX as f64` rounds up
-            // to 2^63. Compare against 2^63 exclusively so that value is
-            // rejected rather than saturated.
-            const I64_MAX_EXCLUSIVE: f64 = 9_223_372_036_854_775_808.0; // 2^63
-            const I64_MIN_INCLUSIVE: f64 = -9_223_372_036_854_775_808.0; // -2^63
-            if !v.is_finite() || !(I64_MIN_INCLUSIVE..I64_MAX_EXCLUSIVE).contains(&v) {
-                return Err(OdbcError::general(
-                    format!("Numeric value out of range: {v}"),
-                    SqlState::numeric_value_out_of_range(),
-                ));
-            }
-            unsafe { write_fixed(target_ptr, len_ind_ptr, v as i64) }
-        }
+        (NumericPivot::Float(v), CDataType::STinyInt) => unsafe {
+            write_truncated_float::<i8>(v, target_ptr, len_ind_ptr)
+        },
+        (NumericPivot::Float(v), CDataType::SShort) => unsafe {
+            write_truncated_float::<i16>(v, target_ptr, len_ind_ptr)
+        },
+        (NumericPivot::Float(v), CDataType::SLong) => unsafe {
+            write_truncated_float::<i32>(v, target_ptr, len_ind_ptr)
+        },
+        (NumericPivot::Float(v), CDataType::SBigInt) => unsafe {
+            write_truncated_float::<i64>(v, target_ptr, len_ind_ptr)
+        },
         // --- Float pivot → unsigned integer targets ---
-        (NumericPivot::Float(v), CDataType::UTinyInt) => {
-            if !v.is_finite() || v < 0.0 || v > u8::MAX as f64 {
-                return Err(OdbcError::general(
-                    format!("Numeric value out of range: {v}"),
-                    SqlState::numeric_value_out_of_range(),
-                ));
-            }
-            unsafe { write_fixed(target_ptr, len_ind_ptr, v as u8) }
-        }
-        (NumericPivot::Float(v), CDataType::UShort) => {
-            if !v.is_finite() || v < 0.0 || v > u16::MAX as f64 {
-                return Err(OdbcError::general(
-                    format!("Numeric value out of range: {v}"),
-                    SqlState::numeric_value_out_of_range(),
-                ));
-            }
-            unsafe { write_fixed(target_ptr, len_ind_ptr, v as u16) }
-        }
-        (NumericPivot::Float(v), CDataType::ULong) => {
-            if !v.is_finite() || v < 0.0 || v > u32::MAX as f64 {
-                return Err(OdbcError::general(
-                    format!("Numeric value out of range: {v}"),
-                    SqlState::numeric_value_out_of_range(),
-                ));
-            }
-            unsafe { write_fixed(target_ptr, len_ind_ptr, v as u32) }
-        }
-        (NumericPivot::Float(v), CDataType::UBigInt) => {
-            // u64::MAX is not representable in f64: `u64::MAX as f64` rounds up
-            // to 2^64.
-            const U64_MAX_EXCLUSIVE: f64 = 18_446_744_073_709_551_616.0; // 2^64
-            if !v.is_finite() || !(0.0..U64_MAX_EXCLUSIVE).contains(&v) {
-                return Err(OdbcError::general(
-                    format!("Numeric value out of range: {v}"),
-                    SqlState::numeric_value_out_of_range(),
-                ));
-            }
-            unsafe { write_fixed(target_ptr, len_ind_ptr, v as u64) }
-        }
+        (NumericPivot::Float(v), CDataType::UTinyInt) => unsafe {
+            write_truncated_float::<u8>(v, target_ptr, len_ind_ptr)
+        },
+        (NumericPivot::Float(v), CDataType::UShort) => unsafe {
+            write_truncated_float::<u16>(v, target_ptr, len_ind_ptr)
+        },
+        (NumericPivot::Float(v), CDataType::ULong) => unsafe {
+            write_truncated_float::<u32>(v, target_ptr, len_ind_ptr)
+        },
+        (NumericPivot::Float(v), CDataType::UBigInt) => unsafe {
+            write_truncated_float::<u64>(v, target_ptr, len_ind_ptr)
+        },
         // --- Float pivot → float targets ---
         // f64 → f32: narrowing loses precision for most values, and overflows
         // to ±inf beyond f32::MAX. Write the value, then report 01S07 when the
@@ -1450,6 +1396,77 @@ unsafe fn write_numeric_pivot(
             format!("Unsupported numeric target type: {target_type:?}"),
             SqlState::invalid_application_buffer_type(),
         )),
+    }
+}
+
+/// Write an `f64` into an integer C target, truncated toward zero.
+///
+/// The governing row is the same one [`write_exact_integer`] cites — [SQL to C:
+/// Numeric]'s row for `SQL_C_STINYINT`, `SQL_C_UTINYINT`, `SQL_C_TINYINT`,
+/// `SQL_C_SBIGINT`, `SQL_C_UBIGINT`, `SQL_C_SSHORT`, `SQL_C_USHORT`,
+/// `SQL_C_SHORT`, `SQL_C_SLONG`, `SQL_C_ULONG`, `SQL_C_LONG` and
+/// `SQL_C_NUMERIC`. That table covers the approximate numeric SQL types
+/// (`SQL_REAL`, `SQL_FLOAT`, `SQL_DOUBLE`) alongside the exact ones — its
+/// identifier list names all nine — so a float source gets the same three
+/// outcomes. Eight of the row's C types reach here, one per caller in
+/// [`write_numeric_pivot`]: `odbc-sys` models the deprecated `SQL_C_TINYINT`,
+/// `SQL_C_SHORT` and `SQL_C_LONG` only as commented-out entries, and
+/// `SQL_C_NUMERIC` has no arm in that function at all. The three outcomes:
+///
+/// - "Data converted without truncation" — `SQL_SUCCESS`.
+/// - "Data converted with truncation of fractional digits" — the truncated
+///   value is written and `01S07` returned.
+/// - "Conversion of data would result in loss of whole (as opposed to
+///   fractional) digits" — `22003`, with `*TargetValuePtr` left alone, which the
+///   table's "Undefined" requires.
+///
+/// **The order matters: truncate first, then range-check the truncated value.**
+/// It is whole digits the third outcome protects, so `127.5` into
+/// `SQL_C_STINYINT` is the second outcome and writes `127`, and `-0.5` into any
+/// unsigned target writes `0` — the same reading [`write_exact_integer`] gives
+/// the text path, so the two agree on that value.
+///
+/// Two notes on the arithmetic:
+///
+/// - **The finiteness test is load-bearing, not defensive.** Rust's
+///   float-to-integer `as` cast is saturating and maps `NaN` to `0`, so without
+///   it a `NaN` would write `0` and report success. An infinity would be caught
+///   anyway, by saturating to `i128::MIN`/`i128::MAX` and failing
+///   `T::try_from`; the test covers it too, and gives it a clearer diagnostic.
+/// - **`i128` is the exact intermediary for every one of the eight targets.**
+///   A finite `f64` carries at most 53 significant bits, so its truncation is
+///   representable in `i128` exactly whenever `|v| < 2^127`, and the eight
+///   target widths are all far below that — `T::try_from` therefore decides the
+///   bound at the target's own width rather than at an `f64`-rounded
+///   approximation of it. That is what makes `2^63` reject for `SQL_C_SBIGINT`
+///   where `v > i64::MAX as f64` admitted it: `i64::MAX as f64` rounds *up* to
+///   `2^63`. A magnitude at or beyond `2^127` saturates to `i128::MIN`/`MAX`
+///   and fails `T::try_from`, which is the same `22003` it deserves.
+///
+/// [SQL to C: Numeric]: https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/sql-to-c-numeric
+unsafe fn write_truncated_float<T: Copy + TryFrom<i128>>(
+    v: f64,
+    target_ptr: *mut c_void,
+    len_ind_ptr: *mut isize,
+) -> Result<SqlReturn, OdbcError> {
+    let truncated = v.trunc();
+    let n = v
+        .is_finite()
+        .then(|| T::try_from(truncated as i128).ok())
+        .flatten()
+        .ok_or_else(|| {
+            OdbcError::general(
+                format!("Numeric value out of range: {v}"),
+                SqlState::numeric_value_out_of_range(),
+            )
+        })?;
+    unsafe {
+        let _ = write_fixed(target_ptr, len_ind_ptr, n)?;
+    };
+    if truncated == v {
+        Ok(SqlReturn::SUCCESS)
+    } else {
+        Err(OdbcError::FractionalTruncation)
     }
 }
 
@@ -3451,11 +3468,15 @@ mod tests {
 
     #[test]
     fn f64_to_slong() {
+        // "Data converted without truncation": a whole float loses nothing, so
+        // this is the exact-numeric row's first outcome and carries no
+        // diagnostic. The fractional case is
+        // `f64_3_9_to_slong_is_3_with_01s07`, below.
         let mut buf: i32 = 0;
         let mut ind: isize = 0;
         let ret = unsafe {
             write_column_value(
-                &ColumnValue::F64(3.9),
+                &ColumnValue::F64(3.0),
                 CDataType::SLong,
                 &mut buf as *mut i32 as *mut c_void,
                 4,
@@ -3463,7 +3484,7 @@ mod tests {
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
-        assert_eq!(buf, 3); // truncation
+        assert_eq!(buf, 3);
         assert_eq!(ind, 4);
     }
 
@@ -3840,6 +3861,197 @@ mod tests {
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
         assert_eq!(buf, 200);
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests for the exact-numeric row of "SQL to C: Numeric" reached from a
+    // float source: truncate toward zero, then range-check the *truncated*
+    // value. A dropped non-zero fraction is 01S07 with the truncated data
+    // written; only a truncation that still does not fit is 22003 with nothing
+    // written.
+    // -----------------------------------------------------------------------
+
+    /// Assert the 01S07 outcome: `expected` written, `SQL_SUCCESS_WITH_INFO`.
+    fn assert_truncated_to<T: Copy + PartialEq + std::fmt::Debug + Default>(
+        v: f64,
+        target_type: CDataType,
+        expected: T,
+    ) {
+        let mut out = T::default();
+        let mut ind: isize = 0;
+        let err = unsafe {
+            write_column_value(
+                &ColumnValue::F64(v),
+                target_type,
+                std::ptr::from_mut(&mut out).cast(),
+                size_of::<T>() as isize,
+                &mut ind,
+            )
+        }
+        .expect_err("a dropped fraction is reported, not silent");
+        assert_eq!(
+            sqlstate_of_err(&err),
+            SqlState::fractional_truncation().as_str()
+        );
+        assert_eq!(err.sql_return(), SqlReturn::SUCCESS_WITH_INFO);
+        // "Truncated data" in the table's *TargetValuePtr* column.
+        assert_eq!(out, expected);
+        assert_eq!(ind, size_of::<T>() as isize);
+    }
+
+    /// Assert the 22003 outcome: nothing written, `sentinel` still in place.
+    fn assert_out_of_range_leaves<T: Copy + PartialEq + std::fmt::Debug>(
+        v: f64,
+        target_type: CDataType,
+        sentinel: T,
+    ) {
+        let mut out = sentinel;
+        let err = unsafe {
+            write_column_value(
+                &ColumnValue::F64(v),
+                target_type,
+                std::ptr::from_mut(&mut out).cast(),
+                size_of::<T>() as isize,
+                std::ptr::null_mut(),
+            )
+        }
+        .expect_err("whole digits would be lost");
+        assert_eq!(
+            sqlstate_of_err(&err),
+            SqlState::numeric_value_out_of_range().as_str()
+        );
+        // "Undefined" in the table's *TargetValuePtr* column: nothing written.
+        assert_eq!(out, sentinel);
+    }
+
+    #[test]
+    fn f64_3_9_to_slong_is_3_with_01s07() {
+        assert_truncated_to(3.9, CDataType::SLong, 3i32);
+    }
+
+    #[test]
+    fn f64_minus_3_9_to_slong_truncates_toward_zero_with_01s07() {
+        // Toward zero, not toward negative infinity: -3, never -4.
+        assert_truncated_to(-3.9, CDataType::SLong, -3i32);
+    }
+
+    #[test]
+    fn f64_127_5_to_stinyint_is_127_with_01s07() {
+        assert_truncated_to(127.5, CDataType::STinyInt, 127i8);
+    }
+
+    #[test]
+    fn f64_128_0_to_stinyint_is_22003() {
+        assert_out_of_range_leaves(128.0, CDataType::STinyInt, 9i8);
+    }
+
+    #[test]
+    fn f64_minus_128_9_to_stinyint_is_minus_128_with_01s07() {
+        assert_truncated_to(-128.9, CDataType::STinyInt, -128i8);
+    }
+
+    #[test]
+    fn f64_minus_129_0_to_stinyint_is_22003() {
+        assert_out_of_range_leaves(-129.0, CDataType::STinyInt, 9i8);
+    }
+
+    #[test]
+    fn f64_minus_0_5_to_utinyint_is_0_with_01s07() {
+        // It is whole digits that must survive, and -0.5 has none: truncation
+        // gives 0, which fits. The same reading governs the text path, in
+        // `write_exact_integer`.
+        assert_truncated_to(-0.5, CDataType::UTinyInt, 0u8);
+    }
+
+    #[test]
+    fn f64_minus_1_5_to_utinyint_is_22003() {
+        // -1.5 truncates to -1, a whole digit an unsigned target cannot hold.
+        assert_out_of_range_leaves(-1.5, CDataType::UTinyInt, 9u8);
+    }
+
+    #[test]
+    fn f64_32767_5_to_sshort_is_i16_max_with_01s07() {
+        assert_truncated_to(32_767.5, CDataType::SShort, i16::MAX);
+    }
+
+    #[test]
+    fn f64_65535_5_to_ushort_is_u16_max_with_01s07() {
+        assert_truncated_to(65_535.5, CDataType::UShort, u16::MAX);
+    }
+
+    #[test]
+    fn f64_2147483647_5_to_slong_is_i32_max_with_01s07() {
+        assert_truncated_to(2_147_483_647.5, CDataType::SLong, i32::MAX);
+    }
+
+    #[test]
+    fn f64_4294967295_5_to_ulong_is_u32_max_with_01s07() {
+        assert_truncated_to(4_294_967_295.5, CDataType::ULong, u32::MAX);
+    }
+
+    #[test]
+    fn f64_just_below_two_pow_63_to_sbigint_is_written() {
+        // The largest f64 below 2^63: spacing in [2^62, 2^63) is 1024, so this
+        // is 2^63 - 1024. It fits i64, and the sibling test at 2^63 itself does
+        // not — together they pin the bound as exact for the target's width.
+        let v = 9_223_372_036_854_774_784.0_f64;
+        let mut out = 0i64;
+        let mut ind: isize = 0;
+        let ret = unsafe {
+            write_column_value(
+                &ColumnValue::F64(v),
+                CDataType::SBigInt,
+                std::ptr::from_mut(&mut out).cast(),
+                size_of::<i64>() as isize,
+                &mut ind,
+            )
+        }
+        .expect("2^63 - 1024 fits in i64");
+        assert_eq!(ret, SqlReturn::SUCCESS);
+        assert_eq!(out, 9_223_372_036_854_774_784);
+    }
+
+    #[test]
+    fn f64_just_below_two_pow_64_to_ubigint_is_written() {
+        // The largest f64 below 2^64: spacing in [2^63, 2^64) is 2048.
+        let v = 18_446_744_073_709_549_568.0_f64;
+        let mut out = 0u64;
+        let mut ind: isize = 0;
+        let ret = unsafe {
+            write_column_value(
+                &ColumnValue::F64(v),
+                CDataType::UBigInt,
+                std::ptr::from_mut(&mut out).cast(),
+                size_of::<u64>() as isize,
+                &mut ind,
+            )
+        }
+        .expect("2^64 - 2048 fits in u64");
+        assert_eq!(ret, SqlReturn::SUCCESS);
+        assert_eq!(out, 18_446_744_073_709_549_568);
+    }
+
+    #[test]
+    fn f64_beyond_i128_range_is_22003_with_nothing_written() {
+        // 1e300 is finite, so it passes the finiteness test and reaches the
+        // cast: `as i128` saturates it to `i128::MAX`, which `i64::try_from`
+        // then rejects. The negative counterpart saturates to `i128::MIN`, so
+        // both ends of the saturation are pinned rather than argued.
+        assert_out_of_range_leaves(1e300, CDataType::SBigInt, 9i64);
+        assert_out_of_range_leaves(-1e300, CDataType::SBigInt, 9i64);
+    }
+
+    #[test]
+    fn f64_nan_to_utinyint_is_22003_with_nothing_written() {
+        // NaN has no truncation, so it stays 22003. Load-bearing: Rust's
+        // saturating float-to-integer cast maps NaN to 0, so without the
+        // finiteness test a NaN would write 0 and report success.
+        assert_out_of_range_leaves(f64::NAN, CDataType::UTinyInt, 9u8);
+    }
+
+    #[test]
+    fn f64_infinity_to_ubigint_is_22003_with_nothing_written() {
+        assert_out_of_range_leaves(f64::INFINITY, CDataType::UBigInt, 9u64);
     }
 
     // -----------------------------------------------------------------------
