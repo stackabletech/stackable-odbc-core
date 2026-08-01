@@ -314,6 +314,45 @@ Restructure `fetch_with_report` around one `stmt_with_desc` resolution per AGENT
 - [ ] `cargo clippy --target x86_64-pc-windows-msvc --all-targets -- -D warnings` — the `#[cfg(windows)]` half.
 - [ ] Any failure: fix red-green as its own step, then re-run the failed check; the fixes join the nearest pending commit or a dedicated `fix:` commit for Andrew.
 
+## Known limitations — found during this work, deliberately not fixed
+
+Defects surfaced by implementers and reviewers while executing the plan, which
+Andrew has ruled are recorded rather than fixed here. Each is real, each has a
+code comment at its site, and none is a regression introduced by this work.
+Listed so a future reader finds them in one place instead of rediscovering them
+one at a time.
+
+- **More than nine fractional-second digits truncate silently**
+  (`src/column_value.rs`, `parse_time_fields`; the comment sits at the
+  `(String, TypeTimestamp)` arm and carries no `TODO` marker, because it
+  records a decision rather than an intention). The *SQL to C: Character* row's
+  "fractional seconds portion truncated → `01S07`" cell is not reported: the
+  parser pads or truncates to nanoseconds without a diagnostic. Identical on
+  the timestamp-value and time-value paths, so the two cannot disagree. Data
+  still arrives; only the warning is missing. *Ruled known 2026-08-01.*
+- **`SQL_C_NUMERIC` has no arm in `write_column_value` at all**, though it
+  appears in the exact-numeric row of both governing tables. A fetch into it
+  answers `HY003` rather than converting. Found during Tasks 2.2 and 2.3.
+- **`SQL_C_BIT` from *character* sources still routes through `f64`.** The
+  worst case is not a wrong diagnostic but lost data: `"1.9999999999999999999"`
+  rounds to exactly `2.0` in `f64` and so answers `22003` with nothing written,
+  where the table's second row converts it to `1` with `01S07`. Found during
+  Task 2.2's review.
+- **A conversion warning inside `SQLFetch`'s bound-column loop skips the
+  remaining columns** (`src/ffi/fetch.rs`, the `?` in the bound-column loop).
+  A `01S07` on one column abandons the rest of that row's bindings and skips
+  `report_rows_fetched`, while `panic_safe` still returns
+  `SQL_SUCCESS_WITH_INFO`. Pre-existing and accepted when only `i64`→`f32`
+  precision loss could produce it; Tasks 2.1 and 2.3 make it far easier to
+  reach. **The largest of these — worth its own task if any of them is.**
+- **The expansion invariant test covers `to_decimal_string` only.**
+  `to_integer`'s `"0".repeat` site rests on reasoning plus two behavioural
+  tests rather than the shared-expression assertion. Found during Task 2.8's
+  final review.
+- **`"2026-07-21T"` is now accepted as midnight** on the DATE path, a trivial
+  widening from Task 2.4's shared parser. Consistent with what the timestamp
+  path already did.
+
 ## Execution order and dependencies
 
 ```

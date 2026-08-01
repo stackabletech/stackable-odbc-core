@@ -347,11 +347,14 @@ unsafe fn write_fixed_or_chunked(
         // in as many words that the fraction is set to zero. Two source types,
         // two tables, two answers.
         //
-        // TODO(spec): the "fractional seconds portion truncated" row's 01S07 is
-        // not reported. `parse_time_fields` truncates a literal carrying more
-        // than nine fractional digits to nanoseconds silently, on this path and
-        // on the timestamp-value path alike. Pre-existing; out of this change's
-        // scope, and the same for both so the two cannot disagree.
+        // Known limitation, recorded rather than fixed: the "fractional seconds
+        // portion truncated" row's 01S07 is not reported. `parse_time_fields`
+        // truncates a literal carrying more than nine fractional digits to
+        // nanoseconds silently, on this path and on the timestamp-value path
+        // alike, so the two cannot disagree and the data still arrives — only
+        // the warning is missing. Ruled 2026-08-01 and listed under "Known
+        // limitations" in docs/superpowers/plans/2026-07-31-audit-remediation.md.
+        // Not an open intention: changing it needs that ruling revisited first.
         (ColumnValue::String(s), CDataType::TypeTimestamp) => {
             let ts = match parse_sql_timestamp(s) {
                 Ok(ts) => ts,
@@ -865,6 +868,45 @@ fn field_parse_error(s: &str, e: std::num::ParseIntError) -> OdbcError {
     }
 }
 
+/// Is `year` a leap year in the proleptic Gregorian calendar?
+///
+/// Divisible by 4, except centuries, except every fourth century — so 2000 is a
+/// leap year and 1900 is not. The same calendar [`civil_from_days`] implements,
+/// which is what keeps this module's two date computations from disagreeing —
+/// and `days_in_month_agrees_with_civil_from_days` checks that rather than
+/// leaving it to this sentence, by walking every day of nine chosen years
+/// through both.
+///
+/// `%` is correct for a negative year here because every arm compares against
+/// zero, and `-100 % 100` is 0 in Rust as it is in mathematics. No negative year
+/// reaches this function today — [`parse_date_fields`] splits on `-`, so a
+/// leading minus sign produces a fourth part and is refused as malformed — but
+/// the rule is written to be right either way rather than to depend on that.
+fn is_leap_year(year: i32) -> bool {
+    year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
+}
+
+/// How many days `month` (1-12) has in `year`.
+///
+/// February is 29 in a leap year and 28 otherwise; April, June, September and
+/// November have 30; January, March, May, July, August, October and December
+/// have 31. Callers must have validated `month` first: an out-of-range month
+/// answers 31, the widest length, so a bad month is refused by the month check
+/// and never by this one reporting an unrelated day error.
+fn days_in_month(year: i32, month: u16) -> u16 {
+    match month {
+        2 => {
+            if is_leap_year(year) {
+                29
+            } else {
+                28
+            }
+        }
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    }
+}
+
 /// Parse `yyyy-mm-dd` into its three numeric fields.
 fn parse_date_fields(s: &str) -> Result<(i16, u16, u16), OdbcError> {
     let mut parts = s.split('-');
@@ -875,7 +917,15 @@ fn parse_date_fields(s: &str) -> Result<(i16, u16, u16), OdbcError> {
     let year: i16 = y.parse().map_err(|e| field_parse_error(s, e))?;
     let month: u16 = m.parse().map_err(|e| field_parse_error(s, e))?;
     let day: u16 = d.parse().map_err(|e| field_parse_error(s, e))?;
-    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+    if !(1..=12).contains(&month) {
+        return Err(invalid_datetime_format(s));
+    }
+    // "Data value is not a valid date-value or timestamp-value" — SQL to C:
+    // Character. ODBC's grammar says only `days-value ::= digit digit`, so what
+    // makes a day valid is the calendar, not the syntax: 2024-02-30 is
+    // well-formed and does not exist. Covered by `feb_30_is_rejected` and its
+    // neighbours.
+    if !(1..=days_in_month(i32::from(year), month)).contains(&day) {
         return Err(invalid_datetime_format(s));
     }
     Ok((year, month, day))
@@ -5357,6 +5407,220 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // Impossible calendar days.
+    //
+    // "Data value is not a valid date-value or timestamp-value" — the last row
+    // of SQL to C: Character's SQL_C_TYPE_DATE cell. ODBC's own grammar defines
+    // `days-value ::= digit digit` and says nothing about which day numbers a
+    // month has, so "valid date-value" is validity against the calendar, and the
+    // calendar is the proleptic Gregorian one `civil_from_days` already uses in
+    // this module. The failures below therefore carry this module's 22007 for a
+    // recognised literal with an out-of-range field, not the row's blanket
+    // 22018.
+    //
+    // Spec: https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/sql-to-c-character
+    // Grammar: https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/date-time-and-timestamp-escape-sequences
+    // -----------------------------------------------------------------------
+
+    /// Read `text` as a date and assert it was refused with 22007, writing
+    /// nothing.
+    fn assert_date_rejected(text: &str) {
+        let (out, ret) = unsafe { convert_text(text, CDataType::TypeDate, date_sentinel()) };
+        let err = ret.expect_err("an impossible calendar day must not convert");
+        assert_eq!(
+            sqlstate_of_err(&err),
+            crate::types::sql_state::INVALID_DATETIME_FORMAT,
+            "{text}"
+        );
+        assert_eq!(out, date_sentinel(), "{text}");
+    }
+
+    /// Read `text` as a date and assert the three fields it produced.
+    fn assert_date_accepted(text: &str, expected: (i16, u16, u16)) {
+        let (out, ret) = unsafe { convert_text(text, CDataType::TypeDate, date_sentinel()) };
+        let ret = ret.expect("a real calendar day must convert");
+        assert_eq!(ret, SqlReturn::SUCCESS, "{text}");
+        assert_eq!((out.year, out.month, out.day), expected, "{text}");
+    }
+
+    #[test]
+    fn feb_30_is_rejected() {
+        assert_date_rejected("2024-02-30");
+    }
+
+    #[test]
+    fn feb_29_2024_is_accepted() {
+        // Divisible by 4 and not by 100: a leap year.
+        assert_date_accepted("2024-02-29", (2024, 2, 29));
+    }
+
+    #[test]
+    fn feb_29_2023_is_rejected() {
+        // Not divisible by 4.
+        assert_date_rejected("2023-02-29");
+    }
+
+    #[test]
+    fn feb_29_1900_is_rejected() {
+        // Divisible by 100 and not by 400: not a leap year.
+        assert_date_rejected("1900-02-29");
+    }
+
+    #[test]
+    fn feb_29_2000_is_accepted() {
+        // Divisible by 400: a leap year, the exception to the century rule.
+        assert_date_accepted("2000-02-29", (2000, 2, 29));
+    }
+
+    #[test]
+    fn feb_28_is_accepted_in_a_non_leap_year() {
+        assert_date_accepted("2023-02-28", (2023, 2, 28));
+    }
+
+    #[test]
+    fn apr_31_is_rejected() {
+        assert_date_rejected("2024-04-31");
+    }
+
+    #[test]
+    fn day_31_is_rejected_in_every_30_day_month() {
+        // The full set of 30-day months: April, June, September, November.
+        for month in ["04", "06", "09", "11"] {
+            assert_date_rejected(&format!("2024-{month}-31"));
+        }
+    }
+
+    #[test]
+    fn day_30_is_accepted_in_every_30_day_month() {
+        for (month, number) in [("04", 4), ("06", 6), ("09", 9), ("11", 11)] {
+            assert_date_accepted(&format!("2024-{month}-30"), (2024, number, 30));
+        }
+    }
+
+    #[test]
+    fn day_31_is_accepted_in_every_31_day_month() {
+        // The full set of 31-day months: January, March, May, July, August,
+        // October, December.
+        for (month, number) in [
+            ("01", 1),
+            ("03", 3),
+            ("05", 5),
+            ("07", 7),
+            ("08", 8),
+            ("10", 10),
+            ("12", 12),
+        ] {
+            assert_date_accepted(&format!("2024-{month}-31"), (2024, number, 31));
+        }
+    }
+
+    #[test]
+    fn impossible_day_in_timestamp_text_is_rejected() {
+        // The timestamp path shares `parse_date_fields`, so the check reaches it
+        // too — a well-formed time does not rescue an impossible date.
+        let (out, ret) = unsafe {
+            convert_text(
+                "2024-02-30 10:00:00",
+                CDataType::TypeTimestamp,
+                timestamp_sentinel(),
+            )
+        };
+        let err = ret.expect_err("February 30th is not a timestamp either");
+        assert_eq!(
+            sqlstate_of_err(&err),
+            crate::types::sql_state::INVALID_DATETIME_FORMAT
+        );
+        assert_eq!(out, timestamp_sentinel());
+    }
+
+    #[test]
+    fn impossible_day_in_timestamp_text_to_time_is_rejected() {
+        // The third C target the change reaches. SQL to C: Character's
+        // SQL_C_TYPE_TIME cell ignores the *date portion* of a
+        // timestamp-value — but only of a valid one, and the row's last line
+        // covers text that is not a valid timestamp-value at all.
+        let (out, ret) =
+            unsafe { convert_text("2024-02-30 10:00:00", CDataType::TypeTime, time_sentinel()) };
+        let err = ret.expect_err("an impossible date is not a valid timestamp-value");
+        assert_eq!(
+            sqlstate_of_err(&err),
+            crate::types::sql_state::INVALID_DATETIME_FORMAT
+        );
+        assert_eq!(out, time_sentinel());
+    }
+
+    #[test]
+    fn year_zero_stays_accepted_and_is_a_leap_year() {
+        // Not a change: `years-value ::= digit digit digit digit` admits "0000"
+        // and the parser has always accepted it, so the day check must agree
+        // with the proleptic Gregorian calendar the rest of this module uses
+        // rather than treat year 0 as a special case. 0 is divisible by 400.
+        assert_date_accepted("0000-02-29", (0, 2, 29));
+    }
+
+    #[test]
+    fn impossible_day_is_refused_on_the_bind_path_too() {
+        // `param_convert::to_date` parses through the same
+        // `parse_sql_timestamp`, so an impossible day is refused before it can
+        // reach a backend as a `ColumnValue::Date`. The 22007 propagates
+        // unchanged: `retype_datetime_error` relabels only 22018.
+        let err = crate::param_convert::text_to_sql_type(
+            "2024-02-30",
+            crate::types::SqlDataType::DATE,
+            0,
+            0,
+        )
+        .expect_err("February 30th must not be bound as a date");
+        assert_eq!(
+            sqlstate_of_err(&err),
+            crate::types::sql_state::INVALID_DATETIME_FORMAT
+        );
+    }
+
+    #[test]
+    fn impossible_day_is_refused_when_bound_as_a_time() {
+        // A separate code route from the `SQL_TYPE_DATE` test above, not a
+        // corollary of it: `to_date` propagates the parser's error directly,
+        // while `to_time` first tries `parse_sql_time`, and only the failure of
+        // *that* reaches `parse_sql_timestamp`.
+        //
+        // The date is validated even though the conversion discards it. C to
+        // SQL: Character's footnote is "the date portion of the timestamp is
+        // ignored", but the row it annotates admits a *valid* timestamp-value,
+        // and 2024-02-30 is not one. Ignoring a field is not the same as
+        // accepting any contents in it.
+        let err = crate::param_convert::text_to_sql_type(
+            "2024-02-30 10:00:00",
+            crate::types::SqlDataType::TIME,
+            0,
+            0,
+        )
+        .expect_err("February 30th must not be bound as a time");
+        assert_eq!(
+            sqlstate_of_err(&err),
+            crate::types::sql_state::INVALID_DATETIME_FORMAT
+        );
+    }
+
+    #[test]
+    fn impossible_day_is_refused_when_bound_as_a_timestamp() {
+        // The third route: `to_timestamp` falls back to `parse_sql_time` when
+        // the timestamp parse fails, and keeps the timestamp parser's error
+        // when that fallback fails too.
+        let err = crate::param_convert::text_to_sql_type(
+            "2024-02-30 10:00:00",
+            crate::types::SqlDataType::TIMESTAMP,
+            0,
+            0,
+        )
+        .expect_err("February 30th must not be bound as a timestamp");
+        assert_eq!(
+            sqlstate_of_err(&err),
+            crate::types::sql_state::INVALID_DATETIME_FORMAT
+        );
+    }
+
+    // -----------------------------------------------------------------------
     // SQL-to-C conversions for the temporal types.
     //
     // These walk the spec's SQL-to-C conversion table rather than the pairs a
@@ -5640,6 +5904,59 @@ mod tests {
         ];
         for (days, expected) in cases {
             assert_eq!(civil_from_days(days), expected, "days = {days}");
+        }
+    }
+
+    /// The day number [`civil_from_days`] maps to 1 January of `year`.
+    ///
+    /// `civil_from_days` is monotonic, so a binary search inverts it. That is
+    /// the point: a second forward implementation of the calendar would be a
+    /// second thing to get wrong, and the test below is about the two existing
+    /// ones agreeing.
+    fn january_first(year: i64) -> i64 {
+        let (mut lo, mut hi) = (-800_000_i64, 800_000_i64);
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if civil_from_days(mid) < (year, 1, 1) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        lo
+    }
+
+    #[test]
+    fn days_in_month_agrees_with_civil_from_days() {
+        // `is_leap_year`'s doc claims it implements the same calendar
+        // `civil_from_days` does. This makes that a checked fact rather than a
+        // stated one, so an edit to either side cannot silently break the
+        // agreement the comment relies on.
+        //
+        // The years are the ones where the two could differ: both century
+        // rules (1900 not a leap year, 1600 and 2000 leap), an ordinary leap
+        // year and its neighbour, year 0 — which is divisible by 400 and
+        // therefore leap in the proleptic Gregorian calendar both sides use —
+        // and 2100, the next century non-leap year.
+        for year in [0_i64, 1600, 1700, 1900, 1996, 2000, 2023, 2024, 2100] {
+            let year_i32 = i32::try_from(year).expect("year fits i32");
+            let start = january_first(year);
+            let end = january_first(year + 1);
+
+            let expected_length = if is_leap_year(year_i32) { 366 } else { 365 };
+            assert_eq!(end - start, expected_length, "length of year {year}");
+
+            for days in start..end {
+                let (y, month, day) = civil_from_days(days);
+                assert_eq!(y, year, "day {days} should fall in {year}");
+                let length = days_in_month(year_i32, month);
+                assert!(day <= length, "{year}-{month}-{day} exceeds {length}");
+                // The last day of a month is the one the next day rolls over.
+                let (_, next_month, _) = civil_from_days(days + 1);
+                if next_month != month {
+                    assert_eq!(day, length, "last day of {year}-{month}");
+                }
+            }
         }
     }
 

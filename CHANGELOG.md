@@ -3358,6 +3358,32 @@ call `SQLCloseCursor` or `SQLFreeStmt(SQL_CLOSE)` first, as it already must for
   Text that parses as a datetime but carries an out-of-range field still
   answers `22007`, not `22018`, on all three paths.
 
+- **Impossible calendar dates are now refused instead of being converted.**
+  The shared literal parser validated the day only as `1`–`31`, so
+  `2024-02-30`, `2023-02-29` and `2024-04-31` were accepted. It now checks the
+  day against the length of the month, with the proleptic Gregorian leap rule:
+  divisible by 4, except centuries, except every fourth century — so
+  `2000-02-29` is valid and `1900-02-29` is not. February has 29 days in a leap
+  year and 28 otherwise; April, June, September and November have 30; January,
+  March, May, July, August, October and December have 31. That is the whole
+  change: a day of `0`, a month outside `1`–`12`, every syntactically malformed
+  form and the year are all unaffected.
+
+  **Both directions change, because both use the parser.** Fetching such a
+  value into any of `SQL_C_TYPE_DATE`, `SQL_C_TYPE_TIME` (from the timestamp
+  form, whose date portion the conversion would otherwise ignore) and
+  `SQL_C_TYPE_TIMESTAMP` was `SQL_SUCCESS` with a nonsense or silently
+  date-stripped struct, and is now `SQL_ERROR` with `22007` and nothing written;
+  binding a character parameter carrying one to `SQL_TYPE_DATE`,
+  `SQL_TYPE_TIME` or `SQL_TYPE_TIMESTAMP` was forwarded to the backend as a
+  valid `ColumnValue` and is now refused with `22007` before the statement
+  executes. The timestamp form (`2024-02-30 10:00:00`) is refused on both paths
+  too.
+
+  `22007` ("invalid datetime format"), not `22018`, on the module's existing
+  rule: the text is a recognised literal whose field is out of range, which is
+  what separates it from text that is no datetime at all.
+
 [C to SQL: Character]: https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/c-to-sql-character
 [SQL to C: Time]: https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/sql-to-c-time
 [SQL to C: Numeric]: https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/sql-to-c-numeric
