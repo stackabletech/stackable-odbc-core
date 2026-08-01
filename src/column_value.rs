@@ -1130,9 +1130,10 @@ fn column_value_as_numeric(value: &ColumnValue) -> Option<NumericPivot> {
 /// and `SQL_C_BIT`. Returns `SQL_ERROR` with SQLSTATE `22003` (numeric value out of
 /// range) when the value does not fit the target type, and `SQL_SUCCESS_WITH_INFO`
 /// with SQLSTATE `01S07` (fractional truncation) when an `i64` or an `f64` is
-/// narrowed to `f32` with precision loss. Any `CDataType` not covered by the
-/// numeric arms returns `SQL_ERROR` with SQLSTATE `HY003` (invalid application
-/// buffer type).
+/// narrowed to `f32` with precision loss, or when a fraction between 0 and 2 has
+/// its fractional part dropped to reach `SQL_C_BIT`. Any `CDataType` not covered
+/// by the numeric arms returns `SQL_ERROR` with SQLSTATE `HY003` (invalid
+/// application buffer type).
 unsafe fn write_numeric_pivot(
     pivot: NumericPivot,
     target_type: CDataType,
@@ -1223,9 +1224,20 @@ unsafe fn write_numeric_pivot(
         (NumericPivot::Int(v), CDataType::Double) => unsafe {
             write_fixed(target_ptr, len_ind_ptr, v as f64)
         },
-        (NumericPivot::Int(v), CDataType::Bit) => unsafe {
-            write_fixed(target_ptr, len_ind_ptr, u8::from(v != 0))
-        },
+        // --- Int pivot → Bit ---
+        // "Data is less than 0 or greater than or equal to 2" is 22003; the
+        // table's 01S07 row ("greater than 0, less than 2, and not equal to 1")
+        // needs a fractional part, which an integer pivot cannot carry, so what
+        // survives the range test here is exactly the "Data is 0 or 1" row.
+        (NumericPivot::Int(v), CDataType::Bit) => {
+            if !(0..2).contains(&v) {
+                return Err(OdbcError::general(
+                    format!("Numeric value out of range: {v} is not 0 or 1"),
+                    SqlState::numeric_value_out_of_range(),
+                ));
+            }
+            unsafe { write_fixed(target_ptr, len_ind_ptr, u8::from(v == 1)) }
+        }
         // --- Float pivot → signed integer targets ---
         (NumericPivot::Float(v), CDataType::STinyInt) => {
             if !v.is_finite() || v < i8::MIN as f64 || v > i8::MAX as f64 {
@@ -1326,7 +1338,17 @@ unsafe fn write_numeric_pivot(
             write_fixed(target_ptr, len_ind_ptr, v)
         },
         // --- Float pivot → Bit ---
-        // NaN is not a valid bit value; return 22003 rather than silently mapping to 1.
+        // The table's three rows in order: 0 or 1 converts with no diagnostic;
+        // greater than 0, less than 2 and not equal to 1 converts to "Truncated
+        // data" with 01S07; less than 0 or at least 2 is 22003 with nothing
+        // written. The range test below already answers 22003 for both
+        // infinities (`+inf` fails the upper bound, `-inf` the lower) and for
+        // NaN (every IEEE comparison against NaN is false, so `contains` is
+        // false), so neither needs a branch of its own to reach the right
+        // SQLSTATE. The explicit NaN branch is kept for its more specific
+        // message, not for its state; `float_nan_to_bit_returns_22003` covers
+        // it, and deleting it would change what an application reads in the
+        // diagnostic rather than what it returns.
         (NumericPivot::Float(v), CDataType::Bit) => {
             if v.is_nan() {
                 return Err(OdbcError::general(
@@ -1334,7 +1356,22 @@ unsafe fn write_numeric_pivot(
                     SqlState::numeric_value_out_of_range(),
                 ));
             }
-            unsafe { write_fixed(target_ptr, len_ind_ptr, u8::from(v != 0.0)) }
+            if !(0.0..2.0).contains(&v) {
+                return Err(OdbcError::general(
+                    format!("Numeric value out of range: {v} is not in [0, 2)"),
+                    SqlState::numeric_value_out_of_range(),
+                ));
+            }
+            // Truncation towards zero: 0.5 delivers 0 and 1.5 delivers 1.
+            let bit = v as u8;
+            unsafe {
+                let _ = write_fixed(target_ptr, len_ind_ptr, bit)?;
+            };
+            if f64::from(bit) == v {
+                Ok(SqlReturn::SUCCESS)
+            } else {
+                Err(OdbcError::FractionalTruncation)
+            }
         }
         (_, _) => Err(OdbcError::general(
             format!("Unsupported numeric target type: {target_type:?}"),
@@ -3671,8 +3708,95 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Tests for NaN → Bit (SQLSTATE 22003)
+    // Tests for the SQL_C_BIT row of "SQL to C: Numeric": 0 or 1 converts, a
+    // fraction in (0, 2) converts with 01S07, anything else is 22003.
     // -----------------------------------------------------------------------
+
+    #[test]
+    fn i64_five_to_bit_is_22003() {
+        let mut buf: u8 = 9;
+        let ret = unsafe {
+            write_column_value(
+                &ColumnValue::I64(5),
+                CDataType::Bit,
+                &mut buf as *mut u8 as *mut c_void,
+                1,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(
+            sqlstate_of_err(&ret.unwrap_err()),
+            SqlState::numeric_value_out_of_range().as_str()
+        );
+        // "Undefined" in the table's *TargetValuePtr* column: nothing written.
+        assert_eq!(buf, 9);
+    }
+
+    #[test]
+    fn i64_minus_one_to_bit_is_22003() {
+        let mut buf: u8 = 9;
+        let ret = unsafe {
+            write_column_value(
+                &ColumnValue::I64(-1),
+                CDataType::Bit,
+                &mut buf as *mut u8 as *mut c_void,
+                1,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(
+            sqlstate_of_err(&ret.unwrap_err()),
+            SqlState::numeric_value_out_of_range().as_str()
+        );
+        assert_eq!(buf, 9);
+    }
+
+    #[test]
+    fn f64_half_to_bit_writes_zero_with_01s07() {
+        let mut buf: u8 = 9;
+        let mut ind: isize = 0;
+        let ret = unsafe {
+            write_column_value(
+                &ColumnValue::F64(0.5),
+                CDataType::Bit,
+                &mut buf as *mut u8 as *mut c_void,
+                1,
+                &mut ind,
+            )
+        };
+        let err = ret.unwrap_err();
+        assert_eq!(err.sql_return(), SqlReturn::SUCCESS_WITH_INFO);
+        assert_eq!(
+            sqlstate_of_err(&err),
+            SqlState::fractional_truncation().as_str()
+        );
+        // "Truncated data": the fractional part is dropped, so 0.5 delivers 0.
+        assert_eq!(buf, 0);
+        assert_eq!(ind, 1);
+    }
+
+    #[test]
+    fn f64_one_point_five_to_bit_writes_one_with_01s07() {
+        let mut buf: u8 = 9;
+        let mut ind: isize = 0;
+        let ret = unsafe {
+            write_column_value(
+                &ColumnValue::F64(1.5),
+                CDataType::Bit,
+                &mut buf as *mut u8 as *mut c_void,
+                1,
+                &mut ind,
+            )
+        };
+        let err = ret.unwrap_err();
+        assert_eq!(err.sql_return(), SqlReturn::SUCCESS_WITH_INFO);
+        assert_eq!(
+            sqlstate_of_err(&err),
+            SqlState::fractional_truncation().as_str()
+        );
+        assert_eq!(buf, 1);
+        assert_eq!(ind, 1);
+    }
 
     #[test]
     fn float_nan_to_bit_returns_22003() {
@@ -3705,20 +3829,50 @@ mod tests {
         assert_eq!(buf, 0);
     }
 
+    /// `-0.0` is the "Data is 0 or 1" row, not the "less than 0" one: IEEE makes
+    /// it equal to `0.0`, so it is inside the range and truncates to 0.
+    /// Tightening the lower bound to `v > 0.0` would break `float_zero_to_bit_is_zero`
+    /// too, since `0.0 > 0.0` is false; what this test adds is the *signed*-zero
+    /// half of that boundary, which nothing covered before and which a reader is
+    /// likelier to reason about incorrectly.
     #[test]
-    fn float_nonzero_to_bit_is_one() {
-        let mut buf: u8 = 0;
+    fn float_negative_zero_to_bit_is_zero() {
+        let mut buf: u8 = 9;
+        let mut ind: isize = 0;
         let ret = unsafe {
             write_column_value(
-                &ColumnValue::F64(1.5),
+                &ColumnValue::F64(-0.0),
+                CDataType::Bit,
+                &mut buf as *mut u8 as *mut c_void,
+                1,
+                &mut ind,
+            )
+        };
+        assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
+        assert_eq!(buf, 0);
+        assert_eq!(ind, 1);
+    }
+
+    /// `2.0` is the lower edge of the table's "greater than or equal to 2" row,
+    /// so it is 22003 and not the 1 an earlier revision wrote for every non-zero
+    /// float.
+    #[test]
+    fn float_two_to_bit_is_22003() {
+        let mut buf: u8 = 9;
+        let ret = unsafe {
+            write_column_value(
+                &ColumnValue::F64(2.0),
                 CDataType::Bit,
                 &mut buf as *mut u8 as *mut c_void,
                 1,
                 std::ptr::null_mut(),
             )
         };
-        assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
-        assert_eq!(buf, 1);
+        assert_eq!(
+            sqlstate_of_err(&ret.unwrap_err()),
+            SqlState::numeric_value_out_of_range().as_str()
+        );
+        assert_eq!(buf, 9);
     }
 
     // -----------------------------------------------------------------------

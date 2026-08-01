@@ -3150,4 +3150,31 @@ call `SQLCloseCursor` or `SQLFreeStmt(SQL_CLOSE)` first, as it already must for
   application actually selected. No `Backend` method changed, and a driver whose
   applications never set the attribute is unaffected.
 
+- **`SQL_C_BIT` now follows the spec's three-way range rule when reading a
+  value.** Both numeric arms of the fetch-side conversion reduced to "non-zero
+  becomes 1", so every value outside the bit range was silently accepted:
+  `SQLGetData`/`SQLFetch` answered `SQL_SUCCESS` and wrote 1 for `5`, for `-1`
+  and for `2.0`. The [SQL to C: Numeric] table gives three outcomes instead —
+  "Data is 0 or 1" converts with no diagnostic, "greater than 0, less than 2,
+  and not equal to 1" writes the truncated data with `01S07`, and "less than 0
+  or greater than or equal to 2" is `22003` with nothing written — and the
+  identical row in [SQL to C: Character] governs a numeric string reaching the
+  same target. The fractional case was also delivering the wrong *value*: `0.5`
+  wrote 1, where truncating the fractional part gives 0.
+
+  The infinities answer the third test — `+inf` is greater than 2 and `-inf` is
+  less than 0 — and NaN answers none of the three, so all three are `22003`;
+  `-0.0` equals `0.0` and is the "0 or 1" case. An integer
+  source cannot carry a fraction, so the `01S07` outcome is reachable only from
+  a float or a numeric string.
+
+  **For driver authors:** an application binding `SQL_C_BIT` against a column
+  whose values are not 0 or 1 now sees `SQL_ERROR`/`22003` where it previously
+  got `SQL_SUCCESS` and a 1, and `SQL_SUCCESS_WITH_INFO`/`01S07` for a fraction
+  in that range. No `Backend` method changed. A backend that means "true" should
+  deliver `ColumnValue::Bool` or a 0/1 numeric rather than relying on the old
+  coercion.
+
+[SQL to C: Numeric]: https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/sql-to-c-numeric
+[SQL to C: Character]: https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/sql-to-c-character
 [Unreleased]: https://github.com/stackabletech/stackable-odbc-core/commits/HEAD
