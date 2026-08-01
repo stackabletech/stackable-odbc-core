@@ -3317,7 +3317,49 @@ call `SQLCloseCursor` or `SQLFreeStmt(SQL_CLOSE)` first, as it already must for
   truncation. `SQL_C_BIT`, `SQL_C_FLOAT` and `SQL_C_DOUBLE` have their own rows
   and are untouched.
 
+- **Fetching character data into a datetime C type now converts across the
+  three literal forms instead of refusing with `22018`.** [SQL to C: Character]
+  lets each datetime C struct accept more than its own form, and core
+  implemented only the matching pairs. Three outcomes changed, all from
+  `SQL_ERROR` with `22018` ("invalid character value for cast") to a
+  conversion:
+
+  | Column text | `TargetType` | Now | SQLSTATE |
+  |---|---|---|---|
+  | `2026-07-21 00:00:00` | `SQL_C_TYPE_DATE` | the date | none |
+  | `2026-07-21 10:30:15` | `SQL_C_TYPE_DATE` | the date, time dropped | `01S07` |
+  | `2026-07-21 10:30:15` | `SQL_C_TYPE_TIME` | the time, date ignored | none |
+  | `2026-07-21 10:30:15.5` | `SQL_C_TYPE_TIME` | the time, fraction dropped | `01S07` |
+  | `10:30:15` | `SQL_C_TYPE_TIMESTAMP` | the time on today's UTC date | none |
+
+  That is the full set: the three rows are `SQL_C_TYPE_DATE` from a
+  timestamp-value, `SQL_C_TYPE_TIME` from a timestamp-value, and
+  `SQL_C_TYPE_TIMESTAMP` from a time-value. The pairs that already worked —
+  date text to `SQL_C_TYPE_DATE`, time text to `SQL_C_TYPE_TIME`, timestamp
+  text to `SQL_C_TYPE_TIMESTAMP`, and date text to `SQL_C_TYPE_TIMESTAMP` at
+  midnight — are unchanged, as is `22018` for text that is no datetime literal
+  at all.
+
+  **Applications will see `SQL_SUCCESS_WITH_INFO` where they saw
+  `SQL_ERROR`.** The two `01S07` rows write the truncated value, per the
+  table's own *TargetValuePtr* column; code treating any non-`SQL_SUCCESS`
+  return as a failure will now discard data it was given. Which part provokes
+  the warning differs per row and follows the footnotes: for
+  `SQL_C_TYPE_DATE` any non-zero time field does ([c], "the time portion ... is
+  truncated"), while for `SQL_C_TYPE_TIME` only a non-zero fraction does, since
+  [d] makes the discarded date part of the conversion rather than a loss.
+
+  A time-only literal read as `SQL_C_TYPE_TIMESTAMP` takes its date fields from
+  the current UTC date, per footnote [g], and keeps its own fractional seconds
+  in nanoseconds. This differs from a `SQL_TYPE_TIME` *column* read into the
+  same struct, which zeroes the fraction — that is the [SQL to C: Time] table's
+  rule for a different source type, and both are now implemented as written.
+
+  Text that parses as a datetime but carries an out-of-range field still
+  answers `22007`, not `22018`, on all three paths.
+
 [C to SQL: Character]: https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/c-to-sql-character
+[SQL to C: Time]: https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/sql-to-c-time
 [SQL to C: Numeric]: https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/sql-to-c-numeric
 [SQL to C: Character]: https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/sql-to-c-character
 [Unreleased]: https://github.com/stackabletech/stackable-odbc-core/commits/HEAD

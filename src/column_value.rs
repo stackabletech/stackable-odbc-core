@@ -253,12 +253,75 @@ unsafe fn write_fixed_or_chunked(
         // Required by the ODBC conversion matrix: SQL_CHAR / SQL_VARCHAR
         // convert to every C type. Backends whose data source has no native
         // date type deliver datetimes as character data.
+        //
+        // Each of the three C structs accepts more than its own literal form,
+        // and the SQL to C: Character rows say which and at what cost. The
+        // cascades below are the same ones `param_convert`'s `to_date`,
+        // `to_time` and `to_timestamp` run in the C-to-SQL direction, over the
+        // same two parsers; only the SQLSTATE conventions differ, which is why
+        // they are not one function.
+
+        // "Data value is a valid date-value" / "a valid timestamp-value; time
+        // portion is zero" — data written, no SQLSTATE. "a valid
+        // timestamp-value; time portion is nonzero" — truncated data written
+        // with 01S07, footnote [c]: "The time portion of the timestamp-value is
+        // truncated." Anything else is the row's 22018 with nothing written —
+        // or this module's 22007, which `parse_sql_timestamp`'s `?` propagates
+        // for a literal it recognises whose field is out of range.
+        //
+        // One branch covers all three: `parse_sql_timestamp` reads a bare
+        // `yyyy-mm-dd` as that date at midnight, so a date-value arrives here
+        // with a zero time portion and takes the clean path by construction.
         (ColumnValue::String(s), CDataType::TypeDate) => {
-            let d = parse_sql_date(s)?;
-            unsafe { write_fixed(target_ptr, len_ind_ptr, d) }
+            let ts = parse_sql_timestamp(s)?;
+            let d = Date {
+                year: ts.year,
+                month: ts.month,
+                day: ts.day,
+            };
+            unsafe {
+                let _ = write_fixed(target_ptr, len_ind_ptr, d)?;
+            }
+            // "Nonzero" is any of the four time fields, the fraction included.
+            if (ts.hour, ts.minute, ts.second, ts.fraction) != (0, 0, 0, 0) {
+                return Err(OdbcError::FractionalTruncation);
+            }
+            Ok(SqlReturn::SUCCESS)
         }
+
+        // "Data value is a valid time-value and the fractional seconds value is
+        // 0" / "a valid timestamp-value or a valid time-value; fractional
+        // seconds portion is zero" — data written, no SQLSTATE, footnote [d]:
+        // "The date portion of the timestamp-value is ignored", so a discarded
+        // date is not a truncation and reports nothing. "a valid
+        // timestamp-value; fractional seconds portion is nonzero" — truncated
+        // data written with 01S07, footnote [e]. Anything else is 22018.
         (ColumnValue::String(s), CDataType::TypeTime) => {
-            let (t, fraction) = parse_sql_time(s)?;
+            let (t, fraction) = match parse_sql_time(s) {
+                Ok(parsed) => parsed,
+                // Load-bearing, not an optimisation: falling through on *every*
+                // error would hand "25:00:00" to `parse_sql_timestamp`, which
+                // does not recognise it as a datetime at all and answers 22018,
+                // discarding the 22007 this module gives a recognised literal
+                // with an out-of-range field. Deleting it fails
+                // `hour_that_overflows_u16_returns_22007_not_22018`, and only
+                // that test — the newer
+                // `timestamp_text_with_out_of_range_minute_to_time_stays_22007`
+                // takes the fall-through and gets its 22007 from the timestamp
+                // parser, so it stays green either way.
+                Err(e) if !is_wrong_literal_shape(&e) => return Err(e),
+                Err(_) => {
+                    let ts = parse_sql_timestamp(s)?;
+                    (
+                        Time {
+                            hour: ts.hour,
+                            minute: ts.minute,
+                            second: ts.second,
+                        },
+                        ts.fraction,
+                    )
+                }
+            };
             unsafe {
                 let _ = write_fixed(target_ptr, len_ind_ptr, t)?;
             }
@@ -267,8 +330,59 @@ unsafe fn write_fixed_or_chunked(
             }
             Ok(SqlReturn::SUCCESS)
         }
+
+        // "Data value is a valid timestamp-value or a valid time-value;
+        // fractional seconds portion not truncated" / "a valid date-value",
+        // footnote [f]: "The time fields of the timestamp structure are set to
+        // zero" — both are what `parse_sql_timestamp` already produces. "a
+        // valid time-value", footnote [g]: "The date fields of the timestamp
+        // structure are set to the current date" — the branch below. Anything
+        // else is 22018 with nothing written.
+        //
+        // Footnote [g] speaks only of the date fields, and the row above it
+        // makes a time-value's fractional seconds something that can be
+        // "truncated" — so the literal's fraction is carried into the target's
+        // own fraction field rather than zeroed. That is the opposite of the
+        // typed `ColumnValue::Time` arm below, whose row (SQL to C: Time) says
+        // in as many words that the fraction is set to zero. Two source types,
+        // two tables, two answers.
+        //
+        // TODO(spec): the "fractional seconds portion truncated" row's 01S07 is
+        // not reported. `parse_time_fields` truncates a literal carrying more
+        // than nine fractional digits to nanoseconds silently, on this path and
+        // on the timestamp-value path alike. Pre-existing; out of this change's
+        // scope, and the same for both so the two cannot disagree.
         (ColumnValue::String(s), CDataType::TypeTimestamp) => {
-            let ts = parse_sql_timestamp(s)?;
+            let ts = match parse_sql_timestamp(s) {
+                Ok(ts) => ts,
+                // A local invariant, *not* load-bearing, unlike its counterpart
+                // in the arm above: no known input both fails
+                // `parse_sql_timestamp` with 22007 and parses as a time-value,
+                // and where neither form parses the terminal arm below already
+                // returns this same `e`. It states "only a 'this is not a
+                // timestamp at all' failure may try the time-value form" so a
+                // later change to either parser cannot quietly break it.
+                Err(e) if !is_wrong_literal_shape(&e) => return Err(e),
+                Err(e) => match parse_sql_time(s) {
+                    Ok((t, fraction)) => {
+                        let (year, month, day) = current_utc_date();
+                        Timestamp {
+                            year,
+                            month,
+                            day,
+                            hour: t.hour,
+                            minute: t.minute,
+                            second: t.second,
+                            fraction,
+                        }
+                    }
+                    // Neither form parsed. A 22007 from the time parser names a
+                    // real defect in the text and is kept over the timestamp
+                    // parser's blanket 22018.
+                    Err(time_err) if !is_wrong_literal_shape(&time_err) => return Err(time_err),
+                    Err(_) => return Err(e),
+                },
+            };
             unsafe { write_fixed(target_ptr, len_ind_ptr, ts) }
         }
 
@@ -814,9 +928,15 @@ fn parse_time_fields(s: &str) -> Result<(u16, u16, u16, u32), OdbcError> {
     Ok((hour, minute, second, fraction))
 }
 
-pub(crate) fn parse_sql_date(s: &str) -> Result<Date, OdbcError> {
-    let (year, month, day) = parse_date_fields(s.trim())?;
-    Ok(Date { year, month, day })
+/// Does this parse failure mean "the text is not this literal form at all"?
+///
+/// The two literal parsers answer with one of two SQLSTATEs, and the difference
+/// decides whether a caller may try the other form: 22018 says the text does not
+/// have this shape, so the other parser deserves a look; 22007 says the shape
+/// was recognised and a field is out of range, which the other parser will not
+/// improve on and will usually report as the weaker 22018.
+fn is_wrong_literal_shape(e: &OdbcError) -> bool {
+    e.sqlstate() == SqlState::invalid_character_value_for_cast()
 }
 
 /// Parse ODBC time literal text into a [`Time`] struct plus the fractional
@@ -4984,6 +5104,256 @@ mod tests {
             err.sqlstate().as_str(),
             crate::types::sql_state::INVALID_DATETIME_FORMAT
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // The cross-form rows of SQL to C: Character — a character column whose
+    // literal is one datetime form read into a C struct of another.
+    //
+    // Spec: https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/sql-to-c-character
+    // -----------------------------------------------------------------------
+
+    /// Write `text` into a `T`-shaped buffer as `target`, returning the buffer
+    /// and the `SqlReturn`. The buffer starts as `sentinel` so a caller
+    /// checking an error path can prove nothing was written.
+    unsafe fn convert_text<T: Copy>(
+        text: &str,
+        target: CDataType,
+        sentinel: T,
+    ) -> (T, Result<SqlReturn, OdbcError>) {
+        let mut out = sentinel;
+        let mut ind: isize = 0;
+        let ret = unsafe {
+            write_column_value(
+                &ColumnValue::String(text.into()),
+                target,
+                std::ptr::from_mut(&mut out).cast(),
+                size_of::<T>() as isize,
+                &mut ind,
+            )
+        };
+        (out, ret)
+    }
+
+    /// A `Date` value no conversion can produce, for the error-path canaries.
+    fn date_sentinel() -> Date {
+        Date {
+            year: -9,
+            month: 99,
+            day: 99,
+        }
+    }
+
+    /// A `Time` value no conversion can produce (hour 99 > 23).
+    fn time_sentinel() -> Time {
+        Time {
+            hour: 99,
+            minute: 99,
+            second: 99,
+        }
+    }
+
+    /// A `Timestamp` value no conversion can produce.
+    fn timestamp_sentinel() -> Timestamp {
+        Timestamp {
+            year: -9,
+            month: 99,
+            day: 99,
+            hour: 99,
+            minute: 99,
+            second: 99,
+            fraction: 99,
+        }
+    }
+
+    // --- SQL_C_TYPE_DATE, rows 2 and 3: the source is a timestamp-value ---
+
+    #[test]
+    fn timestamp_text_with_zero_time_converts_to_date() {
+        // "Data value is a valid timestamp-value; time portion is zero" — the
+        // date is written and the SQLSTATE column is "n/a".
+        let (out, ret) =
+            unsafe { convert_text("2026-07-21 00:00:00", CDataType::TypeDate, date_sentinel()) };
+        let ret = ret.expect("a timestamp whose time is zero converts to a date cleanly");
+        assert_eq!(ret, SqlReturn::SUCCESS);
+        assert_eq!((out.year, out.month, out.day), (2026, 7, 21));
+    }
+
+    #[test]
+    fn timestamp_text_with_time_to_date_is_01s07() {
+        // "Data value is a valid timestamp-value; time portion is nonzero" —
+        // "Truncated data" is written and the SQLSTATE is 01S07, footnote [c]:
+        // "The time portion of the timestamp-value is truncated."
+        let (out, ret) =
+            unsafe { convert_text("2026-07-21 10:30:15", CDataType::TypeDate, date_sentinel()) };
+        let err = ret.expect_err("a dropped time portion is 01S07, not success");
+        assert_eq!(
+            sqlstate_of_err(&err),
+            crate::types::sql_state::FRACTIONAL_TRUNCATION
+        );
+        // "Truncated data": the date is written even though 01S07 is reported.
+        assert_eq!((out.year, out.month, out.day), (2026, 7, 21));
+    }
+
+    #[test]
+    fn timestamp_text_with_only_a_fraction_to_date_is_01s07() {
+        // The time portion is "nonzero" if any of its four fields is, and the
+        // fraction is one of them.
+        let (out, ret) = unsafe {
+            convert_text(
+                "2026-07-21 00:00:00.5",
+                CDataType::TypeDate,
+                date_sentinel(),
+            )
+        };
+        let err = ret.expect_err("a dropped fractional second is still a dropped time portion");
+        assert_eq!(
+            sqlstate_of_err(&err),
+            crate::types::sql_state::FRACTIONAL_TRUNCATION
+        );
+        assert_eq!((out.year, out.month, out.day), (2026, 7, 21));
+    }
+
+    #[test]
+    fn text_that_is_no_date_or_timestamp_to_date_is_22018() {
+        // The row's last line: "Data value is not a valid date-value or
+        // timestamp-value" — 22018, *TargetValuePtr* undefined.
+        let (out, ret) = unsafe { convert_text("10:30:15", CDataType::TypeDate, date_sentinel()) };
+        let err = ret.expect_err("a time-only literal is not a date or a timestamp");
+        assert_eq!(
+            sqlstate_of_err(&err),
+            crate::types::sql_state::INVALID_CHARACTER_VALUE_FOR_CAST
+        );
+        assert_eq!(out, date_sentinel());
+    }
+
+    // --- SQL_C_TYPE_TIME, rows 2 and 3: the source is a timestamp-value ---
+
+    #[test]
+    fn timestamp_text_with_zero_fraction_converts_to_time() {
+        // "Data value is a valid timestamp-value or a valid time-value;
+        // fractional seconds portion is zero", footnote [d]: "The date portion
+        // of the timestamp-value is ignored." No SQLSTATE.
+        let (out, ret) =
+            unsafe { convert_text("2026-07-21 10:30:15", CDataType::TypeTime, time_sentinel()) };
+        let ret = ret.expect("a timestamp with no fraction converts to a time cleanly");
+        assert_eq!(ret, SqlReturn::SUCCESS);
+        assert_eq!((out.hour, out.minute, out.second), (10, 30, 15));
+    }
+
+    #[test]
+    fn timestamp_text_with_fraction_to_time_is_01s07() {
+        // "Data value is a valid timestamp-value; fractional seconds portion is
+        // nonzero" — 01S07 with the truncated data written. Only the *fraction*
+        // provokes it; the discarded date does not, per footnote [d].
+        let (out, ret) = unsafe {
+            convert_text(
+                "2026-07-21 10:30:15.5",
+                CDataType::TypeTime,
+                time_sentinel(),
+            )
+        };
+        let err = ret.expect_err("a dropped fractional second is 01S07, not success");
+        assert_eq!(
+            sqlstate_of_err(&err),
+            crate::types::sql_state::FRACTIONAL_TRUNCATION
+        );
+        assert_eq!((out.hour, out.minute, out.second), (10, 30, 15));
+    }
+
+    #[test]
+    fn text_that_is_no_time_or_timestamp_to_time_is_22018() {
+        let (out, ret) =
+            unsafe { convert_text("not a time", CDataType::TypeTime, time_sentinel()) };
+        let err = ret.expect_err("unparseable text is not a time or a timestamp");
+        assert_eq!(
+            sqlstate_of_err(&err),
+            crate::types::sql_state::INVALID_CHARACTER_VALUE_FOR_CAST
+        );
+        assert_eq!(out, time_sentinel());
+    }
+
+    // --- SQL_C_TYPE_TIMESTAMP, row 4: the source is a time-value ---
+
+    #[test]
+    fn time_text_to_timestamp_gets_current_date() {
+        // "Data value is a valid time-value", footnote [g]: "The date fields of
+        // the timestamp structure are set to the current date." No SQLSTATE.
+        //
+        // Not flaky across a midnight rollover: the expectation is read from the
+        // same clock source the conversion uses, on both sides of the call, and
+        // either reading is accepted.
+        let before = current_utc_date();
+        let (out, ret) =
+            unsafe { convert_text("10:30:15", CDataType::TypeTimestamp, timestamp_sentinel()) };
+        let after = current_utc_date();
+        let ret = ret.expect("a time-only literal converts to a timestamp on the current date");
+        assert_eq!(ret, SqlReturn::SUCCESS);
+        let written = (out.year, out.month, out.day);
+        assert!(
+            written == before || written == after,
+            "date fields {written:?} are neither {before:?} nor {after:?}",
+        );
+        assert_eq!((out.hour, out.minute, out.second), (10, 30, 15));
+        assert_eq!(out.fraction, 0);
+    }
+
+    #[test]
+    fn time_text_with_fraction_to_timestamp_carries_nanoseconds() {
+        // SQL_TIMESTAMP_STRUCT.fraction is in billionths of a second, so ".5"
+        // is 500_000_000 and not 500 or 500_000. The target has a fraction
+        // field, so nothing is truncated and the SQLSTATE stays "n/a".
+        let (out, ret) =
+            unsafe { convert_text("10:30:15.5", CDataType::TypeTimestamp, timestamp_sentinel()) };
+        let ret = ret.expect("a fractional time-only literal converts");
+        assert_eq!(ret, SqlReturn::SUCCESS);
+        assert_eq!((out.hour, out.minute, out.second), (10, 30, 15));
+        assert_eq!(out.fraction, 500_000_000);
+    }
+
+    #[test]
+    fn text_that_is_no_datetime_at_all_to_timestamp_is_22018() {
+        let (out, ret) = unsafe {
+            convert_text(
+                "half past ten",
+                CDataType::TypeTimestamp,
+                timestamp_sentinel(),
+            )
+        };
+        let err = ret.expect_err("unparseable text is not a date, time or timestamp");
+        assert_eq!(
+            sqlstate_of_err(&err),
+            crate::types::sql_state::INVALID_CHARACTER_VALUE_FOR_CAST
+        );
+        assert_eq!(out, timestamp_sentinel());
+    }
+
+    #[test]
+    fn time_text_with_out_of_range_hour_to_timestamp_stays_22007() {
+        // The fall-through to the time-value form must not relabel this
+        // module's 22007 as the row's blanket 22018: "25:00:00" is recognisably
+        // a time literal whose hour is out of range.
+        let (out, ret) =
+            unsafe { convert_text("25:00:00", CDataType::TypeTimestamp, timestamp_sentinel()) };
+        let err = ret.expect_err("hour 25 must not convert");
+        assert_eq!(
+            sqlstate_of_err(&err),
+            crate::types::sql_state::INVALID_DATETIME_FORMAT
+        );
+        assert_eq!(out, timestamp_sentinel());
+    }
+
+    #[test]
+    fn timestamp_text_with_out_of_range_minute_to_time_stays_22007() {
+        // The mirror image on the SQL_C_TYPE_TIME cascade.
+        let (out, ret) =
+            unsafe { convert_text("2026-07-21 10:99:15", CDataType::TypeTime, time_sentinel()) };
+        let err = ret.expect_err("minute 99 must not convert");
+        assert_eq!(
+            sqlstate_of_err(&err),
+            crate::types::sql_state::INVALID_DATETIME_FORMAT
+        );
+        assert_eq!(out, time_sentinel());
     }
 
     // -----------------------------------------------------------------------

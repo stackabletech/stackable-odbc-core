@@ -163,6 +163,16 @@ Fix `write_numeric_pivot`'s two Bit arms (`:1180`, `:1284-1292`) to mirror `para
 
 `src/query_timer.rs`, `src/cancel.rs:35`: record that a *core timer* signalled the token (flag alongside the token or on `FiredCancel`) so `reclassify_cancelled_opt` yields `HYT00` for timer-signalled tokens even when the observing call's own timer never fired. Also add the missing ordering test from the test-gap audit. Tests: `a_token_signalled_by_the_timer_reports_hyt00_on_the_next_failing_call`; `simultaneous_cancel_and_timeout_reports_hyt00` (signal token manually + fire timer, assert `QueryTimer::check` ordering — unit-testable per audit). Commit: `fix: timer-signalled cancellations report HYT00 on subsequent calls, not HY008`
 
+### Task 2.12 (addendum): SQL_C_FLOAT overflow is 22003, not 01S07
+
+**Not from the original audit** — found during Task 2.3's review, added on Andrew's instruction.
+
+`src/column_value.rs:1346-1354` (the `SQL_C_FLOAT` arm of `write_numeric_pivot`): when `v as f32` overflows to ±infinity, the arm returns `01S07` with the infinity written. The *SQL to C: Numeric* row for `SQL_C_FLOAT`/`SQL_C_DOUBLE` has only **two** outcomes — in range → *Data* / `n/a`; out of range → ***Undefined*** / `22003` — and no `01S07` cell at all. So an overflowing narrow should be `22003` with nothing written.
+
+Fetch the row and quote it before changing anything: if the row genuinely lacks an `01S07` cell, the current behaviour delivers an infinity an application did not ask for and calls it a warning. Check both directions of the narrowing (`+inf` and `-inf`), and check whether an `f64` that narrows to a *subnormal* or to zero is a different cell (underflow is not the same as overflow — decide it explicitly rather than by omission).
+
+Note the interaction with Task 2.3: that task's doc-comment edit enumerates this site as one of the `01S07` producers, so fixing the behaviour means correcting that enumeration too — otherwise the comment blesses what the code no longer does. Tests: `f64_overflowing_f32_to_float_is_22003_with_nothing_written` (both signs, sentinel), plus whatever the underflow decision needs. Commit: `fix: a float narrowing that overflows reports 22003 instead of writing infinity`
+
 ---
 
 ## Phase 3 — Investigations (mature-driver checks; ask before changing)
