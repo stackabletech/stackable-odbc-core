@@ -90,6 +90,31 @@ fn out_of_range(text: &str, sql_type: &str) -> OdbcError {
     )
 }
 
+/// A well-formed *numeric-literal* whose exponent expands past
+/// [`MAX_DECIMAL_EXPANSION_DIGITS`].
+///
+/// 22001, because the *C to SQL: Character* table's
+/// `SQL_DECIMAL`/`SQL_NUMERIC`/integer row offers exactly four outcomes —
+/// "Data converted without truncation" (n/a), "Data converted with truncation
+/// of fractional digits" (22001), "Conversion of data would result in loss of
+/// whole (as opposed to fractional) digits" (22001) and "Data value is not a
+/// *numeric-literal*" (22018). Both of the lossy outcomes are 22001 and the row
+/// lists no 22003, so a bound that refuses the value on either side of the
+/// decimal point lands on the same state whichever way it leans. 22018 would be
+/// wrong: the text *is* a numeric-literal.
+///
+/// The read direction disagrees, and correctly so — see
+/// [`DecimalLiteral::to_integer`].
+fn unexpandable(text: &str) -> OdbcError {
+    OdbcError::general(
+        format!(
+            "Parameter value {text:?} has an exponent that expands past \
+             {MAX_DECIMAL_EXPANSION_DIGITS} digits"
+        ),
+        SqlState::string_data_right_truncation(),
+    )
+}
+
 /// The datetime truncations the table calls out: a `SQL_TYPE_DATE` target given
 /// a non-zero time, or a `SQL_TYPE_TIME` target given a non-zero fraction.
 fn datetime_overflow(text: &str, what: &str) -> OdbcError {
@@ -169,6 +194,12 @@ pub(crate) fn text_to_sql_type(
     // what survives the conversion differs.
     if sql_type == SqlDataType::DECIMAL || sql_type == SqlDataType::NUMERIC {
         let literal = decimal_literal(text, "decimal")?;
+        // Before the size checks, which are about the *declared* column and are
+        // skipped entirely when `col_size` is 0. This one is about whether core
+        // will materialise the expansion at all, so it applies either way.
+        if !literal.expansion_is_bounded() {
+            return Err(unexpandable(text));
+        }
         check_declared_decimal_size(&literal, text, col_size, decimal_digits)?;
         return Ok(ColumnValue::Decimal(literal.to_decimal_string()));
     }
@@ -259,6 +290,133 @@ pub(crate) fn text_to_sql_type(
 
 // -- numeric-literal parsing -------------------------------------------------
 
+/// The maximum precision of an ODBC `SQL_DECIMAL` / `SQL_NUMERIC` value: a
+/// `SQL_NUMERIC_STRUCT` carries `SQL_MAX_NUMERIC_LEN` (16) mantissa bytes, and
+/// the spec caps its `precision` field at 38 decimal digits.
+pub(crate) const MAX_ODBC_DECIMAL_PRECISION: usize = 38;
+
+/// The most digits [`DecimalLiteral`] will *synthesise* while expanding an
+/// exponent into plain decimal notation.
+///
+/// # What is bounded
+///
+/// The characters a rendering has to *materialise* — the three
+/// `"0".repeat(…)` calls, two in [`DecimalLiteral::to_decimal_string`] (one per
+/// scale sign) and one in [`DecimalLiteral::to_integer`]'s negative-scale
+/// branch. Significant digits the caller spelled out are memory it has already
+/// paid for and are not counted, which is what lets the bound sit far below any
+/// real precision limit while still refusing only values that would allocate.
+///
+/// **Leading fractional zeros are the exception, and they are counted.**
+/// [`DecimalLiteral::significant`] strips them at parse time, so
+/// `to_decimal_string`'s positive-scale branch re-synthesises them with its own
+/// `"0".repeat` — they really are materialised, whoever typed them. A literal
+/// with every digit
+/// written out, `"0."` followed by 1 048 577 zeros and a `1`, therefore reports
+/// 1 048 577 synthesised digits and is refused. That is fail-closed and
+/// deliberate: the measurement matches what the renderer allocates, which is
+/// the property the bound needs. The alternative — counting supplied leading
+/// zeros as free — would understate the allocation by exactly their number.
+///
+/// # Derivation
+///
+/// The bound has to clear the widest exponent a genuine numeric value can
+/// carry. The candidates, largest plain-decimal rendering each:
+///
+/// | source | synthesised digits |
+/// |---|---|
+/// | ODBC `SQL_DECIMAL` / `SQL_NUMERIC` | 38 ([`MAX_ODBC_DECIMAL_PRECISION`]) |
+/// | IEEE-754 binary64 (`SQL_DOUBLE`, `SQL_C_DOUBLE`) | 323 for the smallest subnormal `4.9e-324`; 307 for `1.8e308` |
+/// | PostgreSQL `numeric`, the widest exact type among the mainstream data sources | [`WIDEST_REAL_DATA_SOURCE_EXPANSION`] — 131 072 whole digits and 16 383 fractional, per its own documented limits |
+///
+/// 2²⁰ clears the largest of those by more than seven times, so no value any of
+/// them can hold is refused, while capping the transient *peak* at about
+/// **2 MiB** — not 1 MiB: every `"0".repeat` is immediately consumed by a
+/// `format!` that copies it, so the padding and the finished string are both
+/// live for a moment. That is about three orders of magnitude below the ~2 GiB
+/// a single unbounded `i32` exponent asks for, and small enough that exceeding
+/// it could never be the difference between a diagnostic and an abort. The
+/// `const` assertions below
+/// hold the derivation from both sides: tightening the bound onto the ODBC
+/// precision alone fails to compile, and so does loosening it back into a
+/// hazard.
+///
+/// # What is actually refused
+///
+/// Not "an exponent past 2²⁰". The refusal set is per rendering branch, because
+/// [`DecimalLiteral::synthesised_digits`] measures
+/// [`DecimalLiteral::to_decimal_string`] branch for branch. In terms of
+/// `scale`, which is `frac_len − exponent` and so runs *opposite* to the
+/// exponent:
+///
+/// | literal | scale | refused? |
+/// |---|---|---|
+/// | non-zero mantissa, `scale < −2²⁰` (large non-negative exponent, `"1e2147483646"`) | very negative | **yes** — `"0".repeat(−scale)` |
+/// | **zero** mantissa, any `scale ≤ 0` (`"0e2147483646"`) | any ≤ 0 | no — renders `"0"`, allocates nothing |
+/// | any mantissa, `scale − significant digits > 2²⁰` (large *negative* exponent, `"0e-2147483647"`, `"1e-2147483647"`) | very positive | **yes** — the padding to `scale` characters happens whether or not the mantissa is zero |
+/// | non-zero mantissa, `scale > 0` and enough digits to cover it | positive | no — a decimal point is inserted, nothing is synthesised |
+///
+/// So a zero mantissa is refused too, at a large negative exponent; only the
+/// `scale ≤ 0` half of the zero case is free. And it is still not a range check
+/// on the *number*: a value far below an integer target's resolution truncates
+/// to zero at no cost through [`DecimalLiteral::to_integer`]'s positive-scale
+/// branch, which slices rather than expands and is deliberately not guarded.
+///
+/// # The accepted range is total
+///
+/// Everything inside the bound renders; being accepted and rendering
+/// successfully are the same thing. That is worth stating because it was once
+/// not true: [`DecimalLiteral::to_decimal_string`]'s positive-scale branch used
+/// `format!`'s `{digits:0>scale$}` width, which Rust caps at `u16::MAX`, so any
+/// `scale` from 65 536 up panicked with "Formatting argument out of range"
+/// instead of rendering — a range this bound accepts and PostgreSQL `numeric`
+/// can reach. That branch now builds its padding with `"0".repeat`, and two
+/// tests pin the old boundary from the far side.
+///
+/// The alternative — lowering the bound to `u16::MAX` — was rejected: it would
+/// have traded a contained panic for wrong answers on legitimate data, since
+/// the derivation table above requires accepting scales far beyond 65 535.
+///
+/// # Why a bound at all
+///
+/// A failed allocation aborts the process rather than unwinding, so
+/// [`crate::panic::panic_safe`] cannot turn it into a `SQL_ERROR`. An exponent
+/// arrives from two directions — an application's `SQL_C_CHAR` parameter, and a
+/// `ColumnValue::Decimal`/`ColumnValue::String` the *data source* returned — and
+/// the second is outside the driver's trust boundary.
+pub(crate) const MAX_DECIMAL_EXPANSION_DIGITS: usize = 1 << 20;
+
+/// A plain-decimal rendering of the widest exact numeric type any mainstream
+/// data source offers: PostgreSQL's `numeric`, documented at up to 131 072
+/// digits before the decimal point and 16 383 after it. Every other candidate
+/// in [`MAX_DECIMAL_EXPANSION_DIGITS`]' table is narrower by three orders of
+/// magnitude.
+const WIDEST_REAL_DATA_SOURCE_EXPANSION: usize = 131_072 + 16_383;
+
+/// The number of digits a plain rendering of an IEEE-754 binary64 needs
+/// synthesised: 323 leading zeros for the smallest subnormal, `4.9e-324`, which
+/// is more than the 307 trailing zeros `1.8e308` needs (digits `18` at scale
+/// −307, since one of the two is already left of the point).
+const MAX_BINARY64_SYNTHESISED_DIGITS: usize = 323;
+
+// [`MAX_DECIMAL_EXPANSION_DIGITS`]' derivation, checked rather than asserted in
+// prose. The bound clears every source in that table with room to spare, so no
+// value one of them can hold is refused.
+const _: () = assert!(MAX_DECIMAL_EXPANSION_DIGITS > WIDEST_REAL_DATA_SOURCE_EXPANSION);
+// Subsumed by the line above — 361 is far below 147 455 — and kept because it
+// is the pairing a reader checks first, and because dropping it would leave
+// both of its constants unreferenced. It documents; it cannot fail alone.
+const _: () = assert!(
+    MAX_DECIMAL_EXPANSION_DIGITS > MAX_ODBC_DECIMAL_PRECISION + MAX_BINARY64_SYNTHESISED_DIGITS
+);
+// And the direction the two above cannot see. They pin the bound from below
+// only, so a later "let us be safer still" edit raising it to `1 << 40` would
+// compile and silently restore the multi-gigabyte allocation this constant
+// exists to prevent — the hazard is a bound that is too *loose*, and only this
+// line fails when one is introduced. 2^22 is about 4 MiB, still an order of
+// magnitude above the widest row of the table.
+const _: () = assert!(MAX_DECIMAL_EXPANSION_DIGITS <= 1 << 22);
+
 /// A parsed *numeric-literal*, as `±digits × 10⁻ˢᶜᵃˡᵉ`.
 ///
 /// Keeping the significant digits as text rather than as a float is what lets a
@@ -347,9 +505,60 @@ impl DecimalLiteral {
         self.digits.bytes().all(|b| b == b'0')
     }
 
+    /// The digits an expansion to plain decimal notation would have to
+    /// synthesise — zeros the source text did not contain.
+    ///
+    /// This measures [`Self::to_decimal_string`] branch for branch, which is
+    /// the property that keeps the bound from refusing a value that costs
+    /// nothing to render. In particular a zero at a non-positive scale is
+    /// **not** measured by its exponent: that renderer returns `"0"` for it
+    /// before reaching any `repeat`, so `"0e2147483646"` synthesises nothing.
+    /// A zero at a *positive* scale is a different case and is measured, since
+    /// `0.000…` really does pad out to `scale` characters.
+    ///
+    /// [`Self::to_integer`] expands on one branch only, and applies this there.
+    /// See [`MAX_DECIMAL_EXPANSION_DIGITS`].
+    fn synthesised_digits(&self) -> usize {
+        // `unsigned_abs` rather than `-self.scale`, which overflows at
+        // `i32::MIN`. `parse_numeric_literal`'s `checked_sub` cannot reach that
+        // value, but nothing about the field's type says so.
+        let magnitude = usize::try_from(self.scale.unsigned_abs()).unwrap_or(usize::MAX);
+        if self.scale <= 0 {
+            if self.is_zero() {
+                return 0;
+            }
+            // Trailing zeros the literal did not spell out.
+            magnitude
+        } else {
+            // The positive-scale branch pads the digits out to `scale`
+            // characters; a literal with more digits than that synthesises
+            // none, because it only gains a decimal point.
+            magnitude.saturating_sub(self.significant().len())
+        }
+    }
+
+    /// Whether this literal can be expanded within
+    /// [`MAX_DECIMAL_EXPANSION_DIGITS`].
+    pub(crate) fn expansion_is_bounded(&self) -> bool {
+        self.synthesised_digits() <= MAX_DECIMAL_EXPANSION_DIGITS
+    }
+
     /// Render as a plain decimal literal, expanding any exponent. A backend
     /// renders `ColumnValue::Decimal` into SQL verbatim, and `1.5e2` is not
     /// something every data source accepts where `150` is.
+    ///
+    /// Past [`MAX_DECIMAL_EXPANSION_DIGITS`] the plain form is not rendered and
+    /// the exponent form is returned instead. That keeps this function total —
+    /// seven call sites across two modules read it, and the exponent form is
+    /// still an exact, syntactically valid *numeric-literal* — while removing
+    /// the only unbounded allocation on the path. It is a fail-safe, not the
+    /// answer: [`text_to_sql_type`] refuses such a value with [`unexpandable`]
+    /// before it renders one, so nothing this branch produces is sent to a
+    /// data source today. The other six call sites are in
+    /// [`crate::numeric_convert`], whose literals come from
+    /// [`Self::from_integer`] (scale 0), from `SQL_C_NUMERIC`'s `i8` scale, or
+    /// from `f64::to_string`, which emits no exponent at all — so none of them
+    /// can reach this branch.
     pub(crate) fn to_decimal_string(&self) -> String {
         let sign = if self.negative && !self.is_zero() {
             "-"
@@ -357,6 +566,9 @@ impl DecimalLiteral {
             ""
         };
         let digits = self.significant();
+        if !self.expansion_is_bounded() {
+            return format!("{sign}{digits}e{}", -i64::from(self.scale));
+        }
         if self.scale <= 0 {
             if self.is_zero() {
                 return format!("{sign}0");
@@ -369,7 +581,20 @@ impl DecimalLiteral {
             let point = digits.len() - scale;
             format!("{sign}{}.{}", &digits[..point], &digits[point..])
         } else {
-            format!("{sign}0.{digits:0>scale$}")
+            // The padding is built explicitly rather than with `format!`'s
+            // `{digits:0>scale$}` width, which Rust caps at `u16::MAX` and
+            // which therefore *panicked* for any scale from 65 536 up — a range
+            // `MAX_DECIMAL_EXPANSION_DIGITS` accepts and must render, since
+            // PostgreSQL `numeric` alone reaches scale 16 383 and the bound is
+            // sized for 147 455. Lowering the bound to `u16::MAX` instead would
+            // trade a contained panic for a wrong answer on legitimate data.
+            //
+            // The repeat count is `synthesised_digits`' own expression for this
+            // cell — `scale.saturating_sub(significant().len())`, where `digits`
+            // *is* `significant()` — so the bound still measures this branch
+            // exactly and the allocation is the one already accounted for.
+            let zeros = "0".repeat(scale.saturating_sub(digits.len()));
+            format!("{sign}0.{zeros}{digits}")
         }
     }
 
@@ -447,8 +672,45 @@ impl DecimalLiteral {
     }
 
     /// The value truncated toward zero, or `None` if it does not fit `i128`.
+    ///
+    /// A literal past [`MAX_DECIMAL_EXPANSION_DIGITS`] is `None` too, and
+    /// deliberately reported the same way: it is a magnitude no integer target
+    /// holds either, and every caller already maps `None` to the SQLSTATE its
+    /// own conversion table names for that — 22001 in [`to_integer`] (*C to
+    /// SQL: Character*), 22003 in `column_value::write_exact_integer` (*SQL to
+    /// C: Character* and *SQL to C: Numeric*) and in
+    /// [`crate::numeric_convert`] (*C to SQL: Numeric*). The two directions
+    /// genuinely disagree about the state, so the bound must not name one.
     pub(crate) fn to_integer(&self) -> Option<i128> {
+        // REQUIRED FOR THE BOUND TO HOLD — not an optimisation, however much it
+        // reads like one. This is the only thing standing between a zero
+        // mantissa and `"0".repeat(2_147_483_646)`.
+        //
+        // The cell it covers is `is_zero()` with `scale <= 0` — a zero at a
+        // large *non-negative exponent*, such as `"0e2147483646"`.
+        // [`Self::synthesised_digits`] reports **0** for that cell by design,
+        // because [`Self::to_decimal_string`] renders it as `"0"` before
+        // reaching any `repeat`. So `expansion_is_bounded()` is `true` there,
+        // the guard below correctly does not fire, and without this early
+        // return the negative-scale branch would expand the exponent in full.
+        // The two guards are complementary; neither covers this cell alone.
+        //
+        // Deleting this reintroduces the original denial of service, and the
+        // test that fails is
+        // `tests::a_zero_mantissa_with_a_pathological_exponent_still_reaches_an_integer`
+        // — by wrong result as well as by allocation, since the expansion ends
+        // in a `parse::<i128>` failure and a `None`.
+        if self.is_zero() {
+            return Some(0);
+        }
         let whole = if self.scale <= 0 {
+            // The one branch that expands. The positive-scale branch below
+            // slices digits the caller supplied and allocates nothing beyond
+            // them, so the bound does not apply to it: `1e-2000000` truncates
+            // toward zero at no cost and must keep doing so.
+            if !self.expansion_is_bounded() {
+                return None;
+            }
             let zeros = "0".repeat(usize::try_from(-self.scale).ok()?);
             format!("{}{zeros}", self.significant())
         } else {
@@ -1065,6 +1327,197 @@ mod tests {
     #[test]
     fn an_integer_parameter_that_is_not_a_numeric_literal_is_22018() {
         assert_eq!(sqlstate("1,000", SqlDataType::INTEGER), "22018");
+    }
+
+    // -- pathological exponents ---------------------------------------------
+
+    /// The exponent the audit reported. Before [`MAX_DECIMAL_EXPANSION_DIGITS`]
+    /// this reached `"0".repeat(2_147_483_646)` inside
+    /// [`DecimalLiteral::to_integer`] — a ~2 GB allocation, and the `format!`
+    /// on the next line copies it — where an allocation failure aborts the
+    /// process rather than unwinding, so `panic_safe` cannot contain it.
+    ///
+    /// 22001 is the *C to SQL: Character* table's verdict for this row:
+    /// "Conversion of data would result in loss of whole (as opposed to
+    /// fractional) digits" → 22001. That row lists no 22003 at all.
+    #[test]
+    fn a_pathological_exponent_bound_as_bigint_is_refused() {
+        assert_eq!(sqlstate("1e2147483646", SqlDataType::EXT_BIG_INT), "22001");
+    }
+
+    /// The same value against `SQL_DECIMAL` with no declared size — the one
+    /// path into [`DecimalLiteral::to_decimal_string`] with no size check in
+    /// front of it, since [`check_declared_decimal_size`] returns `Ok` when
+    /// `col_size` is 0.
+    #[test]
+    fn a_pathological_exponent_bound_as_decimal_is_refused() {
+        assert_eq!(decimal_sqlstate("1e2147483646", 0, 0), "22001");
+    }
+
+    /// A negative exponent expands the other way — the positive-scale branch of
+    /// [`DecimalLiteral::to_decimal_string`] pads the digits out to `scale`
+    /// characters — so it needs the same bound.
+    #[test]
+    fn a_pathological_negative_exponent_bound_as_decimal_is_refused() {
+        assert_eq!(decimal_sqlstate("1e-2147483647", 0, 0), "22001");
+    }
+
+    /// One below that overflows `parse_numeric_literal`'s scale arithmetic, so
+    /// it never becomes a literal at all and takes the row's last line instead.
+    #[test]
+    fn an_exponent_below_i32_min_is_not_a_numeric_literal() {
+        assert_eq!(decimal_sqlstate("1e-2147483648", 0, 0), "22018");
+    }
+
+    /// And one above `i32::MAX` fails the exponent's own `parse::<i32>`.
+    #[test]
+    fn an_exponent_above_i32_max_is_not_a_numeric_literal() {
+        assert_eq!(decimal_sqlstate("1e2147483648", 0, 0), "22018");
+    }
+
+    /// Exactly at the bound still renders, which is what makes the bound a
+    /// resource limit rather than a range check on the value.
+    #[test]
+    fn a_literal_at_the_expansion_limit_still_converts() {
+        let text = format!("1e{MAX_DECIMAL_EXPANSION_DIGITS}");
+        match convert_decimal(&text, 0, 0) {
+            ColumnValue::Decimal(rendered) => {
+                assert_eq!(rendered.len(), MAX_DECIMAL_EXPANSION_DIGITS + 1);
+                assert!(rendered.starts_with("10"));
+            }
+            other => panic!("a decimal target yields ColumnValue::Decimal, got {other:?}"),
+        }
+    }
+
+    /// One synthesised digit past it is refused.
+    #[test]
+    fn a_literal_one_digit_past_the_expansion_limit_is_refused() {
+        let text = format!("1e{}", MAX_DECIMAL_EXPANSION_DIGITS + 1);
+        assert_eq!(decimal_sqlstate(&text, 0, 0), "22001");
+    }
+
+    #[test]
+    fn an_ordinary_positive_exponent_is_unaffected() {
+        assert_eq!(
+            convert("1e18", SqlDataType::EXT_BIG_INT),
+            ColumnValue::I64(1_000_000_000_000_000_000)
+        );
+    }
+
+    #[test]
+    fn an_ordinary_negative_exponent_is_unaffected() {
+        assert_eq!(
+            convert_decimal("1.5e-10", 0, 0),
+            ColumnValue::Decimal("0.00000000015".into())
+        );
+    }
+
+    /// The 38 significant digits `SQL_MAX_NUMERIC_LEN` allows, written out in
+    /// full: nothing is synthesised, so the bound never sees it.
+    #[test]
+    fn a_full_precision_38_digit_decimal_is_unaffected() {
+        let text = "1".repeat(MAX_ODBC_DECIMAL_PRECISION);
+        assert_eq!(
+            convert_decimal(&text, 0, 0),
+            ColumnValue::Decimal(text.clone())
+        );
+    }
+
+    /// Zero is zero at any exponent, and `to_decimal_string` returns `"0"` for
+    /// it without reaching a `repeat`. The bound must not refuse what costs
+    /// nothing, so it measures that branch as synthesising nothing.
+    #[test]
+    fn a_zero_mantissa_with_a_pathological_exponent_still_converts() {
+        assert_eq!(
+            convert_decimal("0e2147483646", 0, 0),
+            ColumnValue::Decimal("0".into())
+        );
+    }
+
+    #[test]
+    fn a_zero_mantissa_with_a_pathological_exponent_still_reaches_an_integer() {
+        assert_eq!(
+            convert("0e2147483646", SqlDataType::EXT_BIG_INT),
+            ColumnValue::I64(0)
+        );
+    }
+
+    /// A zero at a *positive* scale is the opposite case and is bounded: that
+    /// branch really does pad out to `scale` characters, so `0.000…` with two
+    /// million places is refused where `"0e2147483646"` above is not.
+    #[test]
+    fn a_zero_mantissa_at_a_pathological_positive_scale_is_refused() {
+        assert_eq!(decimal_sqlstate("0e-2147483647", 0, 0), "22001");
+    }
+
+    /// The security invariant, across all four rendering cells:
+    /// `synthesised_digits` must never *understate* what `to_decimal_string`
+    /// materialises, or the bound would measure less than the allocation it is
+    /// there to cap. Everything the renderer emits is either a supplied
+    /// significant digit, a synthesised zero, or one of at most three
+    /// structural characters (a sign and `"0."`).
+    ///
+    /// Checked here rather than only reasoned about, because the two
+    /// expressions live in different functions and only a test notices when one
+    /// of them moves.
+    #[test]
+    fn synthesised_digits_never_understates_what_the_renderer_materialises() {
+        const STRUCTURAL: usize = 3; // sign, and the "0." of a bare fraction
+        for text in [
+            "0e2147483646", // zero, scale <= 0: renders "0"
+            "0",            // zero, scale 0
+            "-0.000",       // negative zero at a positive scale
+            "1e18",         // non-zero, scale < 0: trailing zeros synthesised
+            "-1e18",
+            "123.45", // scale > 0, digits cover it: a point is inserted
+            "-123.45",
+            "1e-65536", // scale > 0, padding synthesised — the tight case
+            "-1.5e-10",
+            "15e-200000",
+            "5e-324",
+        ] {
+            let literal = parse_numeric_literal(text).expect("a numeric literal");
+            let rendered = literal.to_decimal_string();
+            let accounted = STRUCTURAL + literal.significant().len() + literal.synthesised_digits();
+            assert!(
+                rendered.len() <= accounted,
+                "{text}: rendered {} characters but only {accounted} were accounted for",
+                rendered.len(),
+            );
+        }
+    }
+
+    /// Rust caps a `format!` width at `u16::MAX`, so the positive-scale branch
+    /// used to panic here rather than render. It builds its padding explicitly
+    /// now, so the whole accepted range is total. This is the exact boundary:
+    /// 65 535 always worked, 65 536 did not.
+    #[test]
+    fn a_scale_one_past_the_format_width_limit_renders() {
+        let scale = usize::from(u16::MAX) + 1;
+        assert_eq!(
+            convert_decimal(&format!("1e-{scale}"), 0, 0),
+            ColumnValue::Decimal(format!("0.{}1", "0".repeat(scale - 1)))
+        );
+    }
+
+    /// And well past it, still inside [`MAX_DECIMAL_EXPANSION_DIGITS`].
+    #[test]
+    fn a_scale_far_past_the_format_width_limit_renders() {
+        let scale = 200_000usize;
+        assert_eq!(
+            convert_decimal(&format!("15e-{scale}"), 0, 0),
+            ColumnValue::Decimal(format!("0.{}15", "0".repeat(scale - 2)))
+        );
+    }
+
+    /// The smallest positive `SQL_DOUBLE` subnormal, in exponent form: 324
+    /// synthesised digits, which the bound must not refuse.
+    #[test]
+    fn the_smallest_binary64_subnormal_still_expands() {
+        assert_eq!(
+            convert_decimal("5e-324", 0, 0),
+            ColumnValue::Decimal(format!("0.{}5", "0".repeat(323)))
+        );
     }
 
     // -- approximate numeric targets ----------------------------------------
