@@ -150,6 +150,41 @@ call `SQLCloseCursor` or `SQLFreeStmt(SQL_CLOSE)` first, as it already must for
 
 ### Added
 
+- `Backend::configure_dsn`, a defaulted hook that supplies a data source's
+  keywords to `ConfigDSN`. This is what makes the Windows ODBC Administrator's
+  **Add…** and **Configure…** buttons work at all: the Administrator calls
+  `ConfigDSNW` with a non-null parent window and an *empty* attribute list, and
+  the driver's dialog is what produces the `DSN` keyword. Core previously looked
+  for that keyword first and failed with `ODBC_ERROR_INVALID_KEYWORD_VALUE`, so
+  **Add…** could never succeed for any driver built on core.
+
+  Core keeps every other part of `ConfigDSN`: request validation, the `DRIVER=`
+  reserved-key filter, `SQLValidDSN`, the ADD-overwrites versus
+  CONFIG-preserves split, and the registry writes. The default implementation is
+  the identity function, so a driver that does not override it keeps core's
+  existing headless behaviour exactly. Not breaking.
+
+  For `ODBC_CONFIG_DSN` and `ODBC_REMOVE_DSN`, core reads the data source's
+  existing keywords from `ODBC.INI` and merges them under the supplied ones
+  before calling the hook, so a driver's dialog never has to touch `odbcinst`.
+  The spec requires this rather than merely allowing it: "for information not in
+  *lpszAttributes*, it uses information from the system information."
+  `ODBC_ADD_DSN` does not prefill, because `SQLWriteDSNToIni` removes the old
+  section before creating the new one.
+
+  Core also enforces that the hook does not change a data source name it was
+  handed ("**ConfigDSN** displays that name but does not allow the user to
+  change it"), because a hook altering `DSN=` on a remove would delete a data
+  source the user never named. A cancelled dialog (`Ok(None)`) returns FALSE
+  and posts **no** installer error, matching psqlODBC.
+
+  New public module `stackable_odbc_core::setup`, carrying `ConfigRequest`
+  (moved from the private `ffi::setup`), `InstallerError` and `SetupError`.
+  `InstallerError` has no `DriverSpecific` variant: `ConfigDSN`'s spec table
+  names `ODBC_ERROR_DRIVER_SPECIFIC`, but no header defines it, including the
+  Windows SDK's own, whose codes end at `ODBC_ERROR_NOTRANINFO` (23). A driver's
+  setup failure posts `ODBC_ERROR_REQUEST_FAILED` instead.
+
 - `SQLGetDiagFieldW` answers `SQL_DIAG_CLASS_ORIGIN` and
   `SQL_DIAG_SUBCLASS_ORIGIN` from the record's SQLSTATE. Both returned the empty
   string, sharing a match arm with `SQL_DIAG_CONNECTION_NAME` and

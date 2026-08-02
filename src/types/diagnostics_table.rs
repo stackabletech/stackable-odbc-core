@@ -161,11 +161,15 @@ const MODULES: &[(&str, &str)] = &[
 /// Functions whose spec page defines no Diagnostics table at all. A permanent
 /// exception, not a backlog.
 const NO_SPEC_DIAGNOSTICS_TABLE: &[&str] = &[
-    // ConfigDSN is an ODBC *installer* entry point, not an ODBC function. Its
-    // page defines no Diagnostics table and it has no handle to post one
-    // through; it reports via SQLPostInstallerError instead, which
+    // ConfigDSN is an ODBC *installer* entry point, not an ODBC function, and
+    // it has no handle to post a diagnostic record through. Its page does have
+    // a Diagnostics table, but the table's rows are installer error codes
+    // (ODBC_ERROR_INVALID_HWND and friends), not SQLSTATEs, so there is nothing
+    // here for this guard to compare against. It reports via
+    // SQLPostInstallerError instead, which
     // `every_false_return_from_config_dsn_w_posts_an_installer_error` in
-    // `ffi/setup.rs` already guards.
+    // `ffi/setup.rs` guards, and the codes themselves are modelled by
+    // `crate::setup::InstallerError`.
     "config_dsn_w",
     // The two diagnostic-retrieval functions have a "Diagnostics" heading with
     // no SQLSTATE table under it. Both pages open that section with the same
