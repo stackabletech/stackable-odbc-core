@@ -23,22 +23,32 @@ use crate::types::{
     TablesResultCol, ULen, YES_NO_LEN, character, identifier, identifier_type_from_raw, integer,
     nullable_from_raw, scope_from_raw, smallint, special_columns_columns, statistics_columns,
 };
-use crate::utf16::{utf16_to_string, write_utf16};
+use crate::utf16::write_utf16;
 
 /// Parse a UTF-16 filter parameter. Returns `None` if the pointer is null,
 /// otherwise parses the string and returns `Some`.
 ///
+/// `arg` is the ODBC spec's own name for the argument (`"CatalogName"`,
+/// `"PKTableName"`, …), and reaches the application in the `HY090` a
+/// terminator-less `SQL_NTS` argument produces. `SQLForeignKeys` takes six of
+/// these and `SQLColumns` four, so "a string argument was too long" would name
+/// none of them.
+///
 /// # Safety
 ///
 /// `ptr` must be valid for `len` u16 elements (or null-terminated if len is SQL_NTS).
-unsafe fn parse_filter_param(ptr: *const u16, len: i16) -> Result<Option<String>, OdbcError> {
+unsafe fn parse_filter_param(
+    ptr: *const u16,
+    len: i16,
+    arg: &str,
+) -> Result<Option<String>, OdbcError> {
     if ptr.is_null() {
         return Ok(None);
     }
     // SAFETY: ptr is non-null (checked above) and points to a valid sequence of `len` UTF-16
     // code units, or is null-terminated if len == SQL_NTS; caller upholds this invariant per
     // the function's own safety contract.
-    let s = unsafe { utf16_to_string(ptr, len.into())? };
+    let s = unsafe { crate::utf16::utf16_to_string_named(ptr, len.into(), arg)? };
     Ok(Some(s))
 }
 
@@ -245,6 +255,17 @@ fn table_enumeration(
 ///   `SQL_MAX_TABLE_NAME_LEN` and `SQL_MAX_COLUMN_NAME_LEN` all answer `0`, which the
 ///   `SQLGetInfo` page defines as "no specified limit or the limit is unknown". A driver
 ///   that answers a real maximum for any of those has to add the check.
+///
+///   **Also returned here**, for a condition this row does not itself state: **any** of this
+///   function's name arguments, passed as `SQL_NTS`, whose null terminator is not within
+///   `MAX_NTS_SCAN` (32 767) code units. Every one of them is resolved by the same helper
+///   (`parse_filter_param`), so the limit applies to all of them alike and the diagnostic
+///   names which one overran. It is a length the driver cannot determine, which is what
+///   `HY090` names; `utf16_to_string` used to hand back the 32 767-unit prefix instead, so
+///   the call filtered on a truncated pattern and returned a result set that was wrong
+///   rather than absent. An **explicitly measured** length is not limited by this, at any
+///   size. See `tables_refuses_an_nts_filter_that_runs_to_the_scan_cap` and
+///   `foreign_keys_names_the_argument_whose_nts_scan_overran`.
 /// - HY117: Connection suspended (DM) (driver-manager-handled; not returned here).
 /// - HYC00: Optional feature not implemented; propagated from backend if catalogs/schemas are
 ///   unsupported.
@@ -283,10 +304,10 @@ pub unsafe fn sql_tables_w<B: Backend>(
             let (stmt, conn) = scope.stmt_with_parent::<B>(statement_handle)?;
             stmt.diagnostics.clear();
 
-            let catalog = parse_filter_param(catalog_name, name_length1)?;
-            let schema = parse_filter_param(schema_name, name_length2)?;
-            let table = parse_filter_param(table_name, name_length3)?;
-            let tt = parse_filter_param(table_type, name_length4)?;
+            let catalog = parse_filter_param(catalog_name, name_length1, "CatalogName")?;
+            let schema = parse_filter_param(schema_name, name_length2, "SchemaName")?;
+            let table = parse_filter_param(table_name, name_length3, "TableName")?;
+            let tt = parse_filter_param(table_type, name_length4, "TableType")?;
             tracing::debug!(
                 "SQLTablesW(stmt={:?}, catalog={:?}, schema={:?}, table={:?}, table_type={:?})",
                 statement_handle,
@@ -488,9 +509,20 @@ pub unsafe fn sql_tables_w<B: Backend>(
 ///   (async, etc.) are driver-manager-handled; not returned here.
 /// - HY013: Memory management error; returned if underlying allocation fails.
 /// - HY090: Invalid string or buffer length — every clause of this row is `(DM)`
-///   (driver-manager-handled; not returned here). Unlike several of its siblings' rows,
-///   this one has only the name-length-below-zero sentence and no maximum-length
-///   sentence, so nothing in it is the driver's.
+///   (driver-manager-handled), so none of the row's own clauses is returned here. Unlike
+///   several of its siblings' rows, this one has only the name-length-below-zero sentence
+///   and no maximum-length sentence, so nothing in it is the driver's.
+///
+///   **Also returned here**, for a condition this row does not itself state: **any** of this
+///   function's name arguments, passed as `SQL_NTS`, whose null terminator is not within
+///   `MAX_NTS_SCAN` (32 767) code units. Every one of them is resolved by the same helper
+///   (`parse_filter_param`), so the limit applies to all of them alike and the diagnostic
+///   names which one overran. It is a length the driver cannot determine, which is what
+///   `HY090` names; `utf16_to_string` used to hand back the 32 767-unit prefix instead, so
+///   the call filtered on a truncated pattern and returned a result set that was wrong
+///   rather than absent. An **explicitly measured** length is not limited by this, at any
+///   size. See `tables_refuses_an_nts_filter_that_runs_to_the_scan_cap` and
+///   `foreign_keys_names_the_argument_whose_nts_scan_overran`.
 /// - HY117: Connection suspended (DM) (driver-manager-handled; not returned here).
 /// - HYC00: Optional feature not implemented; propagated from backend if catalogs/schemas are
 ///   unsupported.
@@ -529,10 +561,10 @@ pub unsafe fn sql_columns_w<B: Backend>(
             let (stmt, conn) = scope.stmt_with_parent::<B>(statement_handle)?;
             stmt.diagnostics.clear();
 
-            let catalog = parse_filter_param(catalog_name, name_length1)?;
-            let schema = parse_filter_param(schema_name, name_length2)?;
-            let table = parse_filter_param(table_name, name_length3)?;
-            let column = parse_filter_param(column_name, name_length4)?;
+            let catalog = parse_filter_param(catalog_name, name_length1, "CatalogName")?;
+            let schema = parse_filter_param(schema_name, name_length2, "SchemaName")?;
+            let table = parse_filter_param(table_name, name_length3, "TableName")?;
+            let column = parse_filter_param(column_name, name_length4, "ColumnName")?;
             tracing::debug!(
                 "SQLColumnsW(stmt={:?}, catalog={:?}, schema={:?}, table={:?}, column={:?})",
                 statement_handle,
@@ -679,6 +711,17 @@ pub unsafe fn sql_columns_w<B: Backend>(
 ///   `SQL_MAX_TABLE_NAME_LEN` and `SQL_MAX_COLUMN_NAME_LEN` all answer `0`, which the
 ///   `SQLGetInfo` page defines as "no specified limit or the limit is unknown". A driver
 ///   that answers a real maximum for any of those has to add the check.
+///
+///   **Also returned here**, for a condition this row does not itself state: **any** of this
+///   function's name arguments, passed as `SQL_NTS`, whose null terminator is not within
+///   `MAX_NTS_SCAN` (32 767) code units. Every one of them is resolved by the same helper
+///   (`parse_filter_param`), so the limit applies to all of them alike and the diagnostic
+///   names which one overran. It is a length the driver cannot determine, which is what
+///   `HY090` names; `utf16_to_string` used to hand back the 32 767-unit prefix instead, so
+///   the call filtered on a truncated pattern and returned a result set that was wrong
+///   rather than absent. An **explicitly measured** length is not limited by this, at any
+///   size. See `tables_refuses_an_nts_filter_that_runs_to_the_scan_cap` and
+///   `foreign_keys_names_the_argument_whose_nts_scan_overran`.
 /// - HY117: Connection suspended (DM) (driver-manager-handled; not returned here).
 /// - HYC00: Optional feature not implemented; propagated from backend if catalogs/schemas are
 ///   unsupported.
@@ -734,9 +777,9 @@ pub unsafe fn sql_primary_keys_w<B: Backend>(
                 ));
             };
 
-            let catalog = parse_filter_param(catalog_name, name_length1)?;
-            let schema = parse_filter_param(schema_name, name_length2)?;
-            let table = parse_filter_param(table_name, name_length3)?;
+            let catalog = parse_filter_param(catalog_name, name_length1, "CatalogName")?;
+            let schema = parse_filter_param(schema_name, name_length2, "SchemaName")?;
+            let table = parse_filter_param(table_name, name_length3, "TableName")?;
             tracing::debug!(
                 "SQLPrimaryKeysW(stmt={:?}, catalog={:?}, schema={:?}, table={:?})",
                 statement_handle,
@@ -858,9 +901,20 @@ pub unsafe fn sql_primary_keys_w<B: Backend>(
 ///   are driver-manager-handled; not returned here.
 /// - HY013: Memory management error; returned if underlying allocation fails.
 /// - HY090: Invalid string or buffer length — every clause of this row is `(DM)`
-///   (driver-manager-handled; not returned here). Unlike several of its siblings' rows,
-///   this one has only the name-length-below-zero sentence and no maximum-length
-///   sentence, so nothing in it is the driver's.
+///   (driver-manager-handled), so none of the row's own clauses is returned here. Unlike
+///   several of its siblings' rows, this one has only the name-length-below-zero sentence
+///   and no maximum-length sentence, so nothing in it is the driver's.
+///
+///   **Also returned here**, for a condition this row does not itself state: **any** of this
+///   function's name arguments, passed as `SQL_NTS`, whose null terminator is not within
+///   `MAX_NTS_SCAN` (32 767) code units. Every one of them is resolved by the same helper
+///   (`parse_filter_param`), so the limit applies to all of them alike and the diagnostic
+///   names which one overran. It is a length the driver cannot determine, which is what
+///   `HY090` names; `utf16_to_string` used to hand back the 32 767-unit prefix instead, so
+///   the call filtered on a truncated pattern and returned a result set that was wrong
+///   rather than absent. An **explicitly measured** length is not limited by this, at any
+///   size. See `tables_refuses_an_nts_filter_that_runs_to_the_scan_cap` and
+///   `foreign_keys_names_the_argument_whose_nts_scan_overran`.
 /// - HY117: Connection suspended (DM) (driver-manager-handled; not returned here).
 /// - HYC00: Optional feature not implemented; propagated from backend if catalogs/schemas are
 ///   unsupported.
@@ -923,12 +977,12 @@ pub unsafe fn sql_foreign_keys_w<B: Backend>(
                 ));
             };
 
-            let pk_catalog = parse_filter_param(pk_catalog_name, name_length1)?;
-            let pk_schema = parse_filter_param(pk_schema_name, name_length2)?;
-            let pk_table = parse_filter_param(pk_table_name, name_length3)?;
-            let fk_catalog = parse_filter_param(fk_catalog_name, name_length4)?;
-            let fk_schema = parse_filter_param(fk_schema_name, name_length5)?;
-            let fk_table = parse_filter_param(fk_table_name, name_length6)?;
+            let pk_catalog = parse_filter_param(pk_catalog_name, name_length1, "PKCatalogName")?;
+            let pk_schema = parse_filter_param(pk_schema_name, name_length2, "PKSchemaName")?;
+            let pk_table = parse_filter_param(pk_table_name, name_length3, "PKTableName")?;
+            let fk_catalog = parse_filter_param(fk_catalog_name, name_length4, "FKCatalogName")?;
+            let fk_schema = parse_filter_param(fk_schema_name, name_length5, "FKSchemaName")?;
+            let fk_table = parse_filter_param(fk_table_name, name_length6, "FKTableName")?;
             tracing::debug!(
                 "SQLForeignKeysW(stmt={:?}, pk_catalog={:?}, pk_schema={:?}, pk_table={:?}, \
                  fk_catalog={:?}, fk_schema={:?}, fk_table={:?})",
@@ -1074,6 +1128,17 @@ pub unsafe fn sql_foreign_keys_w<B: Backend>(
 ///   `SQL_MAX_TABLE_NAME_LEN` and `SQL_MAX_COLUMN_NAME_LEN` all answer `0`, which the
 ///   `SQLGetInfo` page defines as "no specified limit or the limit is unknown". A driver
 ///   that answers a real maximum for any of those has to add the check.
+///
+///   **Also returned here**, for a condition this row does not itself state: **any** of this
+///   function's name arguments, passed as `SQL_NTS`, whose null terminator is not within
+///   `MAX_NTS_SCAN` (32 767) code units. Every one of them is resolved by the same helper
+///   (`parse_filter_param`), so the limit applies to all of them alike and the diagnostic
+///   names which one overran. It is a length the driver cannot determine, which is what
+///   `HY090` names; `utf16_to_string` used to hand back the 32 767-unit prefix instead, so
+///   the call filtered on a truncated pattern and returned a result set that was wrong
+///   rather than absent. An **explicitly measured** length is not limited by this, at any
+///   size. See `tables_refuses_an_nts_filter_that_runs_to_the_scan_cap` and
+///   `foreign_keys_names_the_argument_whose_nts_scan_overran`.
 /// - HY100: Uniqueness option type out of range (DM) (driver-manager-handled; not returned here).
 /// - HY101: Accuracy option type out of range (DM) (driver-manager-handled; not returned here).
 /// - HY117: Connection suspended (DM) (driver-manager-handled; not returned here).
@@ -1154,9 +1219,9 @@ pub unsafe fn sql_statistics_w<B: Backend>(
                 "SQLStatisticsW",
             )?;
 
-            let catalog = parse_filter_param(catalog_name, name_length1)?;
-            let schema = parse_filter_param(schema_name, name_length2)?;
-            let table = parse_filter_param(table_name, name_length3)?;
+            let catalog = parse_filter_param(catalog_name, name_length1, "CatalogName")?;
+            let schema = parse_filter_param(schema_name, name_length2, "SchemaName")?;
+            let table = parse_filter_param(table_name, name_length3, "TableName")?;
             tracing::debug!(
                 "SQLStatisticsW(stmt={:?}, catalog={:?}, schema={:?}, table={:?})",
                 statement_handle,
@@ -1283,6 +1348,17 @@ pub unsafe fn sql_statistics_w<B: Backend>(
 ///   `SQL_MAX_TABLE_NAME_LEN` and `SQL_MAX_COLUMN_NAME_LEN` all answer `0`, which the
 ///   `SQLGetInfo` page defines as "no specified limit or the limit is unknown". A driver
 ///   that answers a real maximum for any of those has to add the check.
+///
+///   **Also returned here**, for a condition this row does not itself state: **any** of this
+///   function's name arguments, passed as `SQL_NTS`, whose null terminator is not within
+///   `MAX_NTS_SCAN` (32 767) code units. Every one of them is resolved by the same helper
+///   (`parse_filter_param`), so the limit applies to all of them alike and the diagnostic
+///   names which one overran. It is a length the driver cannot determine, which is what
+///   `HY090` names; `utf16_to_string` used to hand back the 32 767-unit prefix instead, so
+///   the call filtered on a truncated pattern and returned a result set that was wrong
+///   rather than absent. An **explicitly measured** length is not limited by this, at any
+///   size. See `tables_refuses_an_nts_filter_that_runs_to_the_scan_cap` and
+///   `foreign_keys_names_the_argument_whose_nts_scan_overran`.
 /// - HY097: Column type out of range (DM) (driver-manager-handled; not returned here). Should
 ///   not occur, since the Driver Manager validates `IdentifierType`; if an unrecognized value
 ///   somehow reaches the driver, it is treated as an unsupported characteristic and returns an
@@ -1401,9 +1477,9 @@ pub unsafe fn sql_special_columns_w<B: Backend>(
                 nullable
             );
 
-            let catalog = parse_filter_param(catalog_name, name_length1)?;
-            let schema = parse_filter_param(schema_name, name_length2)?;
-            let table = parse_filter_param(table_name, name_length3)?;
+            let catalog = parse_filter_param(catalog_name, name_length1, "CatalogName")?;
+            let schema = parse_filter_param(schema_name, name_length2, "SchemaName")?;
+            let table = parse_filter_param(table_name, name_length3, "TableName")?;
             tracing::debug!(
                 "SQLSpecialColumnsW(stmt={:?}, catalog={:?}, schema={:?}, table={:?})",
                 statement_handle,
@@ -1978,6 +2054,17 @@ pub(crate) fn procedures_columns(widths: &CatalogResultColumnWidths) -> Vec<Colu
 ///   `SQL_MAX_TABLE_NAME_LEN` and `SQL_MAX_COLUMN_NAME_LEN` all answer `0`, which the
 ///   `SQLGetInfo` page defines as "no specified limit or the limit is unknown". A driver
 ///   that answers a real maximum for any of those has to add the check.
+///
+///   **Also returned here**, for a condition this row does not itself state: **any** of this
+///   function's name arguments, passed as `SQL_NTS`, whose null terminator is not within
+///   `MAX_NTS_SCAN` (32 767) code units. Every one of them is resolved by the same helper
+///   (`parse_filter_param`), so the limit applies to all of them alike and the diagnostic
+///   names which one overran. It is a length the driver cannot determine, which is what
+///   `HY090` names; `utf16_to_string` used to hand back the 32 767-unit prefix instead, so
+///   the call filtered on a truncated pattern and returned a result set that was wrong
+///   rather than absent. An **explicitly measured** length is not limited by this, at any
+///   size. See `tables_refuses_an_nts_filter_that_runs_to_the_scan_cap` and
+///   `foreign_keys_names_the_argument_whose_nts_scan_overran`.
 /// - HY117: Connection suspended (DM) (driver-manager-handled; not returned here).
 /// - HYC00: Optional feature not implemented; propagated from backend if catalogs/schemas or
 ///   search patterns are unsupported.
@@ -2033,9 +2120,9 @@ pub unsafe fn sql_procedures_w<B: Backend>(
                 ));
             };
 
-            let catalog = parse_filter_param(catalog_name, name_length1)?;
-            let schema = parse_filter_param(schema_name, name_length2)?;
-            let proc = parse_filter_param(proc_name, name_length3)?;
+            let catalog = parse_filter_param(catalog_name, name_length1, "CatalogName")?;
+            let schema = parse_filter_param(schema_name, name_length2, "SchemaName")?;
+            let proc = parse_filter_param(proc_name, name_length3, "ProcName")?;
             tracing::debug!(
                 "SQLProceduresW(stmt={:?}, catalog={:?}, schema={:?}, proc={:?})",
                 statement_handle,
@@ -2199,6 +2286,17 @@ pub(crate) fn procedure_columns_columns(
 ///   `SQL_MAX_TABLE_NAME_LEN` and `SQL_MAX_COLUMN_NAME_LEN` all answer `0`, which the
 ///   `SQLGetInfo` page defines as "no specified limit or the limit is unknown". A driver
 ///   that answers a real maximum for any of those has to add the check.
+///
+///   **Also returned here**, for a condition this row does not itself state: **any** of this
+///   function's name arguments, passed as `SQL_NTS`, whose null terminator is not within
+///   `MAX_NTS_SCAN` (32 767) code units. Every one of them is resolved by the same helper
+///   (`parse_filter_param`), so the limit applies to all of them alike and the diagnostic
+///   names which one overran. It is a length the driver cannot determine, which is what
+///   `HY090` names; `utf16_to_string` used to hand back the 32 767-unit prefix instead, so
+///   the call filtered on a truncated pattern and returned a result set that was wrong
+///   rather than absent. An **explicitly measured** length is not limited by this, at any
+///   size. See `tables_refuses_an_nts_filter_that_runs_to_the_scan_cap` and
+///   `foreign_keys_names_the_argument_whose_nts_scan_overran`.
 /// - HY117: Connection suspended (DM) (driver-manager-handled; not returned here).
 /// - HYC00: Optional feature not implemented; propagated from backend if catalogs/schemas or
 ///   search patterns are unsupported.
@@ -2257,10 +2355,10 @@ pub unsafe fn sql_procedure_columns_w<B: Backend>(
                 ));
             };
 
-            let catalog = parse_filter_param(catalog_name, name_length1)?;
-            let schema = parse_filter_param(schema_name, name_length2)?;
-            let proc = parse_filter_param(proc_name, name_length3)?;
-            let column = parse_filter_param(column_name, name_length4)?;
+            let catalog = parse_filter_param(catalog_name, name_length1, "CatalogName")?;
+            let schema = parse_filter_param(schema_name, name_length2, "SchemaName")?;
+            let proc = parse_filter_param(proc_name, name_length3, "ProcName")?;
+            let column = parse_filter_param(column_name, name_length4, "ColumnName")?;
             tracing::debug!(
                 "SQLProcedureColumnsW(stmt={:?}, catalog={:?}, schema={:?}, proc={:?}, \
                  column={:?})",
@@ -2404,9 +2502,20 @@ pub(crate) fn column_privileges_columns(
 ///   are driver-manager-handled; not returned here.
 /// - HY013: Memory management error; returned if underlying allocation fails.
 /// - HY090: Invalid string or buffer length — every clause of this row is `(DM)`
-///   (driver-manager-handled; not returned here). Unlike several of its siblings' rows,
-///   this one has only the name-length-below-zero sentence and no maximum-length
-///   sentence, so nothing in it is the driver's.
+///   (driver-manager-handled), so none of the row's own clauses is returned here. Unlike
+///   several of its siblings' rows, this one has only the name-length-below-zero sentence
+///   and no maximum-length sentence, so nothing in it is the driver's.
+///
+///   **Also returned here**, for a condition this row does not itself state: **any** of this
+///   function's name arguments, passed as `SQL_NTS`, whose null terminator is not within
+///   `MAX_NTS_SCAN` (32 767) code units. Every one of them is resolved by the same helper
+///   (`parse_filter_param`), so the limit applies to all of them alike and the diagnostic
+///   names which one overran. It is a length the driver cannot determine, which is what
+///   `HY090` names; `utf16_to_string` used to hand back the 32 767-unit prefix instead, so
+///   the call filtered on a truncated pattern and returned a result set that was wrong
+///   rather than absent. An **explicitly measured** length is not limited by this, at any
+///   size. See `tables_refuses_an_nts_filter_that_runs_to_the_scan_cap` and
+///   `foreign_keys_names_the_argument_whose_nts_scan_overran`.
 /// - HY117: Connection suspended (DM) (driver-manager-handled; not returned here).
 /// - HYC00: Optional feature not implemented; propagated from backend if catalogs/schemas or
 ///   search patterns are unsupported.
@@ -2471,10 +2580,10 @@ pub unsafe fn sql_column_privileges_w<B: Backend>(
             // parsing would turn into a `None` and lose. See the doc comment.
             check_null_table_name(table_name, "SQLColumnPrivilegesW")?;
 
-            let catalog = parse_filter_param(catalog_name, name_length1)?;
-            let schema = parse_filter_param(schema_name, name_length2)?;
-            let table = parse_filter_param(table_name, name_length3)?;
-            let column = parse_filter_param(column_name, name_length4)?;
+            let catalog = parse_filter_param(catalog_name, name_length1, "CatalogName")?;
+            let schema = parse_filter_param(schema_name, name_length2, "SchemaName")?;
+            let table = parse_filter_param(table_name, name_length3, "TableName")?;
+            let column = parse_filter_param(column_name, name_length4, "ColumnName")?;
             tracing::debug!(
                 "SQLColumnPrivilegesW(stmt={:?}, catalog={:?}, schema={:?}, table={:?}, \
                  column={:?})",
@@ -2622,6 +2731,17 @@ pub(crate) fn table_privileges_columns(
 ///   `SQL_MAX_TABLE_NAME_LEN` and `SQL_MAX_COLUMN_NAME_LEN` all answer `0`, which the
 ///   `SQLGetInfo` page defines as "no specified limit or the limit is unknown". A driver
 ///   that answers a real maximum for any of those has to add the check.
+///
+///   **Also returned here**, for a condition this row does not itself state: **any** of this
+///   function's name arguments, passed as `SQL_NTS`, whose null terminator is not within
+///   `MAX_NTS_SCAN` (32 767) code units. Every one of them is resolved by the same helper
+///   (`parse_filter_param`), so the limit applies to all of them alike and the diagnostic
+///   names which one overran. It is a length the driver cannot determine, which is what
+///   `HY090` names; `utf16_to_string` used to hand back the 32 767-unit prefix instead, so
+///   the call filtered on a truncated pattern and returned a result set that was wrong
+///   rather than absent. An **explicitly measured** length is not limited by this, at any
+///   size. See `tables_refuses_an_nts_filter_that_runs_to_the_scan_cap` and
+///   `foreign_keys_names_the_argument_whose_nts_scan_overran`.
 /// - HY117: Connection suspended (DM) (driver-manager-handled; not returned here).
 /// - HYC00: Optional feature not implemented; propagated from backend if catalogs/schemas or
 ///   search patterns are unsupported.
@@ -2677,9 +2797,9 @@ pub unsafe fn sql_table_privileges_w<B: Backend>(
                 ));
             };
 
-            let catalog = parse_filter_param(catalog_name, name_length1)?;
-            let schema = parse_filter_param(schema_name, name_length2)?;
-            let table = parse_filter_param(table_name, name_length3)?;
+            let catalog = parse_filter_param(catalog_name, name_length1, "CatalogName")?;
+            let schema = parse_filter_param(schema_name, name_length2, "SchemaName")?;
+            let table = parse_filter_param(table_name, name_length3, "TableName")?;
             tracing::debug!(
                 "SQLTablePrivilegesW(stmt={:?}, catalog={:?}, schema={:?}, table={:?})",
                 statement_handle,
@@ -5378,6 +5498,120 @@ mod tests {
                 .as_str()
                 .to_owned()
         })
+    }
+
+    /// The whole catalog family resolves its name arguments through one helper,
+    /// `parse_filter_param`, so one `SQL_NTS` argument running to
+    /// `MAX_NTS_SCAN` is `HY090` for all ten of them. A truncated *filter* is
+    /// the quietest failure in the family: it returns a result set, just the
+    /// wrong one, so an application sees a table list that is missing entries
+    /// with no diagnostic to say why.
+    ///
+    /// `SQLTables` stands for the family here; `SQLForeignKeys` below covers
+    /// the part a shared helper cannot — telling six name arguments apart.
+    ///
+    /// The buffer is exactly the cap, so an over-read is a heap overflow Miri
+    /// sees rather than a longer filter.
+    #[test]
+    fn tables_refuses_an_nts_filter_that_runs_to_the_scan_cap() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockBackend>();
+            let wide = vec![b'a' as u16; crate::utf16::MAX_NTS_SCAN];
+
+            assert_eq!(
+                sql_tables_w::<MockBackend>(
+                    stmt,
+                    wide.as_ptr(),
+                    crate::types::SQL_NTS as i16,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                    0,
+                ),
+                SqlReturn::ERROR,
+            );
+            assert_eq!(
+                first_sqlstate::<MockBackend>(stmt),
+                crate::types::sql_state::INVALID_STRING_OR_BUFFER_LENGTH
+            );
+
+            cleanup_for::<MockBackend>(env, conn, stmt);
+        }
+    }
+
+    /// The diagnostic names *which* argument overran. `SQLForeignKeys` takes
+    /// six name arguments, and "a string argument was too long" would identify
+    /// none of them — which is why `parse_filter_param` carries the spec's own
+    /// argument name rather than letting the shared helper phrase it.
+    #[test]
+    fn foreign_keys_names_the_argument_whose_nts_scan_overran() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockBackend>();
+            let wide = vec![b'a' as u16; crate::utf16::MAX_NTS_SCAN];
+            let nts = crate::types::SQL_NTS as i16;
+
+            assert_eq!(
+                sql_foreign_keys_w::<MockBackend>(
+                    stmt,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                    0,
+                    wide.as_ptr(),
+                    nts,
+                ),
+                SqlReturn::ERROR,
+            );
+            let message = with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |h| {
+                h.diagnostics
+                    .get(0)
+                    .expect("a diagnostic record")
+                    .message
+                    .clone()
+            });
+            assert!(
+                message.contains("FKTableName"),
+                "the diagnostic must name the overrunning argument, got: {message}"
+            );
+
+            cleanup_for::<MockBackend>(env, conn, stmt);
+        }
+    }
+
+    /// The accepting side for the family: a terminator in the last position the
+    /// scan may read is a complete filter, not an error.
+    #[test]
+    fn tables_accepts_an_nts_filter_terminated_at_the_last_scannable_position() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCatalogBackend>();
+            let mut wide = vec![b'a' as u16; crate::utf16::MAX_NTS_SCAN];
+            wide[crate::utf16::MAX_NTS_SCAN - 1] = 0;
+
+            assert_eq!(
+                sql_tables_w::<MockCatalogBackend>(
+                    stmt,
+                    wide.as_ptr(),
+                    crate::types::SQL_NTS as i16,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                    0,
+                ),
+                SqlReturn::SUCCESS,
+            );
+
+            cleanup_for::<MockCatalogBackend>(env, conn, stmt);
+        }
     }
 
     /// The defect: `map_err(|_| ...)` threw the backend's error away and told

@@ -12,7 +12,7 @@ use crate::types::{
     ConnectParams, DriverConnectOption, SQL_NTS, SqlReturn, SqlState,
     driver_connect_option_from_raw,
 };
-use crate::utf16::{utf16_to_string, write_utf16};
+use crate::utf16::{utf16_to_string, utf16_to_string_named, write_utf16};
 
 /// Generic implementation of SQLDriverConnectW.
 ///
@@ -88,8 +88,15 @@ use crate::utf16::{utf16_to_string, write_utf16};
 /// - HY010: Function sequence error (async in progress) — (driver-manager-handled; not returned here).
 /// - HY013: Memory management error — not returned here (Rust panics on alloc failure).
 /// - HY090: Invalid string or buffer length — returned when `string_length1 < 0 && != SQL_NTS`,
-///   or when `buffer_length < 0`. Note: spec marks these as `(DM)`, but they are checked here
-///   as a defence-in-depth guard when called outside a full Driver Manager stack.
+///   or when `buffer_length < 0`. Note: spec marks the row's own clauses as `(DM)`, but they
+///   are checked here as a defence-in-depth guard when called outside a full Driver Manager
+///   stack. **Also returned** for a condition the row does not state: `InConnectionString`
+///   passed as `SQL_NTS` with no null terminator within `MAX_NTS_SCAN` (32 767) code units,
+///   which is a length the driver cannot determine. It is this function's only `SQL_NTS`
+///   argument, so that is the whole set. A truncated connection string is quieter than a
+///   truncated statement — `ConnectParams` parses whatever it is handed — so the connect
+///   proceeded against a *different data source* than the application named. See
+///   `driver_connect_refuses_an_nts_connection_string_that_runs_to_the_scan_cap`.
 /// - HY092: Invalid attribute/option identifier — (driver-manager-handled; not returned here).
 /// - HY110: Invalid driver completion — (driver-manager-handled; not returned here). Both
 ///   clauses of this row carry `(DM)`, so an unrecognised *DriverCompletion* is accepted
@@ -315,6 +322,15 @@ pub unsafe fn sql_driver_connect_w<B: Backend>(
 ///   the first is guarded defensively here, returning `HY090` when `name_length1`,
 ///   `name_length2` or `name_length3` is negative and not equal to `SQL_NTS` (-3). The
 ///   second, a data source name over the maximum length, is not: core declares no maximum.
+///
+///   **Also returned here**, for a condition neither clause states: any of `ServerName`,
+///   `UserName` or `Authentication` — all three, and no other argument — passed as
+///   `SQL_NTS` with no null terminator within `MAX_NTS_SCAN` (32 767) code units, which is a
+///   length the driver cannot determine. The diagnostic names which of the three it was. The
+///   two credential arguments were read inside `if let Ok(..)` and so *discarded* the error:
+///   a swallowed overrun connected with whatever credentials the DSN supplied, under a
+///   *UserName* the application believed it had passed. See
+///   `connect_refuses_an_nts_credential_that_runs_to_the_scan_cap`.
 /// - HYT00: Login timeout expired — not returned here (login timeout not enforced).
 /// - HY114: Driver does not support connection-level async — (driver-manager-handled; not returned here).
 /// - HYT01: Connection timeout expired — not returned here (connection timeout not enforced).
@@ -398,7 +414,11 @@ pub unsafe fn sql_connect_w<B: Backend>(
             }
 
             // Parse DSN name
-            let dsn = utf16_to_string(server_name, name_length1.into())?;
+            let dsn = utf16_to_string_named(
+                server_name,
+                name_length1.into(),
+                "SQLConnectW's ServerName argument",
+            )?;
             tracing::debug!("SQLConnectW: DSN={}", dsn);
 
             // Read DSN keys from odbc.ini via SQLGetPrivateProfileStringW.
@@ -424,18 +444,34 @@ pub unsafe fn sql_connect_w<B: Backend>(
             }
             params.declare_sensitive_keywords(B::sensitive_connect_keywords());
 
-            // Override with user/password if provided
-            if !user_name.is_null()
-                && let Ok(user) = utf16_to_string(user_name, name_length2.into())
-                && !user.is_empty()
-            {
-                params.insert("user", user);
+            // Override with user/password if provided.
+            //
+            // Propagated with `?`, not matched with `if let Ok(..)`. While the
+            // helper's only failure was a null pointer the two were the same
+            // thing, because the null check in front of it already ruled that
+            // out. They are not the same now: an `SQL_NTS` credential running
+            // to `MAX_NTS_SCAN` is `HY090`, and swallowing it would connect as
+            // whoever the DSN names instead of telling the application its
+            // *UserName* argument was unreadable.
+            if !user_name.is_null() {
+                let user = utf16_to_string_named(
+                    user_name,
+                    name_length2.into(),
+                    "SQLConnectW's UserName argument",
+                )?;
+                if !user.is_empty() {
+                    params.insert("user", user);
+                }
             }
-            if !authentication.is_null()
-                && let Ok(auth) = utf16_to_string(authentication, name_length3.into())
-                && !auth.is_empty()
-            {
-                params.insert("password", auth);
+            if !authentication.is_null() {
+                let auth = utf16_to_string_named(
+                    authentication,
+                    name_length3.into(),
+                    "SQLConnectW's Authentication argument",
+                )?;
+                if !auth.is_empty() {
+                    params.insert("password", auth);
+                }
             }
             crate::ffi::connect_attr::carry_connect_timeouts::<B>(handle, &mut params);
             // `SQLConnect` has no *DriverCompletion* argument, so there is
@@ -543,7 +579,13 @@ pub unsafe fn sql_connect_w<B: Backend>(
 /// - HY013: Memory management error — not returned here (Rust panics on alloc failure).
 /// - HY090: Invalid string or buffer length — returned when `string_length1 < 0 && != SQL_NTS`,
 ///   or when `buffer_length < 0`. Note: spec marks these as `(DM)`, but checked here as
-///   defence-in-depth when called outside a full Driver Manager stack.
+///   defence-in-depth when called outside a full Driver Manager stack. **Also returned** for
+///   a condition the row does not state: `InConnectionString` passed as `SQL_NTS` with no
+///   null terminator within `MAX_NTS_SCAN` (32 767) code units, which is a length the driver
+///   cannot determine. It is this function's only `SQL_NTS` argument, so that is the whole
+///   set. The scanned prefix used to be browsed with instead, so the browse round-tripped
+///   against a *different data source* than the application named. See
+///   `browse_connect_refuses_an_nts_connection_string_that_runs_to_the_scan_cap`.
 /// - HYC00: Optional feature not implemented — **absent from this function's diagnostics
 ///   table**, yet returned by this driver, but only from a
 ///   connection attribute set before the connect. Core applies those here (see
@@ -1048,7 +1090,12 @@ pub unsafe fn sql_disconnect<B: Backend>(connection_handle: *mut c_void) -> SqlR
 /// - HY090: Invalid string or buffer length — every clause of this row is `(DM)`, and it is
 ///   guarded defensively here for the reason `HY009` gives: returned when
 ///   `text_length1 < 0 && != SQL_NTS`, or when `buffer_length < 0` and `out_statement_text`
-///   is not null.
+///   is not null. **Also returned** for `InStatementText` passed as `SQL_NTS` with no null
+///   terminator within `MAX_NTS_SCAN` (32 767) code units — this function's only `SQL_NTS`
+///   argument, so the whole set — which is a length the driver cannot determine, and where
+///   the scanned prefix used to be translated and echoed back as though complete. An
+///   explicitly measured `TextLength1` is not limited, at any size. See
+///   `native_sql_refuses_an_nts_statement_that_runs_to_the_scan_cap`.
 /// - HY109: Invalid cursor position — not returned here (no cursor involvement in NativeSql).
 /// - HY117: Connection suspended due to unknown transaction state — (driver-manager-handled; not returned here).
 /// - HYT01: Connection timeout expired — not returned here (connection timeout not enforced).
@@ -2455,6 +2502,236 @@ mod tests {
             let _ = sql_disconnect::<MockBrowseBackend>(conn);
             let _ = sql_free_handle::<MockBrowseBackend>(HandleType::Dbc as i16, conn);
             let _ = sql_free_handle::<MockBrowseBackend>(HandleType::Env as i16, env);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // The MAX_NTS_SCAN limit on SQL_NTS arguments
+    //
+    // Four call sites in this module resolve SQL_NTS, and all four used to take
+    // the scanned prefix when the scan reached the bound. A truncated
+    // connection string is not a syntax error the way a truncated statement is:
+    // `ConnectParams` parses whatever it is given, so the connect proceeded
+    // against a *different data source* than the application named.
+    // -----------------------------------------------------------------------
+
+    /// The `HY090` a scan overrun posts on a connection handle.
+    unsafe fn dbc_sqlstate(conn: *mut c_void) -> String {
+        use crate::ffi::diag::sql_get_diag_rec_w;
+        let mut state = [0u16; 6];
+        let mut native_err: i32 = 0;
+        let mut msg_buf = [0u16; 256];
+        let mut msg_len: i16 = 0;
+        // SAFETY: every buffer is a live local of the declared size.
+        let ret = unsafe {
+            sql_get_diag_rec_w::<MockBackend>(
+                HandleType::Dbc as i16,
+                conn,
+                1,
+                state.as_mut_ptr(),
+                &mut native_err,
+                msg_buf.as_mut_ptr(),
+                msg_buf.len() as i16,
+                &mut msg_len,
+            )
+        };
+        assert_eq!(ret, SqlReturn::SUCCESS, "no diagnostic record was posted");
+        String::from_utf16_lossy(&state[..5])
+    }
+
+    /// A buffer of exactly `MAX_NTS_SCAN` units with no terminator: the scan
+    /// must stop on its last unit, so an over-read is a heap overflow Miri sees
+    /// rather than a longer prefix.
+    fn unterminated_at_the_cap() -> Vec<u16> {
+        vec![b'a' as u16; crate::utf16::MAX_NTS_SCAN]
+    }
+
+    #[test]
+    fn driver_connect_refuses_an_nts_connection_string_that_runs_to_the_scan_cap() {
+        unsafe {
+            let (env, conn) = alloc_env_and_conn();
+            let wide = unterminated_at_the_cap();
+
+            assert_eq!(
+                sql_driver_connect_w::<MockBackend>(
+                    conn,
+                    std::ptr::null_mut(),
+                    wide.as_ptr(),
+                    SQL_NTS as i16,
+                    std::ptr::null_mut(),
+                    0,
+                    std::ptr::null_mut(),
+                    0,
+                ),
+                SqlReturn::ERROR,
+            );
+            assert_eq!(
+                dbc_sqlstate(conn),
+                crate::types::sql_state::INVALID_STRING_OR_BUFFER_LENGTH
+            );
+
+            let _ = sql_free_handle::<MockBackend>(HandleType::Dbc as i16, conn);
+            let _ = sql_free_handle::<MockBackend>(HandleType::Env as i16, env);
+        }
+    }
+
+    #[test]
+    fn browse_connect_refuses_an_nts_connection_string_that_runs_to_the_scan_cap() {
+        unsafe {
+            let (env, conn) = alloc_env_and_conn();
+            let wide = unterminated_at_the_cap();
+
+            assert_eq!(
+                sql_browse_connect_w::<MockBackend>(
+                    conn,
+                    wide.as_ptr(),
+                    SQL_NTS as i16,
+                    std::ptr::null_mut(),
+                    0,
+                    std::ptr::null_mut(),
+                ),
+                SqlReturn::ERROR,
+            );
+            assert_eq!(
+                dbc_sqlstate(conn),
+                crate::types::sql_state::INVALID_STRING_OR_BUFFER_LENGTH
+            );
+
+            let _ = sql_free_handle::<MockBackend>(HandleType::Dbc as i16, conn);
+            let _ = sql_free_handle::<MockBackend>(HandleType::Env as i16, env);
+        }
+    }
+
+    #[test]
+    fn connect_refuses_an_nts_server_name_that_runs_to_the_scan_cap() {
+        unsafe {
+            let (env, conn) = alloc_env_and_conn();
+            let wide = unterminated_at_the_cap();
+
+            assert_eq!(
+                sql_connect_w::<MockBackend>(
+                    conn,
+                    wide.as_ptr(),
+                    SQL_NTS as i16,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                    0,
+                ),
+                SqlReturn::ERROR,
+            );
+            assert_eq!(
+                dbc_sqlstate(conn),
+                crate::types::sql_state::INVALID_STRING_OR_BUFFER_LENGTH
+            );
+
+            let _ = sql_free_handle::<MockBackend>(HandleType::Dbc as i16, conn);
+            let _ = sql_free_handle::<MockBackend>(HandleType::Env as i16, env);
+        }
+    }
+
+    /// The credential arguments, which were read inside `if let Ok(..)` and so
+    /// discarded the error rather than propagating it. A swallowed `HY090` here
+    /// connects with whatever credentials the DSN supplies, under a *UserName*
+    /// the application believes it passed — a silent authorisation change, not a
+    /// missing diagnostic. Delete either `?` in `sql_connect_w`'s credential
+    /// block and this test fails.
+    #[test]
+    fn connect_refuses_an_nts_credential_that_runs_to_the_scan_cap() {
+        unsafe {
+            let dsn: Vec<u16> = "prod\0".encode_utf16().collect();
+            let wide = unterminated_at_the_cap();
+
+            for (user, auth) in [
+                (wide.as_ptr(), std::ptr::null()),
+                (std::ptr::null(), wide.as_ptr()),
+            ] {
+                let (env, conn) = alloc_env_and_conn();
+                assert_eq!(
+                    sql_connect_w::<MockBackend>(
+                        conn,
+                        dsn.as_ptr(),
+                        SQL_NTS as i16,
+                        user,
+                        SQL_NTS as i16,
+                        auth,
+                        SQL_NTS as i16,
+                    ),
+                    SqlReturn::ERROR,
+                );
+                assert_eq!(
+                    dbc_sqlstate(conn),
+                    crate::types::sql_state::INVALID_STRING_OR_BUFFER_LENGTH
+                );
+
+                let _ = sql_disconnect::<MockBackend>(conn);
+                let _ = sql_free_handle::<MockBackend>(HandleType::Dbc as i16, conn);
+                let _ = sql_free_handle::<MockBackend>(HandleType::Env as i16, env);
+            }
+        }
+    }
+
+    #[test]
+    fn native_sql_refuses_an_nts_statement_that_runs_to_the_scan_cap() {
+        unsafe {
+            let (env, conn) = alloc_env_and_conn();
+            assert_eq!(connect_handle(conn), SqlReturn::SUCCESS);
+            let wide = unterminated_at_the_cap();
+
+            assert_eq!(
+                sql_native_sql_w::<MockBackend>(
+                    conn,
+                    wide.as_ptr(),
+                    SQL_NTS,
+                    std::ptr::null_mut(),
+                    0,
+                    std::ptr::null_mut(),
+                ),
+                SqlReturn::ERROR,
+            );
+            assert_eq!(
+                dbc_sqlstate(conn),
+                crate::types::sql_state::INVALID_STRING_OR_BUFFER_LENGTH
+            );
+
+            let _ = sql_disconnect::<MockBackend>(conn);
+            let _ = sql_free_handle::<MockBackend>(HandleType::Dbc as i16, conn);
+            let _ = sql_free_handle::<MockBackend>(HandleType::Env as i16, env);
+        }
+    }
+
+    /// The accepting side, for the whole family: a terminator in the last
+    /// position the scan may read is a complete connection string, not an
+    /// error. Without it, every test above is satisfied by refusing all long
+    /// input.
+    #[test]
+    fn driver_connect_accepts_an_nts_string_terminated_at_the_last_scannable_position() {
+        unsafe {
+            let (env, conn) = alloc_env_and_conn();
+            // A valid connection string, padded with a keyword long enough to
+            // reach the cap, terminated on the last unit the scan may read.
+            let head = "Host=localhost;Port=8080;Database=test;User=me;Pad=";
+            let mut wide: Vec<u16> = head.encode_utf16().collect();
+            wide.resize(crate::utf16::MAX_NTS_SCAN, b'x' as u16);
+            wide[crate::utf16::MAX_NTS_SCAN - 1] = 0;
+
+            assert_eq!(
+                sql_driver_connect_w::<MockBackend>(
+                    conn,
+                    std::ptr::null_mut(),
+                    wide.as_ptr(),
+                    SQL_NTS as i16,
+                    std::ptr::null_mut(),
+                    0,
+                    std::ptr::null_mut(),
+                    0,
+                ),
+                SqlReturn::SUCCESS,
+            );
+
+            let _ = sql_disconnect::<MockBackend>(conn);
+            let _ = sql_free_handle::<MockBackend>(HandleType::Dbc as i16, conn);
+            let _ = sql_free_handle::<MockBackend>(HandleType::Env as i16, env);
         }
     }
 

@@ -449,8 +449,14 @@ fn read_ird_field<B: Backend>(
 ///   row exempts by name
 /// - `HY021` Inconsistent descriptor information — returned when setting
 ///   `SQL_DESC_DATA_PTR` leaves the record failing the spec's consistency check
-/// - `HY090` Invalid string or buffer length — **(DM)** on both of its clauses; not returned
-///   here
+/// - `HY090` Invalid string or buffer length — **(DM)** on both of its clauses, so neither of
+///   the row's own clauses is returned here. `HY090` **is** returned for a condition the row
+///   does not state: `SQL_DESC_NAME` — the one field of this function whose value is a
+///   string, and so the whole set — set with a `BufferLength` of `SQL_NTS` and no null
+///   terminator within `MAX_NTS_SCAN` (32 767) code units, a length the driver cannot
+///   determine. It precedes the `22001` identifier-length check by construction: that check
+///   compares the decoded name, and there is no decoded name. See
+///   `set_desc_field_refuses_an_nts_name_that_runs_to_the_scan_cap`
 /// - `HY091` Invalid descriptor field identifier — returned for an unrecognised
 ///   `field_identifier`, for one that is not defined on this descriptor's role, and for one
 ///   that is defined but read-only there
@@ -2735,6 +2741,40 @@ mod tests {
             );
 
             crate::test_utils::cleanup_connected_env_conn_stmt::<MockAltBackend>(env, conn, stmt);
+        }
+    }
+
+    /// `SQL_DESC_NAME` is the one descriptor field whose value is a string, so
+    /// it is the one that resolves `SQL_NTS` — `BufferLength` is a byte count
+    /// here, and `SQL_NTS / 2` is still negative, which is what selects the
+    /// scan. A name running to `MAX_NTS_SCAN` is `HY090`.
+    ///
+    /// The refusal precedes the `22001` identifier-length check by construction:
+    /// that check compares the *decoded* name, and there is no decoded name.
+    #[test]
+    fn set_desc_field_refuses_an_nts_name_that_runs_to_the_scan_cap() {
+        unsafe {
+            let (env, conn, stmt) =
+                crate::test_utils::alloc_connected_env_conn_stmt::<MockBackend>();
+            let ipd = ipd_of(stmt);
+
+            let wide = vec![b'a' as u16; crate::utf16::MAX_NTS_SCAN];
+            assert_eq!(
+                sql_set_desc_field_w::<MockBackend>(
+                    ipd,
+                    1,
+                    Desc::Name as i16,
+                    wide.as_ptr().cast_mut().cast::<c_void>(),
+                    crate::types::SQL_NTS,
+                ),
+                SqlReturn::ERROR,
+            );
+            assert_eq!(
+                first_sqlstate(ipd),
+                crate::types::sql_state::INVALID_STRING_OR_BUFFER_LENGTH
+            );
+
+            crate::test_utils::cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 

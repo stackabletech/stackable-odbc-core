@@ -150,6 +150,15 @@ call `SQLCloseCursor` or `SQLFreeStmt(SQL_CLOSE)` first, as it already must for
 
 ### Added
 
+- `utf16::utf16_to_string_named`, a public sibling of `utf16::utf16_to_string`
+  taking the argument's ODBC name (`"CatalogName"`, `"SQLConnectW's UserName
+  argument"`, …). It appears in the `HY090` a `SQL_NTS` scan overrun now
+  produces — see the Fixed entry below — and exists because the functions that
+  overrun most usefully have several string arguments: `SQLConnectW` takes
+  three and `SQLForeignKeys` six, so "a string argument was too long" identifies
+  none of them. `utf16_to_string` is unchanged and delegates to it; a driver
+  calling the older function needs no edit.
+
 - `SQLGetDiagFieldW` answers `SQL_DIAG_CLASS_ORIGIN` and
   `SQL_DIAG_SUBCLASS_ORIGIN` from the record's SQLSTATE. Both returned the empty
   string, sharing a match arm with `SQL_DIAG_CONNECTION_NAME` and
@@ -1544,6 +1553,70 @@ call `SQLCloseCursor` or `SQLFreeStmt(SQL_CLOSE)` first, as it already must for
   compared against. Use `HeaderDiagnosticIdentifier::MessageText as i16`.
 
 ### Fixed
+
+- **An `SQL_NTS` argument longer than the 32 767-unit scan limit is now
+  `HY090`, where it used to be silently truncated to its first 32 767 units.**
+  Most seriously, **a statement passed to `SQLExecDirectW` as `SQL_NTS` was
+  executed truncated** — usually a syntax error with a baffling message, and
+  where the cut landed after a syntactically complete prefix, *a different
+  statement than the application wrote*. A multi-row
+  `INSERT ... VALUES (...),(...)` past the limit is the ordinary way to hit it.
+
+  Core bounds every `SQL_NTS` scan at `MAX_NTS_SCAN` (32 767 units) so that a
+  buffer whose terminator the application forgot is not read past its own
+  allocation. That bound stays. What changed is that reaching it is now
+  reported instead of being indistinguishable from success: no scan can tell
+  "there is no terminator" from "the terminator is past the limit", so the rule
+  is stated as the one that needs no such distinction — **an `SQL_NTS` argument
+  is limited to 32 767 units, whatever is in it.**
+
+  An **explicitly declared** length is not limited, at any size: there is
+  nothing to scan for. An application with a statement, connection string or
+  filter longer than the limit passes its real length.
+
+  Every entry point that resolves `SQL_NTS` is affected, and this is the
+  complete list:
+
+  | Entry point | Argument(s) now limited |
+  |---|---|
+  | `SQLExecDirectW` | `StatementText`; a bound `SQL_C_CHAR`/`SQL_C_WCHAR` parameter |
+  | `SQLPrepareW` | `StatementText` |
+  | `SQLExecute` | a bound `SQL_C_CHAR`/`SQL_C_WCHAR` parameter |
+  | `SQLPutData` | the data-at-execution chunk at `DataPtr` |
+  | `SQLDriverConnectW` | `InConnectionString` |
+  | `SQLBrowseConnectW` | `InConnectionString` |
+  | `SQLConnectW` | `ServerName`, `UserName`, `Authentication` |
+  | `SQLNativeSqlW` | `InStatementText` |
+  | `SQLSetConnectAttrW` | `SQL_ATTR_CURRENT_CATALOG`'s value |
+  | `SQLSetCursorNameW` | `CursorName` |
+  | `SQLSetDescFieldW` | `SQL_DESC_NAME`'s value |
+  | `SQLTables`, `SQLColumns`, `SQLPrimaryKeys`, `SQLForeignKeys`, `SQLStatistics`, `SQLSpecialColumns`, `SQLProcedures`, `SQLProcedureColumns`, `SQLColumnPrivileges`, `SQLTablePrivileges` | every name argument |
+
+  `HY090` ("invalid string or buffer length") is in the diagnostics table of
+  every one of them, so no function reports a state its own table omits. The
+  condition is not a clause of any of those rows — the spec's `HY090` clauses
+  are about a negative length that is not `SQL_NTS` — and each doc comment says
+  so.
+
+  Four of these call sites did worse than truncate, and are fixed with it:
+
+  - A bound **`SQL_C_CHAR`** parameter resolved its terminator with
+    `CStr::from_ptr`, which is **unbounded** — the one `SQL_NTS` scan in the
+    crate with no limit at all, so a buffer missing its terminator was read past
+    its own allocation.
+  - A bound **`SQL_C_WCHAR`** parameter read the scan through
+    `unwrap_or_default`, sending the **empty string** to the data source with no
+    diagnostic — worse than the truncation, because `''` is a legal value the
+    backend cannot question.
+  - `SQLConnectW` read `UserName` and `Authentication` inside `if let Ok(..)`,
+    discarding the error: an overrun connected with whatever credentials the DSN
+    supplied, under a *UserName* the application believed it had passed.
+  - `SQLSetCursorNameW` rewrote *every* failure as `HY009` "Cursor name pointer
+    is null". A null `CursorName` is still `HY009`; anything else now reports
+    its own state.
+
+  `ConfigDSNW`'s attribute-list parser already reported its own overrun
+  (`AttributeSyntaxError::Unterminated`) and is unchanged.
 
 - **`SQLAllocHandle` now answers `HY014` when the handle registry is
   exhausted.** It previously returned `SQL_ERROR` with *no diagnostic record at

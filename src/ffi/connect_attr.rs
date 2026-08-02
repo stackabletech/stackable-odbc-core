@@ -323,9 +323,19 @@ fn connection_has_result_set_pending<B: Backend>(
 ///   Manager only validates attributes "that accept a discrete set of values",
 ///   and "for all other connection and statement attributes, the driver must
 ///   verify the value specified in ValuePtr".
-/// - HY090 Invalid string or buffer length: (driver-manager-handled; not returned
-///   here). A `string_length < 0` check for `SQL_ATTR_CURRENT_CATALOG` is
+/// - HY090 Invalid string or buffer length: every clause of this row is
+///   (driver-manager-handled), so none of the row's own clauses is returned
+///   here. A `string_length < 0` check for `SQL_ATTR_CURRENT_CATALOG` is
 ///   performed as a defensive measure.
+///
+///   **Also returned here**, for a condition the row does not state:
+///   `SQL_ATTR_CURRENT_CATALOG` — the one attribute of this function whose value
+///   is a string, and so the whole set — passed with `StringLength` of `SQL_NTS`
+///   and no null terminator within `MAX_NTS_SCAN` (32 767) code units. That is a
+///   length the driver cannot determine; the scanned prefix used to be stored and
+///   sent to `Backend::set_current_catalog` as though it were the whole name, which
+///   selects a *different catalog* rather than failing. See
+///   `set_current_catalog_refuses_an_nts_value_that_runs_to_the_scan_cap`.
 /// - HY092 Invalid attribute/option identifier: (driver-manager-handled; not
 ///   returned here). Unknown attributes are accepted silently.
 /// - HY114 Driver does not support connection-level asynchronous function execution:
@@ -2638,6 +2648,43 @@ mod tests {
                 h.diagnostics.get(0).map(|d| d.sqlstate.as_str().to_owned())
             });
             (ret, state)
+        }
+    }
+
+    /// `SQL_ATTR_CURRENT_CATALOG` is the one connection attribute whose value
+    /// is a string, so it is the one that resolves `SQL_NTS`. A value running to
+    /// `MAX_NTS_SCAN` is `HY090`, and no catalog is stored.
+    ///
+    /// The buffer is exactly the cap, so an over-read is a heap overflow Miri
+    /// sees rather than a longer catalog name.
+    #[test]
+    fn set_current_catalog_refuses_an_nts_value_that_runs_to_the_scan_cap() {
+        unsafe {
+            let (env, conn) = alloc_env_conn();
+            let wide = vec![b'a' as u16; crate::utf16::MAX_NTS_SCAN];
+
+            assert_eq!(
+                sql_set_connect_attr_w::<MockBackend>(
+                    conn,
+                    ConnectionAttribute::CURRENT_CATALOG.0,
+                    wide.as_ptr().cast_mut().cast::<c_void>(),
+                    SQL_NTS,
+                ),
+                SqlReturn::ERROR,
+            );
+            assert_eq!(
+                first_sqlstate::<MockBackend>(conn),
+                crate::types::sql_state::INVALID_STRING_OR_BUFFER_LENGTH
+            );
+            with_handle::<MockBackend, ConnectionHandle<MockBackend>, _>(conn, |h| {
+                assert!(
+                    !h.attr_strings
+                        .contains_key(&ConnectionAttribute::CURRENT_CATALOG.0),
+                    "a refused value must not be stored",
+                );
+            });
+
+            cleanup(env, conn);
         }
     }
 

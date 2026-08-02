@@ -151,7 +151,15 @@ Fix `write_numeric_pivot`'s two Bit arms (`:1180`, `:1284-1292`) to mirror `para
 
 `src/param_convert.rs:364, 452`: bound the expanded digit count (`|scale|` + digits) at a named constant (e.g. `MAX_DECIMAL_EXPANSION = 2 * 38 + 2`-ish — pick against the max ODBC precision and document); beyond it return 22003. Test: `huge_exponent_literal_is_22003_without_allocating` (`"1e2147483646"` as `SQL_C_CHAR`→`SQL_BIGINT`; assert 22003 — allocation absence is asserted by the test completing instantly under Miri, note in comment). Commit: `fix: pathological exponents in numeric literals are rejected before expansion`
 
-### Task 2.9: Bounded NTS scan for SQL_C_CHAR parameters
+### Task 2.9: Bounded NTS scan for SQL_C_CHAR parameters — DONE inside Task 2.7
+
+Landed as part of Task 2.7, which found this call site while enumerating every
+caller of the terminator-scanning helpers. `src/ffi/params.rs` now uses
+`nts_byte_len(ptr)?` followed by `from_raw_parts`, at the exact site named
+below; the review confirmed it covers this task's scope and introduces no
+alignment risk (`u8`, alignment 1). One caveat recorded there: bounding makes
+the output-only-binding over-read *bounded*, not absent — what closes that is
+`collect_params` never reading such a binding. No separate commit.
 
 `src/ffi/params.rs:790`: replace `CStr::from_ptr` with `nts_byte_len` (the helper's own docs name this exact call as the thing to replace). Test: behavioural parity test `char_param_with_nts_reads_to_the_terminator`; the unbounded-read half is un-assertable natively — cover with a Miri run over the params tests (an OOB read would fail Miri). Commit: `fix: SQL_C_CHAR/SQL_NTS parameters use the bounded terminator scan`
 
@@ -162,6 +170,38 @@ Fix `write_numeric_pivot`'s two Bit arms (`:1180`, `:1284-1292`) to mirror `para
 ### Task 2.11: A late-firing timeout must not relabel later failures HY008
 
 `src/query_timer.rs`, `src/cancel.rs:35`: record that a *core timer* signalled the token (flag alongside the token or on `FiredCancel`) so `reclassify_cancelled_opt` yields `HYT00` for timer-signalled tokens even when the observing call's own timer never fired. Also add the missing ordering test from the test-gap audit. Tests: `a_token_signalled_by_the_timer_reports_hyt00_on_the_next_failing_call`; `simultaneous_cancel_and_timeout_reports_hyt00` (signal token manually + fire timer, assert `QueryTimer::check` ordering — unit-testable per audit). Commit: `fix: timer-signalled cancellations report HYT00 on subsequent calls, not HY008`
+
+### Task 2.13 (addendum): raise MAX_NTS_SCAN
+
+**Not from the original audit** — the value question was exposed by Task 2.7 and
+Andrew ruled: land 2.7 as-is, raise the cap separately.
+
+Task 2.7 turned a silent truncation into a clean error, which is strictly
+better for the same input. It did not make the *value* right.
+`MAX_NTS_SCAN = 32 767` is `i16::MAX` — the width of ODBC's *name-length*
+arguments — while `TextLength` is `SQLINTEGER`. Generated SQL routinely exceeds
+32 767 characters, so core now refuses statements every other driver executes.
+
+Evidence gathered during 2.7's review, from cloned source rather than docs:
+psqlODBC's `ucs2strlen` (`win_unicode.c:125-131`) and `make_string`
+(`misc.c:105-116`) are unbounded; MySQL Connector/ODBC's `sqlwcharlen`
+(`util/stringutil.cc:713-719`) likewise, and its one `HY090` length limit
+(`GET_NAME_LEN`, 192 bytes) is a post-hoc MySQL identifier check on catalog
+arguments, never on SQL text; FreeTDS uses `strlen`/`wcslen`
+(`src/odbc/odbc_util.c:60-105`). `strnlen`/`wcsnlen` appear in none of them.
+Decisively, unixODBC forwards `SQL_NTS` **unchanged** for a Unicode
+application talking to a Unicode driver (`SQLExecDirectW.c:312-315`,
+`SQLDriverConnectW.c:777-781`) — it only resolves the length itself on the
+ANSI-app path — so a W-only driver behind it sees raw `SQL_NTS` from every
+Unicode application, and the refusal is reachable in the ordinary case.
+
+Pick a value with a stated derivation rather than by feel, and say what the
+bound is still *for* (it guards a missing terminator; nothing about memory
+safety requires it to be small). Keep the error path and its tests — only the
+constant and its doc move. Check whether the boundary tests, which allocate
+buffers at exactly the cap, become expensive enough at the new value to matter
+under Miri, and if so what to do about it. Commit:
+`fix: MAX_NTS_SCAN no longer refuses statements every other driver executes`
 
 ### Task 2.12 (addendum): SQL_C_FLOAT overflow is 22003, not 01S07
 
@@ -204,6 +244,24 @@ Doc-only changes cannot be test-verified except via the doc guards and `pre-comm
 
 ### Task 4.1: Diagnostics-table and doc-comment corrections (code-adjacent)
 
+- [ ] **Three catalog `HY090` rows are transcribed wrong — found during Task
+  2.7's review, verified against the live pages.** `SQLColumns`,
+  `SQLForeignKeys` and `SQLColumnPrivileges` are marked `DmMarking::All`, but
+  each live page carries an unmarked "exceeded the maximum length value for the
+  corresponding catalog or name" clause after the `(DM)` one — the same
+  two-clause shape `SQLTablePrivileges` already has, correctly, as
+  `Split("maximum length")` at `src/types/diagnostics_table.rs:1176`. So
+  `SQLColumnPrivileges` at `:1146` sits beside its own counter-example. Change
+  the three rows to `Split("maximum length")` and rewrite the three doc
+  sentences at `src/ffi/metadata.rs:511-513`, `:903-905` and `:2504-2506`,
+  which currently assert the opposite ("this one has only the
+  name-length-below-zero sentence and no maximum-length sentence, so nothing in
+  it is the driver's"). Note the existing bullets hyphenate "maximum-length",
+  which would **not** satisfy a `Split("maximum length")` substring check — so
+  the guard fails loudly until both halves are fixed, which is the desired
+  behaviour. Verify each against the live spec page, not against the
+  transcription: reading the transcription is how this slipped through in the
+  first place.
 - [ ] `src/types/diagnostics_table.rs:699`: SQLGetData HY010 `All` → `Split("SQL_PARAM_DATA_AVAILABLE")`; update the `sql_get_data` doc bullet (`fetch.rs:911`) to answer the unmarked clause ("cannot arise — core never returns SQL_PARAM_DATA_AVAILABLE"). The guard test enforces the pairing (it will fail between the two edits — that is the red step).
 - [ ] Reword to the "guarded defensively"/"returned here as a defence-in-depth guard" verdicts: `fetch.rs:888-895` (24000), `metadata.rs:237-238` (SQLTables HY010 — and sweep the other 11 catalog functions for the same pattern), `fetch.rs:243-245` (HY010, align with the inline comment at :364), `connect.rs:57-58, 291-292` (08002 — copy browse_connect's wording), `connect_attr.rs:326-328` (HY090), `fetch.rs:229-231` (24000 S2/S3 extension is core's choice, not the spec's).
 - [ ] Delete the dangling "Deferred." at `connect_attr.rs:304-313`.
