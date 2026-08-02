@@ -216,6 +216,7 @@ unsafe fn write_fixed_or_chunked(
                     &owned
                 }
             };
+            check_whole_digits_fit(value, s, target_type, target_ptr, buf_len)?;
             let (ret, delivered) = unsafe {
                 if target_type == CDataType::WChar {
                     write_wchar(s, target_ptr, buf_len, len_ind_ptr, offset)?
@@ -1029,6 +1030,238 @@ pub(crate) fn parse_sql_timestamp(s: &str) -> Result<Timestamp, OdbcError> {
         second,
         fraction,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Helper: the SQL to C: Numeric whole-digit rule for character targets
+// ---------------------------------------------------------------------------
+
+/// Whether the *SQL to C: Numeric* table governs this value's conversion to a
+/// character C type.
+///
+/// The table's own list of numeric SQL types is SQL_DECIMAL, SQL_NUMERIC,
+/// SQL_TINYINT, SQL_SMALLINT, SQL_INTEGER, SQL_BIGINT, SQL_REAL, SQL_FLOAT and
+/// SQL_DOUBLE — which is exactly the seven variants below and no others.
+///
+/// The other fifteen variants are excluded. Enumerated in full, because a
+/// variant quietly missing from this list is a silently wrong number:
+///
+/// - `Bool` is SQL_BIT (*SQL to C: Bit*), whose character row is
+///   "*BufferLength* > 1" / "*BufferLength* <= 1" → 22003. A different test,
+///   not implemented here; `a_bool_takes_the_bit_table_not_the_numeric_one`
+///   pins the current 01004 so the omission is visible rather than assumed.
+///
+///   TODO(spec): implement *SQL to C: Bit*'s "*BufferLength* <= 1" → 22003 row
+///   for SQL_C_CHAR and SQL_C_WCHAR. Core returns 01004 today.
+/// - `Date`, `Time`, `Timestamp` and `TimestampTz` are *SQL to C: Date* /
+///   *Time* / *Timestamp*, whose character rows carry a 22003 of their own
+///   keyed to a fixed minimum width, not to a digit count.
+///
+///   TODO(spec): implement those minimum-width 22003 rows — "*BufferLength* <
+///   20" for a timestamp, and the analogous widths on the date and time pages.
+///   Core returns 01004 for all of them today.
+/// - `String`, `Json`, `Bytes`, `Guid`, `Array`, `Map`, `Row` and the two
+///   interval variants (`IntervalYearMonth`, `IntervalDayTime`) are not numeric
+///   at all. *SQL to C: Character* has no 22003 row for SQL_C_CHAR whatsoever,
+///   so a character column that does not fit stays an ordinary 01004.
+/// - `Null` never reaches here: `write_fixed_or_chunked` answers it with
+///   `SQL_NULL_DATA` before the target type is examined. Listed for
+///   completeness so the fifteen add up rather than leaving a reader to check.
+const fn is_numeric_source(value: &ColumnValue) -> bool {
+    matches!(
+        value,
+        ColumnValue::I8(_)
+            | ColumnValue::I16(_)
+            | ColumnValue::I32(_)
+            | ColumnValue::I64(_)
+            | ColumnValue::F32(_)
+            | ColumnValue::F64(_)
+            | ColumnValue::Decimal(_)
+    )
+}
+
+/// The part of a rendered number that cannot be given up: everything before the
+/// decimal point.
+///
+/// A leading `-` is included. The table says "digits" and a sign is not one,
+/// but the boundary the table draws is `>=`, which is precisely "the whole part
+/// plus the null terminator must fit" — and a sign occupies a byte of the
+/// application's buffer exactly as a digit does. Excluding it would deliver
+/// `-12` for `-123.45` in a four-byte buffer under the 01004 row: a different
+/// number, which is the outcome this row exists to prevent. Pinned in both
+/// directions by `a_minus_sign_occupies_a_whole_digit_position`.
+///
+/// This is also the reading the crate already takes in the opposite direction:
+/// `numeric_convert`'s C-to-SQL size check counts the sign against the declared
+/// `ColumnSize`, pinned by `the_minus_sign_counts_toward_the_declared_size`. The
+/// two tables word their limits differently, so this is corroboration rather
+/// than a shared rule, but the fetch and bind paths agreeing on what a sign
+/// costs is worth more than either wording.
+///
+/// A rendering with no decimal point is all whole part, which is what makes
+/// `Infinity` and `NaN` fall out correctly with no special case — they have no
+/// fraction to sacrifice, so any truncation at all is whole-part loss.
+///
+/// Both of the odd renderings this can meet come from a backend-supplied
+/// `ColumnValue::Decimal`, since core produces neither itself:
+///
+/// - **Exponent notation is not decomposed** — `1.5E10` counts one whole digit
+///   rather than eleven. This *under*-counts, which is the safe direction: such
+///   a value keeps the previous 01004 behaviour rather than gaining a false
+///   22003. Rust's `Display` for `f32`/`f64` never uses exponent form, so it
+///   cannot arrive from the float variants.
+/// - **A leading space or `+` counts as a whole-part position**, and that is
+///   correct rather than an over-count, because core writes a `Decimal`'s text
+///   through verbatim: the character occupies a byte of the application's
+///   buffer exactly as the sign does. `" 123.45"` needs five bytes for `" 123"`
+///   and its terminator, and gets them. The two halves agree — what is reserved
+///   is what is written — which is the property that matters, and the one that
+///   would break if this trimmed.
+fn whole_part(rendered: &str) -> &str {
+    match rendered.find('.') {
+        Some(point) => &rendered[..point],
+        None => rendered,
+    }
+}
+
+/// Enforces the *SQL to C: Numeric* table's third character row.
+///
+/// Spec: <https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/sql-to-c-numeric>
+///
+/// The SQL_C_CHAR row's three outcomes, in the order the table lists them:
+///
+/// | Test | \**TargetValuePtr* | \**StrLen_or_IndPtr* | SQLSTATE |
+/// |---|---|---|---|
+/// | Character byte length < *BufferLength* | Data | Length of data in bytes | n/a |
+/// | Number of whole (as opposed to fractional) digits < *BufferLength* | Truncated data | Length of data in bytes | 01004 |
+/// | Number of whole (as opposed to fractional) digits >= *BufferLength* | Undefined | Undefined | 22003 |
+///
+/// SQL_C_WCHAR states the same three tests, with "Character length" and
+/// "Length of data in characters" in place of the byte forms.
+///
+/// This function answers only the third row; the first two are the ordinary
+/// truncation the character writers already implement. Both output locations
+/// are "Undefined" on that row, so it returns before either writer runs and
+/// **nothing at all is written — not the data, not the indicator**.
+/// `assert_22003_writes_nothing` checks both with sentinels.
+///
+/// # Who reaches this
+///
+/// `write_column_value` has three call sites, and all three inherit this row:
+///
+/// - `sql_fetch`'s bound-column loop (`ffi/fetch.rs`), so `SQLFetch` and
+///   `SQLFetchScroll`.
+/// - `sql_get_data` (`ffi/fetch.rs`), via `write_column_value_at`.
+/// - `write_output_params` (`ffi/params.rs`), so a numeric **output parameter**
+///   too — reached from `sql_exec_direct_w` and `sql_execute`, and not from
+///   `sql_param_data`, which executes without writing output parameters back.
+///   That site is the one where the change is sharpest: it discards the
+///   `SqlReturn` (it has no diagnostic queue to raise `01004` on) but
+///   propagates the `Err` with `?`, so a truncation that was silent becomes a
+///   failed execution. It cannot hit the no-buffer exemption spuriously — the
+///   loop skips records where `DescriptorRecord::is_bound` is false, so the
+///   data pointer is non-null by the time this runs.
+///
+/// Two points about the arithmetic:
+///
+/// - For SQL_C_CHAR the condition below is `buf_len < whole + 1`, which is
+///   `whole >= buf_len` — the table's `>=` exactly, and readable as "the whole
+///   part and its null terminator must both fit".
+/// - For SQL_C_WCHAR the row's "Number of whole ... digits" is a character
+///   count while `BufferLength` is a byte count on the wire, so the same
+///   condition is scaled by two. That agrees with `write_wchar`'s own
+///   `capacity_units = buf_len / 2 - 1`, so the two cannot disagree about
+///   where the buffer ends.
+///
+/// # A call that supplies no buffer is exempt
+///
+/// The row is not applied when the writer would write nothing anyway — a null
+/// `target_ptr`, or a `buf_len` with no room for even the null terminator
+/// (`<= 0` for SQL_C_CHAR, `< 2` for SQL_C_WCHAR). Those are exactly the
+/// early-return conditions `write_char` and `write_wchar` already have, so this
+/// is one rule stated in two places rather than a second rule.
+///
+/// **The reason is what the row is for.** A wrong *number* reaching the
+/// application's buffer is the harm 22003 prevents; where there is no buffer,
+/// that harm cannot occur, so literalism buys nothing and costs two idioms the
+/// spec sanctions:
+///
+/// - **The zero-length length probe** — `BufferLength` 0 with a real pointer,
+///   the documented "how much room do I need" call, which `SQLGetData`'s own
+///   prose protects by returning `HY090` when `BufferLength` is less than 0
+///   *but not when it is 0*. Pinned by
+///   `a_zero_length_buffer_on_a_numeric_column_stays_a_length_probe`.
+/// - **The indicator-only binding** — `SQLBindCol` with a null data pointer and
+///   a live length/indicator pointer, which the spec permits in as many words
+///   ("An application can unbind the data buffer for a column but still have a
+///   length/indicator buffer bound for the column") and which
+///   `collect_bindings` deliberately keeps. Pinned by
+///   `fetch_writes_the_indicator_of_an_indicator_only_numeric_binding`.
+///
+/// Both reference drivers agree: psqlODBC's `setup_getdataclass`
+/// (`convert.c`) branches on `cbValueMax == 0` with the comment "just returns
+/// length info", and MySQL Connector/ODBC does the same in `utility.cc`.
+///
+/// **`buf_len == 1` on SQL_C_CHAR is *not* exempt.** There is a buffer there,
+/// and the writer would put a bare null terminator in it — delivering `""` for
+/// a number, which is the wrong number and exactly the harm above.
+/// `a_one_byte_char_buffer_is_still_22003` pins that edge.
+///
+/// The check is independent of the `SQLGetData` chunk offset by construction —
+/// it reads the whole rendered value, not the not-yet-delivered remainder — so
+/// a value that passes on the first chunk passes on every later one. The
+/// consequence is that a rendering longer than the buffer cannot be retrieved
+/// in parts at all: a `DECIMAL(38,0)` is 39 characters and a 32-byte buffer now
+/// answers 22003 where both reference drivers would deliver it in chunks. That
+/// is spec-defensible — the numeric types are absent from `SQLGetData`'s
+/// "Retrieving Variable-Length Data in Parts" list — and `sql_get_data` does
+/// not advance the cursor on the `Err` path, so the column stays readable with
+/// a buffer that fits.
+fn check_whole_digits_fit(
+    value: &ColumnValue,
+    rendered: &str,
+    target_type: CDataType,
+    target_ptr: *mut c_void,
+    buf_len: isize,
+) -> Result<(), OdbcError> {
+    if !is_numeric_source(value) {
+        return Ok(());
+    }
+
+    // The "no buffer at all" carve-out above. These two conditions mirror
+    // `write_char`'s `buf_len <= 0` and `write_wchar`'s `buf_len < 2`.
+    let minimum_useful_buf_len = if target_type == CDataType::WChar {
+        2
+    } else {
+        1
+    };
+    if target_ptr.is_null() || buf_len < minimum_useful_buf_len {
+        return Ok(());
+    }
+
+    let whole = whole_part(rendered);
+    let (units, bytes_per_unit) = if target_type == CDataType::WChar {
+        (whole.encode_utf16().count(), 2_isize)
+    } else {
+        (whole.len(), 1_isize)
+    };
+
+    let needed = isize::try_from(units)
+        .unwrap_or(isize::MAX)
+        .saturating_add(1)
+        .saturating_mul(bytes_per_unit);
+
+    if buf_len < needed {
+        return Err(OdbcError::general(
+            format!(
+                "Numeric value out of range: {rendered} needs {needed} bytes for its whole part \
+                 and null terminator as {target_type:?}, but the application supplied a \
+                 {buf_len}-byte buffer"
+            ),
+            SqlState::numeric_value_out_of_range(),
+        ));
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -5985,5 +6218,344 @@ mod tests {
         assert!((2020..=2200).contains(&year), "implausible year {year}");
         assert!((1..=12).contains(&month), "month out of range: {month}");
         assert!((1..=31).contains(&day), "day out of range: {day}");
+    }
+
+    // -----------------------------------------------------------------------
+    // SQL to C: Numeric — the SQL_C_CHAR / SQL_C_WCHAR rows
+    //
+    // "Number of whole (as opposed to fractional) digits < BufferLength" —
+    // truncated data written, indicator set, 01004.
+    // "Number of whole (as opposed to fractional) digits >= BufferLength" —
+    // *TargetValuePtr* "Undefined", *StrLen_or_IndPtr* "Undefined", 22003.
+    // -----------------------------------------------------------------------
+
+    /// Fills a buffer and an indicator with sentinels, runs a character-target
+    /// conversion, and asserts the table's 22003 row: SQLSTATE 22003 and both
+    /// output locations left exactly as they were, since the row calls each of
+    /// them "Undefined".
+    fn assert_22003_writes_nothing(value: &ColumnValue, target_type: CDataType, buf_len: isize) {
+        const BUF_SENTINEL: u8 = 0xAA;
+        const IND_SENTINEL: isize = -12_345;
+
+        let mut buf = [BUF_SENTINEL; 64];
+        let mut ind: isize = IND_SENTINEL;
+        let ret = unsafe {
+            write_column_value(
+                value,
+                target_type,
+                buf.as_mut_ptr().cast::<c_void>(),
+                buf_len,
+                &mut ind,
+            )
+        };
+        assert_eq!(
+            sqlstate_of_err(&ret.unwrap_err()),
+            SqlState::numeric_value_out_of_range().as_str(),
+            "{value:?} into a {buf_len}-byte {target_type:?} buffer"
+        );
+        assert!(
+            buf.iter().all(|&b| b == BUF_SENTINEL),
+            "*TargetValuePtr* is \"Undefined\" on the 22003 row, so nothing may be written: {:?}",
+            &buf[..8]
+        );
+        assert_eq!(
+            ind, IND_SENTINEL,
+            "*StrLen_or_IndPtr* is \"Undefined\" on the 22003 row, so it must not be written"
+        );
+    }
+
+    /// Runs a character-target conversion and returns the bytes delivered plus
+    /// the indicator, for the 01004 row where truncated data *is* written.
+    fn char_write(value: &ColumnValue, buf_len: isize) -> (SqlReturn, Vec<u8>, isize) {
+        let mut buf = [0xAAu8; 64];
+        let mut ind: isize = 0;
+        let ret = unsafe {
+            write_column_value(
+                value,
+                CDataType::Char,
+                buf.as_mut_ptr().cast::<c_void>(),
+                buf_len,
+                &mut ind,
+            )
+        };
+        let len = usize::try_from(buf_len.max(0)).expect("test buffer length");
+        (ret.expect("no error expected"), buf[..len].to_vec(), ind)
+    }
+
+    #[test]
+    fn i64_123456_into_4_byte_char_buffer_is_22003() {
+        // Six whole digits, BufferLength 4: "Number of whole (as opposed to
+        // fractional) digits >= BufferLength". Delivering "123" would hand the
+        // application a different *number*, which is what separates this row
+        // from the character table's ordinary 01004.
+        assert_22003_writes_nothing(&ColumnValue::I64(123_456), CDataType::Char, 4);
+    }
+
+    #[test]
+    fn f64_1_25_into_buffer_holding_1_2_is_01004() {
+        // Whole digits 1 < BufferLength 4, so this is the middle row:
+        // "Truncated data" written, "Length of data in bytes" in the
+        // indicator, 01004. Only the fraction is lost.
+        let (ret, written, ind) = char_write(&ColumnValue::F64(1.25), 4);
+        assert_eq!(ret, SqlReturn::SUCCESS_WITH_INFO);
+        assert_eq!(&written, b"1.2\0");
+        assert_eq!(ind, 4, "\"1.25\" is four bytes of data");
+    }
+
+    #[test]
+    fn the_char_boundary_is_every_whole_digit_plus_the_terminator() {
+        // "1234.5": four whole digits. BufferLength 5 holds "1234" and the
+        // null terminator and nothing else — whole digits 4 < 5, the 01004
+        // row. One byte less and 4 >= 4, the 22003 row. This pins the exact
+        // `>=` of the table rather than an off-by-one either side of it.
+        let (ret, written, ind) = char_write(&ColumnValue::Decimal("1234.5".to_string()), 5);
+        assert_eq!(ret, SqlReturn::SUCCESS_WITH_INFO);
+        assert_eq!(&written, b"1234\0");
+        assert_eq!(ind, 6);
+
+        assert_22003_writes_nothing(
+            &ColumnValue::Decimal("1234.5".to_string()),
+            CDataType::Char,
+            4,
+        );
+    }
+
+    #[test]
+    fn a_numeric_that_fits_entirely_is_not_truncated_at_the_boundary() {
+        // The first row: "Character byte length < BufferLength". "1234" in a
+        // five-byte buffer is four bytes plus the terminator, so it is whole
+        // data with no SQLSTATE — the boundary case that must not be dragged
+        // into either truncation row.
+        let (ret, written, ind) = char_write(&ColumnValue::I32(1234), 5);
+        assert_eq!(ret, SqlReturn::SUCCESS);
+        assert_eq!(&written, b"1234\0");
+        assert_eq!(ind, 4);
+    }
+
+    #[test]
+    fn the_wchar_boundary_counts_utf16_units_not_bytes() {
+        // The SQL_C_WCHAR row states the same test, and `BufferLength` is a
+        // byte count on the wire while the row's "Number of whole ... digits"
+        // is a character count — so four whole digits need ten bytes here,
+        // five UTF-16 units, not five bytes. Ten passes; eight is 22003.
+        let mut buf = [0u16; 16];
+        let mut ind: isize = 0;
+        let ret = unsafe {
+            write_column_value(
+                &ColumnValue::Decimal("1234.5".to_string()),
+                CDataType::WChar,
+                buf.as_mut_ptr().cast::<c_void>(),
+                10,
+                &mut ind,
+            )
+        };
+        assert_eq!(ret.unwrap(), SqlReturn::SUCCESS_WITH_INFO);
+        assert_eq!(String::from_utf16_lossy(&buf[..4]), "1234");
+        assert_eq!(buf[4], 0, "null terminator");
+        assert_eq!(ind, 12, "\"1234.5\" is six UTF-16 units, twelve bytes");
+
+        assert_22003_writes_nothing(
+            &ColumnValue::Decimal("1234.5".to_string()),
+            CDataType::WChar,
+            8,
+        );
+    }
+
+    #[test]
+    fn a_minus_sign_occupies_a_whole_digit_position() {
+        // The table says "digits" and a minus sign is not one, but the `>=`
+        // boundary it draws is exactly "the whole part plus the null
+        // terminator must fit", and the sign occupies a byte of the buffer
+        // just as a digit does. Reading it out of the count would deliver
+        // "-12" for -123.45 in a four-byte buffer: a different number, which
+        // is the outcome this row exists to prevent. So the sign counts, in
+        // both directions of the boundary.
+        let (ret, written, ind) = char_write(&ColumnValue::F64(-123.45), 5);
+        assert_eq!(ret, SqlReturn::SUCCESS_WITH_INFO);
+        assert_eq!(&written, b"-123\0");
+        assert_eq!(ind, 7);
+
+        assert_22003_writes_nothing(&ColumnValue::F64(-123.45), CDataType::Char, 4);
+    }
+
+    #[test]
+    fn a_character_column_truncating_is_still_ordinary_01004() {
+        // The guard against over-reach: SQL to C: Character has no 22003 row
+        // at all for SQL_C_CHAR, so a genuine character column that does not
+        // fit keeps returning truncated data with 01004. Only the sources the
+        // SQL to C: Numeric table governs move.
+        let (ret, written, ind) = char_write(&ColumnValue::String("123456".to_string()), 4);
+        assert_eq!(ret, SqlReturn::SUCCESS_WITH_INFO);
+        assert_eq!(&written, b"123\0");
+        assert_eq!(ind, 6);
+    }
+
+    #[test]
+    fn a_non_numeric_source_that_looks_numeric_is_still_01004() {
+        // `ColumnValue::Bytes` renders as hex digits and `Guid` as a hex
+        // string, but neither is a numeric SQL type, so neither takes the
+        // numeric row. Pins that the rule keys off the source variant rather
+        // than off what the rendering happens to look like.
+        let (ret, written, ind) = char_write(&ColumnValue::Bytes(vec![0x12, 0x34, 0x56]), 4);
+        assert_eq!(ret, SqlReturn::SUCCESS_WITH_INFO);
+        assert_eq!(&written, b"123\0");
+        assert_eq!(ind, 6);
+    }
+
+    #[test]
+    fn every_numeric_variant_takes_the_22003_row() {
+        // Enumerates the full set the rule applies to, so a new numeric
+        // `ColumnValue` variant that is left out of `is_numeric_source` shows
+        // up here rather than as a silently wrong number. SQL_DECIMAL,
+        // SQL_NUMERIC, SQL_TINYINT, SQL_SMALLINT, SQL_INTEGER, SQL_BIGINT,
+        // SQL_REAL, SQL_FLOAT and SQL_DOUBLE are the table's own list.
+        //
+        // Every value here is positive and every buffer is sized off its digit
+        // count alone, so this test covers variant coverage only. The sign rule
+        // is `a_minus_sign_occupies_a_whole_digit_position`'s job, and keeping
+        // the two apart means a regression in either one names itself.
+        for (value, char_buf_len) in [
+            (ColumnValue::I8(127), 3),
+            (ColumnValue::I16(32_767), 4),
+            (ColumnValue::I32(2_000_000_000), 4),
+            (ColumnValue::I64(123_456), 4),
+            (ColumnValue::F32(123_456.0), 4),
+            (ColumnValue::F64(123_456.0), 4),
+            (ColumnValue::Decimal("123456".to_string()), 4),
+        ] {
+            assert_22003_writes_nothing(&value, CDataType::Char, char_buf_len);
+            assert_22003_writes_nothing(&value, CDataType::WChar, char_buf_len * 2);
+        }
+    }
+
+    #[test]
+    fn a_non_finite_float_has_no_fraction_to_sacrifice() {
+        // "Infinity" and "NaN" carry no decimal point, so the whole of the
+        // rendering is the whole part and any truncation at all is whole-part
+        // loss. That falls out of the same rule with no special case: "Inf"
+        // is not a value the application can read back as a number.
+        assert_22003_writes_nothing(&ColumnValue::F64(f64::INFINITY), CDataType::Char, 5);
+        assert_22003_writes_nothing(&ColumnValue::F64(f64::NAN), CDataType::Char, 3);
+
+        // Exactly enough room, so no truncation: "NaN" is three bytes plus a
+        // terminator.
+        let (ret, written, _) = char_write(&ColumnValue::F64(f64::NAN), 4);
+        assert_eq!(ret, SqlReturn::SUCCESS);
+        assert_eq!(&written, b"NaN\0");
+    }
+
+    #[test]
+    fn a_zero_length_buffer_on_a_numeric_column_stays_a_length_probe() {
+        // The carve-out. Read literally the table's third row would fire here —
+        // every number has at least one whole digit, so "whole digits >=
+        // BufferLength" holds for BufferLength 0 — but the row exists to stop a
+        // wrong *number* reaching the application's buffer, and there is no
+        // buffer to reach. `SQLGetData`'s own prose protects this call
+        // (`HY090` when BufferLength is less than 0 but not when it is 0), and
+        // both reference drivers special-case it: psqlODBC's
+        // `setup_getdataclass` branches on `cbValueMax == 0` with the comment
+        // "just returns length info", and MySQL Connector/ODBC does the same in
+        // `utility.cc`.
+        //
+        // So a numeric column probes exactly as a character one does: 01004,
+        // nothing written, and the full length in the indicator so the
+        // application can size its buffer and call again.
+        let (ret, _, ind) = char_write(&ColumnValue::I64(123_456), 0);
+        assert_eq!(ret, SqlReturn::SUCCESS_WITH_INFO);
+        assert_eq!(ind, 6, "the probe must still report the length it needs");
+
+        let mut buf = [0xAAu16; 8];
+        let mut ind: isize = 0;
+        let ret = unsafe {
+            write_column_value(
+                &ColumnValue::I64(123_456),
+                CDataType::WChar,
+                buf.as_mut_ptr().cast::<c_void>(),
+                0,
+                &mut ind,
+            )
+        };
+        assert_eq!(ret.unwrap(), SqlReturn::SUCCESS_WITH_INFO);
+        assert_eq!(ind, 12);
+        assert_eq!(buf, [0xAAu16; 8], "wrote into a zero-length buffer");
+    }
+
+    #[test]
+    fn leading_padding_in_a_decimal_is_reserved_because_it_is_written() {
+        // A backend may hand core a `Decimal` carrying a leading space or `+`.
+        // `whole_part` counts it, and that is right rather than an over-count:
+        // core writes a `Decimal`'s text through verbatim, so the character
+        // occupies a byte of the buffer exactly as a digit does. This pins the
+        // property that makes it right — what is reserved is what is written.
+        let (ret, written, ind) = char_write(&ColumnValue::Decimal(" 123.45".to_string()), 5);
+        assert_eq!(ret, SqlReturn::SUCCESS_WITH_INFO);
+        assert_eq!(
+            &written, b" 123\0",
+            "the leading space is written, so reserving room for it is correct"
+        );
+        assert_eq!(ind, 7);
+
+        // One byte less and the whole part no longer fits.
+        assert_22003_writes_nothing(
+            &ColumnValue::Decimal(" 123.45".to_string()),
+            CDataType::Char,
+            4,
+        );
+    }
+
+    #[test]
+    fn a_one_byte_char_buffer_is_still_22003() {
+        // The other side of the carve-out, and the reason it is drawn at "the
+        // writer would write nothing" rather than at "the buffer is small".
+        // One byte is a real buffer: `write_char` would put a bare null
+        // terminator in it and report 01004, delivering "" for a number. That
+        // is the wrong number, which is what the row prevents.
+        assert_22003_writes_nothing(&ColumnValue::I64(123_456), CDataType::Char, 1);
+        // The SQL_C_WCHAR counterpart needs two bytes before a terminator fits,
+        // so one byte is the exempt case there and two is the first checked one.
+        assert_22003_writes_nothing(&ColumnValue::I64(123_456), CDataType::WChar, 2);
+    }
+
+    #[test]
+    fn a_null_target_with_a_live_indicator_is_never_22003() {
+        // The indicator-only binding, at this layer: `SQLBindCol` with a null
+        // data pointer and a live length/indicator pointer, which the spec
+        // permits in as many words ("An application can unbind the data buffer
+        // for a column but still have a length/indicator buffer bound for the
+        // column"). There is no buffer for a wrong number to reach, so the row
+        // does not apply and the length is still reported.
+        //
+        // `buf_len` is swept because a binding of this shape can carry any
+        // octet length; none of them may turn into an error.
+        for buf_len in [0, 1, 2, 4, 64] {
+            let mut ind: isize = 0;
+            let ret = unsafe {
+                write_column_value(
+                    &ColumnValue::I64(123_456),
+                    CDataType::Char,
+                    std::ptr::null_mut(),
+                    buf_len,
+                    &mut ind,
+                )
+            };
+            assert_eq!(
+                ret.unwrap(),
+                SqlReturn::SUCCESS,
+                "null target with buf_len {buf_len}"
+            );
+            assert_eq!(ind, 6, "null target with buf_len {buf_len}");
+        }
+    }
+
+    #[test]
+    fn a_bool_takes_the_bit_table_not_the_numeric_one() {
+        // SQL_BIT is its own table (SQL to C: Bit), whose SQL_C_CHAR row reads
+        // "BufferLength > 1" / "BufferLength <= 1" -> 22003. Core does not
+        // implement that row yet, so a `Bool` in a one-byte buffer still
+        // reports 01004; pinning it keeps this change honest about its scope
+        // rather than letting a reader assume SQL_BIT moved with the numerics.
+        let (ret, _, ind) = char_write(&ColumnValue::Bool(true), 1);
+        assert_eq!(ret, SqlReturn::SUCCESS_WITH_INFO);
+        assert_eq!(ind, 1);
     }
 }

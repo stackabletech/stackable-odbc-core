@@ -876,8 +876,15 @@ pub unsafe fn sql_extended_fetch<B: Backend>(
 /// - 08S01 (communication link failure): propagated from the backend.
 /// - 22002 (indicator variable required but not supplied): returned when the column value
 ///   is NULL and `str_len_or_ind_ptr` is null.
-/// - 22003 (numeric value out of range): returned via `write_column_value` when a numeric
-///   pivot does not fit the requested C target type.
+/// - 22003 (numeric value out of range): returned via `write_column_value` in two distinct
+///   cases. A numeric pivot that does not fit the requested *fixed-width* C target type is
+///   the first. The second is the *SQL to C: Numeric* table's character row — a numeric
+///   column read into `SQL_C_CHAR` or `SQL_C_WCHAR` whose *whole* digits do not fit
+///   `BufferLength` ("Number of whole (as opposed to fractional) digits >= *BufferLength*"),
+///   where losing only fractional digits stays `01004`. That second case is not a pivot: the
+///   value is rendered as text and the buffer is measured against it. A call supplying no
+///   buffer at all — a null `TargetValuePtr`, or a `BufferLength` with no room for the null
+///   terminator — is exempt and keeps its `01004` length-probe behaviour.
 /// - 22007 (invalid datetime format): returned via `write_column_value` when character data
 ///   parses as a date/time/timestamp but a field value is out of range (e.g. month 13, or a
 ///   numeric field too large for its target width, e.g. year `"99999"`). Per this function's
@@ -2164,6 +2171,58 @@ mod tests {
                 std::ptr::read(indicator_ptr),
                 isize::try_from(std::mem::size_of::<i32>()).expect("small"),
                 "SQLFetch did not write the length of a data-unbound column",
+            );
+
+            cleanup_long_data(env, conn, stmt);
+        }
+    }
+
+    /// The sibling of the test above, with `SQL_C_CHAR` instead of
+    /// `SQL_C_SLONG`, because only the character targets reach
+    /// `check_whole_digits_fit`.
+    ///
+    /// Column 2 is the numeric `I32(4242)`, so an indicator-only binding to a
+    /// character target is exactly the combination the *SQL to C: Numeric*
+    /// table's 22003 row would break if it were applied literally: four whole
+    /// digits against an octet length of 0. The row exists to stop a wrong
+    /// number reaching the application's buffer, and this binding has no
+    /// buffer — the spec sanctions it in as many words ("An application can
+    /// unbind the data buffer for a column but still have a length/indicator
+    /// buffer bound for the column"), so it must stay `SQL_SUCCESS` with the
+    /// length reported.
+    ///
+    /// The `SQL_C_SLONG` test above cannot catch a regression here: a
+    /// fixed-width target never enters the character branch at all.
+    #[test]
+    fn fetch_writes_the_indicator_of_an_indicator_only_numeric_binding() {
+        unsafe {
+            let (env, conn, stmt) = long_data_stmt_no_fetch();
+
+            let mut indicator: isize = -99;
+            let indicator_ptr = std::ptr::from_mut(&mut indicator);
+
+            assert_eq!(
+                crate::ffi::bind::sql_bind_col::<MockLongDataBackend>(
+                    stmt,
+                    2,
+                    CDataType::Char as i16,
+                    std::ptr::null_mut(),
+                    0,
+                    indicator_ptr,
+                ),
+                SqlReturn::SUCCESS,
+            );
+
+            assert_eq!(
+                sql_fetch::<MockLongDataBackend>(stmt),
+                SqlReturn::SUCCESS,
+                "an indicator-only binding of a numeric column to SQL_C_CHAR \
+                 must not become 22003",
+            );
+            assert_eq!(
+                std::ptr::read(indicator_ptr),
+                4,
+                "SQLFetch did not report the length of \"4242\"",
             );
 
             cleanup_long_data(env, conn, stmt);

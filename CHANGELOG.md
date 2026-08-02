@@ -3384,6 +3384,110 @@ call `SQLCloseCursor` or `SQLFreeStmt(SQL_CLOSE)` first, as it already must for
   rule: the text is a recognised literal whose field is out of range, which is
   what separates it from text that is no datetime at all.
 
+- **Fetching a numeric column into a character buffer too small for its whole
+  digits is now an error with no data, where it was a warning with truncated
+  data.** Applications will notice this sharply: a call that returned
+  `SQL_SUCCESS_WITH_INFO` with `01004` and a value in the buffer now returns
+  `SQL_ERROR` with `22003` and **nothing written — neither the data nor the
+  length indicator**.
+
+  **Five entry points reach it**, which is every caller of the shared
+  marshalling routine: `SQLFetch` and `SQLFetchScroll` (bound columns),
+  `SQLGetData`, and — through output parameters — `SQLExecDirect` and
+  `SQLExecute`.
+
+  `ColumnValue::I64(123456)` read into a four-byte `SQL_C_CHAR` buffer
+  delivered `"123"`. That is not a truncated string, it is a different number,
+  and [SQL to C: Numeric] separates the two cases in as many words. Its
+  `SQL_C_CHAR` and `SQL_C_WCHAR` rows read:
+
+  | Test | \**TargetValuePtr* | \**StrLen_or_IndPtr* | SQLSTATE |
+  |---|---|---|---|
+  | Character byte length < *BufferLength* | Data | Length of data in bytes | n/a |
+  | Number of whole (as opposed to fractional) digits < *BufferLength* | Truncated data | Length of data in bytes | `01004` |
+  | Number of whole (as opposed to fractional) digits >= *BufferLength* | Undefined | Undefined | `22003` |
+
+  Core implemented the middle row for every case and never the last one.
+  Losing only *fractional* digits is unchanged: `1.25` into four bytes still
+  delivers `"1.2"` with `01004`.
+
+  **Affected sources** are the nine numeric SQL types the table names, which
+  reach core as seven `ColumnValue` variants: `I8` (`SQL_TINYINT`), `I16`
+  (`SQL_SMALLINT`), `I32` (`SQL_INTEGER`), `I64` (`SQL_BIGINT`), `F32`
+  (`SQL_REAL`), `F64` (`SQL_FLOAT`/`SQL_DOUBLE`) and `Decimal`
+  (`SQL_DECIMAL`/`SQL_NUMERIC`). **Affected targets** are `SQL_C_CHAR` and
+  `SQL_C_WCHAR`, and those only.
+
+  **Core is now stricter here than the two most widely deployed open-source
+  drivers.** Neither psqlODBC nor MySQL Connector/ODBC implements this row:
+  both return `01004` with truncated data, write the full length, and let the
+  application keep reading in chunks. This entry is not "core caught up" — it is
+  core diverging, deliberately, because the table is unambiguous and a truncated
+  number is a wrong number. Applications validated only against those two
+  drivers are the ones most likely to notice.
+
+  **A numeric output parameter fails the whole execution rather than
+  truncating.** `write_output_params` shares the same marshalling routine and
+  propagates its error with `?`, where the old `SQL_SUCCESS_WITH_INFO` was
+  deliberately discarded — that path has no diagnostic queue to raise `01004`
+  on. So a numeric output parameter bound to `SQL_C_CHAR` with a buffer too
+  small for its whole digits now fails `SQLExecDirect` or `SQLExecute` outright,
+  where it previously truncated silently. No legitimate no-buffer call is
+  affected: the loop already skips unbound records, so the data pointer is
+  non-null, and a zero `SQL_DESC_OCTET_LENGTH` takes the no-buffer exemption
+  below. `SQLParamData` is **not** affected — it completes a data-at-execution
+  sequence and executes, but does not write output parameters back at all. In
+  practice no in-tree backend produces output parameters yet, so this clause is
+  forward-looking.
+
+  **A long numeric rendering can no longer be retrieved in parts.** A
+  `DECIMAL(38,0)` renders to 39 characters; reading it through a 32-byte
+  `SQL_C_CHAR` buffer is now `22003` on the first call, where both reference
+  drivers deliver it in chunks. That follows from the row — the check is a
+  property of the value, not of the not-yet-delivered remainder — and is
+  spec-defensible, since the numeric types are absent from `SQLGetData`'s
+  "Retrieving Variable-Length Data in Parts" list. The column is **not**
+  consumed: `SQLGetData` does not advance its cursor on the error path, so the
+  same column reads normally once the application supplies a buffer that fits.
+
+  **Nothing else moves.** A genuine character column that does not fit is still
+  `01004` with truncated data, because [SQL to C: Character] has no `22003` row
+  at all. The other fifteen `ColumnValue` variants are unchanged: `Bool`
+  (`SQL_BIT`), the four datetime variants (`Date`, `Time`, `Timestamp`,
+  `TimestampTz`), `String`, `Json`, `Bytes`, `Guid`, `Array`, `Map`, `Row`, the
+  two interval variants (`IntervalYearMonth`, `IntervalDayTime`) and `Null`,
+  which is answered with `SQL_NULL_DATA` before any of this runs.
+
+  Two rulings worth knowing, both pinned by tests:
+
+  - **A minus sign counts as a whole-digit position.** The table says "digits",
+    and a sign is not one, but the boundary it draws is exactly "the whole part
+    plus the null terminator must fit" and a sign occupies a byte just as a
+    digit does. Reading it out would deliver `"-12"` for `-123.45` in a
+    four-byte buffer — the wrong number, which is what the row exists to
+    prevent.
+  - **A call that supplies no buffer is exempt**, and keeps its previous
+    behaviour exactly. That covers the zero-length length probe
+    (`BufferLength` 0 with a real pointer, the documented "how much room do I
+    need" call) and the indicator-only binding `SQLBindCol` permits ("An
+    application can unbind the data buffer for a column but still have a
+    length/indicator buffer bound for the column"). The row exists to stop a
+    wrong number reaching the application's buffer; where there is no buffer,
+    that cannot happen. Both reference drivers special-case the probe the same
+    way, and `SQLGetData`'s own prose protects it by returning `HY090` when
+    `BufferLength` is less than 0 *but not* when it is 0. A `BufferLength` of 1
+    on `SQL_C_CHAR` is **not** exempt — there is a buffer there, and delivering
+    `""` for a number is the wrong number.
+
+  **Still not implemented, and unchanged by this entry:** the `22003` rows on
+  the sibling conversion tables, which are keyed to a fixed minimum buffer width
+  rather than to a digit count — `SQL to C: Bit`'s "*BufferLength* <= 1" and the
+  date, time and timestamp pages' minimum widths ("*BufferLength* < 20" for a
+  timestamp). Core returns `01004` for all of those. Two further numeric gaps
+  also remain open and are **not** addressed here: an `f64` overflowing an
+  `SQL_C_FLOAT` target still reports `01S07` where the same table says `22003`,
+  and `SQL_C_NUMERIC` has no conversion arm at all.
+
 [C to SQL: Character]: https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/c-to-sql-character
 [SQL to C: Time]: https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/sql-to-c-time
 [SQL to C: Numeric]: https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/sql-to-c-numeric
