@@ -4032,6 +4032,142 @@ impl Backend for MockFailingDescribeBackend {
 }
 
 // ---------------------------------------------------------------------------
+// A backend whose column_count is negative, for the u16 narrowing regression
+// (Task 2.10)
+// ---------------------------------------------------------------------------
+
+/// A statement whose `column_count` cannot be represented in `u16`.
+///
+/// `StatementBackend::column_count` returns `i16`, so this is the *only* way
+/// `u16::try_from` on it can fail: a positive `i16` always fits, since its
+/// max (32 767) is below `u16::MAX` (65 535). A backend cannot report "too
+/// many columns" through this method at all — it can only report a count
+/// that is negative, which is what this mock does.
+///
+/// `describe_col` succeeds for any column, so a test can tell "core's range
+/// check wrongly rejected column 1" (07009, `describe_col` never reached)
+/// apart from "the call reached the backend and got an answer"
+/// (`SQL_SUCCESS`).
+pub struct MockNegativeColumnCountStatement;
+
+impl StatementBackend for MockNegativeColumnCountStatement {
+    type Error = OdbcError;
+
+    fn column_count(&self) -> i16 {
+        -1
+    }
+
+    fn describe_col(
+        &self,
+        _col: u16,
+    ) -> Result<Cow<'_, crate::types::ColumnDescriptor>, OdbcError> {
+        Ok(Cow::Owned(crate::types::ColumnDescriptor::default()))
+    }
+}
+
+/// Hands out statements whose reported column count does not fit `u16`.
+///
+/// Exists to prove `u16::try_from(column_count).unwrap_or(0)` — which
+/// collapses a count `u16` cannot hold to zero — does not turn "the count is
+/// unrepresentable" into "reject every column, including valid ones." The
+/// fix saturates up instead, so column 1 must still reach `describe_col`.
+pub struct MockNegativeColumnCountBackend;
+
+impl Backend for MockNegativeColumnCountBackend {
+    type Connection = MockConnection;
+    type Statement = MockNegativeColumnCountStatement;
+    type Error = OdbcError;
+    type CancelToken = MockCancelToken;
+
+    fn connect(_: &ConnectParams) -> Result<MockConnection, OdbcError> {
+        Ok(MockConnection)
+    }
+    fn disconnect(_: &mut MockConnection) -> Result<(), OdbcError> {
+        Ok(())
+    }
+    fn cancel_token(_conn: &Self::Connection) -> Self::CancelToken {
+        MockCancelToken::default()
+    }
+    fn cancel(token: &Self::CancelToken) -> Result<(), Self::Error> {
+        token
+            .cancelled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+    fn is_cancelled(token: &Self::CancelToken) -> bool {
+        token.cancelled.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    fn exec_direct(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: &str,
+    ) -> Result<MockNegativeColumnCountStatement, OdbcError> {
+        Ok(MockNegativeColumnCountStatement)
+    }
+    fn prepare(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: &str,
+    ) -> Result<MockNegativeColumnCountStatement, OdbcError> {
+        Ok(MockNegativeColumnCountStatement)
+    }
+    fn execute(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: &mut MockNegativeColumnCountStatement,
+        _: &[crate::types::ColumnValue],
+    ) -> Result<crate::types::ExecuteOutcome, OdbcError> {
+        Ok(crate::types::ExecuteOutcome::default())
+    }
+    fn get_info(_: &MockConnection, _: crate::types::InfoType) -> Result<InfoValue, OdbcError> {
+        Err(OdbcError::NotImplemented {
+            feature: "get_info".into(),
+        })
+    }
+    fn get_functions() -> Cow<'static, [crate::function_id::FunctionId]> {
+        Cow::Borrowed(&[])
+    }
+    fn get_type_info(_conn: &Self::Connection) -> Cow<'static, [TypeInfoRow]> {
+        Cow::Borrowed(&[])
+    }
+    fn tables(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: &crate::types::TablesQuery<'_>,
+    ) -> Result<Vec<TableRow>, OdbcError> {
+        Ok(Vec::new())
+    }
+    fn columns(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: &crate::types::ColumnsQuery<'_>,
+    ) -> Result<Vec<ColumnRow>, OdbcError> {
+        Ok(Vec::new())
+    }
+
+    fn supports_catalogs(_conn: &Self::Connection) -> bool {
+        false
+    }
+    fn supports_schemas(_conn: &Self::Connection) -> bool {
+        false
+    }
+    fn alter_table_support(_conn: &Self::Connection) -> u32 {
+        0
+    }
+    fn outer_join_capabilities(_conn: &Self::Connection) -> u32 {
+        0
+    }
+    fn default_txn_isolation(_conn: &Self::Connection) -> u32 {
+        0
+    }
+    fn txn_isolation_options(_conn: &Self::Connection) -> u32 {
+        0
+    }
+
+    minimal_capability_decls!();
+}
+
+// ---------------------------------------------------------------------------
 // A backend whose describe_col panics, for SQLCopyDesc phase-one panic safety
 // ---------------------------------------------------------------------------
 

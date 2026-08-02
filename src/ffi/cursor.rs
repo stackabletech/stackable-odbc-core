@@ -734,10 +734,19 @@ pub unsafe fn sql_get_cursor_name_w<B: Backend>(
 ///   dereferenced.
 /// - HY010 (function sequence error): (driver-manager-handled; not returned here)
 /// - HY013 (memory management error): not applicable; Rust memory access cannot fail silently.
-/// - HY090 (invalid string or buffer length): not returned. The row is (DM)-marked and
-///   describes `NameLength` "less than 0 but not equal to SQL_NTS", which the Driver
-///   Manager rejects before the call arrives. An earlier revision returned it for an
-///   *empty* name, which is a different condition and is now `34000`.
+/// - HY090 (invalid string or buffer length): the row's own clause is not returned. It is
+///   (DM)-marked and describes `NameLength` "less than 0 but not equal to SQL_NTS", which
+///   the Driver Manager rejects before the call arrives. An earlier revision returned it for
+///   an *empty* name, which is a different condition and is now `34000`.
+///
+///   `HY090` **is** returned here for a condition the row does not state: `CursorName` —
+///   this function's only string argument, so the whole set — passed as `SQL_NTS` with no
+///   null terminator within `MAX_NTS_SCAN` (32 767) code units, a length the driver cannot
+///   determine. Note that this function used to rewrite *every* failure from
+///   `utf16_to_string` as `HY009`, so the state is now the condition's rather than the
+///   call site's. A null `CursorName` is still `HY009`. See
+///   `set_cursor_name_refuses_an_nts_name_that_runs_to_the_scan_cap` and
+///   `set_cursor_name_still_reports_hy009_for_a_null_pointer`.
 /// - HY117 (connection suspended): (driver-manager-handled; not returned here)
 /// - HYT01 (connection timeout): not applicable; the framework is in-process.
 /// - IM001 (driver does not support function): (driver-manager-handled; not returned here)
@@ -769,13 +778,13 @@ pub unsafe fn sql_set_cursor_name_w<B: Backend>(
                 .diagnostics
                 .clear();
 
-            // Spec HY009: null pointer.
-            let name = utf16_to_string(cursor_name, i32::from(name_length)).map_err(|_| {
-                OdbcError::general(
-                    "Cursor name pointer is null",
-                    SqlState::invalid_use_of_null_pointer(),
-                )
-            })?;
+            // Spec HY009: null pointer — which is the state `utf16_to_string`
+            // already returns for one, so it is propagated rather than
+            // rebuilt. The `map_err` that used to sit here rewrote *every*
+            // failure as "Cursor name pointer is null", which became a lie the
+            // moment the helper gained a second failure: an `SQL_NTS` name
+            // running to `MAX_NTS_SCAN` is `HY090`, not `HY009`.
+            let name = utf16_to_string(cursor_name, i32::from(name_length))?;
             tracing::debug!(
                 "SQLSetCursorNameW(stmt={:?}, name={:?})",
                 statement_handle,
@@ -1967,6 +1976,64 @@ mod tests {
     unsafe fn set_cursor_name(stmt: *mut c_void, name: &str) -> SqlReturn {
         let utf16: Vec<u16> = name.encode_utf16().collect();
         unsafe { sql_set_cursor_name_w::<MockBackend>(stmt, utf16.as_ptr(), utf16.len() as i16) }
+    }
+
+    /// A cursor name passed as `SQL_NTS` that runs to `MAX_NTS_SCAN` is
+    /// `HY090`, not `HY009`.
+    ///
+    /// `sql_set_cursor_name_w` rewrote *every* failure from `utf16_to_string`
+    /// as "Cursor name pointer is null" with `HY009`, which was true while a
+    /// null pointer was the helper's only failure and became a lie the moment
+    /// it gained a second one. Delete the `map_err`'s replacement — that is,
+    /// reinstate it — and this test reports `HY009`.
+    ///
+    /// The buffer is exactly the cap, so an over-read is a heap overflow Miri
+    /// sees rather than a longer name.
+    #[test]
+    fn set_cursor_name_refuses_an_nts_name_that_runs_to_the_scan_cap() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+
+            let wide = vec![b'a' as u16; crate::utf16::MAX_NTS_SCAN];
+            assert_eq!(
+                sql_set_cursor_name_w::<MockBackend>(
+                    stmt,
+                    wide.as_ptr(),
+                    crate::types::SQL_NTS as i16
+                ),
+                SqlReturn::ERROR,
+            );
+            assert_eq!(
+                first_sqlstate(stmt),
+                crate::types::sql_state::INVALID_STRING_OR_BUFFER_LENGTH
+            );
+
+            cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
+    /// A null cursor name is still `HY009`. Propagating the helper's error
+    /// instead of rewriting it must not lose the state the spec's row names.
+    #[test]
+    fn set_cursor_name_still_reports_hy009_for_a_null_pointer() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+
+            assert_eq!(
+                sql_set_cursor_name_w::<MockBackend>(
+                    stmt,
+                    std::ptr::null(),
+                    crate::types::SQL_NTS as i16
+                ),
+                SqlReturn::ERROR,
+            );
+            assert_eq!(
+                first_sqlstate(stmt),
+                crate::types::sql_state::INVALID_USE_OF_NULL_POINTER
+            );
+
+            cleanup_env_conn_stmt(env, conn, stmt);
+        }
     }
 
     /// `SQLCUR` and `SQL_CUR` are the prefixes `sql_get_cursor_name_w` draws its

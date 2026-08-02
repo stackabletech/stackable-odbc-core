@@ -177,6 +177,18 @@ fn zero_row_searched_dml<B: Backend>(stmt: &StatementHandle<B>) -> bool {
 ///   follow it are not marked and are the driver's: each describes a parameter length value
 ///   set with `SQLBindParameter` that the row rules out. Those are propagated from the
 ///   backend.
+///
+///   **Also returned here**, for a condition none of those four sentences states: an
+///   `SQL_NTS` argument whose null terminator is not within `MAX_NTS_SCAN` (32 767) units,
+///   which is a length the driver cannot determine. Two arguments of this call can reach it
+///   — `StatementText` itself, and a `SQL_C_CHAR` or `SQL_C_WCHAR` parameter bound with an
+///   `SQL_NTS` (or absent) length indicator — and those are the complete set. Before this,
+///   `utf16_to_string` returned the 32 767-unit prefix as though it were the whole string,
+///   so a longer statement was **executed truncated**: harmless when the prefix is a syntax
+///   error, and a different statement than the application wrote when it is not. An
+///   explicitly measured `TextLength` is not limited by this, at any size. See
+///   `nts_input_longer_than_the_scan_cap_is_hy090_not_a_truncated_statement` and
+///   `an_explicitly_measured_statement_far_beyond_the_scan_cap_still_executes`.
 /// - HY105: Invalid parameter type — propagated from backend.
 /// - HY109: Invalid cursor position — propagated from backend.
 /// - HY117: Connection suspended — (driver-manager-handled; not returned here).
@@ -448,6 +460,12 @@ pub unsafe fn sql_exec_direct_w<B: Backend>(
 /// - HY013: Memory management error — propagated from backend.
 /// - HY090: Invalid string or buffer length — (DM case `TextLength <= 0 and != SQL_NTS`:
 ///   driver-manager-handled); fails if `TextLength < 0` and `!= SQL_NTS` (checked here).
+///   **Also returned here**, for the condition the row does not state: a `StatementText`
+///   passed as `SQL_NTS` whose null terminator is not within `MAX_NTS_SCAN` (32 767) units.
+///   `StatementText` is this function's only `SQL_NTS` argument, so it is the whole set —
+///   parameters are bound but not read until `SQLExecute`. An explicitly measured
+///   `TextLength` is not limited, at any size. See
+///   `prepare_refuses_an_nts_statement_with_no_terminator_within_the_scan_cap`.
 /// - HY117: Connection suspended — (driver-manager-handled; not returned here).
 /// - HYC00: Optional feature not implemented — propagated from backend; also returned here
 ///   (checked before the backend is called) for a `{call ...}`/`{?= call ...}` stored-procedure
@@ -683,7 +701,15 @@ pub unsafe fn sql_prepare_w<B: Backend>(
 ///   check is guarded here for the same reason.
 /// - HY013: Memory management error — propagated from backend.
 /// - HY090: Invalid string or buffer length — propagated from backend (parameter buffer length
-///   validation).
+///   validation). **Also returned here**, for a bound `SQL_C_CHAR` or `SQL_C_WCHAR`
+///   parameter whose `SQL_NTS` (or absent) length indicator sends core scanning and whose
+///   null terminator is not within `MAX_NTS_SCAN` (32 767) units. Those two C types are the
+///   complete set: every other bound type has a fixed width or an explicit indicator, and
+///   this function takes no string argument of its own. The `SQL_C_WCHAR` arm previously
+///   sent the **empty string** in that case (`unwrap_or_default`) and the `SQL_C_CHAR` arm
+///   scanned unbounded (`CStr::from_ptr`). See
+///   `read_param_value_refuses_a_wchar_nts_buffer_that_runs_to_the_scan_cap` and
+///   `read_param_value_refuses_a_char_nts_buffer_that_runs_to_the_scan_cap`.
 /// - HY105: Invalid parameter type — propagated from backend.
 /// - HY109: Invalid cursor position — propagated from backend.
 /// - HY117: Connection suspended — (driver-manager-handled; not returned here).
@@ -1670,6 +1696,146 @@ mod tests {
                 !std::sync::Arc::ptr_eq(&first, &second),
                 "each execution owns its own cancel token, so a cancel aimed at one execution \
                  cannot leak into the next — which is what makes a cancelled statement reusable"
+            );
+
+            cleanup_env_conn_stmt_for::<MockRecordingBackend>(env, conn, stmt);
+        }
+    }
+
+    /// A `SQL_NTS` statement with no terminator inside `MAX_NTS_SCAN` is
+    /// `HY090`, and the backend is never called.
+    ///
+    /// This is the one silent-truncation bug on the *input* side:
+    /// `utf16_to_string` gave up at the cap and handed back the prefix, which
+    /// `sql_exec_direct_w` then executed. A truncation landing after a
+    /// syntactically complete prefix executes a **different statement than the
+    /// application wrote** — `DELETE FROM t WHERE id = 1` from
+    /// `DELETE FROM t WHERE id = 1 AND …`.
+    ///
+    /// "The backend was never called" is asserted through the cancel token:
+    /// `mint_cancel_token` runs after the text is decoded and its result is the
+    /// token `MockRecordingBackend::exec_direct` records itself against, so an
+    /// absent token is proof no statement-producing call happened. The cursor
+    /// and statement checks are the same fact read off the handle.
+    #[test]
+    fn nts_input_longer_than_the_scan_cap_is_hy090_not_a_truncated_statement() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockRecordingBackend>();
+            with_handle::<MockRecordingBackend, ConnectionHandle<MockRecordingBackend>, _>(
+                conn,
+                |c| {
+                    c.connection = Some(MockConnection);
+                },
+            );
+
+            // No terminator anywhere, and the allocation stops at the cap so a
+            // scan that runs past it is a heap overflow rather than a longer
+            // prefix.
+            let wide = vec![b'a' as u16; crate::utf16::MAX_NTS_SCAN];
+            assert_eq!(
+                sql_exec_direct_w::<MockRecordingBackend>(stmt, wide.as_ptr(), SQL_NTS),
+                SqlReturn::ERROR
+            );
+            assert_eq!(
+                first_diag_state::<MockRecordingBackend>(stmt).as_deref(),
+                Some(crate::types::sql_state::INVALID_STRING_OR_BUFFER_LENGTH)
+            );
+            assert!(
+                crate::handles::registry::registry()
+                    .cancel_of(stmt)
+                    .is_none(),
+                "no cancel token was minted, so no statement-producing backend call ran"
+            );
+            with_handle::<MockRecordingBackend, StatementHandle<MockRecordingBackend>, _>(
+                stmt,
+                |s| {
+                    assert!(!s.cursor_open, "no cursor may be opened by a refused call");
+                    assert!(s.statement.is_none(), "no statement may be left behind");
+                },
+            );
+
+            cleanup_env_conn_stmt_for::<MockRecordingBackend>(env, conn, stmt);
+        }
+    }
+
+    /// The accepting side of the same boundary, so the check above cannot be
+    /// satisfied by refusing every long statement: a terminator in the last
+    /// position the scan may read still executes, in full.
+    #[test]
+    fn an_nts_statement_terminated_at_the_last_scannable_position_still_executes() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockRecordingBackend>();
+            with_handle::<MockRecordingBackend, ConnectionHandle<MockRecordingBackend>, _>(
+                conn,
+                |c| {
+                    c.connection = Some(MockConnection);
+                },
+            );
+
+            let mut wide = vec![b'a' as u16; crate::utf16::MAX_NTS_SCAN];
+            wide[crate::utf16::MAX_NTS_SCAN - 1] = 0;
+            assert_eq!(
+                sql_exec_direct_w::<MockRecordingBackend>(stmt, wide.as_ptr(), SQL_NTS),
+                SqlReturn::SUCCESS
+            );
+
+            cleanup_env_conn_stmt_for::<MockRecordingBackend>(env, conn, stmt);
+        }
+    }
+
+    /// The cap bounds a scan, never a declared length. A statement three times
+    /// the cap, passed with its real `TextLength`, is unaffected — which is the
+    /// property that keeps generated multi-row `INSERT` statements working.
+    #[test]
+    fn an_explicitly_measured_statement_far_beyond_the_scan_cap_still_executes() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockRecordingBackend>();
+            with_handle::<MockRecordingBackend, ConnectionHandle<MockRecordingBackend>, _>(
+                conn,
+                |c| {
+                    c.connection = Some(MockConnection);
+                },
+            );
+
+            let wide = vec![b'a' as u16; crate::utf16::MAX_NTS_SCAN * 3];
+            assert_eq!(
+                sql_exec_direct_w::<MockRecordingBackend>(
+                    stmt,
+                    wide.as_ptr(),
+                    i32::try_from(wide.len()).expect("fits in i32"),
+                ),
+                SqlReturn::SUCCESS
+            );
+
+            cleanup_env_conn_stmt_for::<MockRecordingBackend>(env, conn, stmt);
+        }
+    }
+
+    /// `SQLPrepare` routes its `StatementText` through the same helper, so it
+    /// inherits the same refusal.
+    #[test]
+    fn prepare_refuses_an_nts_statement_with_no_terminator_within_the_scan_cap() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockRecordingBackend>();
+            with_handle::<MockRecordingBackend, ConnectionHandle<MockRecordingBackend>, _>(
+                conn,
+                |c| {
+                    c.connection = Some(MockConnection);
+                },
+            );
+
+            let wide = vec![b'a' as u16; crate::utf16::MAX_NTS_SCAN];
+            assert_eq!(
+                sql_prepare_w::<MockRecordingBackend>(stmt, wide.as_ptr(), SQL_NTS),
+                SqlReturn::ERROR
+            );
+            assert_eq!(
+                first_diag_state::<MockRecordingBackend>(stmt).as_deref(),
+                Some(crate::types::sql_state::INVALID_STRING_OR_BUFFER_LENGTH)
+            );
+            with_handle::<MockRecordingBackend, StatementHandle<MockRecordingBackend>, _>(
+                stmt,
+                |s| assert!(s.statement.is_none(), "nothing may be prepared"),
             );
 
             cleanup_env_conn_stmt_for::<MockRecordingBackend>(env, conn, stmt);

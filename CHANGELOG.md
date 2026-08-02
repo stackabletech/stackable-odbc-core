@@ -185,6 +185,15 @@ call `SQLCloseCursor` or `SQLFreeStmt(SQL_CLOSE)` first, as it already must for
   Windows SDK's own, whose codes end at `ODBC_ERROR_NOTRANINFO` (23). A driver's
   setup failure posts `ODBC_ERROR_REQUEST_FAILED` instead.
 
+- `utf16::utf16_to_string_named`, a public sibling of `utf16::utf16_to_string`
+  taking the argument's ODBC name (`"CatalogName"`, `"SQLConnectW's UserName
+  argument"`, …). It appears in the `HY090` a `SQL_NTS` scan overrun now
+  produces — see the Fixed entry below — and exists because the functions that
+  overrun most usefully have several string arguments: `SQLConnectW` takes
+  three and `SQLForeignKeys` six, so "a string argument was too long" identifies
+  none of them. `utf16_to_string` is unchanged and delegates to it; a driver
+  calling the older function needs no edit.
+
 - `SQLGetDiagFieldW` answers `SQL_DIAG_CLASS_ORIGIN` and
   `SQL_DIAG_SUBCLASS_ORIGIN` from the record's SQLSTATE. Both returned the empty
   string, sharing a match arm with `SQL_DIAG_CONNECTION_NAME` and
@@ -1579,6 +1588,70 @@ call `SQLCloseCursor` or `SQLFreeStmt(SQL_CLOSE)` first, as it already must for
   compared against. Use `HeaderDiagnosticIdentifier::MessageText as i16`.
 
 ### Fixed
+
+- **An `SQL_NTS` argument longer than the 32 767-unit scan limit is now
+  `HY090`, where it used to be silently truncated to its first 32 767 units.**
+  Most seriously, **a statement passed to `SQLExecDirectW` as `SQL_NTS` was
+  executed truncated** — usually a syntax error with a baffling message, and
+  where the cut landed after a syntactically complete prefix, *a different
+  statement than the application wrote*. A multi-row
+  `INSERT ... VALUES (...),(...)` past the limit is the ordinary way to hit it.
+
+  Core bounds every `SQL_NTS` scan at `MAX_NTS_SCAN` (32 767 units) so that a
+  buffer whose terminator the application forgot is not read past its own
+  allocation. That bound stays. What changed is that reaching it is now
+  reported instead of being indistinguishable from success: no scan can tell
+  "there is no terminator" from "the terminator is past the limit", so the rule
+  is stated as the one that needs no such distinction — **an `SQL_NTS` argument
+  is limited to 32 767 units, whatever is in it.**
+
+  An **explicitly declared** length is not limited, at any size: there is
+  nothing to scan for. An application with a statement, connection string or
+  filter longer than the limit passes its real length.
+
+  Every entry point that resolves `SQL_NTS` is affected, and this is the
+  complete list:
+
+  | Entry point | Argument(s) now limited |
+  |---|---|
+  | `SQLExecDirectW` | `StatementText`; a bound `SQL_C_CHAR`/`SQL_C_WCHAR` parameter |
+  | `SQLPrepareW` | `StatementText` |
+  | `SQLExecute` | a bound `SQL_C_CHAR`/`SQL_C_WCHAR` parameter |
+  | `SQLPutData` | the data-at-execution chunk at `DataPtr` |
+  | `SQLDriverConnectW` | `InConnectionString` |
+  | `SQLBrowseConnectW` | `InConnectionString` |
+  | `SQLConnectW` | `ServerName`, `UserName`, `Authentication` |
+  | `SQLNativeSqlW` | `InStatementText` |
+  | `SQLSetConnectAttrW` | `SQL_ATTR_CURRENT_CATALOG`'s value |
+  | `SQLSetCursorNameW` | `CursorName` |
+  | `SQLSetDescFieldW` | `SQL_DESC_NAME`'s value |
+  | `SQLTables`, `SQLColumns`, `SQLPrimaryKeys`, `SQLForeignKeys`, `SQLStatistics`, `SQLSpecialColumns`, `SQLProcedures`, `SQLProcedureColumns`, `SQLColumnPrivileges`, `SQLTablePrivileges` | every name argument |
+
+  `HY090` ("invalid string or buffer length") is in the diagnostics table of
+  every one of them, so no function reports a state its own table omits. The
+  condition is not a clause of any of those rows — the spec's `HY090` clauses
+  are about a negative length that is not `SQL_NTS` — and each doc comment says
+  so.
+
+  Four of these call sites did worse than truncate, and are fixed with it:
+
+  - A bound **`SQL_C_CHAR`** parameter resolved its terminator with
+    `CStr::from_ptr`, which is **unbounded** — the one `SQL_NTS` scan in the
+    crate with no limit at all, so a buffer missing its terminator was read past
+    its own allocation.
+  - A bound **`SQL_C_WCHAR`** parameter read the scan through
+    `unwrap_or_default`, sending the **empty string** to the data source with no
+    diagnostic — worse than the truncation, because `''` is a legal value the
+    backend cannot question.
+  - `SQLConnectW` read `UserName` and `Authentication` inside `if let Ok(..)`,
+    discarding the error: an overrun connected with whatever credentials the DSN
+    supplied, under a *UserName* the application believed it had passed.
+  - `SQLSetCursorNameW` rewrote *every* failure as `HY009` "Cursor name pointer
+    is null". A null `CursorName` is still `HY009`; anything else now reports
+    its own state.
+
+  `ConfigDSNW`'s attribute-list parser already reported its own overrun
+  (`AttributeSyntaxError::Unterminated`) and is unchanged.
 
 - **`SQLAllocHandle` now answers `HY014` when the handle registry is
   exhausted.** It previously returned `SQL_ERROR` with *no diagnostic record at
@@ -3418,6 +3491,126 @@ call `SQLCloseCursor` or `SQLFreeStmt(SQL_CLOSE)` first, as it already must for
   `22007` ("invalid datetime format"), not `22018`, on the module's existing
   rule: the text is a recognised literal whose field is out of range, which is
   what separates it from text that is no datetime at all.
+
+- **Fetching a numeric column into a character buffer too small for its whole
+  digits is now an error with no data, where it was a warning with truncated
+  data.** Applications will notice this sharply: a call that returned
+  `SQL_SUCCESS_WITH_INFO` with `01004` and a value in the buffer now returns
+  `SQL_ERROR` with `22003` and **nothing written — neither the data nor the
+  length indicator**.
+
+  **Five entry points reach it**, which is every caller of the shared
+  marshalling routine: `SQLFetch` and `SQLFetchScroll` (bound columns),
+  `SQLGetData`, and — through output parameters — `SQLExecDirect` and
+  `SQLExecute`.
+
+  `ColumnValue::I64(123456)` read into a four-byte `SQL_C_CHAR` buffer
+  delivered `"123"`. That is not a truncated string, it is a different number,
+  and [SQL to C: Numeric] separates the two cases in as many words. Its
+  `SQL_C_CHAR` and `SQL_C_WCHAR` rows read:
+
+  | Test | \**TargetValuePtr* | \**StrLen_or_IndPtr* | SQLSTATE |
+  |---|---|---|---|
+  | Character byte length < *BufferLength* | Data | Length of data in bytes | n/a |
+  | Number of whole (as opposed to fractional) digits < *BufferLength* | Truncated data | Length of data in bytes | `01004` |
+  | Number of whole (as opposed to fractional) digits >= *BufferLength* | Undefined | Undefined | `22003` |
+
+  Core implemented the middle row for every case and never the last one.
+  Losing only *fractional* digits is unchanged: `1.25` into four bytes still
+  delivers `"1.2"` with `01004`.
+
+  **Affected sources** are the nine numeric SQL types the table names, which
+  reach core as seven `ColumnValue` variants: `I8` (`SQL_TINYINT`), `I16`
+  (`SQL_SMALLINT`), `I32` (`SQL_INTEGER`), `I64` (`SQL_BIGINT`), `F32`
+  (`SQL_REAL`), `F64` (`SQL_FLOAT`/`SQL_DOUBLE`) and `Decimal`
+  (`SQL_DECIMAL`/`SQL_NUMERIC`). **Affected targets** are `SQL_C_CHAR` and
+  `SQL_C_WCHAR`, and those only.
+
+  **Core is now stricter here than the two most widely deployed open-source
+  drivers.** Neither psqlODBC nor MySQL Connector/ODBC implements this row:
+  both return `01004` with truncated data, write the full length, and let the
+  application keep reading in chunks. This entry is not "core caught up" — it is
+  core diverging, deliberately, because the table is unambiguous and a truncated
+  number is a wrong number. Applications validated only against those two
+  drivers are the ones most likely to notice.
+
+  **A numeric output parameter fails the whole execution rather than
+  truncating.** `write_output_params` shares the same marshalling routine and
+  propagates its error with `?`, where the old `SQL_SUCCESS_WITH_INFO` was
+  deliberately discarded — that path has no diagnostic queue to raise `01004`
+  on. So a numeric output parameter bound to `SQL_C_CHAR` with a buffer too
+  small for its whole digits now fails `SQLExecDirect` or `SQLExecute` outright,
+  where it previously truncated silently. No legitimate no-buffer call is
+  affected: the loop already skips unbound records, so the data pointer is
+  non-null, and a zero `SQL_DESC_OCTET_LENGTH` takes the no-buffer exemption
+  below. `SQLParamData` is **not** affected — it completes a data-at-execution
+  sequence and executes, but does not write output parameters back at all. In
+  practice no in-tree backend produces output parameters yet, so this clause is
+  forward-looking.
+
+  **A long numeric rendering can no longer be retrieved in parts.** A
+  `DECIMAL(38,0)` renders to 39 characters; reading it through a 32-byte
+  `SQL_C_CHAR` buffer is now `22003` on the first call, where both reference
+  drivers deliver it in chunks. That follows from the row — the check is a
+  property of the value, not of the not-yet-delivered remainder — and is
+  spec-defensible, since the numeric types are absent from `SQLGetData`'s
+  "Retrieving Variable-Length Data in Parts" list. The column is **not**
+  consumed: `SQLGetData` does not advance its cursor on the error path, so the
+  same column reads normally once the application supplies a buffer that fits.
+
+  **Nothing else moves.** A genuine character column that does not fit is still
+  `01004` with truncated data, because [SQL to C: Character] has no `22003` row
+  at all. The other fifteen `ColumnValue` variants are unchanged: `Bool`
+  (`SQL_BIT`), the four datetime variants (`Date`, `Time`, `Timestamp`,
+  `TimestampTz`), `String`, `Json`, `Bytes`, `Guid`, `Array`, `Map`, `Row`, the
+  two interval variants (`IntervalYearMonth`, `IntervalDayTime`) and `Null`,
+  which is answered with `SQL_NULL_DATA` before any of this runs.
+
+  Two rulings worth knowing, both pinned by tests:
+
+  - **A minus sign counts as a whole-digit position.** The table says "digits",
+    and a sign is not one, but the boundary it draws is exactly "the whole part
+    plus the null terminator must fit" and a sign occupies a byte just as a
+    digit does. Reading it out would deliver `"-12"` for `-123.45` in a
+    four-byte buffer — the wrong number, which is what the row exists to
+    prevent.
+  - **A call that supplies no buffer is exempt**, and keeps its previous
+    behaviour exactly. That covers the zero-length length probe
+    (`BufferLength` 0 with a real pointer, the documented "how much room do I
+    need" call) and the indicator-only binding `SQLBindCol` permits ("An
+    application can unbind the data buffer for a column but still have a
+    length/indicator buffer bound for the column"). The row exists to stop a
+    wrong number reaching the application's buffer; where there is no buffer,
+    that cannot happen. Both reference drivers special-case the probe the same
+    way, and `SQLGetData`'s own prose protects it by returning `HY090` when
+    `BufferLength` is less than 0 *but not* when it is 0. A `BufferLength` of 1
+    on `SQL_C_CHAR` is **not** exempt — there is a buffer there, and delivering
+    `""` for a number is the wrong number.
+
+  **Still not implemented, and unchanged by this entry:** the `22003` rows on
+  the sibling conversion tables, which are keyed to a fixed minimum buffer width
+  rather than to a digit count — `SQL to C: Bit`'s "*BufferLength* <= 1" and the
+  date, time and timestamp pages' minimum widths ("*BufferLength* < 20" for a
+  timestamp). Core returns `01004` for all of those. Two further numeric gaps
+  also remain open and are **not** addressed here: an `f64` overflowing an
+  `SQL_C_FLOAT` target still reports `01S07` where the same table says `22003`,
+  and `SQL_C_NUMERIC` has no conversion arm at all.
+
+- **A backend reporting a column count that does not fit `u16` no longer makes
+  `SQLDescribeColW` and `SQLColAttributeW` reject every column, including
+  valid ones.** Both range-check `column_number` against
+  `StatementBackend::column_count` before calling the backend, and narrowed
+  that count with `u16::try_from(column_count).unwrap_or(0)`. Because
+  `column_count` returns `i16` — the `SQLNumResultCols` ABI type, whose max
+  (32 767) already fits `u16::MAX` (65 535) — the only value that can fail
+  that conversion is a **negative** count from a misbehaving backend, not an
+  oversized one. Collapsing a failed conversion to 0 turned "this count can't
+  be trusted" into "column 1 is out of range", which is the wrong direction:
+  every column number then failed a check meant to catch only a column past
+  the end. The narrowing now saturates up to `u16::MAX` instead (with a
+  `tracing::warn!`), so an unrepresentable count makes the range check
+  permissive rather than universally hostile, and `describe_col`'s own answer
+  — not a manufactured `07009` — is what the application sees.
 
 [C to SQL: Character]: https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/c-to-sql-character
 [SQL to C: Time]: https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/sql-to-c-time

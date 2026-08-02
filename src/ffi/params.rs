@@ -796,16 +796,27 @@ pub(crate) unsafe fn read_param_value(rec: ParamRecord<'_>) -> Result<ParamValue
                     Some(clamp_to_bound_buffer(l as usize, apd.octet_length))
                 }
             };
-            let bytes = if let Some(n) = byte_len {
-                // SAFETY: value_ptr is non-null and the caller guarantees it points to at
-                // least `n` valid bytes as indicated by str_len_or_ind_ptr.
-                unsafe { std::slice::from_raw_parts(ptr, n) }
-            } else {
-                // Indicator is SQL_NTS or absent: the string is null-terminated.
-                // SAFETY: caller guarantees ptr is a valid, null-terminated C string (ODBC
-                // SQL_C_CHAR buffers are always null-terminated when SQL_NTS is used).
-                unsafe { std::ffi::CStr::from_ptr(ptr as *const std::ffi::c_char) }.to_bytes()
+            let n = match byte_len {
+                Some(n) => n,
+                None => {
+                    // Indicator is SQL_NTS or absent: the string is
+                    // null-terminated. `CStr::from_ptr` used to resolve it and
+                    // is **unbounded**, so a buffer whose terminator the
+                    // application forgot was read past its own allocation —
+                    // the one NTS scan in the crate that had no bound at all,
+                    // while the `SQL_C_WCHAR` arm below shared `MAX_NTS_SCAN`.
+                    // Same helper, same `HY090`, same limit for both arms now.
+                    //
+                    // SAFETY: `ptr` is non-null (the null `data_ptr` case
+                    // returns above) and the caller guarantees it is
+                    // null-terminated, or readable for `MAX_NTS_SCAN` bytes.
+                    unsafe { crate::utf16::nts_byte_len(ptr) }?
+                }
             };
+            // SAFETY: value_ptr is non-null and the caller guarantees it points to at
+            // least `n` valid bytes — as indicated by str_len_or_ind_ptr, or as
+            // counted by the terminator scan above.
+            let bytes = unsafe { std::slice::from_raw_parts(ptr, n) };
             return crate::param_convert::text_to_sql_type(
                 &String::from_utf8_lossy(bytes),
                 ipd.sql_type(),
@@ -819,11 +830,15 @@ pub(crate) unsafe fn read_param_value(rec: ParamRecord<'_>) -> Result<ParamValue
             let code_units = if indicator_ptr.is_null() {
                 // Indicator pointer absent: treat as null-terminated (SQL_NTS).
                 // Use utf16_to_string which bounds the scan to MAX_NTS_SCAN code units.
+                // A scan that runs to the bound is `HY090` and is propagated:
+                // `unwrap_or_default` sent the *empty string* as the parameter,
+                // so a value too long to measure arrived at the data source as
+                // `''` with no diagnostic at all.
                 // SAFETY: caller guarantees ptr is a valid, null-terminated UTF-16 string.
-                // value_ptr null case is excluded by the guard above; unwrap_or_default is unreachable.
+                // The value_ptr null case is excluded by the guard above.
                 debug_assert!(!ptr.is_null(), "value_ptr null case excluded above");
                 return crate::param_convert::text_to_sql_type(
-                    &unsafe { utf16_to_string(ptr, SQL_NTS) }.unwrap_or_default(),
+                    &unsafe { utf16_to_string(ptr, SQL_NTS) }?,
                     ipd.sql_type(),
                     ipd.length,
                     ipd.scale,
@@ -835,11 +850,12 @@ pub(crate) unsafe fn read_param_value(rec: ParamRecord<'_>) -> Result<ParamValue
                 let l = unsafe { std::ptr::read_unaligned(indicator_ptr) };
                 if l == SQL_NTS as isize || l < 0 {
                     // Null-terminated: delegate to bounded NTS scan helper.
+                    // Its `HY090` is propagated, for the reason above.
                     // SAFETY: caller guarantees ptr is a valid, null-terminated UTF-16 string.
-                    // value_ptr null case is excluded by the guard above; unwrap_or_default is unreachable.
+                    // The value_ptr null case is excluded by the guard above.
                     debug_assert!(!ptr.is_null(), "value_ptr null case excluded above");
                     return crate::param_convert::text_to_sql_type(
-                        &unsafe { utf16_to_string(ptr, SQL_NTS) }.unwrap_or_default(),
+                        &unsafe { utf16_to_string(ptr, SQL_NTS) }?,
                         ipd.sql_type(),
                         ipd.length,
                         ipd.scale,
@@ -1341,13 +1357,16 @@ pub(crate) unsafe fn find_data_at_exec_params(
 /// `data_ptr` must be non-null and satisfy [`crate::utf16::nts_byte_len`]'s
 /// contract, or [`crate::utf16::nts_utf16_len`]'s when the C type is
 /// `SQL_C_WCHAR`.
-unsafe fn dae_nts_byte_count(c_type: Option<odbc_sys::CDataType>, data_ptr: *const u8) -> usize {
+unsafe fn dae_nts_byte_count(
+    c_type: Option<odbc_sys::CDataType>,
+    data_ptr: *const u8,
+) -> Result<usize, OdbcError> {
     match c_type {
         // Two bytes per code unit, exactly as `dae_buffer_to_value` reads them
         // back out of the accumulated buffer.
         Some(odbc_sys::CDataType::WChar) => {
             // SAFETY: forwarded from this function's own contract.
-            unsafe { crate::utf16::nts_utf16_len(data_ptr.cast::<u16>()) * 2 }
+            Ok(unsafe { crate::utf16::nts_utf16_len(data_ptr.cast::<u16>()) }? * 2)
         }
         // SAFETY: forwarded from this function's own contract.
         _ => unsafe { crate::utf16::nts_byte_len(data_ptr) },
@@ -1431,9 +1450,16 @@ unsafe fn dae_nts_byte_count(c_type: Option<odbc_sys::CDataType>, data_ptr: *con
 ///   returns it here. It resolves to NULL, which is the only value it can take in core:
 ///   `SQL_DEFAULT_PARAM` names a *procedure* parameter's default and `crate::escape` refuses
 ///   `{call ...}` with `HYC00`, so no statement core executes has one.
-/// - HY090: Invalid string or buffer length — returned when `str_len_or_ind` is negative
-///   and none of `SQL_NTS`, `SQL_NULL_DATA` or `SQL_DEFAULT_PARAM`, which are the three the
-///   spec's *StrLen_or_Ind* description lists.
+/// - HY090: Invalid string or buffer length — returned for two conditions, which are the
+///   complete set. (1) `str_len_or_ind` is negative and none of `SQL_NTS`, `SQL_NULL_DATA`
+///   or `SQL_DEFAULT_PARAM`, which are the three the spec's *StrLen_or_Ind* description
+///   lists. (2) `str_len_or_ind` **is** `SQL_NTS` and the chunk at `DataPtr` has no
+///   terminator within `MAX_NTS_SCAN` (32 767) units — code units for a `SQL_C_WCHAR`
+///   parameter, bytes for every other C type, per `dae_nts_byte_count` — which is a length
+///   the driver cannot determine. The second is not stated by the row; `HY090` is the state
+///   the condition names. It previously took the capped length, which truncated the
+///   *middle* of a long data-at-execution value with nothing said. See
+///   `put_data_refuses_an_nts_chunk_that_runs_to_the_scan_cap`.
 /// - HY117: Connection suspended — (driver-manager-handled; not returned here).
 /// - HYT01: Connection timeout expired — not returned here; core implements no connection
 ///   timeout, so no deadline exists to expire. The row carries no `(DM)` marker.
@@ -1573,7 +1599,12 @@ pub unsafe fn sql_put_data<B: Backend>(
                 // SAFETY: data_ptr is non-null (guarded above) and the caller
                 // guarantees it is null-terminated in the bound C type. Covered
                 // by this function's own `unsafe` block, as the reads below are.
-                dae_nts_byte_count(c_type, data_ptr.cast::<u8>())
+                //
+                // A chunk running to `MAX_NTS_SCAN` with no terminator is
+                // `HY090` rather than a 32 767-unit chunk: a capped length is
+                // the same silent truncation the text paths had, and here it
+                // would corrupt the *middle* of a long value with nothing said.
+                dae_nts_byte_count(c_type, data_ptr.cast::<u8>())?
             } else if str_len_or_ind < 0 {
                 // Spec HY090: a negative length that is none of the three the
                 // *StrLen_or_Ind* description lists — SQL_NTS, SQL_NULL_DATA
@@ -2714,15 +2745,20 @@ mod tests {
         }
     }
 
-    /// `CStr::from_ptr` scans without a bound, so a buffer whose terminator is
-    /// missing is read past its own allocation — the only such scan in the
-    /// crate, since `utf16_to_string` caps its own at `MAX_NTS_SCAN`.
+    /// A `SQL_NTS` chunk running to `MAX_NTS_SCAN` with no terminator is
+    /// `HY090`, and nothing is appended to the accumulated value.
+    ///
+    /// This test used to assert the opposite — `SQL_SUCCESS` with a
+    /// `MAX_NTS_SCAN`-byte chunk — on the grounds that the bound was the point
+    /// and the length was merely its consequence. The bound *is* the point and
+    /// stays; what changed is that reaching it is now reported. A capped length
+    /// silently truncated the middle of a long data-at-execution value.
     ///
     /// The buffer is exactly the cap, so a correctly bounded scan stops on its
     /// last byte and reads nothing beyond it. One byte further and Miri reports
     /// the over-read, which is what makes this test worth its size.
     #[test]
-    fn put_data_bounds_an_unterminated_nts_scan() {
+    fn put_data_refuses_an_nts_chunk_that_runs_to_the_scan_cap() {
         unsafe {
             let (env, conn, stmt) = connected_stmt();
             let mut indicator: isize = SQL_DATA_AT_EXEC;
@@ -2740,14 +2776,50 @@ mod tests {
                     data.as_mut_ptr().cast::<c_void>(),
                     SQL_NTS as isize,
                 ),
-                SqlReturn::SUCCESS,
+                SqlReturn::ERROR,
+            );
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |h| {
+                let rec = h.diagnostics.get(0).expect("record 1 exists");
+                assert_eq!(
+                    rec.sqlstate.as_str(),
+                    crate::types::sql_state::INVALID_STRING_OR_BUFFER_LENGTH
+                );
+            });
+            assert!(
+                dae_buffer(stmt).is_empty(),
+                "a refused chunk must not be appended to the value",
             );
 
-            assert_eq!(
-                dae_buffer(stmt).len(),
-                crate::utf16::MAX_NTS_SCAN,
-                "the scan did not stop at its bound",
+            cleanup(env, conn, stmt);
+        }
+    }
+
+    /// The accepting side of the same boundary: a terminator on the last byte
+    /// the scan may read is a `MAX_NTS_SCAN - 1` byte chunk, not an error.
+    /// Without this, the refusal above is satisfied by rejecting every chunk.
+    #[test]
+    fn put_data_accepts_an_nts_chunk_terminated_at_the_last_scannable_byte() {
+        unsafe {
+            let (env, conn, stmt) = connected_stmt();
+            let mut indicator: isize = SQL_DATA_AT_EXEC;
+            start_dae_loop(
+                stmt,
+                CDataType::Char,
+                SqlDataType::VARCHAR,
+                &raw mut indicator,
             );
+
+            let mut data = vec![b'a'; crate::utf16::MAX_NTS_SCAN];
+            data[crate::utf16::MAX_NTS_SCAN - 1] = 0;
+            assert_eq!(
+                sql_put_data::<MockBackend>(
+                    stmt,
+                    data.as_mut_ptr().cast::<c_void>(),
+                    SQL_NTS as isize,
+                ),
+                SqlReturn::SUCCESS,
+            );
+            assert_eq!(dae_buffer(stmt).len(), crate::utf16::MAX_NTS_SCAN - 1);
 
             cleanup(env, conn, stmt);
         }
@@ -4311,10 +4383,16 @@ mod tests {
     ///
     /// An output-only `SQL_C_CHAR` buffer with no indicator is read as a
     /// null-terminated C string. The application never wrote a terminator —
-    /// it bound the buffer for the driver to fill — so `CStr::from_ptr` walks
-    /// off the end looking for one. Here the buffer holds no zero byte at all
-    /// and is followed by a guard region that also holds none, so the scan must
-    /// leave the allocation to terminate.
+    /// it bound the buffer for the driver to fill — so the scan walks off the
+    /// end looking for one. Here the buffer holds no zero byte at all and is
+    /// followed by a guard region that also holds none, so the scan must leave
+    /// the allocation to terminate.
+    ///
+    /// The scan is `crate::utf16::nts_byte_len` now and is bounded at
+    /// `MAX_NTS_SCAN`, which turns the over-read into a bounded one — 32 767
+    /// bytes rather than however far the first stray zero is. That is a smaller
+    /// hole, not a closed one, and this test pins the thing that actually
+    /// closes it: `collect_params` never reads an output-only binding at all.
     ///
     /// Under Miri this test is the check: reading out of bounds is reported
     /// rather than merely producing a wrong string.
@@ -4330,7 +4408,7 @@ mod tests {
             decimal_digits: 0,
             value_ptr: arena.as_mut_ptr().cast::<c_void>(),
             buffer_length: 8,
-            // Absent indicator: read_param_value falls back to CStr::from_ptr.
+            // Absent indicator: read_param_value falls back to a terminator scan.
             str_len_or_ind_ptr: std::ptr::null_mut(),
         };
         let mut bindings = BoundParams::new();
@@ -4434,6 +4512,66 @@ mod tests {
         };
         let val = unsafe { read_bound_param(&binding) }.unwrap();
         assert_eq!(val, ColumnValue::String("hello".to_string()));
+    }
+
+    /// A bound `SQL_C_CHAR` parameter whose `SQL_NTS` buffer runs to
+    /// `MAX_NTS_SCAN` is `HY090`.
+    ///
+    /// This arm resolved its terminator with `CStr::from_ptr`, which is
+    /// **unbounded** — the only NTS scan in the crate that had no limit at all,
+    /// so a buffer whose terminator the application forgot was read past its own
+    /// allocation. The buffer here is exactly the cap, so the bounded scan stops
+    /// on its last byte and Miri reports any over-read.
+    #[test]
+    fn read_param_value_refuses_a_char_nts_buffer_that_runs_to_the_scan_cap() {
+        let s = vec![b'a'; crate::utf16::MAX_NTS_SCAN];
+        let mut indicator: isize = SQL_NTS as isize;
+        let binding = BoundParam {
+            input_output_type: odbc_sys::ParamType::Input,
+            c_type: odbc_sys::CDataType::Char,
+            sql_type: SqlDataType(12),
+            col_size: 0,
+            decimal_digits: 0,
+            value_ptr: s.as_ptr() as *mut c_void,
+            buffer_length: 0,
+            str_len_or_ind_ptr: &mut indicator,
+        };
+        let err = unsafe { read_bound_param(&binding) }.expect_err("must not send a capped prefix");
+        assert_eq!(
+            err.sqlstate().as_str(),
+            crate::types::sql_state::INVALID_STRING_OR_BUFFER_LENGTH
+        );
+    }
+
+    /// The `SQL_C_WCHAR` counterpart. This arm *was* bounded, but read the scan
+    /// through `unwrap_or_default`, so an over-long value was sent to the data
+    /// source as the **empty string** with no diagnostic — worse than the
+    /// truncation, because `''` is a legal value the backend cannot question.
+    /// Delete either `?` in `read_param_value`'s `WChar` arm and this fails.
+    #[test]
+    fn read_param_value_refuses_a_wchar_nts_buffer_that_runs_to_the_scan_cap() {
+        let s = vec![b'a' as u16; crate::utf16::MAX_NTS_SCAN];
+        // Both spellings of "null-terminated": an explicit SQL_NTS indicator,
+        // and no indicator at all. They are separate branches of the arm.
+        let mut indicator: isize = SQL_NTS as isize;
+        for ind in [&raw mut indicator, std::ptr::null_mut()] {
+            let binding = BoundParam {
+                input_output_type: odbc_sys::ParamType::Input,
+                c_type: odbc_sys::CDataType::WChar,
+                sql_type: SqlDataType(12),
+                col_size: 0,
+                decimal_digits: 0,
+                value_ptr: s.as_ptr() as *mut c_void,
+                buffer_length: 0,
+                str_len_or_ind_ptr: ind,
+            };
+            let err =
+                unsafe { read_bound_param(&binding) }.expect_err("must not send an empty string");
+            assert_eq!(
+                err.sqlstate().as_str(),
+                crate::types::sql_state::INVALID_STRING_OR_BUFFER_LENGTH
+            );
+        }
     }
 
     #[test]

@@ -13,7 +13,46 @@ use crate::types::SqlReturn;
 /// application-supplied buffer too. A second bound stated there would be a
 /// second answer to one question, and the answer that went missing is the one
 /// that let an unterminated buffer be read past its allocation.
+///
+/// # This is a length limit on `SQL_NTS`, not a malformed-input check
+///
+/// Reaching the bound means one of two things, and **no scan can tell them
+/// apart**: the buffer has no terminator at all, or it has one past the cap.
+/// Distinguishing them is precisely what the bound forbids. So the rule the
+/// crate enforces is the one that does not need the distinction — an `SQL_NTS`
+/// argument is limited to `MAX_NTS_SCAN` code units, and one that runs to the
+/// limit is refused with [`SqlState::invalid_string_or_buffer_length`]
+/// (`HY090`), whatever is in it.
+///
+/// An **explicitly declared** length is not bounded by this at all: the
+/// application has already said how long the string is, so there is nothing to
+/// scan for and no risk to bound. An application with a statement longer than
+/// the cap passes its real `TextLength`.
+///
+/// [`SqlState::invalid_string_or_buffer_length`]: crate::types::SqlState::invalid_string_or_buffer_length
 pub(crate) const MAX_NTS_SCAN: usize = i16::MAX as usize;
+
+/// The one error every `SQL_NTS` scan in the crate raises on reaching
+/// `MAX_NTS_SCAN`.
+///
+/// `HY090` ("Invalid string or buffer length") is in the diagnostics table of
+/// every function that resolves an `SQL_NTS` argument, so no caller has to
+/// borrow a state from a neighbouring row. It is the honest reading of the
+/// condition too: the application declared a length the driver cannot resolve.
+///
+/// `what` names the argument in the caller's own vocabulary, because the entry
+/// log records the handle and not the text, and "which string" is the first
+/// thing anyone reading the diagnostic wants.
+fn nts_scan_overrun(what: &str) -> OdbcError {
+    OdbcError::general(
+        format!(
+            "{what} was passed as SQL_NTS but has no null terminator within the \
+             {MAX_NTS_SCAN}-unit scan limit, so its length cannot be determined; \
+             pass an explicit length for input this long"
+        ),
+        crate::types::SqlState::invalid_string_or_buffer_length(),
+    )
+}
 
 /// Convert a UTF-16 encoded string pointer into a Rust `String`.
 ///
@@ -26,14 +65,38 @@ pub(crate) const MAX_NTS_SCAN: usize = i16::MAX as usize;
 /// a bad handle argument, and returning it here would tell the application its
 /// connection or statement had been corrupted.
 ///
+/// An `SQL_NTS` argument reaching `MAX_NTS_SCAN` units without a terminator
+/// yields `HY090` — see that constant for why the limit is stated as a length
+/// rather than as a malformed-input check. It used to return the scanned prefix
+/// instead, indistinguishably from a complete string, so `SQLExecDirectW`
+/// executed the first 32 767 units of a longer statement.
+///
 /// # Safety
 ///
 /// The caller must ensure:
 /// - If `len >= 0`, the pointer must be valid for at least `len` `u16` elements.
 /// - If `len < 0` (SQL_NTS), the pointer must point to a null-terminated UTF-16
-///   string. The scan is bounded to `MAX_NTS_SCAN` code units to prevent
-///   unbounded reads on malformed input.
+///   string, or be valid for `MAX_NTS_SCAN` readable code units. The scan
+///   reads no further than that, so either undertaking is enough.
 pub unsafe fn utf16_to_string(ptr: *const u16, len: i32) -> Result<String, OdbcError> {
+    unsafe { utf16_to_string_named(ptr, len, "the string argument") }
+}
+
+/// [`utf16_to_string`], with the argument's name for the `HY090` diagnostic a
+/// scan overrun produces.
+///
+/// Only the callers with more than one string argument need it — `SQLConnectW`
+/// takes three and `SQLForeignKeys` six, and "the string argument was too long"
+/// does not say which.
+///
+/// # Safety
+///
+/// As [`utf16_to_string`].
+pub unsafe fn utf16_to_string_named(
+    ptr: *const u16,
+    len: i32,
+    what: &str,
+) -> Result<String, OdbcError> {
     if ptr.is_null() {
         return Err(OdbcError::general(
             "null string pointer",
@@ -47,11 +110,17 @@ pub unsafe fn utf16_to_string(ptr: *const u16, len: i32) -> Result<String, OdbcE
     // over an odd address. Constructing the slice at all would be undefined
     // behaviour, before anything is even read from it.
     let units: Vec<u16> = if len < 0 {
-        // Scan to null terminator, bounded to prevent OOB reads.
+        // Scan to null terminator, bounded to prevent OOB reads. Reaching the
+        // bound is a failure, not a result: the prefix read so far is not the
+        // application's string, and returning it is how a truncated statement
+        // came to be executed.
         let mut units = Vec::new();
-        while units.len() < MAX_NTS_SCAN {
-            // SAFETY: the caller guarantees a null-terminated string, and the
-            // scan is bounded above.
+        loop {
+            if units.len() == MAX_NTS_SCAN {
+                return Err(nts_scan_overrun(what));
+            }
+            // SAFETY: the caller guarantees a null-terminated string or
+            // MAX_NTS_SCAN readable units, and the index is below that bound.
             let unit = unsafe { std::ptr::read_unaligned(ptr.add(units.len())) };
             if unit == 0 {
                 break;
@@ -70,29 +139,34 @@ pub unsafe fn utf16_to_string(ptr: *const u16, len: i32) -> Result<String, OdbcE
 }
 
 /// Length, in `u16` code units, of a null-terminated UTF-16 string, bounded to
-/// [`MAX_NTS_SCAN`]. The terminator itself is not counted.
+/// `MAX_NTS_SCAN`. The terminator itself is not counted.
 ///
 /// The counting half of [`utf16_to_string`]'s scan, for a caller that wants the
 /// length rather than the decoded text — `SQLPutData` accumulates raw bytes and
 /// decodes once, at the end, so decoding each chunk would be both wasteful and
 /// wrong across a split surrogate pair.
 ///
+/// Shares that function's contract exactly: reaching the bound is `HY090`, not
+/// a length of `MAX_NTS_SCAN`. A capped length was the same silent truncation
+/// in the other unit — the chunk arrived at the backend 32 767 units long and
+/// nothing said so.
+///
 /// # Safety
 ///
 /// `ptr` must be non-null and either point to a null-terminated UTF-16 string
-/// or be valid for [`MAX_NTS_SCAN`] readable code units.
-pub(crate) unsafe fn nts_utf16_len(ptr: *const u16) -> usize {
+/// or be valid for `MAX_NTS_SCAN` readable code units.
+pub(crate) unsafe fn nts_utf16_len(ptr: *const u16) -> Result<usize, OdbcError> {
     let mut len = 0;
     while len < MAX_NTS_SCAN {
         // SAFETY: the caller guarantees a terminator within the bound, or that
         // many readable units. `read_unaligned` because an ODBC application may
         // place its buffer at any offset inside a packed structure.
         if unsafe { std::ptr::read_unaligned(ptr.add(len)) } == 0 {
-            break;
+            return Ok(len);
         }
         len += 1;
     }
-    len
+    Err(nts_scan_overrun("the SQL_C_WCHAR data buffer"))
 }
 
 /// Length, in bytes, of a null-terminated byte string, bounded to
@@ -106,17 +180,17 @@ pub(crate) unsafe fn nts_utf16_len(ptr: *const u16) -> usize {
 ///
 /// `ptr` must be non-null and either point to a null-terminated byte string or
 /// be valid for [`MAX_NTS_SCAN`] readable bytes.
-pub(crate) unsafe fn nts_byte_len(ptr: *const u8) -> usize {
+pub(crate) unsafe fn nts_byte_len(ptr: *const u8) -> Result<usize, OdbcError> {
     let mut len = 0;
     while len < MAX_NTS_SCAN {
         // SAFETY: as above. `u8` has alignment 1, so no unaligned read is
         // possible and no `read_unaligned` is needed.
         if unsafe { *ptr.add(len) } == 0 {
-            break;
+            return Ok(len);
         }
         len += 1;
     }
-    len
+    Err(nts_scan_overrun("the data buffer"))
 }
 
 /// Write a UTF-16 encoded string into an output buffer.
@@ -446,6 +520,102 @@ mod tests {
         let wide = [b'A' as u16, 0u16];
         let result = unsafe { utf16_to_string(wide.as_ptr(), -1) }.unwrap();
         assert_eq!(result, "A");
+    }
+
+    /// An `SQL_NTS` buffer with no terminator inside the bound is an error, not
+    /// a 32 766-unit prefix. Reaching [`MAX_NTS_SCAN`] used to return the prefix
+    /// as though the scan had found a terminator, so no caller could tell "this
+    /// is the whole string" from "I gave up looking".
+    ///
+    /// The allocation is exactly [`MAX_NTS_SCAN`] units with no zero in it, so
+    /// it doubles as the bound's canary: reading one unit past the cap is a heap
+    /// overflow that Miri and AddressSanitizer see, rather than a silently
+    /// larger prefix.
+    #[test]
+    fn utf16_to_string_rejects_nts_input_that_runs_to_the_scan_cap() {
+        let buf = vec![b'a' as u16; MAX_NTS_SCAN];
+        // SAFETY: the buffer is exactly MAX_NTS_SCAN readable units, which is
+        // this function's documented SQL_NTS contract.
+        let err = unsafe { utf16_to_string(buf.as_ptr(), -3) }
+            .expect_err("an unterminated SQL_NTS buffer must not decode to a prefix");
+        assert_eq!(
+            err.sqlstate().as_str(),
+            crate::types::sql_state::INVALID_STRING_OR_BUFFER_LENGTH
+        );
+        assert_eq!(err.sql_return(), SqlReturn::ERROR);
+    }
+
+    /// The accepting side of the same boundary: a terminator in the last
+    /// position the scan is allowed to read still succeeds, and the whole
+    /// content before it comes back. Without this the "reject" test above is
+    /// satisfied by an off-by-one that refuses legitimate input too.
+    #[test]
+    fn utf16_to_string_accepts_nts_input_terminated_at_the_last_scannable_position() {
+        let mut buf = vec![b'a' as u16; MAX_NTS_SCAN];
+        buf[MAX_NTS_SCAN - 1] = 0;
+        // SAFETY: exactly MAX_NTS_SCAN readable units, terminated inside them.
+        let s = unsafe { utf16_to_string(buf.as_ptr(), -3) }
+            .expect("a terminator inside the bound is not an error");
+        assert_eq!(s.len(), MAX_NTS_SCAN - 1);
+    }
+
+    /// [`nts_utf16_len`] shares [`utf16_to_string`]'s scan and now shares its
+    /// contract: hitting the cap is a failure the caller can see.
+    #[test]
+    fn nts_utf16_len_rejects_input_that_runs_to_the_scan_cap() {
+        let buf = vec![b'a' as u16; MAX_NTS_SCAN];
+        // SAFETY: exactly MAX_NTS_SCAN readable units.
+        let err = unsafe { nts_utf16_len(buf.as_ptr()) }
+            .expect_err("an unterminated buffer must not report a capped length");
+        assert_eq!(
+            err.sqlstate().as_str(),
+            crate::types::sql_state::INVALID_STRING_OR_BUFFER_LENGTH
+        );
+    }
+
+    #[test]
+    fn nts_utf16_len_accepts_input_terminated_at_the_last_scannable_position() {
+        let mut buf = vec![b'a' as u16; MAX_NTS_SCAN];
+        buf[MAX_NTS_SCAN - 1] = 0;
+        // SAFETY: exactly MAX_NTS_SCAN readable units, terminated inside them.
+        let len = unsafe { nts_utf16_len(buf.as_ptr()) }.expect("terminated inside the bound");
+        assert_eq!(len, MAX_NTS_SCAN - 1);
+    }
+
+    /// The byte counterpart, for `SQL_C_CHAR` and the other single-byte C types.
+    #[test]
+    fn nts_byte_len_rejects_input_that_runs_to_the_scan_cap() {
+        let buf = vec![b'a'; MAX_NTS_SCAN];
+        // SAFETY: exactly MAX_NTS_SCAN readable bytes.
+        let err = unsafe { nts_byte_len(buf.as_ptr()) }
+            .expect_err("an unterminated buffer must not report a capped length");
+        assert_eq!(
+            err.sqlstate().as_str(),
+            crate::types::sql_state::INVALID_STRING_OR_BUFFER_LENGTH
+        );
+    }
+
+    #[test]
+    fn nts_byte_len_accepts_input_terminated_at_the_last_scannable_position() {
+        let mut buf = vec![b'a'; MAX_NTS_SCAN];
+        buf[MAX_NTS_SCAN - 1] = 0;
+        // SAFETY: exactly MAX_NTS_SCAN readable bytes, terminated inside them.
+        let len = unsafe { nts_byte_len(buf.as_ptr()) }.expect("terminated inside the bound");
+        assert_eq!(len, MAX_NTS_SCAN - 1);
+    }
+
+    /// The cap governs the `SQL_NTS` scan only. An explicitly declared length
+    /// is read in full, so a 100 000-unit statement passed with its real length
+    /// is unaffected by any of the above — the change refuses input whose length
+    /// the driver cannot determine, not input that is merely long.
+    #[test]
+    fn an_explicit_length_far_beyond_the_scan_cap_is_read_in_full() {
+        let n = MAX_NTS_SCAN * 3;
+        let buf = vec![b'a' as u16; n];
+        // SAFETY: `n` readable units, which is what the declared length says.
+        let s = unsafe { utf16_to_string(buf.as_ptr(), i32::try_from(n).expect("fits in i32")) }
+            .expect("an explicit length is not bounded by MAX_NTS_SCAN");
+        assert_eq!(s.len(), n);
     }
 
     #[test]
