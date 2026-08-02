@@ -1554,6 +1554,30 @@ call `SQLCloseCursor` or `SQLFreeStmt(SQL_CLOSE)` first, as it already must for
 
 ### Fixed
 
+- **A cancellation delivered by core's own query timer now reports `HYT00` on
+  every later call in that cursor's life, not `HY008` on all but the first.**
+  A `SQL_ATTR_QUERY_TIMEOUT` that core enforces (a backend answering
+  `QueryTimeout::CoreCancels`) is delivered through `Backend::cancel`, the same
+  mechanism `SQLCancel` uses, so core has to record which of the two happened.
+  It recorded it on the `QueryTimer` guard, which lives for exactly one backend
+  call. A deadline expiring in the window between the backend call returning
+  and the guard being dropped therefore signalled the token and left no trace
+  the *next* call could read: the execution itself stayed successful — which the
+  spec permits, "it is possible for the execution to succeed and return
+  SQL_SUCCESS while the cancel is also successful" — and the following
+  `SQLFetch`, quite likely failing because the delivered cancel had killed the
+  server-side cursor, saw a signalled token, a timer of its own that had not
+  fired, and reported "operation canceled" to an application that had set a
+  deadline and never called `SQLCancel`.
+
+  The record now lives beside the backend's token, in the allocation
+  `mint_cancel_token` stores and `Registry::cancel_of` clones out, so it is
+  minted and discarded per execution exactly as the token is. `SQLGetData` is
+  unaffected on purpose: its diagnostics table carries no `HYT00` row at all,
+  so a `SQLGetData` failing on a timed-out cursor keeps `HY008`.
+
+  No driver-facing API changed; `Backend::CancelToken` is untouched.
+
 - **An `SQL_NTS` argument longer than the 32 767-unit scan limit is now
   `HY090`, where it used to be silently truncated to its first 32 767 units.**
   Most seriously, **a statement passed to `SQLExecDirectW` as `SQL_NTS` was

@@ -2082,9 +2082,8 @@ mod tests {
         ffi::{execute::sql_prepare_w, handle::sql_free_handle},
         handles::ConnectionHandle,
         test_utils::{
-            MockBackend, MockCancelAwareBackend, MockCancelToken, MockConnection,
-            MockLongDataBackend, MockRecordingBackend, alloc_env_conn_stmt, with_descriptor,
-            with_handle,
+            MockBackend, MockCancelAwareBackend, MockConnection, MockLongDataBackend,
+            MockRecordingBackend, alloc_env_conn_stmt, with_descriptor, with_handle,
         },
         types::{CDataType, ParamType, SQL_INTERVAL_YEAR, SQL_INTERVAL_YEAR_TO_MONTH},
     };
@@ -5366,8 +5365,7 @@ mod tests {
         let token = crate::handles::registry::registry()
             .cancel_of(stmt)
             .expect("an execution mints a token");
-        let token = token
-            .downcast_ref::<MockCancelToken>()
+        let token = crate::handles::cancel_as::<MockRecordingBackend>(&token)
             .expect("the backend's own token type");
         token
             .executed_params

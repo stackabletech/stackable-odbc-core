@@ -37,6 +37,7 @@ use std::sync::Arc as StdArc;
 use odbc_sys::Desc;
 
 use crate::backend::{Backend, StatementBackend};
+use crate::cancel::CancelState;
 use crate::descriptor::{BindOffset, DescriptorRecord, DescriptorRole};
 use crate::diagnostics::DiagnosticQueue;
 use crate::errors::{IntoOdbc, OdbcError};
@@ -1343,11 +1344,21 @@ pub unsafe fn alloc_statement<B: Backend>(
 /// never obtains a `&B::Connection`, so it is irrelevant to the argument here
 /// beyond being one more site that upholds the same "lock before scope"
 /// precondition the other two do.
+///
+/// What is stored is a [`CancelState<B::CancelToken>`], not the bare
+/// `B::CancelToken`: the wrapper adds core's own record of *why* the token was
+/// signalled, which the query timer sets and `QueryTimer::reclassify` reads.
+/// See that type's doc comment for why the fact belongs in this allocation and
+/// not on the statement or in the registry slot. Nothing outside
+/// [`cancel_as`], `QueryTimer` and `sql_cancel` needs to know: `cancel_as`
+/// hands back the `&B::CancelToken` inside it, so every backend call site is
+/// unaffected.
 pub(crate) fn mint_cancel_token<B: Backend>(
     stmt_token: *mut c_void,
     connection: &B::Connection,
 ) -> StdArc<dyn Any + Send + Sync> {
-    let created: StdArc<dyn Any + Send + Sync> = StdArc::new(B::cancel_token(connection));
+    let created: StdArc<dyn Any + Send + Sync> =
+        StdArc::new(CancelState::new(B::cancel_token(connection)));
     registry().set_cancel(stmt_token, StdArc::clone(&created));
     created
 }
@@ -1370,6 +1381,11 @@ pub(crate) fn current_cancel_token(
 /// Downcast a type-erased cancel token back to the concrete `B::CancelToken`
 /// a statement-producing call needs to pass through.
 ///
+/// The stored value is a [`CancelState<B::CancelToken>`] (see
+/// [`mint_cancel_token`]); this returns the backend's half of it, borrowed
+/// from inside the `Arc`, so a call site passing a token to a `Backend` method
+/// sees exactly what it always did.
+///
 /// The `Err` arm is unreachable in practice: every token this crate stores
 /// was built by `mint_cancel_token::<B>` for this exact `B`, so the type
 /// always matches. It exists anyway because nothing makes that statically
@@ -1378,12 +1394,34 @@ pub(crate) fn current_cancel_token(
 pub(crate) fn cancel_as<B: Backend>(
     token: &StdArc<dyn Any + Send + Sync>,
 ) -> Result<&B::CancelToken, OdbcError> {
-    token.downcast_ref::<B::CancelToken>().ok_or_else(|| {
-        OdbcError::general(
-            "Statement's cancel token is not this backend's CancelToken type",
-            crate::types::SqlState::general_error(),
-        )
-    })
+    cancel_state_as::<B>(token).map(CancelState::token)
+}
+
+/// [`cancel_as`], keeping core's own cancellation record rather than
+/// discarding it.
+///
+/// Three callers. [`cancel_as`] above, which throws the record away; and the
+/// two in [`crate::query_timer`] that need to know *why* the token was
+/// signalled rather than only that it was — `QueryTimer::timed_out`, whose
+/// timeout pass reads [`CancelState::timed_out`], and the timer thread, which
+/// sets it.
+///
+/// Those two spelled the `downcast_ref` out by hand until review caught it.
+/// The type named in a `downcast` is not checked against the type
+/// `mint_cancel_token` stores — a mismatch compiles and then silently misses
+/// at run time — so every site that names it is a site that can drift. This
+/// function is where it is named once.
+pub(crate) fn cancel_state_as<B: Backend>(
+    token: &StdArc<dyn Any + Send + Sync>,
+) -> Result<&CancelState<B::CancelToken>, OdbcError> {
+    token
+        .downcast_ref::<CancelState<B::CancelToken>>()
+        .ok_or_else(|| {
+            OdbcError::general(
+                "Statement's cancel token is not this backend's CancelToken type",
+                crate::types::SqlState::general_error(),
+            )
+        })
 }
 
 /// Free an environment handle. Fails with `SqlReturn::ERROR` if there are
@@ -1941,9 +1979,7 @@ mod tests {
                 "a cursor-consuming call must observe the execution's own token"
             );
             assert!(
-                first
-                    .downcast_ref::<crate::test_utils::MockCancelToken>()
-                    .is_some(),
+                cancel_as::<MockBackend>(&first).is_ok(),
                 "the stored token must be the backend's own type"
             );
 

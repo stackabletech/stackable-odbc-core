@@ -6,6 +6,7 @@ use std::ffi::c_void;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::backend::{Backend, StatementBackend};
+use crate::cancel::CancelState;
 use crate::errors::{IntoOdbc, OdbcError};
 use crate::handles::StatementHandle;
 use crate::handles::registry::{HandleKind, registry};
@@ -508,9 +509,17 @@ pub unsafe fn sql_cancel<B: Backend>(statement_handle: *mut c_void) -> SqlReturn
     // covers a stale/foreign token as well as a live statement that has made
     // no backend call yet; both are indistinguishable from "nothing to
     // cancel" and handled identically by `signal_cancel` below.
+    //
+    // The stored type is `CancelState<B::CancelToken>`, the wrapper
+    // `mint_cancel_token` puts in the registry — naming `B::CancelToken` here
+    // would compile and then fail every downcast, silently turning `SQLCancel`
+    // into a no-op. Eight tests catch it, most of them by asserting the `HY008`
+    // that a landed cancel produces two calls later;
+    // `a_cancel_reaches_the_token_an_execution_minted` is the one that asserts
+    // the cancel landed at all.
     let token = registry()
         .cancel_of(statement_handle)
-        .and_then(|t| t.downcast::<B::CancelToken>().ok());
+        .and_then(|t| t.downcast::<CancelState<B::CancelToken>>().ok());
 
     // A live statement always has a lock group; a null, stale or wrong-kind
     // handle does not. This check has to happen before either branch below,
@@ -580,12 +589,15 @@ pub unsafe fn sql_cancel<B: Backend>(statement_handle: *mut c_void) -> SqlReturn
 /// Shared by both of `sql_cancel`'s branches so that fold-in exists in exactly
 /// one place rather than being duplicated per branch.
 fn signal_cancel<B: Backend>(
-    token: &Option<std::sync::Arc<B::CancelToken>>,
+    token: &Option<std::sync::Arc<CancelState<B::CancelToken>>>,
 ) -> Result<(), OdbcError> {
     let Some(token) = token else {
         return Ok(());
     };
-    match B::cancel(token).into_odbc() {
+    // The backend's half only: `CancelState::timed_out` records a *core*
+    // deadline, and this cancellation is the application's, which is `HY008`
+    // and not `HYT00`.
+    match B::cancel(token.token()).into_odbc() {
         Ok(()) | Err(OdbcError::NotImplemented { .. }) => Ok(()),
         Err(e) => Err(e),
     }
@@ -1631,7 +1643,11 @@ mod tests {
         unsafe {
             let (env, conn, stmt) = alloc_env_conn_stmt();
 
-            let token = std::sync::Arc::new(crate::test_utils::MockCancelToken::default());
+            // A `CancelState`, because that is what `mint_cancel_token`
+            // stores and therefore what `sql_cancel` has to find.
+            let token = std::sync::Arc::new(CancelState::new(
+                crate::test_utils::MockCancelToken::default(),
+            ));
             crate::handles::registry::registry().set_cancel(
                 stmt,
                 std::sync::Arc::clone(&token) as std::sync::Arc<dyn std::any::Any + Send + Sync>,
@@ -1640,11 +1656,73 @@ mod tests {
             let ret = sql_cancel::<MockBackend>(stmt);
             assert_eq!(ret, SqlReturn::SUCCESS);
             assert!(
-                token.cancelled.load(Ordering::SeqCst),
+                token.token().cancelled.load(Ordering::SeqCst),
                 "Backend::cancel must have run against the stored token"
             );
 
             cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
+    /// The two halves of the stored-token type, put together: an execution
+    /// mints the token, and `SQLCancel` reads it back.
+    ///
+    /// Nothing makes a disagreement between `mint_cancel_token` and
+    /// `sql_cancel` a compile error — `Arc::downcast` on a mismatch returns
+    /// `Err`, and `signal_cancel` reads the resulting `None` as "no token yet,
+    /// nothing to cancel" — so what a disagreement produces is a `SQLCancel`
+    /// that returns `SQL_SUCCESS` and silently cancels nothing.
+    ///
+    /// It is *not* the only test that catches that. The neighbouring cancel
+    /// tests seed the registry by hand, so each pins only its own spelling of
+    /// the type, but `execute::a_cancel_from_another_thread_makes_the_running_call_return_hy008`,
+    /// `fetch::a_cancelled_fetch_reports_hy008` and the two
+    /// `metadata::*_reports_hy008_when_the_statement_was_cancelled` tests all
+    /// go through the mint path and fail if the two disagree. What they assert
+    /// is the `HY008` a landed cancel produces on a *later* call; this one
+    /// asserts the cancel landed, which is the property itself rather than a
+    /// consequence of it, and it says so at the point of failure.
+    #[test]
+    fn a_cancel_reaches_the_token_an_execution_minted() {
+        unsafe {
+            let (env, conn, stmt) =
+                alloc_env_conn_stmt_for::<crate::test_utils::MockCancelAwareBackend>();
+            with_handle::<
+                crate::test_utils::MockCancelAwareBackend,
+                crate::handles::ConnectionHandle<crate::test_utils::MockCancelAwareBackend>,
+                _,
+            >(conn, |c| {
+                c.connection = Some(crate::test_utils::MockConnection);
+            });
+
+            let wide: Vec<u16> = "SELECT 1".encode_utf16().collect();
+            assert_eq!(
+                crate::ffi::execute::sql_exec_direct_w::<crate::test_utils::MockCancelAwareBackend>(
+                    stmt,
+                    wide.as_ptr(),
+                    wide.len() as i32,
+                ),
+                SqlReturn::SUCCESS,
+                "precondition: the execution runs and mints a token",
+            );
+
+            assert_eq!(
+                sql_cancel::<crate::test_utils::MockCancelAwareBackend>(stmt),
+                SqlReturn::SUCCESS
+            );
+
+            let stored = registry()
+                .cancel_of(stmt)
+                .expect("the execution minted one");
+            let cancel =
+                crate::handles::cancel_as::<crate::test_utils::MockCancelAwareBackend>(&stored)
+                    .expect("the backend's own token type");
+            assert!(
+                cancel.cancelled.load(Ordering::SeqCst),
+                "SQLCancel must reach the token the execution stored, not fail its downcast",
+            );
+
+            cleanup_env_conn_stmt_for::<crate::test_utils::MockCancelAwareBackend>(env, conn, stmt);
         }
     }
 
@@ -1662,10 +1740,10 @@ mod tests {
             let (env, conn, stmt) =
                 alloc_env_conn_stmt_for::<crate::test_utils::MockFailingCloseBackend>();
 
-            let token = crate::test_utils::MockCancelToken {
+            let token = CancelState::new(crate::test_utils::MockCancelToken {
                 should_fail: std::sync::atomic::AtomicBool::new(true),
                 ..Default::default()
-            };
+            });
             crate::handles::registry::registry().set_cancel(
                 stmt,
                 std::sync::Arc::new(token) as std::sync::Arc<dyn std::any::Any + Send + Sync>,
@@ -1741,7 +1819,9 @@ mod tests {
         unsafe {
             let (env, conn, stmt) = alloc_env_conn_stmt();
 
-            let token = std::sync::Arc::new(crate::test_utils::MockCancelToken::default());
+            let token = std::sync::Arc::new(CancelState::new(
+                crate::test_utils::MockCancelToken::default(),
+            ));
             registry().set_cancel(
                 stmt,
                 std::sync::Arc::clone(&token) as std::sync::Arc<dyn std::any::Any + Send + Sync>,
@@ -1763,7 +1843,7 @@ mod tests {
             let ret = sql_cancel::<MockBackend>(stmt);
             assert_eq!(ret, SqlReturn::SUCCESS);
             assert!(
-                token.cancelled.load(Ordering::SeqCst),
+                token.token().cancelled.load(Ordering::SeqCst),
                 "the backend must be signalled even with the group held"
             );
 
