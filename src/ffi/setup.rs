@@ -2,6 +2,12 @@
 
 use std::collections::HashMap;
 
+// Split by platform on purpose: only `ConfigRequest` has a cross-platform user.
+// `InstallerError` and `config_request_from_raw` are reached only from
+// `#[cfg(windows)]` code, so an unconditional `use` fails clippy on Linux.
+#[cfg(windows)]
+use crate::setup::{ConfigRequest, InstallerError, config_request_from_raw};
+
 /// Longest single DSN attribute segment scanned before giving up, in UTF-16
 /// code units. Mirrors `utf16.rs`'s `MAX_NTS_SCAN`: without a bound, an
 /// attribute list missing its terminator walks memory until it faults.
@@ -229,89 +235,6 @@ unsafe extern "system" {
     unsafe fn SQLValidDSNW(lpszDSN: *const u16) -> i32;
 }
 
-// `SQLConfigDataSource` request flags, from `odbcinst.h`. Not `#[cfg(windows)]`:
-// `config_request_from_raw` below is the boundary conversion, and keeping it
-// outside the gate is what lets a Linux test reach it at all.
-//
-// Only the first three are `ConfigDSN`'s. The rest are listed because they are
-// the values a Driver Manager can plausibly forward here and `ConfigDSN` must
-// reject — its diagnostics table names the condition exactly: "The *fRequest*
-// argument was not one of the following: ODBC_ADD_DSN ODBC_CONFIG_DSN
-// ODBC_REMOVE_DSN."
-#[cfg_attr(not(windows), allow(dead_code))]
-const ODBC_ADD_DSN: u16 = 1;
-#[cfg_attr(not(windows), allow(dead_code))]
-const ODBC_CONFIG_DSN: u16 = 2;
-#[cfg_attr(not(windows), allow(dead_code))]
-const ODBC_REMOVE_DSN: u16 = 3;
-/// `ODBC_ADD_SYS_DSN` (4) — `SQLConfigDataSource`'s system-DSN request, which
-/// `ConfigDSN` does not accept. Named only so the guard test can reject it by
-/// name rather than by literal.
-#[allow(dead_code)]
-const ODBC_ADD_SYS_DSN: u16 = 4;
-/// `ODBC_CONFIG_SYS_DSN` (5) — likewise.
-#[allow(dead_code)]
-const ODBC_CONFIG_SYS_DSN: u16 = 5;
-/// `ODBC_REMOVE_SYS_DSN` (6) — likewise.
-#[allow(dead_code)]
-const ODBC_REMOVE_SYS_DSN: u16 = 6;
-/// `ODBC_REMOVE_DEFAULT_DSN` (7) — likewise.
-#[allow(dead_code)]
-const ODBC_REMOVE_DEFAULT_DSN: u16 = 7;
-
-/// `ConfigDSN`'s *fRequest* argument, as one of the three values its spec
-/// defines.
-///
-/// A typed enum because the crate converts raw ABI integers at the boundary
-/// rather than passing them through, and because the alternative — a `_` arm at
-/// the bottom of a `match f_request` — is what put the request check *after*
-/// the attribute checks, so an unrecognised request was diagnosed as a bad
-/// attribute list.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(not(windows), allow(dead_code))]
-pub(crate) enum ConfigRequest {
-    /// `ODBC_ADD_DSN` (1) — add a new data source.
-    Add,
-    /// `ODBC_CONFIG_DSN` (2) — configure (modify) an existing data source.
-    Config,
-    /// `ODBC_REMOVE_DSN` (3) — remove an existing data source.
-    Remove,
-}
-
-/// Recognise a *fRequest* value, following the crate's `*_from_raw` idiom.
-///
-/// `None` for anything else, including `odbcinst.h`'s `ODBC_ADD_SYS_DSN` and
-/// its neighbours: those belong to `SQLConfigDataSource`, and `ConfigDSN`'s own
-/// table lists three values and no others.
-#[cfg_attr(not(windows), allow(dead_code))]
-pub(crate) fn config_request_from_raw(raw: u16) -> Option<ConfigRequest> {
-    match raw {
-        ODBC_ADD_DSN => Some(ConfigRequest::Add),
-        ODBC_CONFIG_DSN => Some(ConfigRequest::Config),
-        ODBC_REMOVE_DSN => Some(ConfigRequest::Remove),
-        _ => None,
-    }
-}
-
-// `SQLInstallerError` codes, from `odbcinst.h`. Only the ones `ConfigDSN`'s own
-// diagnostics table lists are defined here; the header carries eighteen more
-// that belong to other installer entry points.
-/// `ODBC_ERROR_INVALID_REQUEST_TYPE` (5) — `fRequest` was not one of
-/// `ODBC_ADD_DSN`, `ODBC_CONFIG_DSN`, `ODBC_REMOVE_DSN`.
-#[cfg(windows)]
-const ODBC_ERROR_INVALID_REQUEST_TYPE: u32 = 5;
-/// `ODBC_ERROR_INVALID_NAME` (7) — the `lpszDriver` argument was invalid.
-#[cfg(windows)]
-const ODBC_ERROR_INVALID_NAME: u32 = 7;
-/// `ODBC_ERROR_INVALID_KEYWORD_VALUE` (8) — `lpszAttributes` contained a syntax
-/// error.
-#[cfg(windows)]
-const ODBC_ERROR_INVALID_KEYWORD_VALUE: u32 = 8;
-/// `ODBC_ERROR_REQUEST_FAILED` (11) — the operation `fRequest` asked for could
-/// not be performed.
-#[cfg(windows)]
-const ODBC_ERROR_REQUEST_FAILED: u32 = 11;
-
 /// Post an installer error and return `ConfigDSN`'s FALSE.
 ///
 /// Every `return 0` in [`config_dsn_w`] goes through here. `ConfigDSN` returns a
@@ -321,11 +244,11 @@ const ODBC_ERROR_REQUEST_FAILED: u32 = 11;
 /// *\*pfErrorCode* value is posted to the installer error buffer by a call to
 /// **SQLPostInstallerError**."
 #[cfg(windows)]
-fn fail(code: u32, message: &str) -> i32 {
-    tracing::error!("ConfigDSNW: {message} (installer error {code})");
+fn fail(code: InstallerError, message: &str) -> i32 {
+    tracing::error!("ConfigDSNW: {message} (installer error {})", code.code());
     let msg = to_wide_null(message);
     // SAFETY: `msg` is a null-terminated UTF-16 buffer that outlives the call.
-    unsafe { SQLPostInstallerErrorW(code, msg.as_ptr()) };
+    unsafe { SQLPostInstallerErrorW(code.code(), msg.as_ptr()) };
     0
 }
 
@@ -582,7 +505,7 @@ pub unsafe fn config_dsn_w(
         || unsafe { config_dsn_body(hwnd_parent, f_request, lpsz_driver, lpsz_attributes) },
         || {
             fail(
-                ODBC_ERROR_REQUEST_FAILED,
+                InstallerError::RequestFailed,
                 "a panic was caught at the ConfigDSNW boundary; the data source \
                  was not changed",
             )
@@ -613,7 +536,7 @@ unsafe fn config_dsn_body(
     // the caller never learned the request itself was rejected.
     let Some(request) = config_request_from_raw(f_request) else {
         return fail(
-            ODBC_ERROR_INVALID_REQUEST_TYPE,
+            InstallerError::InvalidRequestType,
             "fRequest was not ODBC_ADD_DSN, ODBC_CONFIG_DSN or ODBC_REMOVE_DSN",
         );
     };
@@ -636,7 +559,7 @@ unsafe fn config_dsn_body(
 
     if lpsz_driver.is_null() {
         return fail(
-            ODBC_ERROR_INVALID_NAME,
+            InstallerError::InvalidName,
             "the lpszDriver argument was a null pointer",
         );
     }
@@ -662,7 +585,7 @@ unsafe fn config_dsn_body(
     // which sends the caller looking in the wrong place.
     if let Some(error) = parsed.syntax_error {
         return fail(
-            ODBC_ERROR_INVALID_KEYWORD_VALUE,
+            InstallerError::InvalidKeywordValue,
             match error {
                 AttributeSyntaxError::SegmentWithoutEquals => {
                     "the attribute list carries a segment with no '=', so it is not \
@@ -680,7 +603,7 @@ unsafe fn config_dsn_body(
 
     let Some((_, dsn_value)) = attrs.iter().find(|(k, _)| k.eq_ignore_ascii_case("DSN")) else {
         return fail(
-            ODBC_ERROR_INVALID_KEYWORD_VALUE,
+            InstallerError::InvalidKeywordValue,
             "the attribute list carries no DSN keyword, so there is no data source to name",
         );
     };
@@ -697,7 +620,7 @@ unsafe fn config_dsn_body(
     // SAFETY: dsn_w is a null-terminated UTF-16 string constructed above.
     if unsafe { SQLValidDSNW(dsn_w.as_ptr()) } == 0 {
         return fail(
-            ODBC_ERROR_INVALID_KEYWORD_VALUE,
+            InstallerError::InvalidKeywordValue,
             "SQLValidDSN rejected the data source name: too long, or it contains \
              a character the registry grammar forbids",
         );
@@ -749,7 +672,7 @@ unsafe fn config_dsn_body(
             // no rename to detect.
             if !dsn_is_registered(&dsn_w) {
                 return fail(
-                    ODBC_ERROR_REQUEST_FAILED,
+                    InstallerError::RequestFailed,
                     "ODBC_CONFIG_DSN names a data source that is not in ODBC.INI; \
                      use ODBC_ADD_DSN to create one",
                 );
@@ -946,7 +869,7 @@ mod tests {
         // audited functions, so this one needs the whole file.
         let source = include_str!("setup.rs");
         assert!(
-            source.contains("SQLPostInstallerErrorW(code, msg.as_ptr())"),
+            source.contains("SQLPostInstallerErrorW(code.code(), msg.as_ptr())"),
             "`fail` no longer posts an installer error"
         );
     }
@@ -1151,43 +1074,9 @@ mod tests {
         );
     }
 
-    /// `ODBC_ADD_SYS_DSN` (4) and its neighbours are real `SQLConfigDataSource`
-    /// request flags — `/usr/include/odbcinst.h` lists 4 through 7 — that
-    /// `ConfigDSN` does not accept. Each must be unrecognised, so the caller
-    /// gets `ODBC_ERROR_INVALID_REQUEST_TYPE` and not a diagnosis of whatever
-    /// else was wrong with the call.
-    #[test]
-    fn only_the_three_config_dsn_requests_are_recognised() {
-        assert_eq!(
-            config_request_from_raw(ODBC_ADD_DSN),
-            Some(ConfigRequest::Add)
-        );
-        assert_eq!(
-            config_request_from_raw(ODBC_CONFIG_DSN),
-            Some(ConfigRequest::Config)
-        );
-        assert_eq!(
-            config_request_from_raw(ODBC_REMOVE_DSN),
-            Some(ConfigRequest::Remove)
-        );
-
-        // Values from odbcinst.h that belong to SQLConfigDataSource, not to
-        // ConfigDSN, plus the ends of the range.
-        for rejected in [
-            0,
-            ODBC_ADD_SYS_DSN,
-            ODBC_CONFIG_SYS_DSN,
-            ODBC_REMOVE_SYS_DSN,
-            ODBC_REMOVE_DEFAULT_DSN,
-            u16::MAX,
-        ] {
-            assert_eq!(
-                config_request_from_raw(rejected),
-                None,
-                "fRequest {rejected} is not one of ConfigDSN's three"
-            );
-        }
-    }
+    // `only_the_three_config_dsn_requests_are_recognised` moved to
+    // `crate::setup`, along with `ConfigRequest` and `config_request_from_raw`
+    // themselves.
 
     /// The request type is validated before anything else can fail, so that an
     /// out-of-range `fRequest` is diagnosed as one. The spec ties
