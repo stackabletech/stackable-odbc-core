@@ -1542,6 +1542,41 @@ pub unsafe fn sql_special_columns_w<B: Backend>(
     ret
 }
 
+/// Narrows a backend-reported column count to the `u16` the 07009 range
+/// check in [`sql_describe_col_w`] and [`sql_col_attribute_w`] compares
+/// `column_number` against, saturating up rather than down when it does not
+/// fit.
+///
+/// `StatementBackend::column_count` returns `i16` — the `SQLNumResultCols`
+/// ABI type — so a *positive* count always fits `u16`: its max, 32 767, is
+/// below `u16::MAX`. The only way `u16::try_from` fails here is a **negative**
+/// count from a backend, not an oversized one — the shape a naive
+/// `unwrap_or(0)` invites is unreachable for "too many columns" given this
+/// signature, but a misbehaving `StatementBackend` impl can still return a
+/// negative value nothing here validates against.
+///
+/// `unwrap_or(0)` used to collapse that case to 0, and the `column_number > 0`
+/// comparison that follows then rejected every column as 07009, including
+/// column 1 — the reported count could not be trusted, and the driver
+/// answered by trusting it least. Saturating up to `u16::MAX` instead makes
+/// the comparison permissive whenever the count can't be represented,
+/// deferring to `describe_col`'s own answer rather than manufacturing a
+/// range-check failure the backend never reported.
+///
+/// Covered by
+/// `tests::describe_col_succeeds_when_backend_column_count_is_negative` and
+/// `tests::col_attribute_succeeds_when_backend_column_count_is_negative`.
+fn column_count_upper_bound(column_count: i16) -> u16 {
+    u16::try_from(column_count).unwrap_or_else(|_| {
+        tracing::warn!(
+            "column_count_upper_bound: backend reported a column count ({column_count}) that \
+             does not fit u16; treating the 07009 range check as unbounded rather than \
+             rejecting every column"
+        );
+        u16::MAX
+    })
+}
+
 /// Generic implementation of SQLDescribeColW.
 ///
 /// Spec: <https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqldescribecol-function>
@@ -1667,7 +1702,7 @@ pub unsafe fn sql_describe_col_w<B: Backend>(
             // its column number was wrong whatever had actually failed — a
             // communication failure, a cancellation, anything.
             let column_count = statement_data.column_count();
-            if column_number > u16::try_from(column_count).unwrap_or(0) {
+            if column_number > column_count_upper_bound(column_count) {
                 return Err(OdbcError::general(
                     format!(
                         "Column number {column_number} out of range (have {column_count} columns)"
@@ -1896,7 +1931,7 @@ pub unsafe fn sql_col_attribute_w<B: Backend>(
 
             // Spec 07009, core's own check — see `sql_describe_col_w`, which
             // carries the same pair of comments and the reasoning behind them.
-            if column_number > u16::try_from(column_count).unwrap_or(0) {
+            if column_number > column_count_upper_bound(column_count) {
                 return Err(OdbcError::general(
                     format!(
                         "Column number {column_number} out of range (have {column_count} columns)"
@@ -2867,8 +2902,8 @@ mod tests {
     use crate::handles::ConnectionHandle;
     use crate::test_utils::{
         MockBackend, MockCancelAwareBackend, MockCatalogArgsBackend, MockCatalogBackend,
-        MockConnection, MockFailingDescribeBackend, MockNoCatalogBackend, alloc_env_conn_stmt,
-        with_handle,
+        MockConnection, MockFailingDescribeBackend, MockNegativeColumnCountBackend,
+        MockNoCatalogBackend, alloc_env_conn_stmt, with_handle,
     };
     use crate::types::{
         CDataType, ColumnsResultCol, Desc, ForeignKeysResultCol, Nullable, PrimaryKeysResultCol,
@@ -5830,6 +5865,107 @@ mod tests {
             );
 
             crate::test_utils::cleanup_connected_env_conn_stmt::<MockFailingDescribeBackend>(
+                env, conn, stmt,
+            );
+        }
+    }
+
+    /// [`column_count_upper_bound`] in isolation, sidestepping the backend
+    /// entirely: a negative count saturates up to `u16::MAX` rather than down
+    /// to 0, while an ordinary positive count (including `i16::MAX`, the
+    /// largest a backend can ever report) passes through unchanged.
+    #[test]
+    fn column_count_upper_bound_saturates_up_not_down() {
+        assert_eq!(
+            column_count_upper_bound(-1),
+            u16::MAX,
+            "a negative count must not collapse to 0, which would reject every column",
+        );
+        assert_eq!(
+            column_count_upper_bound(i16::MIN),
+            u16::MAX,
+            "the most negative representable count still saturates up, not down",
+        );
+        assert_eq!(
+            column_count_upper_bound(0),
+            0,
+            "an empty result set is 0 columns"
+        );
+        assert_eq!(
+            column_count_upper_bound(2),
+            2,
+            "an ordinary positive count passes through unchanged",
+        );
+        assert_eq!(
+            column_count_upper_bound(i16::MAX),
+            u16::try_from(i16::MAX).expect("i16::MAX fits u16"),
+            "the largest count a backend can report still fits u16 and passes through",
+        );
+    }
+
+    /// Task 2.10's defect: `u16::try_from(column_count).unwrap_or(0)` collapses
+    /// an unrepresentable count to 0, and the `column_number > 0` check that
+    /// follows then rejects every column, including valid ones. A backend
+    /// cannot report *more* than `u16::MAX` columns through
+    /// `StatementBackend::column_count` — it returns `i16`, whose max already
+    /// fits — so the only way to hit the failed conversion is a *negative*
+    /// count, which `MockNegativeColumnCountBackend` reports.
+    ///
+    /// Column 1 must still reach `describe_col` and succeed: saturating the
+    /// unrepresentable count up to `u16::MAX` makes the range check
+    /// permissive rather than rejecting everything, leaving the backend's own
+    /// answer as the real gate.
+    #[test]
+    fn describe_col_succeeds_when_backend_column_count_is_negative() {
+        unsafe {
+            let (env, conn, stmt) = described_stmt_for::<MockNegativeColumnCountBackend>();
+
+            let mut data_type: i16 = 0;
+            assert_eq!(
+                sql_describe_col_w::<MockNegativeColumnCountBackend>(
+                    stmt,
+                    1,
+                    std::ptr::null_mut(),
+                    0,
+                    std::ptr::null_mut(),
+                    &mut data_type,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                ),
+                SqlReturn::SUCCESS,
+                "a negative backend column count must not reject every column as 07009",
+            );
+
+            crate::test_utils::cleanup_connected_env_conn_stmt::<MockNegativeColumnCountBackend>(
+                env, conn, stmt,
+            );
+        }
+    }
+
+    /// The `SQLColAttributeW` half of the same claim — it carries an
+    /// identical range check at its own call site.
+    #[test]
+    fn col_attribute_succeeds_when_backend_column_count_is_negative() {
+        unsafe {
+            let (env, conn, stmt) = described_stmt_for::<MockNegativeColumnCountBackend>();
+
+            let mut numeric: isize = 0;
+            assert_eq!(
+                sql_col_attribute_w::<MockNegativeColumnCountBackend>(
+                    stmt,
+                    1,
+                    Desc::ConciseType as u16,
+                    std::ptr::null_mut(),
+                    0,
+                    std::ptr::null_mut(),
+                    &mut numeric,
+                ),
+                SqlReturn::SUCCESS,
+                "a negative backend column count must not reject every column as 07009",
+            );
+
+            crate::test_utils::cleanup_connected_env_conn_stmt::<MockNegativeColumnCountBackend>(
                 env, conn, stmt,
             );
         }

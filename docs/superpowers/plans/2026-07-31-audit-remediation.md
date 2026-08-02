@@ -410,6 +410,22 @@ one at a time.
 - **`"2026-07-21T"` is now accepted as midnight** on the DATE path, a trivial
   widening from Task 2.4's shared parser. Consistent with what the timestamp
   path already did.
+- **A negative `RecNumber` aliases to record 0 for two descriptor roles.**
+  `src/ffi/desc.rs:312` (`read_desc_field`) and `:603` (`write_desc_field`)
+  narrow with `u16::try_from(record_number).unwrap_or(0)`. `Ard` and `Apd` are
+  already protected by the negative check at `:272` / `:542`; the gap is
+  `DescriptorRole::App` — the explicit descriptor whose role is not yet
+  resolved, omitted from that guard — and `DescriptorRole::Ipd`, where only
+  `== 0` is checked so a negative non-zero value slips through. The result is
+  a missing `07009`, a spec-compliance gap rather than a safety one. Low
+  severity: IPD record 0 is never consulted by real parameter binding
+  (parameters start at 1), and bookmark records are deliberately out of scope
+  per AGENTS.md with no path reading them for real data today. Found during
+  Task 2.10's survey; the scoping above is the *reviewer's* correction — the
+  original survey named the two roles that are already guarded, listed a safe
+  site (`:389`, which rejects the aliased 0 unconditionally) and a dead one
+  (`:1121`, where `:1074` has already refused negatives for all four roles).
+  Promote to a task if the missing `07009` is wanted before 0.1.0.
 
 ## Execution order and dependencies
 

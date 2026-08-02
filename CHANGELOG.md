@@ -3561,6 +3561,22 @@ call `SQLCloseCursor` or `SQLFreeStmt(SQL_CLOSE)` first, as it already must for
   `SQL_C_FLOAT` target still reports `01S07` where the same table says `22003`,
   and `SQL_C_NUMERIC` has no conversion arm at all.
 
+- **A backend reporting a column count that does not fit `u16` no longer makes
+  `SQLDescribeColW` and `SQLColAttributeW` reject every column, including
+  valid ones.** Both range-check `column_number` against
+  `StatementBackend::column_count` before calling the backend, and narrowed
+  that count with `u16::try_from(column_count).unwrap_or(0)`. Because
+  `column_count` returns `i16` — the `SQLNumResultCols` ABI type, whose max
+  (32 767) already fits `u16::MAX` (65 535) — the only value that can fail
+  that conversion is a **negative** count from a misbehaving backend, not an
+  oversized one. Collapsing a failed conversion to 0 turned "this count can't
+  be trusted" into "column 1 is out of range", which is the wrong direction:
+  every column number then failed a check meant to catch only a column past
+  the end. The narrowing now saturates up to `u16::MAX` instead (with a
+  `tracing::warn!`), so an unrepresentable count makes the range check
+  permissive rather than universally hostile, and `describe_col`'s own answer
+  — not a manufactured `07009` — is what the application sees.
+
 [C to SQL: Character]: https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/c-to-sql-character
 [SQL to C: Time]: https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/sql-to-c-time
 [SQL to C: Numeric]: https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/sql-to-c-numeric
