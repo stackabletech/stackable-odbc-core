@@ -972,7 +972,7 @@ macro_rules! forward_ffi {
             lpsz_attributes: *const u16,
         ) -> i32 {
             unsafe {
-                $crate::ffi::setup::config_dsn_w(
+                $crate::ffi::setup::config_dsn_w::<$B>(
                     hwnd_parent,
                     f_request,
                     lpsz_driver,
