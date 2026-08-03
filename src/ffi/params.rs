@@ -1,4 +1,9 @@
-//! Generic implementations of SQLBindParameter and SQLNumParams.
+//! Parameter binding, description and data-at-execution: `SQLBindParameter`,
+//! `SQLNumParams`, `SQLDescribeParam`, `SQLPutData` and `SQLParamData`.
+//!
+//! The last two are a pair: `SQLParamData` drives the data-at-execution sequence and
+//! `SQLPutData` supplies each chunk, which is why they live beside the binding that
+//! started it rather than with the execution functions.
 
 #![allow(clippy::too_many_arguments)]
 

@@ -1,3 +1,20 @@
+//! The `forward_ffi!` macro: the C ABI surface a driver crate exports.
+//!
+//! One `pub unsafe extern "system" fn` per entry point, each a thin forward to the
+//! generic implementation in [`crate::ffi`], plus the two tables `SQLGetFunctions`
+//! answers from. Nothing here decides behaviour — a function that needs a decision
+//! belongs in `ffi/`, so that every driver inherits it — and nothing here is
+//! conditional on the backend beyond the type it is given.
+//!
+//! `ConfigDSNW` is `#[cfg(windows)]` and is the one export that is not an ODBC
+//! function: the installer library calls it to configure a DSN. It compiles from Linux
+//! with `--target x86_64-pc-windows-msvc`, which is worth doing before pushing, because
+//! a plain `cargo check` never looks at it.
+//!
+//! Which functions belong here is settled by
+//! [`crate::function_id::CORE_EXPORTED_FUNCTIONS`], against which a guard test pins
+//! every symbol.
+
 /// Generates all ODBC FFI forwarding stubs for a given backend.
 ///
 /// Place this in a driver's `lib.rs`:

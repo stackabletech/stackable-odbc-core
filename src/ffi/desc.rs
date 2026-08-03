@@ -1,5 +1,6 @@
-//! `SQLGetDescFieldW`, `SQLSetDescFieldW`, `SQLGetDescRecW` and `SQLSetDescRec`
-//! — the four accessors over a statement's own descriptors.
+//! `SQLGetDescFieldW`, `SQLSetDescFieldW`, `SQLGetDescRecW`, `SQLSetDescRec` and
+//! `SQLCopyDesc` — the five descriptor functions, over a statement's own descriptors
+//! and over any the application allocated itself.
 //!
 //! # How a call reaches a field
 //!
@@ -29,10 +30,16 @@
 //!
 //! # What is still missing
 //!
-//! `SQLCopyDesc` and `SQLAllocHandle(SQL_HANDLE_DESC)`. Until they land,
-//! **`SQL_OIC_CORE` is not satisfied**: Core-level conformance requires working
-//! descriptors, and these four make a statement's own descriptors real without
-//! making an application's own possible.
+//! Two things, both deliberate: **bookmark records** (record 0), and **automatic
+//! population of the IPD** — `SQL_ATTR_AUTO_IPD` stays `SQL_FALSE`, so the five
+//! fields the spec's footnote 1 names stay `Undefined` on the IPD.
+//!
+//! **`SQL_OIC_CORE` is satisfied.** Core-level conformance requires allocating and
+//! freeing every handle type and manipulating descriptor fields through all five of
+//! these functions, which `SQLCopyDesc` and `SQLAllocHandle(SQL_HANDLE_DESC)` closed.
+//! An application descriptor can be swapped in through `SQL_ATTR_APP_ROW_DESC` /
+//! `SQL_ATTR_APP_PARAM_DESC`, and one descriptor may be shared across statements on a
+//! connection.
 
 use std::ffi::c_void;
 

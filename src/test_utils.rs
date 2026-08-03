@@ -1,7 +1,14 @@
 //! Shared test infrastructure for stackable-odbc-core.
 //!
-//! Provides `MockBackend` (connect succeeds) and `MockFailBackend` (connect fails)
-//! so test modules don't each need their own copy.
+//! `MockBackend` is the default: connect and disconnect succeed and everything else
+//! answers `NotImplemented`. Beside it are purpose-built mocks for paths `MockBackend`
+//! cannot reach — `MockAltBackend` declares a different value for every capability
+//! method, `MockTypeInfoBackend` and `MockFunctionsBackend` declare real rows and a real
+//! function list so a loop over them cannot pass vacuously, `MockFailingCloseBackend`
+//! fails a cursor close, and the `mock_isolation_backend!` / `mock_txn_backend!` families
+//! generate transaction-capability variants. Grep for `struct Mock` for the current set;
+//! a list here would go stale, as an earlier mention of a `MockFailBackend` that was
+//! never written did.
 
 use std::borrow::Cow;
 use std::ffi::c_void;

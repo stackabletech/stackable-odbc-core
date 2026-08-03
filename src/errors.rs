@@ -220,7 +220,7 @@ impl OdbcError {
 /// blanket `impl<T, U: From<T>> Into<U> for T` only runs in the other
 /// direction. Stating the bound as `where OdbcError: From<Self::Error>` on the
 /// trait does not help either: a `where` clause mentioning an associated type
-/// is not elaborated into an implied bound, so every one of core's ~70 generic
+/// is not elaborated into an implied bound, so every one of core's generic
 /// functions would have to repeat it. This extension is the cheap way to keep
 /// the call sites readable.
 pub(crate) trait IntoOdbc<T> {

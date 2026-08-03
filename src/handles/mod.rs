@@ -1,5 +1,9 @@
-//! ODBC handle types (environment, connection, statement), their allocation
-//! and free routines, and handle validation at the FFI boundary.
+//! ODBC handle types (environment, connection, statement, descriptor), their
+//! allocation and free routines, and handle validation at the FFI boundary.
+//!
+//! A descriptor is a registered allocation like the other three rather than a field of
+//! a statement: an implicit one is parented to its statement and an explicit one to a
+//! connection, and all of them join the connection's lock group.
 //!
 //! # Why handles are not pointers
 //!

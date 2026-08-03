@@ -1,4 +1,9 @@
-//! Row fetching and column retrieval: `SQLFetch`, `SQLFetchScroll`, `SQLGetData`.
+//! Row fetching and column retrieval: `SQLFetch`, `SQLFetchScroll`,
+//! `SQLExtendedFetch` and `SQLGetData`.
+//!
+//! `SQLExtendedFetch` is the one deprecated ODBC 2.x function core exports, because the
+//! Driver Manager does not map it (see `CORE_UNEXPORTED_FUNCTIONS` in `function_id.rs`
+//! for the seventeen it does).
 
 use std::ffi::c_void;
 

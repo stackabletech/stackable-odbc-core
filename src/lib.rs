@@ -5,8 +5,11 @@
 //! concrete driver crate implements the [`backend::Backend`] and
 //! [`backend::StatementBackend`] traits, then calls the
 //! [`forward_ffi!`](macro@forward_ffi) macro to generate the C ABI entry points
-//! automatically: 72 `SQL*` functions, plus `ConfigDSNW` on Windows, where the
-//! installer library calls it to configure a DSN.
+//! automatically: every `SQL*` function in
+//! [`function_id::CORE_EXPORTED_FUNCTIONS`], plus `ConfigDSNW` on Windows, where the
+//! installer library calls it to configure a DSN. That constant is the authoritative
+//! list and a guard test pins each entry to a symbol that exists, so it is the thing to
+//! read rather than a count written here — the count that used to be here was wrong.
 //!
 //! # Call flow
 //!
@@ -61,11 +64,13 @@
 //! application's calls into those automatically, so there is no ANSI variant to
 //! write.
 //!
-//! Most exported entry points are *not* `W`-suffixed, because most ODBC
+//! Many exported entry points are *not* `W`-suffixed, because many ODBC
 //! functions take no strings at all: `SQLAllocHandle`, `SQLFetch`,
-//! `SQLBindCol`, `SQLEndTran` and 36 others have a single spelling that serves
-//! both. Of the 72 `SQL*` functions `forward_ffi!` generates, 32 are `W` forms
-//! and 40 have no encoding in their signature to vary.
+//! `SQLBindCol`, `SQLEndTran` and the rest of that kind have a single spelling
+//! that serves both. Which spelling a given function has is decided by its own
+//! signature and settled in [`function_id::CORE_EXPORTED_FUNCTIONS`]; the split is
+//! deliberately not stated as a pair of numbers here, because both of the numbers
+//! that were had drifted.
 
 /// The `odbc-sys` version this crate was built against.
 ///

@@ -559,10 +559,39 @@ what previous `docs:` commits in this branch did.
 
 ### Task 4.3: Module headers and crate-level counts
 
-- [ ] `src/ffi/desc.rs:28-33`: delete/rewrite "What is still missing" (remaining true gaps: bookmark records, auto-IPD).
-- [ ] `src/lib.rs:8, 66-67`: replace the four counts (72/32/40/36) with count-free prose pointing at `CORE_EXPORTED_FUNCTIONS`.
-- [ ] `src/ffi/params.rs:1` (name all five entry points), `src/ffi/fetch.rs:1` (+ `sql_extended_fetch`), `src/handles/mod.rs:1` (+ descriptor), `src/forward_ffi.rs` (add a `//!`), `src/errors.rs:223` ("~70" → "the"), `src/test_utils.rs:3` (drop the nonexistent `MockFailBackend` mention — superseded by Task 5.1 which adds it for real, so instead make the sentence true there).
-- [ ] Commit: `docs: module headers and crate docs describe what the modules now contain`
+- [x] `src/ffi/desc.rs:28-33`: delete/rewrite "What is still missing" (remaining true gaps: bookmark records, auto-IPD).
+- [x] `src/lib.rs:8, 66-67`: replace the four counts (72/32/40/36) with count-free prose pointing at `CORE_EXPORTED_FUNCTIONS`.
+- [x] `src/ffi/params.rs:1` (name all five entry points), `src/ffi/fetch.rs:1` (+ `sql_extended_fetch`), `src/handles/mod.rs:1` (+ descriptor), `src/forward_ffi.rs` (add a `//!`), `src/errors.rs:223` ("~70" → "the"), `src/test_utils.rs:3` (drop the nonexistent `MockFailBackend` mention — superseded by Task 5.1 which adds it for real, so instead make the sentence true there).
+- [x] Commit: `docs: module headers and crate docs describe what the modules now contain`
+
+
+**Outcome (2026-08-03).** All items done. The counts were worse than the plan
+recorded, and the fix was to stop counting:
+
+- **All three of `lib.rs`'s numbers were wrong, not just stale in one place.**
+  The truth today is 60 `SQL*` functions — 31 `W` forms and 29 with a single
+  spelling — plus `ConfigDSNW`, against a claimed 72 total, 32 `W` and 40 non-`W`.
+  Both passages now point at `function_id::CORE_EXPORTED_FUNCTIONS`, which a guard
+  test already pins symbol by symbol, and say plainly that the numbers that were
+  there had drifted. `errors.rs`'s "~70 generic" went the same way.
+- **`test_utils.rs` advertised a mock that has never existed.** `MockFailBackend`
+  appears nowhere in the crate; the header now describes what is actually there
+  and tells the reader to grep for `struct Mock` rather than trusting a list —
+  naming the phantom as the reason. Task 5.1 may still add a failing-connect mock,
+  and will not have to correct this sentence to do it.
+- **`ffi/desc.rs`'s header was wrong at both ends.** It called the module "the
+  four accessors over a statement's own descriptors" (five functions, and
+  explicit descriptors exist), and its "What is still missing" listed
+  `SQLCopyDesc` and `SQLAllocHandle(SQL_HANDLE_DESC)` as absent while asserting
+  `SQL_OIC_CORE` is not satisfied. Both landed some time ago; the section now
+  names the two real gaps, bookmark records and auto-IPD.
+- **rustdoc treats `footnote-[1]` as an intra-doc link.** Writing the phrase
+  AGENTS.md uses verbatim broke `cargo doc -Dwarnings` with "unresolved link to
+  `1`". Prose lifted from a markdown file needs its brackets checked when it lands
+  in a doc comment.
+- `forward_ffi.rs` had no `//!` at all, only the macro's own `///`. It now says
+  what belongs in the file and what does not, and points at the same authoritative
+  constant.
 
 ### Task 4.4: Markdown drift (README, AGENTS, CHANGELOG)
 
