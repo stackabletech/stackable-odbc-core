@@ -156,6 +156,15 @@ call `SQLCloseCursor` or `SQLFreeStmt(SQL_CLOSE)` first, as it already must for
 
 ### Added
 
+- **`into_values` on the ten catalog row types**, beside the existing
+  `to_values`. It consumes the row, so the strings move instead of being cloned:
+  measured at **0.40×** the borrowing form for a 50 000-row result set (3.28 ms →
+  1.33 ms). `to_values` remains and now delegates to it, which keeps the spec
+  column order defined in one place — two lists in that order is how they come to
+  disagree, and an application binds by column number. A driver has nothing to
+  change; core's own catalog functions use the consuming form.
+
+
 - `Backend::configure_dsn`, a defaulted hook that supplies a data source's
   keywords to `ConfigDSN`. This is what makes the Windows ODBC Administrator's
   **Add…** and **Configure…** buttons work at all: the Administrator calls

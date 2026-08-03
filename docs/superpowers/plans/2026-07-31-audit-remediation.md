@@ -1006,11 +1006,49 @@ design are recorded here so a retry starts from them.
 
 ### Task 6.6: Small wins + logging hardening (LOW batch, one commit)
 
-- [ ] `write_utf16` null-buffer branch uses `count()` (no `Vec`) — existing length-probe tests green.
-- [ ] `translate_escapes` fast path: `if !sql.contains('{')` return owned input — escape tests green; add `text_without_braces_is_returned_unchanged`.
-- [ ] `catalog_rows.rs`: add consuming `into_values(self)`; switch the ten `metadata.rs` call sites.
-- [ ] `logging.rs` (S2): document the symlink-follow behaviour and same-user threat model in the module header; optionally add CRLF-stripping for backend-originated text in log lines (decide with Andrew — it changes log fidelity).
-- [ ] GATE. Commit: `perf: small allocation wins on cold paths; logging threat model documented`
+- [x] `write_utf16` null-buffer branch uses `count()` (no `Vec`) — existing length-probe tests green.
+- [x] `translate_escapes` fast path: `if !sql.contains('{')` return owned input — escape tests green; add `text_without_braces_is_returned_unchanged`.
+- [x] `catalog_rows.rs`: add consuming `into_values(self)`; switch the ten `metadata.rs` call sites.
+- [x] `logging.rs` (S2): document the symlink-follow behaviour and same-user threat model in the module header; optionally add CRLF-stripping for backend-originated text in log lines (decide with Andrew — it changes log fidelity).
+- [x] GATE. Commit: `perf: small allocation wins on cold paths; logging threat model documented`
+
+
+**Outcome (2026-08-03).** Three items done and measured in isolation; the fourth
+is documented, with its optional half left as a question below.
+
+- **`write_utf16`'s length probe no longer allocates.** It collected a `Vec<u16>`
+  before checking whether there was anywhere to write, so the pure length query —
+  which every "how big a buffer do I need" call is — built the units to throw them
+  away. Counted instead, with the `Vec` built after the early return.
+- **`translate_escapes` fast path: 86 ns → 6 ns** on the *setup alone*
+  (`Vec<char>` against `contains('{')`), before counting the scan it now skips
+  entirely. This runs on every `SQLExecDirect` and `SQLPrepare`, and the
+  overwhelming majority of statements contain no escape.
+  `text_without_braces_is_returned_unchanged` pins that the fast path and the
+  scanner agree, which is the thing worth testing about it.
+- **`into_values` is 0.40× the borrowing form** — 3.28 ms → 1.33 ms for 50 000
+  catalog rows, measured the way `metadata.rs` calls it (`into_iter` over an owned
+  `Vec`, not a clone of a borrowed row; a first attempt that cloned the row anyway
+  measured a misleading 0.87×). Implemented by **inverting** rather than adding:
+  `into_values` is primary and `to_values` delegates to
+  `self.clone().into_values()`, so the ten column orders are still written once.
+  Eleven call sites switched, `opt_str` consumes.
+- **`logging.rs` threat model documented (S2).** Four things, each verified rather
+  than assumed: a log contains connection parameters *other than* credentials
+  (`ConnectParams` redacts them by hand, pinned by two tests) plus catalog filter
+  arguments, and **no** statement text and no parameter or column values — so it
+  is schema-revealing, not data-revealing; whoever can set `ODBC_LOG_FILE` can
+  already run code as that user, so it is not a privilege boundary; symlinks *are*
+  followed (`create(true)`, no `O_NOFOLLOW`), which leaves the world-writable
+  directory case as an operational matter rather than one core can decide; and
+  mode `0o600` applies at creation only.
+
+**Open question, deliberately not decided:** CRLF-stripping for
+backend-originated text in log lines. It would stop a hostile error message
+forging log records, but it changes log fidelity — a diagnostic containing a real
+newline would no longer round-trip — and nothing in core currently logs
+backend-supplied text except through `Debug`, which escapes newlines already.
+Left to Andrew.
 
 ---
 

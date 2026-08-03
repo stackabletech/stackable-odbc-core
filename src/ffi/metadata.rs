@@ -415,7 +415,7 @@ pub unsafe fn sql_tables_w<B: Backend>(
                     })
                     .collect();
                 let mut values: Vec<Vec<ColumnValue>> =
-                    rows.iter().map(TableRow::to_values).collect();
+                    rows.into_iter().map(TableRow::into_values).collect();
                 crate::catalog_sort::sort_rows(
                     &mut values,
                     &TABLES_SORT_KEYS,
@@ -453,7 +453,8 @@ pub unsafe fn sql_tables_w<B: Backend>(
             let rows = B::tables(connection, cancel, &query);
             let rows = timer.check::<B, _, _>(rows, cancel)?;
 
-            let mut values: Vec<Vec<ColumnValue>> = rows.iter().map(TableRow::to_values).collect();
+            let mut values: Vec<Vec<ColumnValue>> =
+                rows.into_iter().map(TableRow::into_values).collect();
             crate::catalog_sort::sort_rows(
                 &mut values,
                 &TABLES_SORT_KEYS,
@@ -647,7 +648,8 @@ pub unsafe fn sql_columns_w<B: Backend>(
             let rows = B::columns(connection, cancel, &query);
             let rows = timer.check::<B, _, _>(rows, cancel)?;
 
-            let mut values: Vec<Vec<ColumnValue>> = rows.iter().map(ColumnRow::to_values).collect();
+            let mut values: Vec<Vec<ColumnValue>> =
+                rows.into_iter().map(ColumnRow::into_values).collect();
             // Spec: ordered by TABLE_CAT, TABLE_SCHEM, TABLE_NAME,
             // ORDINAL_POSITION — zero-based column indices 0, 1, 2, 16.
             crate::catalog_sort::sort_rows(
@@ -843,7 +845,7 @@ pub unsafe fn sql_primary_keys_w<B: Backend>(
             let rows = timer.check::<B, _, _>(rows, cancel)?;
 
             let mut values: Vec<Vec<ColumnValue>> =
-                rows.iter().map(PrimaryKeyRow::to_values).collect();
+                rows.into_iter().map(PrimaryKeyRow::into_values).collect();
             // Spec: ordered by TABLE_CAT, TABLE_SCHEM, TABLE_NAME, KEY_SEQ
             // — zero-based column indices 0, 1, 2, 4.
             crate::catalog_sort::sort_rows(
@@ -1074,7 +1076,7 @@ pub unsafe fn sql_foreign_keys_w<B: Backend>(
             let rows = timer.check::<B, _, _>(rows, cancel)?;
 
             let mut values: Vec<Vec<ColumnValue>> =
-                rows.iter().map(ForeignKeyRow::to_values).collect();
+                rows.into_iter().map(ForeignKeyRow::into_values).collect();
             // Spec: "If the foreign keys associated with a primary key are
             // requested, the result set is ordered by FKTABLE_CAT,
             // FKTABLE_SCHEM, FKTABLE_NAME, and KEY_SEQ. If the primary keys
@@ -1292,7 +1294,7 @@ pub unsafe fn sql_statistics_w<B: Backend>(
             {
                 Ok(rows) => {
                     let mut values: Vec<Vec<ColumnValue>> =
-                        rows.iter().map(StatisticsRow::to_values).collect();
+                        rows.into_iter().map(StatisticsRow::into_values).collect();
                     // Spec: ordered by NON_UNIQUE, TYPE, INDEX_QUALIFIER,
                     // INDEX_NAME, ORDINAL_POSITION — zero-based column
                     // indices 3, 6, 4, 5, 7.
@@ -1555,8 +1557,10 @@ pub unsafe fn sql_special_columns_w<B: Backend>(
                 .into_odbc()
             {
                 Ok(rows) => {
-                    let mut values: Vec<Vec<ColumnValue>> =
-                        rows.iter().map(SpecialColumnRow::to_values).collect();
+                    let mut values: Vec<Vec<ColumnValue>> = rows
+                        .into_iter()
+                        .map(SpecialColumnRow::into_values)
+                        .collect();
                     // Spec: ordered by SCOPE — zero-based column index 0.
                     crate::catalog_sort::sort_rows(
                         &mut values,
@@ -2248,7 +2252,7 @@ pub unsafe fn sql_procedures_w<B: Backend>(
             let rows = timer.check::<B, _, _>(rows, cancel)?;
 
             let mut values: Vec<Vec<ColumnValue>> =
-                rows.iter().map(ProcedureRow::to_values).collect();
+                rows.into_iter().map(ProcedureRow::into_values).collect();
             crate::catalog_sort::sort_rows(
                 &mut values,
                 &PROCEDURES_SORT_KEYS,
@@ -2489,8 +2493,10 @@ pub unsafe fn sql_procedure_columns_w<B: Backend>(
             let rows = B::procedure_columns(connection, cancel, &query);
             let rows = timer.check::<B, _, _>(rows, cancel)?;
 
-            let mut values: Vec<Vec<ColumnValue>> =
-                rows.iter().map(ProcedureColumnRow::to_values).collect();
+            let mut values: Vec<Vec<ColumnValue>> = rows
+                .into_iter()
+                .map(ProcedureColumnRow::into_values)
+                .collect();
             crate::catalog_sort::sort_rows(
                 &mut values,
                 &PROCEDURE_COLUMNS_SORT_KEYS,
@@ -2722,8 +2728,10 @@ pub unsafe fn sql_column_privileges_w<B: Backend>(
             let rows = B::column_privileges(connection, cancel, &query);
             let rows = timer.check::<B, _, _>(rows, cancel)?;
 
-            let mut values: Vec<Vec<ColumnValue>> =
-                rows.iter().map(ColumnPrivilegeRow::to_values).collect();
+            let mut values: Vec<Vec<ColumnValue>> = rows
+                .into_iter()
+                .map(ColumnPrivilegeRow::into_values)
+                .collect();
             crate::catalog_sort::sort_rows(
                 &mut values,
                 &COLUMN_PRIVILEGES_SORT_KEYS,
@@ -2941,8 +2949,10 @@ pub unsafe fn sql_table_privileges_w<B: Backend>(
             let rows = B::table_privileges(connection, cancel, &query);
             let rows = timer.check::<B, _, _>(rows, cancel)?;
 
-            let mut values: Vec<Vec<ColumnValue>> =
-                rows.iter().map(TablePrivilegeRow::to_values).collect();
+            let mut values: Vec<Vec<ColumnValue>> = rows
+                .into_iter()
+                .map(TablePrivilegeRow::into_values)
+                .collect();
             crate::catalog_sort::sort_rows(
                 &mut values,
                 &TABLE_PRIVILEGES_SORT_KEYS,

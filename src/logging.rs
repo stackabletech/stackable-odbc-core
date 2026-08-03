@@ -1,4 +1,38 @@
 //! `tracing`-based logging, configured by `ODBC_LOG_LEVEL` and `ODBC_LOG_FILE`.
+//!
+//! # Threat model
+//!
+//! Recorded because the audit raised the log file as a finding, and the answer is
+//! mostly about *who already has what* rather than about this code.
+//!
+//! **What a log can contain.** Connection parameters other than credentials —
+//! host, port, database, user — plus the catalog functions' filter arguments,
+//! which are schema, table and column names. Passwords are not among them:
+//! `ConnectParams` implements `Debug` by hand to redact credential keywords, and
+//! `debug_redacts_password_key` and
+//! `debug_redacts_credential_keywords_beyond_password_and_pwd` pin it. Neither
+//! statement text nor parameter or column *values* are logged at any level, so a
+//! log is schema-revealing and not data-revealing.
+//!
+//! **Who chooses the path.** Whoever can set `ODBC_LOG_FILE` in the environment
+//! of the process the driver is loaded into — which is the application itself, or
+//! someone who can already run code as that user and therefore read anything the
+//! driver can. The variable is not a privilege boundary, and enabling logging is
+//! a decision by the process rather than an attacker-reachable toggle.
+//!
+//! **Symlinks are followed, deliberately.** The file is opened with `create(true)`
+//! and `append(true)` and no `O_NOFOLLOW`, so a pre-existing symlink at the
+//! configured path is followed and a pre-existing regular file is appended to.
+//! Given the paragraph above that is not a privilege escalation; what remains is
+//! the classic world-writable-directory case — a legitimate user configures a path
+//! under `/tmp` and another user pre-creates a link there. The mitigation is
+//! operational: do not configure a log path in a world-writable directory. Core
+//! does not refuse one, because it cannot tell a shared directory from an
+//! intended one, and a driver that declines to log is its own denial of service.
+//!
+//! **Mode `0o600` applies at creation only.** An existing file keeps whatever
+//! mode it already has, which the comment at the `open` call repeats where it is
+//! actionable.
 
 use std::sync::Once;
 use tracing_subscriber::fmt::format::FmtSpan;

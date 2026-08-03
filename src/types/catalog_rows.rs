@@ -376,9 +376,9 @@ catalog_rows! {
     }
 }
 
-fn opt_str(v: &Option<String>) -> ColumnValue {
+fn opt_str(v: Option<String>) -> ColumnValue {
     match v {
-        Some(s) => ColumnValue::String(s.clone()),
+        Some(s) => ColumnValue::String(s),
         None => ColumnValue::Null,
     }
 }
@@ -400,187 +400,307 @@ fn opt_i32(v: Option<i32>) -> ColumnValue {
 impl TableRow {
     /// Values in spec column order: `TABLE_CAT`, `TABLE_SCHEM`, `TABLE_NAME`,
     /// `TABLE_TYPE`, `REMARKS`.
-    pub fn to_values(&self) -> Vec<ColumnValue> {
+    /// Consuming, so the strings move rather than being cloned. The
+    /// borrowing [`Self::to_values`] delegates here, which keeps the column
+    /// order defined once — two lists in this order is how they come to
+    /// disagree, and an application binds by number.
+    pub fn into_values(self) -> Vec<ColumnValue> {
         vec![
-            opt_str(&self.catalog),
-            opt_str(&self.schema),
-            opt_str(&self.name),
-            opt_str(&self.table_type),
-            opt_str(&self.remarks),
+            opt_str(self.catalog),
+            opt_str(self.schema),
+            opt_str(self.name),
+            opt_str(self.table_type),
+            opt_str(self.remarks),
         ]
+    }
+
+    /// Values in spec column order: `TABLE_CAT`, `TABLE_SCHEM`, `TABLE_NAME`,
+    ///
+    /// Clones. [`Self::into_values`] is the one to use where the row is
+    /// owned and discarded after, which is every call in `ffi/metadata.rs`.
+    pub fn to_values(&self) -> Vec<ColumnValue> {
+        self.clone().into_values()
     }
 }
 
 impl ColumnRow {
     /// Values in spec column order; 18 columns, matching the field order.
-    pub fn to_values(&self) -> Vec<ColumnValue> {
+    /// Consuming, so the strings move rather than being cloned. The
+    /// borrowing [`Self::to_values`] delegates here, which keeps the column
+    /// order defined once — two lists in this order is how they come to
+    /// disagree, and an application binds by number.
+    pub fn into_values(self) -> Vec<ColumnValue> {
         vec![
-            opt_str(&self.catalog),
-            opt_str(&self.schema),
-            ColumnValue::String(self.table_name.clone()),
-            ColumnValue::String(self.column_name.clone()),
+            opt_str(self.catalog),
+            opt_str(self.schema),
+            ColumnValue::String(self.table_name),
+            ColumnValue::String(self.column_name),
             ColumnValue::I16(self.data_type),
-            ColumnValue::String(self.type_name.clone()),
+            ColumnValue::String(self.type_name),
             opt_i32(self.column_size),
             opt_i32(self.buffer_length),
             opt_i16(self.decimal_digits),
             opt_i16(self.num_prec_radix),
             ColumnValue::I16(self.nullable),
-            opt_str(&self.remarks),
-            opt_str(&self.column_def),
+            opt_str(self.remarks),
+            opt_str(self.column_def),
             ColumnValue::I16(self.sql_data_type),
             opt_i16(self.sql_datetime_sub),
             opt_i32(self.char_octet_length),
             ColumnValue::I32(self.ordinal_position),
-            opt_str(&self.is_nullable),
+            opt_str(self.is_nullable),
         ]
+    }
+
+    /// Values in spec column order; 18 columns, matching the field order.
+    ///
+    /// Clones. [`Self::into_values`] is the one to use where the row is
+    /// owned and discarded after, which is every call in `ffi/metadata.rs`.
+    pub fn to_values(&self) -> Vec<ColumnValue> {
+        self.clone().into_values()
     }
 }
 
 impl PrimaryKeyRow {
     /// Values in spec column order; 6 columns, matching the field order.
-    pub fn to_values(&self) -> Vec<ColumnValue> {
+    /// Consuming, so the strings move rather than being cloned. The
+    /// borrowing [`Self::to_values`] delegates here, which keeps the column
+    /// order defined once — two lists in this order is how they come to
+    /// disagree, and an application binds by number.
+    pub fn into_values(self) -> Vec<ColumnValue> {
         vec![
-            opt_str(&self.catalog),
-            opt_str(&self.schema),
-            ColumnValue::String(self.table_name.clone()),
-            ColumnValue::String(self.column_name.clone()),
+            opt_str(self.catalog),
+            opt_str(self.schema),
+            ColumnValue::String(self.table_name),
+            ColumnValue::String(self.column_name),
             ColumnValue::I16(self.key_seq),
-            opt_str(&self.pk_name),
+            opt_str(self.pk_name),
         ]
+    }
+
+    /// Values in spec column order; 6 columns, matching the field order.
+    ///
+    /// Clones. [`Self::into_values`] is the one to use where the row is
+    /// owned and discarded after, which is every call in `ffi/metadata.rs`.
+    pub fn to_values(&self) -> Vec<ColumnValue> {
+        self.clone().into_values()
     }
 }
 
 impl ForeignKeyRow {
     /// Values in spec column order; 14 columns, matching the field order.
-    pub fn to_values(&self) -> Vec<ColumnValue> {
+    /// Consuming, so the strings move rather than being cloned. The
+    /// borrowing [`Self::to_values`] delegates here, which keeps the column
+    /// order defined once — two lists in this order is how they come to
+    /// disagree, and an application binds by number.
+    pub fn into_values(self) -> Vec<ColumnValue> {
         vec![
-            opt_str(&self.pk_catalog),
-            opt_str(&self.pk_schema),
-            ColumnValue::String(self.pk_table_name.clone()),
-            ColumnValue::String(self.pk_column_name.clone()),
-            opt_str(&self.fk_catalog),
-            opt_str(&self.fk_schema),
-            ColumnValue::String(self.fk_table_name.clone()),
-            ColumnValue::String(self.fk_column_name.clone()),
+            opt_str(self.pk_catalog),
+            opt_str(self.pk_schema),
+            ColumnValue::String(self.pk_table_name),
+            ColumnValue::String(self.pk_column_name),
+            opt_str(self.fk_catalog),
+            opt_str(self.fk_schema),
+            ColumnValue::String(self.fk_table_name),
+            ColumnValue::String(self.fk_column_name),
             ColumnValue::I16(self.key_seq),
             opt_i16(self.update_rule),
             opt_i16(self.delete_rule),
-            opt_str(&self.fk_name),
-            opt_str(&self.pk_name),
+            opt_str(self.fk_name),
+            opt_str(self.pk_name),
             opt_i16(self.deferrability),
         ]
+    }
+
+    /// Values in spec column order; 14 columns, matching the field order.
+    ///
+    /// Clones. [`Self::into_values`] is the one to use where the row is
+    /// owned and discarded after, which is every call in `ffi/metadata.rs`.
+    pub fn to_values(&self) -> Vec<ColumnValue> {
+        self.clone().into_values()
     }
 }
 
 impl StatisticsRow {
     /// Values in spec column order; 13 columns, matching the field order.
-    pub fn to_values(&self) -> Vec<ColumnValue> {
+    /// Consuming, so the strings move rather than being cloned. The
+    /// borrowing [`Self::to_values`] delegates here, which keeps the column
+    /// order defined once — two lists in this order is how they come to
+    /// disagree, and an application binds by number.
+    pub fn into_values(self) -> Vec<ColumnValue> {
         vec![
-            opt_str(&self.catalog),
-            opt_str(&self.schema),
-            ColumnValue::String(self.table_name.clone()),
+            opt_str(self.catalog),
+            opt_str(self.schema),
+            ColumnValue::String(self.table_name),
             opt_i16(self.non_unique),
-            opt_str(&self.index_qualifier),
-            opt_str(&self.index_name),
+            opt_str(self.index_qualifier),
+            opt_str(self.index_name),
             ColumnValue::I16(self.index_type),
             opt_i16(self.ordinal_position),
-            opt_str(&self.column_name),
-            opt_str(&self.asc_or_desc),
+            opt_str(self.column_name),
+            opt_str(self.asc_or_desc),
             opt_i32(self.cardinality),
             opt_i32(self.pages),
-            opt_str(&self.filter_condition),
+            opt_str(self.filter_condition),
         ]
+    }
+
+    /// Values in spec column order; 13 columns, matching the field order.
+    ///
+    /// Clones. [`Self::into_values`] is the one to use where the row is
+    /// owned and discarded after, which is every call in `ffi/metadata.rs`.
+    pub fn to_values(&self) -> Vec<ColumnValue> {
+        self.clone().into_values()
     }
 }
 
 impl SpecialColumnRow {
     /// Values in spec column order; 8 columns, matching the field order.
-    pub fn to_values(&self) -> Vec<ColumnValue> {
+    /// Consuming, so the strings move rather than being cloned. The
+    /// borrowing [`Self::to_values`] delegates here, which keeps the column
+    /// order defined once — two lists in this order is how they come to
+    /// disagree, and an application binds by number.
+    pub fn into_values(self) -> Vec<ColumnValue> {
         vec![
             opt_i16(self.scope),
-            ColumnValue::String(self.column_name.clone()),
+            ColumnValue::String(self.column_name),
             ColumnValue::I16(self.data_type),
-            ColumnValue::String(self.type_name.clone()),
+            ColumnValue::String(self.type_name),
             opt_i32(self.column_size),
             opt_i32(self.buffer_length),
             opt_i16(self.decimal_digits),
             opt_i16(self.pseudo_column),
         ]
     }
+
+    /// Values in spec column order; 8 columns, matching the field order.
+    ///
+    /// Clones. [`Self::into_values`] is the one to use where the row is
+    /// owned and discarded after, which is every call in `ffi/metadata.rs`.
+    pub fn to_values(&self) -> Vec<ColumnValue> {
+        self.clone().into_values()
+    }
 }
 
 impl ProcedureRow {
     /// Values in spec column order; 8 columns, matching the field order.
-    pub fn to_values(&self) -> Vec<ColumnValue> {
+    /// Consuming, so the strings move rather than being cloned. The
+    /// borrowing [`Self::to_values`] delegates here, which keeps the column
+    /// order defined once — two lists in this order is how they come to
+    /// disagree, and an application binds by number.
+    pub fn into_values(self) -> Vec<ColumnValue> {
         vec![
-            opt_str(&self.catalog),
-            opt_str(&self.schema),
-            ColumnValue::String(self.name.clone()),
+            opt_str(self.catalog),
+            opt_str(self.schema),
+            ColumnValue::String(self.name),
             opt_i16(self.num_input_params),
             opt_i16(self.num_output_params),
             opt_i16(self.num_result_sets),
-            opt_str(&self.remarks),
+            opt_str(self.remarks),
             opt_i16(self.procedure_type),
         ]
+    }
+
+    /// Values in spec column order; 8 columns, matching the field order.
+    ///
+    /// Clones. [`Self::into_values`] is the one to use where the row is
+    /// owned and discarded after, which is every call in `ffi/metadata.rs`.
+    pub fn to_values(&self) -> Vec<ColumnValue> {
+        self.clone().into_values()
     }
 }
 
 impl ProcedureColumnRow {
     /// Values in spec column order; 19 columns, matching the field order.
-    pub fn to_values(&self) -> Vec<ColumnValue> {
+    /// Consuming, so the strings move rather than being cloned. The
+    /// borrowing [`Self::to_values`] delegates here, which keeps the column
+    /// order defined once — two lists in this order is how they come to
+    /// disagree, and an application binds by number.
+    pub fn into_values(self) -> Vec<ColumnValue> {
         vec![
-            opt_str(&self.catalog),
-            opt_str(&self.schema),
-            ColumnValue::String(self.procedure_name.clone()),
-            ColumnValue::String(self.column_name.clone()),
+            opt_str(self.catalog),
+            opt_str(self.schema),
+            ColumnValue::String(self.procedure_name),
+            ColumnValue::String(self.column_name),
             ColumnValue::I16(self.column_type),
             ColumnValue::I16(self.data_type),
-            ColumnValue::String(self.type_name.clone()),
+            ColumnValue::String(self.type_name),
             opt_i32(self.column_size),
             opt_i32(self.buffer_length),
             opt_i16(self.decimal_digits),
             opt_i16(self.num_prec_radix),
             ColumnValue::I16(self.nullable),
-            opt_str(&self.remarks),
-            opt_str(&self.column_def),
+            opt_str(self.remarks),
+            opt_str(self.column_def),
             ColumnValue::I16(self.sql_data_type),
             opt_i16(self.sql_datetime_sub),
             opt_i32(self.char_octet_length),
             ColumnValue::I32(self.ordinal_position),
-            opt_str(&self.is_nullable),
+            opt_str(self.is_nullable),
         ]
+    }
+
+    /// Values in spec column order; 19 columns, matching the field order.
+    ///
+    /// Clones. [`Self::into_values`] is the one to use where the row is
+    /// owned and discarded after, which is every call in `ffi/metadata.rs`.
+    pub fn to_values(&self) -> Vec<ColumnValue> {
+        self.clone().into_values()
     }
 }
 
 impl ColumnPrivilegeRow {
     /// Values in spec column order; 8 columns, matching the field order.
-    pub fn to_values(&self) -> Vec<ColumnValue> {
+    /// Consuming, so the strings move rather than being cloned. The
+    /// borrowing [`Self::to_values`] delegates here, which keeps the column
+    /// order defined once — two lists in this order is how they come to
+    /// disagree, and an application binds by number.
+    pub fn into_values(self) -> Vec<ColumnValue> {
         vec![
-            opt_str(&self.catalog),
-            opt_str(&self.schema),
-            ColumnValue::String(self.table_name.clone()),
-            ColumnValue::String(self.column_name.clone()),
-            opt_str(&self.grantor),
-            ColumnValue::String(self.grantee.clone()),
-            ColumnValue::String(self.privilege.clone()),
-            opt_str(&self.is_grantable),
+            opt_str(self.catalog),
+            opt_str(self.schema),
+            ColumnValue::String(self.table_name),
+            ColumnValue::String(self.column_name),
+            opt_str(self.grantor),
+            ColumnValue::String(self.grantee),
+            ColumnValue::String(self.privilege),
+            opt_str(self.is_grantable),
         ]
+    }
+
+    /// Values in spec column order; 8 columns, matching the field order.
+    ///
+    /// Clones. [`Self::into_values`] is the one to use where the row is
+    /// owned and discarded after, which is every call in `ffi/metadata.rs`.
+    pub fn to_values(&self) -> Vec<ColumnValue> {
+        self.clone().into_values()
     }
 }
 
 impl TablePrivilegeRow {
     /// Values in spec column order; 7 columns, matching the field order.
-    pub fn to_values(&self) -> Vec<ColumnValue> {
+    /// Consuming, so the strings move rather than being cloned. The
+    /// borrowing [`Self::to_values`] delegates here, which keeps the column
+    /// order defined once — two lists in this order is how they come to
+    /// disagree, and an application binds by number.
+    pub fn into_values(self) -> Vec<ColumnValue> {
         vec![
-            opt_str(&self.catalog),
-            opt_str(&self.schema),
-            ColumnValue::String(self.table_name.clone()),
-            opt_str(&self.grantor),
-            ColumnValue::String(self.grantee.clone()),
-            ColumnValue::String(self.privilege.clone()),
-            opt_str(&self.is_grantable),
+            opt_str(self.catalog),
+            opt_str(self.schema),
+            ColumnValue::String(self.table_name),
+            opt_str(self.grantor),
+            ColumnValue::String(self.grantee),
+            ColumnValue::String(self.privilege),
+            opt_str(self.is_grantable),
         ]
+    }
+
+    /// Values in spec column order; 7 columns, matching the field order.
+    ///
+    /// Clones. [`Self::into_values`] is the one to use where the row is
+    /// owned and discarded after, which is every call in `ffi/metadata.rs`.
+    pub fn to_values(&self) -> Vec<ColumnValue> {
+        self.clone().into_values()
     }
 }
 

@@ -185,6 +185,15 @@ const MAX_ESCAPE_DEPTH: usize = 64;
 /// an unsupported (`{call}` → HYC00) or malformed (unterminated → 42000)
 /// escape, or one nested more than 64 levels deep (42000).
 pub fn translate_escapes(sql: &str, dialect: &EscapeDialect) -> Result<String, OdbcError> {
+    // No brace, no escape sequence: every form this module translates opens with
+    // `{`. Checked before anything is allocated, because this runs on every
+    // `SQLExecDirect` and `SQLPrepare` and the overwhelming majority of
+    // statements contain no escape at all — and the scan below allocates a
+    // `Vec<char>` as wide as the statement before it looks at a single
+    // character.
+    if !sql.contains('{') {
+        return Ok(sql.to_owned());
+    }
     let chars: Vec<char> = sql.chars().collect();
     translate_slice(&chars, dialect, 0)
 }
@@ -678,6 +687,31 @@ mod tests {
     }
     fn rtr(sql: &str) -> String {
         translate_escapes(sql, &rewriting_dialect()).unwrap()
+    }
+
+    /// Statement text with no brace comes back unchanged, by the fast path.
+    ///
+    /// Not merely an optimisation to assert: the fast path returns the input
+    /// *without* running the scanner, so this is what pins that the two agree for
+    /// text the scanner would also have left alone. A `{` anywhere sends the
+    /// statement down the scanning path, which the neighbouring tests cover.
+    #[test]
+    fn text_without_braces_is_returned_unchanged() {
+        let dialect = dialect();
+        for sql in [
+            "",
+            "SELECT 1",
+            "SELECT * FROM t WHERE name = 'a' AND x <= 2",
+            // A brace-free string that still contains the other punctuation the
+            // scanner cares about, so the fast path is not merely lucky.
+            "SELECT 'literal ) ( ,' FROM t",
+        ] {
+            assert_eq!(
+                translate_escapes(sql, &dialect).expect("brace-free text never fails"),
+                sql,
+                "the fast path must be identity for {sql:?}"
+            );
+        }
     }
 
     #[test]

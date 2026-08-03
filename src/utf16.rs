@@ -306,12 +306,16 @@ pub unsafe fn write_utf16(
     buf_len: i16,
     len_ptr: *mut i16,
 ) -> SqlReturn {
-    let wide: Vec<u16> = value.encode_utf16().collect();
+    // Counted, not collected: a length probe — the `out_ptr.is_null()` branch
+    // below — needs only the number, and building the units to throw them away
+    // was the whole cost of the probe. The `Vec` is built after that branch, for
+    // the callers that have somewhere to write.
+    let unit_count = value.encode_utf16().count();
 
     // Always report the total length needed (without null terminator).
     // Saturate to i16::MAX to avoid silent overflow on very long strings.
     if !len_ptr.is_null() {
-        let reported_len = wide.len().min(i16::MAX as usize) as i16;
+        let reported_len = unit_count.min(i16::MAX as usize) as i16;
         // Unaligned: an application using row-wise binding hands out pointers
         // at arbitrary offsets into a packed buffer, so `*len_ptr = ..` would
         // be undefined behaviour. In a debug build it is not even silent — the
@@ -328,6 +332,8 @@ pub unsafe fn write_utf16(
     if out_ptr.is_null() {
         return SqlReturn::SUCCESS;
     }
+
+    let wide: Vec<u16> = value.encode_utf16().collect();
 
     // A non-null buffer with no room in it is a different thing, and sharing the
     // branch above gave the two the same answer. The application supplied
