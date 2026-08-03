@@ -789,8 +789,10 @@ fn read_desc_rec_field<B: Backend>(
 /// - `descriptor_handle`: Descriptor handle.
 /// - `record_number`: The descriptor record to read.
 /// - `name`: Buffer for `SQL_DESC_NAME`.
-/// - `buffer_length`: Length of `name` in bytes.
-/// - `string_length_ptr`: Receives the available byte count for `name`.
+/// - `buffer_length`: Length of `name` in **characters**, per this page's own
+///   wording — unlike [`sql_get_desc_field_w`], whose page counts bytes. See
+///   the comment at the `SQL_DESC_NAME` write for the evidence.
+/// - `string_length_ptr`: Receives the available **character** count for `name`.
 /// - `type_ptr`: Receives `SQL_DESC_TYPE`.
 /// - `sub_type_ptr`: Receives `SQL_DESC_DATETIME_INTERVAL_CODE`, for a datetime
 ///   or interval type.
@@ -843,7 +845,8 @@ fn read_desc_rec_field<B: Backend>(
 /// `descriptor_handle` must be null or a token issued by one of the `alloc_*`
 /// functions in `handles`. Every output pointer must be null or point to
 /// writable memory of its own type; `name` must be null or point to
-/// `buffer_length` writable bytes.
+/// `buffer_length` writable `u16`s — characters, not bytes, per the parameter
+/// list above.
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn sql_get_desc_rec_w<B: Backend>(
     descriptor_handle: *mut c_void,
@@ -912,6 +915,40 @@ pub unsafe fn sql_get_desc_rec_w<B: Backend>(
 
             // `SQL_DESC_NAME` is a character field, and its buffer is optional
             // like every other output here.
+            //
+            // **Both lengths are character counts, not byte counts**, which is
+            // the one place this function parts company with
+            // `sql_get_desc_field_w` above. This page: "*BufferLength* [Input]
+            // Length of the **Name* buffer, in characters", and
+            // "*StringLengthPtr* [Output] ... the number of characters of data
+            // available to return". `SQLGetDescField`'s page says "total number
+            // of bytes" for both of its counterparts *and* carries the clause
+            // this page does not — "if the value in **ValuePtr* is of a Unicode
+            // data type (when calling SQLGetDescFieldW), the *BufferLength*
+            // argument must be an even number" — so the two are deliberately
+            // different rather than one page being loose. `SQLGetCursorNameW`
+            // ("in characters", no even-number clause) is on this side of the
+            // line too.
+            //
+            // The drivers corroborate it, which is what settled a reading the
+            // ANSI-signature spec page alone cannot: FreeTDS reaches
+            // `SQLGetDescRec`'s name through `odbc_set_dstr`, which routes to
+            // the character-counted `odbc_set_string` rather than the
+            // byte-counted `odbc_set_string_oct` it uses elsewhere
+            // (`include/freetds/odbc.h`), and psqlODBC's `SQLGetDescRecW`
+            // assigns `*StringLength = nlen` where `nlen` is the UTF-16 unit
+            // count returned by `utf8_to_ucs2_lf` (`odbcapi30w.c`). MySQL
+            // Connector/ODBC abstains — its `SQLGetDescRecW` is
+            // `NOT_IMPLEMENTED` (`driver/unicode.cc`).
+            //
+            // unixODBC's Driver Manager is the one dissenting voice, and it
+            // dissents from itself: `DriverManager/SQLGetDescRecW.c` passes
+            // `buffer_length` and `string_length` to a Unicode driver
+            // untouched — so it constrains nothing here — while its ANSI path
+            // does `*string_length *= sizeof(SQLWCHAR)` after converting the
+            // name, which hands the application a byte count for the same call.
+            // One of its two paths must be wrong; neither is authority for what
+            // a Unicode driver reports.
             let Some(DescFieldValue::String(field_name)) =
                 read_desc_rec_field(&mut target, record_number, Desc::Name)?
             else {
@@ -919,11 +956,11 @@ pub unsafe fn sql_get_desc_rec_w<B: Backend>(
             };
             let mut units: i16 = 0;
             let ret = crate::utf16::note_truncation(
-                crate::utf16::write_utf16(&field_name, name, buffer_length / 2, &mut units),
+                crate::utf16::write_utf16(&field_name, name, buffer_length, &mut units),
                 &mut target.desc.diagnostics,
             );
             if !string_length_ptr.is_null() {
-                std::ptr::write_unaligned(string_length_ptr, units.saturating_mul(2));
+                std::ptr::write_unaligned(string_length_ptr, units);
             }
             Ok(ret)
         })
@@ -2272,6 +2309,112 @@ mod tests {
         }
     }
 
+    /// `SQLGetDescRec` counts `BufferLength` and `*StringLengthPtr` in
+    /// **characters**, not bytes — the one place this function differs from its
+    /// sibling `SQLGetDescField`, which its own page counts in bytes and which
+    /// carries the "must be an even number" clause this page does not have.
+    ///
+    /// The two neighbouring `get_desc_rec_*` tests cannot see the difference:
+    /// both read an unnamed record, and zero bytes is zero characters. A name of
+    /// six characters makes the units observable in both directions at once —
+    /// the reported length, and how much of the buffer a truncating call fills.
+    #[test]
+    fn get_desc_rec_counts_the_name_buffer_in_characters_not_bytes() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            let ipd = ipd_of(stmt);
+
+            let mut val: i32 = 0;
+            assert_eq!(
+                crate::ffi::params::sql_bind_parameter::<MockBackend>(
+                    stmt,
+                    1,
+                    ParamType::Input as i16,
+                    CDataType::SLong as i16,
+                    SqlDataType::INTEGER.0,
+                    0,
+                    0,
+                    std::ptr::from_mut(&mut val).cast::<c_void>(),
+                    4,
+                    std::ptr::null_mut(),
+                ),
+                SqlReturn::SUCCESS
+            );
+
+            // SQLSetDescField's BufferLength *is* a byte count — that page says
+            // "total number of bytes" and carries the even-number clause — so
+            // the two functions of this test disagree on units by design.
+            let wide: Vec<u16> = "ABCDEF".encode_utf16().collect();
+            assert_eq!(
+                sql_set_desc_field_w::<MockBackend>(
+                    ipd,
+                    1,
+                    Desc::Name as i16,
+                    wide.as_ptr().cast_mut().cast::<c_void>(),
+                    i32::try_from(wide.len() * 2).expect("short"),
+                ),
+                SqlReturn::SUCCESS
+            );
+
+            // A buffer with room to spare: the whole name arrives, and the
+            // reported length is 6 characters rather than 12 bytes.
+            let mut name = [0u16; 32];
+            let mut name_len: i16 = -1;
+            let ret = sql_get_desc_rec_w::<MockBackend>(
+                ipd,
+                1,
+                name.as_mut_ptr(),
+                i16::try_from(name.len()).expect("short"),
+                &mut name_len,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+            assert_eq!(
+                name_len, 6,
+                "*StringLengthPtr is \"the number of characters of data available\""
+            );
+            assert_eq!(String::from_utf16_lossy(&name[..6]), "ABCDEF");
+            assert_eq!(name[6], 0, "null-terminated by the driver");
+
+            // A buffer of four *characters*: three of them plus a terminator,
+            // 01004, and the untruncated length still reported in characters.
+            // Read as bytes this would be two SQLWCHARs, so one character.
+            let mut small = [0xFFFFu16; 4];
+            let mut name_len: i16 = -1;
+            let ret = sql_get_desc_rec_w::<MockBackend>(
+                ipd,
+                1,
+                small.as_mut_ptr(),
+                i16::try_from(small.len()).expect("short"),
+                &mut name_len,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS_WITH_INFO);
+            // The warning-severity 01004, not the 22001 that `SQLSetDescField`
+            // answers for an over-long name — this row is "the buffer **Name*
+            // was not large enough ... therefore, the field was truncated".
+            assert_eq!(first_sqlstate(ipd), sql_state::STRING_DATA_RIGHT_TRUNCATED);
+            assert_eq!(
+                name_len, 6,
+                "the untruncated length, in characters, per the 01004 row"
+            );
+            assert_eq!(String::from_utf16_lossy(&small[..3]), "ABC");
+            assert_eq!(small[3], 0, "null-terminated within BufferLength");
+
+            cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
     /// The seven fields the spec lists, read in one call. Each output pointer
     /// is independently optional: "an application can prevent the return of a
     /// field's setting by setting the argument that corresponds to the field to
@@ -2305,11 +2448,15 @@ mod tests {
             let mut precision: i16 = -1;
             let mut scale: i16 = -1;
             let mut nullable: i16 = -1;
+            // A character count, not `name.len() * 2`: see
+            // `get_desc_rec_counts_the_name_buffer_in_characters_not_bytes`.
+            // Doubling it here would overstate the buffer by 2×, which this
+            // unnamed record happens not to expose.
             let ret = sql_get_desc_rec_w::<MockBackend>(
                 ipd,
                 1,
                 name.as_mut_ptr(),
-                (name.len() * 2) as i16,
+                i16::try_from(name.len()).expect("short"),
                 &mut name_len,
                 &mut type_out,
                 &mut sub_type,
@@ -2466,11 +2613,12 @@ mod tests {
             let mut precision: i16 = -1;
             let mut scale: i16 = -1;
             let mut nullable: i16 = -1;
+            // A character count, as at the IPD site above.
             let ret = sql_get_desc_rec_w::<MockBackend>(
                 ard,
                 1,
                 name.as_mut_ptr(),
-                i16::try_from(name.len() * 2).expect("short"),
+                i16::try_from(name.len()).expect("short"),
                 &mut name_len,
                 &mut type_out,
                 &mut sub_type,

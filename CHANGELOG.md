@@ -1589,6 +1589,40 @@ call `SQLCloseCursor` or `SQLFreeStmt(SQL_CLOSE)` first, as it already must for
 
 ### Fixed
 
+- **`SQLGetDescRecW` counts its `Name` buffer and length in characters, not
+  bytes.** `BufferLength` was halved and `*StringLengthPtr` doubled, so an
+  application that passed a buffer of *n* `SQLWCHAR`s got half of it used, and a
+  six-character parameter name was reported as 12. Both are now taken and
+  reported as the spec's own wording has them: "Length of the `*Name` buffer, in
+  characters" and "the number of characters of data available to return".
+
+  **This is an ABI-visible change for any application that called this
+  function.** One that passed `sizeof(buf)` (bytes) now declares twice the
+  capacity it has, so a long enough name overruns it; one that passed a
+  character count now gets the whole name where it previously got half. There is
+  no compatibility shim, because the two readings are indistinguishable at the
+  call.
+
+  `SQLGetDescFieldW` is **not** affected and keeps its byte counts, which is the
+  distinction that settled this: its page says "total number of bytes" and
+  carries the clause `SQLGetDescRec`'s page does not — "if the value in
+  `*ValuePtr` is of a Unicode data type (when calling `SQLGetDescFieldW`), the
+  `BufferLength` argument must be an even number". `SQLGetCursorNameW` ("in
+  characters", no even-number clause) was already on the character side.
+
+  The spec page describes the ANSI signature, where characters and bytes
+  coincide, so the drivers were checked rather than inferred from. FreeTDS
+  reaches this name through `odbc_set_dstr`, which routes to the
+  character-counted `odbc_set_string` and not the byte-counted
+  `odbc_set_string_oct` it uses elsewhere (`include/freetds/odbc.h`); psqlODBC's
+  `SQLGetDescRecW` assigns `*StringLength` the UTF-16 unit count returned by
+  `utf8_to_ucs2_lf` (`odbcapi30w.c`); MySQL Connector/ODBC abstains, its
+  `SQLGetDescRecW` being `NOT_IMPLEMENTED` (`driver/unicode.cc`). unixODBC's
+  Driver Manager is the one dissenting voice and dissents from itself — it
+  passes both values to a Unicode driver untouched, constraining nothing, while
+  its ANSI path does `*string_length *= sizeof(SQLWCHAR)` and hands the
+  application a byte count for the same call (`DriverManager/SQLGetDescRecW.c`).
+
 - **A float C target no longer reports `01S07` for an inexact narrowing.**
   Fetching an `f64` or an `i64` into `SQL_C_FLOAT` returned
   `SQL_SUCCESS_WITH_INFO` with `01S07` ("fractional truncation") whenever the

@@ -321,9 +321,41 @@ Each produces either a fix commit or a documented decision. **If drivers disagre
 
 ### Task 3.1: SQLGetDescRecW length semantics (bytes vs characters)
 
-- [ ] Read psqlODBC's and MySQL Connector/ODBC's `SQLGetDescRec`/W implementations (source, not docs) for `BufferLength`/`StringLengthPtr` units.
-- [ ] If they corroborate the spec (characters): fix `src/ffi/desc.rs:916, 920` (drop the `/2` and `*2`), update the doc comment **with the evidence found**, update the two pinned tests (`desc.rs:2291, 2452`) — red-green on the pins. CHANGELOG (Fixed). Commit: `fix: SQLGetDescRecW buffer and length are counted in characters per the spec`
-- [ ] If they contradict the spec: report both findings to Andrew and stop.
+- [x] Read psqlODBC's and MySQL Connector/ODBC's `SQLGetDescRec`/W implementations (source, not docs) for `BufferLength`/`StringLengthPtr` units.
+- [x] If they corroborate the spec (characters): fix `src/ffi/desc.rs:916, 920` (drop the `/2` and `*2`), update the doc comment **with the evidence found**, update the two pinned tests (`desc.rs:2291, 2452`) — red-green on the pins. CHANGELOG (Fixed). Commit: `fix: SQLGetDescRecW buffer and length are counted in characters per the spec`
+- [x] If they contradict the spec: report both findings to Andrew and stop.
+
+**Outcome (2026-08-03).** Characters, fixed. The drivers corroborate the spec —
+FreeTDS via `odbc_set_dstr` → the character-counted `odbc_set_string` (it has a
+byte-counted `odbc_set_string_oct` and uses it elsewhere, so the choice is
+deliberate), psqlODBC via `*StringLength = nlen` from `utf8_to_ucs2_lf`. MySQL
+Connector/ODBC abstains: `SQLGetDescRecW` is `NOT_IMPLEMENTED`.
+
+Four corrections to what this task assumed:
+
+- **The two named tests did not pin the units.** Both read an *unnamed* record
+  and assert `name_len == 0`, which is true in either unit, so both passed
+  before and after. The red test had to be written from scratch
+  (`get_desc_rec_counts_the_name_buffer_in_characters_not_bytes`, a six-character
+  IPD name read twice — once with room to spare, once through a four-character
+  buffer). Their `BufferLength` arguments were still corrected from
+  `name.len() * 2` to `name.len()`, which under the fixed reading overstated the
+  buffer by 2×.
+- **`SQLGetDescField` is the reason this is decidable at all**, and it is *not*
+  part of the fix. Its page says "total number of bytes" and carries the "must
+  be an even number" clause that `SQLGetDescRec`'s page lacks, so the two
+  siblings differ by design and core's byte counts at `desc.rs:219-228` are
+  correct. `SQLGetCursorNameW` was already character-counted. Core follows each
+  page's own wording rather than one house rule — worth knowing before "fixing"
+  the neighbours for consistency.
+- **unixODBC's DM is self-inconsistent here** and was nearly read as a
+  contradiction of the spec: its Unicode path passes both lengths to the driver
+  untouched, while its ANSI path multiplies the driver's `*string_length` by
+  `sizeof(SQLWCHAR)`. Only the second says anything about units, and it is about
+  an *ANSI* driver, so it is not authority for this function. That asymmetry is
+  recorded in the code comment and the CHANGELOG rather than acted on.
+- **It is an ABI-visible change with no shim possible** — the two readings are
+  indistinguishable at the call site. Flagged in the CHANGELOG.
 
 ### Task 3.2: METADATA_ID delimited identifiers with embedded quotes
 
