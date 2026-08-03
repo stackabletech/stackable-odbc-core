@@ -900,6 +900,26 @@ mechanism:
   cancel pass runs first and would label it `HY008`, and the timeout pass runs
   second so the more specific state wins. An application that set a deadline is
   waiting to tell "my deadline passed" from "another thread cancelled me".
+
+  **The attribution outlives the call that made it**, and has to. A deadline
+  that expires as the backend call is returning cancels the token and leaves the
+  call successful, so the failure it causes surfaces on a *later* call — whose
+  own timer never fired. `cancel::CancelState` is therefore what the registry
+  stores: the backend's token plus core's `timed_out` flag, one allocation, so
+  the flag is minted per execution and survives a freed statement exactly as the
+  token does. `QueryTimer::reclassify` reads it, which confines `HYT00` to the
+  entry points that hold a timer. `cancel::reclassify_cancelled` deliberately
+  does not read it: the four entry points that reach it without a timer —
+  `SQLGetData`, `SQLDescribeParam`, `SQLDescribeCol`, `SQLColAttribute` — have
+  no `HYT00` row between them, so those keep `HY008` on a timed-out cursor.
+
+  Do not shorten that to "the timer-holding entry points are exactly the ones
+  with an `HYT00` row". `SQLParamData` holds a timer and relabels, and its own
+  table has no such row; it inherits one from the sentence after its table
+  ("it can return any SQLSTATE that can be returned by the function called to
+  execute the statement"), which is the same grant its doc comment already
+  documents a dozen other inherited states under. Check a function's table
+  *and* its surrounding prose before deciding either way.
 - **Every lock in the crate is imported from `src/sync.rs`**, never directly
   from `std::sync`, so that building a test with `--cfg loom` swaps every one
   of them for loom's instrumented equivalent. A lock imported around that

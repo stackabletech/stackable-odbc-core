@@ -1633,8 +1633,11 @@ mod tests {
             let token = crate::handles::registry::registry()
                 .cancel_of(stmt)
                 .expect("token stored");
-            let token = token
-                .downcast_ref::<crate::test_utils::MockCancelToken>()
+            // Through the production accessor, not a hand-written downcast:
+            // the registry stores a `CancelState` wrapper, and a test that
+            // spelled the stored type itself would keep passing while
+            // `cancel_as` — what every call site actually uses — broke.
+            let token = crate::handles::cancel_as::<MockRecordingBackend>(&token)
                 .expect("backend's own type");
             assert!(
                 token
