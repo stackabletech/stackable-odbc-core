@@ -213,6 +213,79 @@ Fetch the row and quote it before changing anything: if the row genuinely lacks 
 
 Note the interaction with Task 2.3: that task's doc-comment edit enumerates this site as one of the `01S07` producers, so fixing the behaviour means correcting that enumeration too — otherwise the comment blesses what the code no longer does. Tests: `f64_overflowing_f32_to_float_is_22003_with_nothing_written` (both signs, sentinel), plus whatever the underflow decision needs. Commit: `fix: a float narrowing that overflows reports 22003 instead of writing infinity`
 
+### Task 2.14 (addendum): the two float-conversion claims Task 2.12 argued but did not act on
+
+**Not from the original audit** — both were surfaced by Task 2.12's
+implementer and sharpened by its reviewer, which recommended one task covering
+the pair rather than two drive-by fixes. Added on Andrew's instruction
+(2026-08-03). The reason they belong together: Task 2.12 argued the case for
+both *in code comments* while changing neither, so the comments currently
+describe a position the code does not hold.
+
+Both parts are one question asked twice — **what does a float target report
+when the value it was handed is not the value it delivers?** Decide them
+together or they will disagree.
+
+#### Part A — the *in-range* `01S07` in both float arms is core's invention
+
+`src/column_value.rs`, `write_numeric_pivot`: the `F64`→`SQL_C_FLOAT` arm and
+the `i64`→`SQL_C_FLOAT` arm both report `01S07` when the narrowing is inexact
+but lands on a representable `f32`. The *SQL to C: Numeric* row for
+`SQL_C_FLOAT`/`SQL_C_DOUBLE` has **two** cells — in range → *Data* / `n/a`;
+out of range → *Undefined* / `22003` — and Task 2.12's reviewer independently
+confirmed against the live page that the integer row above it and the
+`SQL_C_BIT` row below it *do* carry `01S07`, so the float row's omission is a
+distinction the table draws rather than an oversight. Neither psqlODBC
+(`convert.c`, `case SQL_C_FLOAT`) nor MySQL Connector/ODBC
+(`driver/results.cc`, `sql_get_data`) reports anything on this path.
+
+So spec and drivers agree, which makes this a decision rather than an ask —
+but it is a decision to **remove a diagnostic**, so:
+
+- Fetch the row and quote it before changing anything, and check whether any
+  footnote or the table's preamble grants `01S07` to a float target by another
+  route. A blind removal is the failure mode here.
+- One decision must cover **both** arms. Fixing the `F64` arm alone leaves the
+  `i64` arm making the same claim the change just rejected.
+- The severity moves from `SQL_SUCCESS_WITH_INFO` to `SQL_SUCCESS`, and the
+  data delivered does not change. That is user-facing at all five
+  `write_column_value` entry points (`SQLFetch`, `SQLFetchScroll`,
+  `SQLGetData`, `SQLExecDirect`, `SQLExecute`) — an application watching for
+  `01S07` to detect precision loss stops seeing it. Say so in the CHANGELOG.
+- **Three tests pin the behaviour being removed** and must change in the same
+  commit, red-green: `int_to_float_precision_loss_returns_01s07`,
+  `f64_narrowed_to_f32_with_precision_loss_warns`, and Task 2.12's
+  `f64_underflowing_to_zero_in_f32_is_01s07_with_zero_written`. The third is
+  the one most easily mistaken for a regression, because Task 2.12 added it
+  *as* characterisation of exactly this invented warning — its comment says so.
+- Task 2.12's doc-comment enumeration of the `01S07` sites (itself a correction
+  of Task 2.3's) must be corrected again, and this time the enumeration shrinks
+  by two entries rather than changing one.
+
+#### Part B — `parse_numeric_text` turns `"1e400"` into `Ok(inf)`
+
+`src/column_value.rs`, `parse_numeric_text`: a character column holding a
+literal beyond `f64` range parses to infinity and is then written with
+`SQL_SUCCESS`. After Task 2.12, `F64(1e300)` into `SQL_C_FLOAT` errors with
+`22003` while `String("1e400")` into the same target still delivers `+inf` and
+calls it success — and Task 2.12's own justification ("delivering a number the
+data source never held") applies to the second verbatim. This is the governing
+table's *SQL to C: Character* row, not *Numeric*, so read that row rather than
+reusing Part A's.
+
+It affects `SQL_C_DOUBLE` as well as `SQL_C_FLOAT`, and the loss happens at
+parse time, before the arm that would range-check it — so the fix site is
+`parse_numeric_text`, not the pivot. Check whether the same literal reaches any
+*other* caller of `parse_numeric_text` that would now start erroring, and name
+them; a parse-site change has wider reach than an arm-site one, which is the
+main risk in this part.
+
+Tests: name them for the concluded contract, not for the current behaviour.
+`a_character_literal_beyond_f64_range_is_22003_with_nothing_written` covers
+Part B for both `SQL_C_FLOAT` and `SQL_C_DOUBLE`; Part A needs the three pinned
+tests above inverted plus one asserting `SQL_SUCCESS` on a genuinely inexact
+narrowing. Commit: `fix: a float target reports only the diagnostics its spec row defines`
+
 ---
 
 ## Phase 3 — Investigations (mature-driver checks; ask before changing)
@@ -433,6 +506,7 @@ one at a time.
 0.1 ──────────────────────────────► 6.1..6.5 (need the benchmark)
 1.1 → 1.4 (shared offset helper)    2.1..2.10 independent of each other
 1.3 → 6.1 (same writers/cursor)     2.11 independent
+2.12 → 2.14 (2.14 corrects 2.12's own doc enumeration and inverts a test it added)
 3.1/3.2/3.3 independent, may end in "ask"
 4.x after phases 1–3 (doc claims must describe the *fixed* code)
 5.1..5.4 independent of each other; 5.2 after 1.1/1.3 (same test arenas)
