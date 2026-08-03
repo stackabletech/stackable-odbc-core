@@ -1463,6 +1463,30 @@ mod tests {
     use crate::types::SQL_ROWSET_SIZE;
     use crate::types::{SQL_SENSITIVE, SQL_TRUE};
 
+    /// The first SQLSTATE on a statement handle, so a test can assert the state
+    /// its name claims rather than only the return code. Same six-line shape as
+    /// the helper in `ffi/execute.rs`.
+    unsafe fn first_sqlstate<B: Backend>(handle: *mut c_void) -> String {
+        let mut state = [0u16; 6];
+        let mut native: i32 = 0;
+        let mut msg = [0u16; 256];
+        let mut msg_len: i16 = 0;
+        let ret = unsafe {
+            crate::ffi::diag::sql_get_diag_rec_w::<B>(
+                odbc_sys::HandleType::Stmt as i16,
+                handle,
+                1,
+                state.as_mut_ptr(),
+                &mut native,
+                msg.as_mut_ptr(),
+                msg.len() as i16,
+                &mut msg_len,
+            )
+        };
+        assert_eq!(ret, SqlReturn::SUCCESS, "no diagnostic record was posted");
+        String::from_utf16_lossy(&state[..5])
+    }
+
     #[test]
     fn cursor_sensitivity_agrees_with_the_value_sqlgetinfo_reports() {
         // `SQL_ATTR_CURSOR_SENSITIVITY` and `SQL_CURSOR_SENSITIVITY` draw from
@@ -2034,9 +2058,16 @@ mod tests {
                 SqlReturn::SUCCESS_WITH_INFO,
                 "oversized rowset was accepted silently"
             );
+            assert_eq!(
+                first_sqlstate::<MockBackend>(stmt),
+                crate::types::sql_state::OPTION_VALUE_CHANGED,
+                "the state this test's name claims"
+            );
 
-            // Checked before any other call: every FFI function clears the
-            // handle's diagnostics on entry.
+            // Checked before any call that *clears* them — every FFI function
+            // clears the handle's diagnostics on entry, except the
+            // diagnostic-reading ones, which is why the state assertion above
+            // can precede this.
             with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
                 assert_eq!(
                     handle.diagnostics.len(),
@@ -2104,6 +2135,11 @@ mod tests {
                 SqlReturn::SUCCESS_WITH_INFO,
                 "a rowset core cannot produce was accepted silently"
             );
+            assert_eq!(
+                first_sqlstate::<MockBackend>(stmt),
+                crate::types::sql_state::OPTION_VALUE_CHANGED,
+                "the state this test's name claims"
+            );
 
             with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
                 assert_eq!(
@@ -2170,6 +2206,11 @@ mod tests {
                 ret,
                 SqlReturn::SUCCESS_WITH_INFO,
                 "oversized parameter set was accepted silently"
+            );
+            assert_eq!(
+                first_sqlstate::<MockBackend>(stmt),
+                crate::types::sql_state::OPTION_VALUE_CHANGED,
+                "the state this test's name claims"
             );
 
             with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
@@ -3333,6 +3374,11 @@ mod tests {
                 0,
             );
             assert_eq!(ret, SqlReturn::ERROR);
+            assert_eq!(
+                first_sqlstate::<MockBackend>(stmt),
+                crate::types::sql_state::INVALID_CURSOR_STATE,
+                "the state this test's name claims"
+            );
             cleanup_env_conn_stmt(env, conn, stmt);
         }
     }
@@ -3352,6 +3398,11 @@ mod tests {
                 0,
             );
             assert_eq!(ret, SqlReturn::ERROR);
+            assert_eq!(
+                first_sqlstate::<MockBackend>(stmt),
+                crate::types::sql_state::ATTRIBUTE_CANNOT_BE_SET_NOW,
+                "the state this test's name claims"
+            );
             cleanup_env_conn_stmt(env, conn, stmt);
         }
     }

@@ -192,6 +192,30 @@ mod tests {
     use crate::types::CDataType;
     use std::ffi::c_void;
 
+    /// The first SQLSTATE on a statement handle, so a test can assert the state
+    /// its name claims rather than only the return code. Same six-line shape as
+    /// the helper in `ffi/execute.rs`.
+    unsafe fn first_sqlstate<B: Backend>(handle: *mut c_void) -> String {
+        let mut state = [0u16; 6];
+        let mut native: i32 = 0;
+        let mut msg = [0u16; 256];
+        let mut msg_len: i16 = 0;
+        let ret = unsafe {
+            crate::ffi::diag::sql_get_diag_rec_w::<B>(
+                odbc_sys::HandleType::Stmt as i16,
+                handle,
+                1,
+                state.as_mut_ptr(),
+                &mut native,
+                msg.as_mut_ptr(),
+                msg.len() as i16,
+                &mut msg_len,
+            )
+        };
+        assert_eq!(ret, SqlReturn::SUCCESS, "no diagnostic record was posted");
+        String::from_utf16_lossy(&state[..5])
+    }
+
     #[test]
     fn bind_col_zero_returns_hyc00() {
         unsafe {
@@ -206,6 +230,11 @@ mod tests {
                 std::ptr::null_mut(),
             );
             assert_eq!(ret, SqlReturn::ERROR);
+            assert_eq!(
+                first_sqlstate::<MockBackend>(stmt),
+                crate::types::sql_state::OPTIONAL_FEATURE_NOT_IMPLEMENTED,
+                "the state this test's name claims"
+            );
             cleanup_env_conn_stmt(env, conn, stmt);
         }
     }

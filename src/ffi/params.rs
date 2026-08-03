@@ -2234,6 +2234,30 @@ mod tests {
     /// "Hello" in UTF-16LE carries a zero byte at index 1 — and
     /// `dae_buffer_to_value`'s `chunks_exact(2)` then has nothing to pair, so
     /// the parameter arrived as an empty string with no diagnostic at all.
+    /// The first SQLSTATE on a statement handle, so a test can assert the state
+    /// its name claims rather than only the return code. Same six-line shape as
+    /// the helper in `ffi/execute.rs`.
+    unsafe fn first_sqlstate<B: Backend>(handle: *mut c_void) -> String {
+        let mut state = [0u16; 6];
+        let mut native: i32 = 0;
+        let mut msg = [0u16; 256];
+        let mut msg_len: i16 = 0;
+        let ret = unsafe {
+            crate::ffi::diag::sql_get_diag_rec_w::<B>(
+                HandleType::Stmt as i16,
+                handle,
+                1,
+                state.as_mut_ptr(),
+                &mut native,
+                msg.as_mut_ptr(),
+                msg.len() as i16,
+                &mut msg_len,
+            )
+        };
+        assert_eq!(ret, SqlReturn::SUCCESS, "no diagnostic record was posted");
+        String::from_utf16_lossy(&state[..5])
+    }
+
     #[test]
     fn put_data_resolves_sql_nts_in_the_bound_c_type() {
         unsafe {
@@ -3160,6 +3184,11 @@ mod tests {
                 std::ptr::null_mut(),
             );
             assert_eq!(ret, SqlReturn::ERROR);
+            assert_eq!(
+                first_sqlstate::<MockBackend>(stmt),
+                crate::types::sql_state::RESTRICTED_DATA_TYPE_ATTRIBUTE_VIOLATION,
+                "the state this test's name claims"
+            );
             cleanup(env, conn, stmt);
         }
     }
@@ -3182,6 +3211,11 @@ mod tests {
                 std::ptr::null_mut(),
             );
             assert_eq!(ret, SqlReturn::ERROR);
+            assert_eq!(
+                first_sqlstate::<MockBackend>(stmt),
+                crate::types::sql_state::RESTRICTED_DATA_TYPE_ATTRIBUTE_VIOLATION,
+                "the state this test's name claims"
+            );
             cleanup(env, conn, stmt);
         }
     }
@@ -3207,6 +3241,11 @@ mod tests {
                 std::ptr::null_mut(),
             );
             assert_eq!(ret, SqlReturn::ERROR);
+            assert_eq!(
+                first_sqlstate::<MockBackend>(stmt),
+                crate::types::sql_state::RESTRICTED_DATA_TYPE_ATTRIBUTE_VIOLATION,
+                "the state this test's name claims"
+            );
             cleanup(env, conn, stmt);
         }
     }
@@ -3232,6 +3271,11 @@ mod tests {
                 std::ptr::null_mut(),
             );
             assert_eq!(ret, SqlReturn::ERROR);
+            assert_eq!(
+                first_sqlstate::<MockBackend>(stmt),
+                crate::types::sql_state::RESTRICTED_DATA_TYPE_ATTRIBUTE_VIOLATION,
+                "the state this test's name claims"
+            );
             cleanup(env, conn, stmt);
         }
     }
@@ -3279,6 +3323,11 @@ mod tests {
                 std::ptr::null_mut(),
             );
             assert_eq!(ret, SqlReturn::ERROR);
+            assert_eq!(
+                first_sqlstate::<MockBackend>(stmt),
+                crate::types::sql_state::RESTRICTED_DATA_TYPE_ATTRIBUTE_VIOLATION,
+                "the state this test's name claims"
+            );
             cleanup(env, conn, stmt);
         }
     }

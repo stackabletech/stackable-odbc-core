@@ -5411,11 +5411,16 @@ mod tests {
         }
     }
 
+    /// Column 0 (the bookmark column) with a result set open is `07009`, whose
+    /// second clause — "greater than the number of columns in the result set" —
+    /// carries no `(DM)` marker and is therefore core's to return. Its
+    /// column-0 clause *is* `(DM)`-marked, so this is a defensive guard, kept
+    /// because core is also linked without a Driver Manager.
     #[test]
-    fn describe_col_column_zero_returns_07009() {
-        // Spec 07009: Column 0 (bookmark) is not supported.
+    fn describe_col_column_zero_with_a_result_set_returns_07009() {
         unsafe {
             let (env, conn, stmt) = alloc_env_conn_stmt();
+            stmt_with_named_column(stmt);
             let mut name_buf = [0u16; 64];
             let mut name_len: i16 = 0;
             let mut data_type: i16 = 0;
@@ -5423,9 +5428,6 @@ mod tests {
             let mut decimal: i16 = 0;
             let mut nullable: i16 = 0;
 
-            // Even without a result set, column 0 should be rejected
-            // before the result-set check (but currently the no-result-set check
-            // comes first; either way, column 0 returns ERROR).
             let ret = sql_describe_col_w::<MockBackend>(
                 stmt,
                 0,
@@ -5438,6 +5440,49 @@ mod tests {
                 &mut nullable,
             );
             assert_eq!(ret, SqlReturn::ERROR);
+            assert_eq!(
+                first_sqlstate::<MockBackend>(stmt),
+                crate::types::sql_state::INVALID_DESCRIPTOR_INDEX,
+            );
+            cleanup(env, conn, stmt);
+        }
+    }
+
+    /// Without a result set, the no-result-set check runs **first**, so the
+    /// answer is `07005` — "the statement ... did not return a result set. There
+    /// were no columns to describe" — whatever column number was asked for.
+    ///
+    /// This test used to be named for `07009` while constructing exactly this
+    /// situation, and asserted only the return code, so the mismatch was
+    /// invisible. Both orderings are spec-legal; this one is what core does.
+    #[test]
+    fn describe_col_without_a_result_set_is_07005_even_for_column_zero() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            let mut name_buf = [0u16; 64];
+            let mut name_len: i16 = 0;
+            let mut data_type: i16 = 0;
+            let mut size: ULen = 0;
+            let mut decimal: i16 = 0;
+            let mut nullable: i16 = 0;
+
+            let ret = sql_describe_col_w::<MockBackend>(
+                stmt,
+                0,
+                name_buf.as_mut_ptr(),
+                64,
+                &mut name_len,
+                &mut data_type,
+                &mut size,
+                &mut decimal,
+                &mut nullable,
+            );
+            assert_eq!(ret, SqlReturn::ERROR);
+            assert_eq!(
+                first_sqlstate::<MockBackend>(stmt),
+                crate::types::sql_state::PREPARED_STATEMENT_NOT_CURSOR_SPEC,
+                "the no-result-set check precedes the column-number one"
+            );
             cleanup(env, conn, stmt);
         }
     }

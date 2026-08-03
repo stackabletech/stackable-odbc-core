@@ -1818,6 +1818,11 @@ mod tests {
                 0,
             );
             assert_eq!(ret, SqlReturn::ERROR);
+            assert_eq!(
+                dbc_sqlstate(conn),
+                crate::types::sql_state::INVALID_USE_OF_NULL_POINTER,
+                "the state this test's name claims"
+            );
 
             let _ = sql_free_handle::<MockBackend>(HandleType::Dbc as i16, conn);
             let _ = sql_free_handle::<MockBackend>(HandleType::Env as i16, env);
@@ -1918,6 +1923,11 @@ mod tests {
                 0,
             );
             assert_eq!(ret, SqlReturn::ERROR);
+            assert_eq!(
+                dbc_sqlstate(conn),
+                crate::types::sql_state::INVALID_STRING_OR_BUFFER_LENGTH,
+                "the state this test's name claims"
+            );
 
             let _ = sql_free_handle::<MockBackend>(HandleType::Dbc as i16, conn);
             let _ = sql_free_handle::<MockBackend>(HandleType::Env as i16, env);

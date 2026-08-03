@@ -2144,6 +2144,11 @@ mod tests {
                 0,
             );
             assert_eq!(ret, SqlReturn::ERROR);
+            assert_eq!(
+                first_sqlstate::<MockBackend>(conn),
+                crate::types::sql_state::INVALID_ATTRIBUTE_VALUE,
+                "the state this test's name claims"
+            );
             cleanup(env, conn);
         }
     }
@@ -2159,6 +2164,11 @@ mod tests {
                 0,
             );
             assert_eq!(ret, SqlReturn::ERROR);
+            assert_eq!(
+                first_sqlstate::<MockBackend>(conn),
+                crate::types::sql_state::INVALID_ATTRIBUTE_VALUE,
+                "the state this test's name claims"
+            );
             cleanup(env, conn);
         }
     }
@@ -2174,6 +2184,11 @@ mod tests {
                 0,
             );
             assert_eq!(ret, SqlReturn::ERROR);
+            assert_eq!(
+                first_sqlstate::<MockBackend>(conn),
+                crate::types::sql_state::INVALID_ATTRIBUTE_VALUE,
+                "the state this test's name claims"
+            );
             cleanup(env, conn);
         }
     }
@@ -2189,6 +2204,11 @@ mod tests {
                 0,
             );
             assert_eq!(ret, SqlReturn::ERROR);
+            assert_eq!(
+                first_sqlstate::<MockBackend>(conn),
+                crate::types::sql_state::INVALID_ATTRIBUTE_VALUE,
+                "the state this test's name claims"
+            );
             cleanup(env, conn);
         }
     }
@@ -2283,6 +2303,11 @@ mod tests {
                 std::ptr::null_mut(),
             );
             assert_eq!(ret, SqlReturn::ERROR);
+            assert_eq!(
+                first_sqlstate::<MockBackend>(conn),
+                crate::types::sql_state::INVALID_ATTRIBUTE_OPTION_IDENTIFIER,
+                "the state this test's name claims"
+            );
             cleanup(env, conn);
         }
     }

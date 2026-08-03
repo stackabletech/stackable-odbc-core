@@ -572,6 +572,30 @@ mod tests {
         }
     }
 
+    /// The first SQLSTATE on a connection handle, so a test can assert the state
+    /// its name claims rather than only the return code. Same six-line shape as
+    /// the helper in `ffi/execute.rs`.
+    unsafe fn first_sqlstate<B: Backend>(handle: *mut c_void) -> String {
+        let mut state = [0u16; 6];
+        let mut native: i32 = 0;
+        let mut msg = [0u16; 256];
+        let mut msg_len: i16 = 0;
+        let ret = unsafe {
+            crate::ffi::diag::sql_get_diag_rec_w::<B>(
+                HandleType::Dbc as i16,
+                handle,
+                1,
+                state.as_mut_ptr(),
+                &mut native,
+                msg.as_mut_ptr(),
+                msg.len() as i16,
+                &mut msg_len,
+            )
+        };
+        assert_eq!(ret, SqlReturn::SUCCESS, "no diagnostic record was posted");
+        String::from_utf16_lossy(&state[..5])
+    }
+
     #[test]
     fn end_tran_commit_dbc_not_connected_returns_08003() {
         // Spec 08003: SQLEndTran on SQL_HANDLE_DBC when no connection is open.
@@ -583,6 +607,11 @@ mod tests {
                 CompletionType::Commit as i16,
             );
             assert_eq!(ret, SqlReturn::ERROR);
+            assert_eq!(
+                first_sqlstate::<MockBackend>(conn),
+                crate::types::sql_state::CONNECTION_NOT_OPEN,
+                "the state this test's name claims"
+            );
             cleanup(env, conn);
         }
     }
@@ -597,6 +626,11 @@ mod tests {
                 CompletionType::Rollback as i16,
             );
             assert_eq!(ret, SqlReturn::ERROR);
+            assert_eq!(
+                first_sqlstate::<MockBackend>(conn),
+                crate::types::sql_state::CONNECTION_NOT_OPEN,
+                "the state this test's name claims"
+            );
             cleanup(env, conn);
         }
     }

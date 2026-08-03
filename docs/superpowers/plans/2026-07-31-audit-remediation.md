@@ -716,9 +716,46 @@ and one AGENTS.md claim corrected by measurement.
 
 ### Task 5.3: Error tests assert their SQLSTATE
 
-- [ ] Retrofit the ~15 return-code-only tests (list: `bind.rs:196, 447`; `connect.rs:1772, 1849`; `connect_attr.rs:2128` + 3 siblings; `params.rs:2984, 3006` + 3 siblings; `stmt_attr.rs:3313, 3337`; `tran.rs:591`; `fetch.rs:2216` + neighbours) with `first_sqlstate`-style assertions against the state their name claims. Where a file lacks the helper, copy the 6-line pattern from `execute.rs:1740`.
-- [ ] Any retrofit that then FAILS reveals a wrong-state bug: stop, report, fix as its own red-green step within this task.
-- [ ] GATE. Commit: `test: error-path tests assert the SQLSTATE their names claim`
+- [x] Retrofit the ~15 return-code-only tests (list: `bind.rs:196, 447`; `connect.rs:1772, 1849`; `connect_attr.rs:2128` + 3 siblings; `params.rs:2984, 3006` + 3 siblings; `stmt_attr.rs:3313, 3337`; `tran.rs:591`; `fetch.rs:2216` + neighbours) with `first_sqlstate`-style assertions against the state their name claims. Where a file lacks the helper, copy the 6-line pattern from `execute.rs:1740`.
+- [x] Any retrofit that then FAILS reveals a wrong-state bug: stop, report, fix as its own red-green step within this task.
+- [x] GATE. Commit: `test: error-path tests assert the SQLSTATE their names claim`
+
+
+**Outcome (2026-08-03).** 21 tests retrofitted, one real defect found — in a
+test name, not in the code.
+
+- **The target set was derived, not taken from the list.** The line numbers had
+  moved, so the criterion was applied mechanically instead: a test whose *name*
+  claims a SQLSTATE (`_returns_hy024`, `_with_07006`, `_01s02`, …) while its body
+  asserts only a return code. That found 24, of which two were false positives
+  (the `set_then_get_query_timeout` pair already assert `Some("01S02")` through a
+  variable called `state`, which no "sqlstate" grep finds), leaving 22. A broader
+  scan for *any* `SqlReturn::ERROR` test without a state assertion returns 107 —
+  most of those have names that claim nothing, so they are out of scope.
+- **`describe_col_column_zero_returns_07009` returned `07005`.** The bug was the
+  name: the test built a statement with **no result set**, and for that the spec
+  gives `07005` — "did not return a result set. There were no columns to
+  describe" — whatever column number is passed. Its own comment admitted the
+  ordering ("currently the no-result-set check comes first") while its name and
+  the absent assertion hid it. Verified by probe that column 0 *with* a result set
+  really is `07009`, so it is split into two tests that each say what they check,
+  and the `07009` claim is now covered rather than merely relabelled. Also worth
+  noting: `07009`'s column-0 clause carries `(DM)`, so that guard is defensive,
+  which the new test's doc records.
+- **Four files had no state-reading helper** (`bind.rs`, `params.rs`,
+  `stmt_attr.rs`, `tran.rs`) and now carry the same generic
+  `first_sqlstate<B: Backend>` the other five use — six of the eleven helpers in
+  `src/ffi` were already this shape.
+- **A stale ordering comment surfaced.** The `01S02` tests said the diagnostic
+  count is "checked before any other call: every FFI function clears the handle's
+  diagnostics on entry". A state assertion now precedes it, which is sound
+  because the diagnostic-*reading* functions do not clear — and the passing
+  `len() == 1` assertion after it proves that. The comment says so now.
+
+Two mistakes of my own, both caught by the gate: `#[test]` doubled on a
+rewritten test (`no-duplicate-test-names.sh` named it and explained the cause,
+the same trap as Task 3.3), and `INVALID_ATTRIBUTE_IDENTIFIER` guessed for
+`HY092` where the constant is `INVALID_ATTRIBUTE_OPTION_IDENTIFIER`.
 
 ### Task 5.4: Remaining coverage gaps
 
