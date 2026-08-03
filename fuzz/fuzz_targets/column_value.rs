@@ -141,15 +141,22 @@ fuzz_target!(|input: Input| {
     } else {
         256
     };
-    let mut buf = vec![0u8; alloc];
-    let mut ind: isize = 0;
+    // Deliberately misaligned, not incidentally aligned. `vec![0u8; alloc]`
+    // handed over `buf.as_mut_ptr()` directly, which the allocator returns
+    // suitably aligned for anything this writes, so no run ever exercised the
+    // unaligned path and the `write_unaligned` calls were taken on trust. An
+    // arena of the widest-*alignment* target type (8 bytes: `i64`, `f64`,
+    // `SQLLEN`) offset by one byte is misaligned for every target on every
+    // platform, and one extra element keeps `alloc` bytes writable past the
+    // offset.
+    let mut arena = vec![0u64; alloc / 8 + 2];
+    let mut ind_arena = [0isize; 2];
+    // SAFETY: both offsets stay inside their own allocation, and every write
+    // through them is an unaligned write.
     unsafe {
-        let _ = write_column_value(
-            &value,
-            target,
-            buf.as_mut_ptr() as *mut c_void,
-            buf_len,
-            &mut ind,
-        );
+        let buf = arena.as_mut_ptr().cast::<u8>().add(1);
+        let ind = ind_arena.as_mut_ptr().cast::<u8>().add(1).cast::<isize>();
+        debug_assert!(!ind.is_aligned(), "the point of the offset");
+        let _ = write_column_value(&value, target, buf as *mut c_void, buf_len, ind);
     }
 });

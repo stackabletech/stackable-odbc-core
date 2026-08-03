@@ -787,10 +787,27 @@ Two things make this easy to get wrong when auditing:
 - **Grep for the operation, not for `*ptr`.** A deref of a cast
   (`*(diag_info as *mut i32) = v`) and a multi-line `unsafe` block both evade
   the obvious pattern. `from_raw_parts` looks nothing like a deref at all.
-- **A misaligned access is not reliably observable on x86-64.** In a *debug*
-  build the standard library's precondition check fires, but it raises a
-  **non-unwinding** panic, which `panic_safe`'s `catch_unwind` cannot contain —
-  the host process aborts. In release it usually just works, until it does not.
+- **A misaligned access is only *sometimes* observable on x86-64, and the
+  exception is the one that matters.** Measured on 2026-08-03 with
+  `debug-assertions` on, a misaligned access through four of the five shapes
+  aborts the process — the standard library's precondition check fires and
+  raises a **non-unwinding** panic, which `panic_safe`'s `catch_unwind` cannot
+  contain:
+
+  | Shape | Detected by `cargo test` (debug) |
+  |---|---|
+  | `*ptr = v` / `*ptr`, including through a cast | yes — abort |
+  | `slice::from_raw_parts(_mut)` | yes — on construction |
+  | `ptr::copy_nonoverlapping` | yes |
+  | `&*(p as *const T)` | yes |
+  | **`ptr::write` / `ptr::read`** | **no — silently succeeds** |
+
+  That last row is the trap: `ptr::write` is precisely the aligned sibling of
+  the `write_unaligned` this crate uses everywhere, so **the one regression the
+  misalignment tests exist to catch is the one a debug build does not catch**.
+  It needs `-Zmiri-symbolic-alignment-check`. With `debug-assertions` off,
+  nothing in the table is detected. In release it usually just works, until it
+  does not.
 
 **`-Zmiri-symbolic-alignment-check` is a manual tool, deliberately not in CI.**
 Plain Miri checks alignment against the concrete address the allocator returned,

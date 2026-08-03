@@ -679,10 +679,40 @@ now exists, so that header's promise is kept rather than merely made honest.
 
 **Files:** tests in `src/column_value.rs`, `src/ffi/fetch.rs`, `src/ffi/desc.rs`, `src/ffi/diag.rs`, `src/ffi/metadata.rs`.
 
-- [ ] One arena+1 test per family, using the AGENTS.md pattern (offset one byte into an allocation of the *target* type): fixed-width `write_column_value` (i64, f64, `SQL_TIMESTAMP_STRUCT` targets), `SQLFetch` indicator (`isize`) writes, row-status `u16` array, `SQLGetDiagFieldW`/`SQLGetDescFieldW` integer outputs, `SQLDescribeColW` outputs.
-- [ ] Verify the tests bite: run under `MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-symbolic-alignment-check"` — they pass; temporarily revert one `write_unaligned` to `write` locally and confirm Miri fails (do not commit the revert).
-- [ ] Also fix the fuzz target's alignment blind spot: `fuzz/fuzz_targets/column_value.rs:144` — allocate the arena as the widest target type and offset, so ASan/Miri luck is not required.
-- [ ] GATE (+ `(cd fuzz && cargo +nightly build ...)` since fuzz/ changed). Commit: `test: every marshalling family has a deliberately misaligned-buffer test`
+- [x] One arena+1 test per family, using the AGENTS.md pattern (offset one byte into an allocation of the *target* type): fixed-width `write_column_value` (i64, f64, `SQL_TIMESTAMP_STRUCT` targets), `SQLFetch` indicator (`isize`) writes, row-status `u16` array, `SQLGetDiagFieldW`/`SQLGetDescFieldW` integer outputs, `SQLDescribeColW` outputs.
+- [x] Verify the tests bite: run under `MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-symbolic-alignment-check"` — they pass; temporarily revert one `write_unaligned` to `write` locally and confirm Miri fails (do not commit the revert).
+- [x] Also fix the fuzz target's alignment blind spot: `fuzz/fuzz_targets/column_value.rs:144` — allocate the arena as the widest target type and offset, so ASan/Miri luck is not required.
+- [x] GATE (+ `(cd fuzz && cargo +nightly build ...)` since fuzz/ changed). Commit: `test: every marshalling family has a deliberately misaligned-buffer test`
+
+
+**Outcome (2026-08-03).** Eight tests across five families, the fuzz arena fixed,
+and one AGENTS.md claim corrected by measurement.
+
+- **The Miri verification step could not run** (`~/.cache/miri` is not writable
+  in the sandbox), so the "bite" check was done a different way, and it worked:
+  `write_fixed`'s `write_unaligned` was temporarily replaced by a deref-assign,
+  and `sbigint_target_may_be_misaligned` aborted with `misaligned pointer
+  dereference: address must be a multiple of 0x8`, SIGABRT. That proves the test's
+  pointer really is misaligned and really reaches the write. The revert was done
+  from a saved copy, not `git checkout`.
+- **AGENTS.md's "in a debug build the precondition check fires" was too broad,
+  and wrong in the one case that matters.** Measured: `*ptr = v`,
+  `slice::from_raw_parts`, `ptr::copy_nonoverlapping` and `&*ptr` all abort
+  natively with `debug-assertions` on — but **`ptr::write`/`read` silently
+  succeed**, and `ptr::write` is exactly the aligned sibling of the
+  `write_unaligned` this crate uses. So the regression these tests exist to catch
+  is the one a debug build does *not* catch; only
+  `-Zmiri-symbolic-alignment-check` does. The matrix is now in AGENTS.md with the
+  date. With `debug-assertions` off, none of the five is detected.
+- **The fuzz target's blind spot was total, not partial.** It allocated
+  `vec![0u8; alloc]` and passed `buf.as_mut_ptr()`, which the allocator returns
+  suitably aligned for everything the target writes, so no run had ever exercised
+  an unaligned write. It now offsets one byte into a `Vec<u64>` — the widest
+  *alignment* among the target types — with the indicator offset too.
+- Two small corrections while writing: the `describe_col` helper names its column
+  `"abcde"`, not what I first asserted, and `sql_get_desc_rec_w`'s four `i16`
+  outputs needed `byte_add` steps inside one odd-based region so that every one of
+  them is odd rather than only the first.
 
 ### Task 5.3: Error tests assert their SQLSTATE
 

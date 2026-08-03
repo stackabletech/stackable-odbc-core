@@ -5015,6 +5015,111 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // Misaligned application buffers
+    //
+    // ODBC row-wise binding hands out pointers at arbitrary offsets into a
+    // packed buffer, so no target pointer is ever guaranteed aligned. Each test
+    // below offsets one byte into an allocation of the *target* type, which is
+    // misaligned on every platform — offsetting into a `Vec<u8>` would not be,
+    // since a byte allocation may already start on an odd address.
+    //
+    // What these prove where, measured on x86-64 with `debug-assertions`:
+    // a regression to `*ptr = v`, `slice::from_raw_parts`, `&*ptr` or
+    // `copy_nonoverlapping` aborts the test process outright; a regression from
+    // `write_unaligned` to `ptr::write` is **not** detected natively and needs
+    // `MIRIFLAGS=-Zmiri-symbolic-alignment-check`.
+    // -----------------------------------------------------------------------
+
+    /// An 8-byte integer target at an odd address, with the length indicator
+    /// misaligned too.
+    #[test]
+    fn sbigint_target_may_be_misaligned() {
+        let mut arena = vec![0i64; 4];
+        let mut ind_arena = vec![0isize; 4];
+        // SAFETY: both offsets stay inside their own allocation.
+        let out = unsafe { arena.as_mut_ptr().cast::<u8>().add(1) }.cast::<i64>();
+        let ind = unsafe { ind_arena.as_mut_ptr().cast::<u8>().add(1) }.cast::<isize>();
+        assert!(!out.is_aligned() && !ind.is_aligned(), "the test's premise");
+
+        let ret = unsafe {
+            write_column_value(
+                &ColumnValue::I64(-3),
+                CDataType::SBigInt,
+                out.cast::<c_void>(),
+                size_of::<i64>() as isize,
+                ind,
+            )
+        }
+        .expect("a misaligned target is legal");
+        assert_eq!(ret, SqlReturn::SUCCESS);
+        // SAFETY: read back through the same unaligned pointers.
+        unsafe {
+            assert_eq!(std::ptr::read_unaligned(out), -3);
+            assert_eq!(std::ptr::read_unaligned(ind), size_of::<i64>() as isize);
+        }
+    }
+
+    /// The same for a float target: `f64` has the same alignment as `i64` but a
+    /// different write path through `write_fixed`'s monomorphisation.
+    #[test]
+    fn double_target_may_be_misaligned() {
+        let mut arena = vec![0f64; 4];
+        // SAFETY: stays inside the allocation.
+        let out = unsafe { arena.as_mut_ptr().cast::<u8>().add(1) }.cast::<f64>();
+        assert!(!out.is_aligned(), "the test's premise");
+
+        let ret = unsafe {
+            write_column_value(
+                &ColumnValue::F64(0.5),
+                CDataType::Double,
+                out.cast::<c_void>(),
+                size_of::<f64>() as isize,
+                std::ptr::null_mut(),
+            )
+        }
+        .expect("a misaligned target is legal");
+        assert_eq!(ret, SqlReturn::SUCCESS);
+        // SAFETY: read back through the same unaligned pointer.
+        unsafe { assert_eq!(std::ptr::read_unaligned(out), 0.5) };
+    }
+
+    /// A struct target rather than a scalar. `SQL_TIMESTAMP_STRUCT` is written
+    /// as one value, so a single misaligned write covers all seven fields — and
+    /// its `year` is an `i16` inside a struct whose alignment is 4, so a naive
+    /// field-by-field write would have a different bug.
+    #[test]
+    fn timestamp_struct_target_may_be_misaligned() {
+        let mut arena = vec![odbc_sys::Timestamp::default(); 4];
+        // SAFETY: stays inside the allocation.
+        let out = unsafe { arena.as_mut_ptr().cast::<u8>().add(1) }.cast::<odbc_sys::Timestamp>();
+        assert!(!out.is_aligned(), "the test's premise");
+
+        let ret = unsafe {
+            write_column_value(
+                &ColumnValue::Timestamp {
+                    year: 2026,
+                    month: 8,
+                    day: 3,
+                    hour: 10,
+                    minute: 30,
+                    second: 15,
+                    fraction: 0,
+                },
+                CDataType::TypeTimestamp,
+                out.cast::<c_void>(),
+                size_of::<odbc_sys::Timestamp>() as isize,
+                std::ptr::null_mut(),
+            )
+        }
+        .expect("a misaligned target is legal");
+        assert_eq!(ret, SqlReturn::SUCCESS);
+        // SAFETY: read back through the same unaligned pointer.
+        let ts = unsafe { std::ptr::read_unaligned(out) };
+        assert_eq!((ts.year, ts.month, ts.day), (2026, 8, 3));
+        assert_eq!((ts.hour, ts.minute, ts.second), (10, 30, 15));
+    }
+
+    // -----------------------------------------------------------------------
     // Tests for Decimal/String → numeric C type conversion
     // -----------------------------------------------------------------------
 

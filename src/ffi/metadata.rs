@@ -4966,6 +4966,58 @@ mod tests {
         }
     }
 
+    /// Every one of `SQLDescribeColW`'s five scalar outputs at an odd address,
+    /// each offset one byte into an allocation of its own type.
+    ///
+    /// `ColumnSizePtr` is the interesting one: it is a `SQLULEN`, eight bytes
+    /// wide on a 64-bit target, so it is the output most likely to be written
+    /// with an aligned store by accident.
+    #[test]
+    fn describe_col_writes_every_output_through_a_misaligned_pointer() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            stmt_with_named_column(stmt);
+
+            let mut name_arena = vec![0u16; 64];
+            let mut i16_arena = vec![0i16; 16];
+            let mut size_arena = vec![0usize; 4];
+            let name = name_arena.as_mut_ptr().cast::<u8>().add(1).cast::<u16>();
+            // Four `i16` outputs, each two bytes apart inside one odd-based
+            // region, so every one of them is odd.
+            let i16_base = i16_arena.as_mut_ptr().cast::<u8>().add(1).cast::<i16>();
+            let name_len = i16_base;
+            let data_type = i16_base.byte_add(2);
+            let decimal_digits = i16_base.byte_add(4);
+            let nullable = i16_base.byte_add(6);
+            let col_size = size_arena.as_mut_ptr().cast::<u8>().add(1).cast::<usize>();
+            assert!(
+                !name.is_aligned() && !name_len.is_aligned() && !col_size.is_aligned(),
+                "the test's premise"
+            );
+
+            let ret = sql_describe_col_w::<MockBackend>(
+                stmt,
+                1,
+                name,
+                32,
+                name_len,
+                data_type,
+                col_size,
+                decimal_digits,
+                nullable,
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+            assert_eq!(
+                std::ptr::read_unaligned(name_len),
+                5,
+                "the name length must be written through the odd address"
+            );
+            assert_eq!(std::ptr::read_unaligned(name), 'a' as u16, "\"abcde\"");
+
+            cleanup(env, conn, stmt);
+        }
+    }
+
     #[test]
     fn describe_col_still_reports_characters() {
         // Spec, SQLDescribeCol NameLengthPtr: "the total number of characters".

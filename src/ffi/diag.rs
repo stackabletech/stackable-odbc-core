@@ -1325,6 +1325,42 @@ mod tests {
     // sql_get_diag_field_w stub
     // -----------------------------------------------------------------------
 
+    /// `SQL_DIAG_NUMBER`'s `SQLINTEGER` output at an odd address.
+    ///
+    /// A header field whose value is an integer is written straight through the
+    /// application's pointer, and row-wise binding means that pointer is never
+    /// guaranteed aligned. Offset one byte into an `i32` allocation, which is
+    /// misaligned on every platform.
+    #[test]
+    fn diag_field_writes_an_integer_through_a_misaligned_pointer() {
+        unsafe {
+            let mut env: *mut c_void = std::ptr::null_mut();
+            let _ = sql_alloc_handle::<MockBackend>(
+                HandleType::Env as i16,
+                std::ptr::null_mut(),
+                &mut env,
+            );
+
+            let mut arena = vec![-1i32; 4];
+            let count = arena.as_mut_ptr().cast::<u8>().add(1).cast::<i32>();
+            assert!(!count.is_aligned(), "the test's premise");
+
+            let ret = sql_get_diag_field_w::<MockBackend>(
+                HandleType::Env as i16,
+                env,
+                0,
+                HeaderDiagnosticIdentifier::Number as i16,
+                count.cast::<c_void>(),
+                0,
+                std::ptr::null_mut(),
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+            assert_eq!(std::ptr::read_unaligned(count), 0, "no diagnostics pushed");
+
+            let _ = sql_free_handle::<MockBackend>(HandleType::Env as i16, env);
+        }
+    }
+
     #[test]
     fn diag_field_number_returns_zero_when_no_records() {
         unsafe {

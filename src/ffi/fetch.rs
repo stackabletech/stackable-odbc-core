@@ -1860,6 +1860,96 @@ mod tests {
         }
     }
 
+    /// A bound column's data *and* indicator pointers at odd addresses, driven
+    /// through `SQLFetch` rather than through `write_column_value` directly, so
+    /// the binding collection and the ARD are on the path too.
+    ///
+    /// Row-wise binding is exactly how an application produces this: one packed
+    /// buffer per row, with each column at whatever offset its width implies.
+    #[test]
+    fn fetch_writes_through_misaligned_bound_pointers() {
+        unsafe {
+            let (env, conn, stmt) = long_data_stmt_no_fetch();
+
+            // Offset one byte into allocations of the *target* types, so the
+            // result is misaligned on every platform.
+            let mut buf_arena = vec![0u16; 4096];
+            let mut ind_arena = vec![0isize; 4];
+            let buf = buf_arena.as_mut_ptr().cast::<u8>().add(1);
+            let ind = ind_arena.as_mut_ptr().cast::<u8>().add(1).cast::<isize>();
+            assert!(!ind.is_aligned(), "the test's premise");
+
+            assert_eq!(
+                crate::ffi::bind::sql_bind_col::<MockLongDataBackend>(
+                    stmt,
+                    1,
+                    CDataType::WChar as i16,
+                    buf.cast::<c_void>(),
+                    4096,
+                    ind,
+                ),
+                SqlReturn::SUCCESS
+            );
+            assert_eq!(sql_fetch::<MockLongDataBackend>(stmt), SqlReturn::SUCCESS);
+            assert!(
+                std::ptr::read_unaligned(ind) > 0,
+                "the indicator must have been written through the odd address"
+            );
+
+            cleanup_long_data(env, conn, stmt);
+        }
+    }
+
+    /// `SQL_ATTR_ROWS_FETCHED_PTR` and `SQL_ATTR_ROW_STATUS_PTR` at odd
+    /// addresses. These are written by `SQLFetch` itself rather than by the
+    /// column marshalling, and the row-status one is an array write, which is
+    /// the shape that would reach for `slice::from_raw_parts` — UB on
+    /// construction, before anything is read.
+    #[test]
+    fn fetch_writes_through_misaligned_status_pointers() {
+        unsafe {
+            let (env, conn, stmt) = long_data_stmt_no_fetch();
+
+            let mut fetched_arena = vec![0usize; 4];
+            let mut status_arena = vec![0u16; 8];
+            let fetched = fetched_arena
+                .as_mut_ptr()
+                .cast::<u8>()
+                .add(1)
+                .cast::<usize>();
+            let status = status_arena.as_mut_ptr().cast::<u8>().add(1).cast::<u16>();
+            assert!(
+                !fetched.is_aligned() && !status.is_aligned(),
+                "the test's premise"
+            );
+
+            assert_eq!(
+                crate::ffi::stmt_attr::sql_set_stmt_attr_w::<MockLongDataBackend>(
+                    stmt,
+                    odbc_sys::StatementAttribute::RowsFetchedPtr as i32,
+                    fetched.cast::<c_void>(),
+                    0,
+                ),
+                SqlReturn::SUCCESS
+            );
+            assert_eq!(
+                crate::ffi::stmt_attr::sql_set_stmt_attr_w::<MockLongDataBackend>(
+                    stmt,
+                    odbc_sys::StatementAttribute::RowStatusPtr as i32,
+                    status.cast::<c_void>(),
+                    0,
+                ),
+                SqlReturn::SUCCESS
+            );
+
+            assert_eq!(sql_fetch::<MockLongDataBackend>(stmt), SqlReturn::SUCCESS);
+            assert_eq!(std::ptr::read_unaligned(fetched), 1);
+            assert_eq!(std::ptr::read_unaligned(status), SQL_ROW_SUCCESS);
+
+            cleanup_long_data(env, conn, stmt);
+        }
+    }
+
     /// The other half of the split: [`RowReport::Arguments`] writes through the
     /// caller's own pointers and leaves the statement attributes alone. The
     /// spec makes them separate storage — that buffer "is used only by

@@ -1502,6 +1502,65 @@ mod tests {
         });
     }
 
+    /// `SQLGetDescFieldW`'s numeric output at an odd address, and
+    /// `SQLGetDescRecW`'s beside it — the latter writes six scalars and an
+    /// `SQLLEN`, so it is the widest set of integer outputs in this module.
+    #[test]
+    fn desc_field_and_rec_write_through_misaligned_pointers() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            let ard = ard_of(stmt);
+            seed_ard_records(stmt, 1, CDataType::SBigInt as i16);
+
+            let mut isize_arena = vec![0isize; 4];
+            let value = isize_arena.as_mut_ptr().cast::<u8>().add(1).cast::<isize>();
+            assert!(!value.is_aligned(), "the test's premise");
+
+            let ret = sql_get_desc_field_w::<MockBackend>(
+                ard,
+                1,
+                Desc::ConciseType as i16,
+                value.cast::<c_void>(),
+                0,
+                std::ptr::null_mut(),
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+            assert_eq!(std::ptr::read_unaligned(value), CDataType::SBigInt as isize);
+
+            // SQLGetDescRecW: four `i16` outputs at odd addresses plus an
+            // odd-addressed `SQLLEN`.
+            let mut i16_arena = vec![0i16; 16];
+            let i16_base = i16_arena.as_mut_ptr().cast::<u8>().add(1).cast::<i16>();
+            let mut length_arena = vec![0isize; 4];
+            let length = length_arena
+                .as_mut_ptr()
+                .cast::<u8>()
+                .add(1)
+                .cast::<isize>();
+            let ret = sql_get_desc_rec_w::<MockBackend>(
+                ard,
+                1,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                i16_base,
+                i16_base.byte_add(2),
+                length,
+                i16_base.byte_add(4),
+                i16_base.byte_add(6),
+                i16_base.byte_add(8),
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS);
+            assert_eq!(
+                std::ptr::read_unaligned(i16_base),
+                CDataType::SBigInt as i16,
+                "SQL_DESC_TYPE must be written through the odd address"
+            );
+
+            cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
     /// A record field reads back through the descriptor.
     #[test]
     fn get_desc_field_reads_back_a_record_field() {
