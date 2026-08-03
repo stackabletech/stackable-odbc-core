@@ -480,8 +480,11 @@ pub(crate) fn record_from_column(
         unnamed: numeric(Desc::Unnamed)?,
         ..crate::descriptor::DescriptorRecord::default()
     };
-    // Last, and through `set_concise_type`: it is the only writer of the type
-    // trio, so setting it after the rest cannot be undone by them.
+    // Last, and through `set_concise_type`, so the two fields it derives are not
+    // then overwritten by an earlier-set value. It is *not* the only writer of the
+    // type trio — `descriptor::set_field`'s `Desc::Type` arm writes all three and its
+    // `Desc::DatetimeIntervalCode` arm writes one — but it is the last write here,
+    // which is what this ordering needs.
     record.set_concise_type(i16::try_from(numeric(Desc::ConciseType)?).unwrap_or(0));
     Ok(record)
 }

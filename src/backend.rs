@@ -530,9 +530,9 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// **Scope caveat.** `SQL_ATTR_QUERY_TIMEOUT` is a *statement* attribute
     /// but this hook receives only the connection, so a backend that applies it
     /// session-wide gives every statement on that connection the most recently
-    /// set value. Core cannot fix that without changing the signature of the
-    /// nine statement-producing methods, which would break every existing
-    /// driver. A backend that can scope a deadline per statement should carry
+    /// set value. Core cannot fix that without changing the signature of every
+    /// method taking a `cancel:` argument, which would break every existing
+    /// driver. (Deliberately not a count: the number has grown twice already.) A backend that can scope a deadline per statement should carry
     /// the value on its own connection state and apply it at execution time.
     fn set_query_timeout(
         _conn: &Self::Connection,
@@ -1070,9 +1070,11 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// behaviour it does not implement.
     ///
     /// The default is [`crate::types::CursorBehavior::Preserve`]: the least destructive
-    /// value, and the one both psqlODBC and MySQL Connector/ODBC report for
-    /// commit. A backend whose data source drops cursors on commit **must**
-    /// override this.
+    /// value, and the one both reference drivers report for commit —
+    /// psqlODBC's `info.c` answers `SQL_CURSOR_COMMIT_BEHAVIOR` with
+    /// `SQL_CB_PRESERVE`, and MySQL Connector/ODBC's `driver/info.cc` answers
+    /// `SQL_CB_PRESERVE` for commit and rollback in one shared arm. A backend whose
+    /// data source drops cursors on commit **must** override this.
     ///
     /// # Reporting path
     ///

@@ -23,7 +23,9 @@
 //!   `get_column_attribute` that implements `SQLColAttributeW`.
 //!
 //! `descriptor::field_access` decides `HY091` for all of them, from the spec's
-//! "Initialization of Descriptor Fields" tables.
+//! "Initialization of Descriptor Fields" tables — for every identifier that names a
+//! real field. An integer naming none is refused earlier, by `field_from_raw` in this
+//! module, with the same state.
 //!
 //! # What is still missing
 //!

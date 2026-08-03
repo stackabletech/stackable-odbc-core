@@ -69,6 +69,12 @@ pub fn init_logging() {
                                 .compact()
                                 .with_ansi(false)
                                 .with_span_events(span_events)
+                                // `std::sync::Mutex`, not `crate::sync::Mutex`, and
+                                // the crate's second stated exception to that rule
+                                // (see `sync.rs`): `tracing_subscriber` implements
+                                // `MakeWriter` for `std::sync::Mutex<W>` specifically,
+                                // so loom's unrelated `Mutex` type would not compile
+                                // here. No loom model reaches logging.
                                 .with_writer(std::sync::Mutex::new(file)),
                         )
                         .try_init();

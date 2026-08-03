@@ -224,7 +224,9 @@ unsafe fn report_rows_fetched_only<B: Backend>(
 ///   — so this is not a case of core answering an unmarked half. The check (`stmt.statement`
 ///   is `None`) is kept because core is also linked without a Driver Manager in front of it,
 ///   by its own tests and by an embedder, and the inline comment at the site says the same.
-/// - HY013 (memory management error): not returned.
+/// - HY013 (memory management error): not returned: `SqlState` has no `HY013` constant and no factory for it, so no path in
+///   core can produce it. Rust's allocator aborts on OOM rather than returning an error,
+///   and `panic_safe` contains any unwind.
 /// - HY090 (invalid string or buffer length): not applicable, and the row carries no `(DM)`
 ///   marker, so this is the driver's answer to give. Its single clause describes a column-0
 ///   binding under `SQL_UB_VARIABLE`, and no such binding can exist: `sql_bind_col` refuses
@@ -241,7 +243,10 @@ unsafe fn report_rows_fetched_only<B: Backend>(
 ///   source's own timeout error is propagated. Armed here and not only at the
 ///   statement-producing calls because a data source may return column metadata long before it
 ///   computes a row, which puts the whole wait on the fetch.
-/// - HYT01 (connection timeout expired): not implemented.
+/// - HYT01 (connection timeout expired): propagated from the backend unchanged. Core
+///   implements no connection timeout of its own — `SQL_ATTR_CONNECTION_TIMEOUT` is the
+///   backend's to honour — and this function reaches a fallible backend call, so the
+///   state can arrive from there and is passed through as it came.
 /// - IM001 (driver does not support this function): driver-manager-handled; not returned here.
 /// - IM017: Polling disabled; not returned here (the asynchronous notification model is not
 ///   supported — not DM-annotated in the spec).
@@ -539,7 +544,9 @@ unsafe fn fetch_with_report<B: Backend>(
 ///   the backend's own SQLSTATE.
 /// - HY010 (function sequence error): delegated to `sql_fetch` for `SQL_FETCH_NEXT`. (DM)
 ///   variants are driver-manager-handled; not returned here.
-/// - HY013 (memory management error): not returned.
+/// - HY013 (memory management error): not returned: `SqlState` has no `HY013` constant and no factory for it, so no path in
+///   core can produce it. Rust's allocator aborts on OOM rather than returning an error,
+///   and `panic_safe` contains any unwind.
 /// - HY090 (invalid string or buffer length): not applicable, and the row carries no `(DM)`
 ///   marker; see `sql_fetch`, whose identical row it delegates to.
 /// - HY106 (fetch type out of range): **returned by this driver** for any `FetchOrientation`
@@ -556,7 +563,10 @@ unsafe fn fetch_with_report<B: Backend>(
 ///   carries no `(DM)` marker here either, and `SQL_FETCH_NEXT` is the only orientation that
 ///   reaches the backend at all — every other one is rejected with `HY106` above — so arming
 ///   the deadline in `sql_fetch` covers this function completely.
-/// - HYT01 (connection timeout expired): not implemented.
+/// - HYT01 (connection timeout expired): propagated from the backend unchanged. Core
+///   implements no connection timeout of its own — `SQL_ATTR_CONNECTION_TIMEOUT` is the
+///   backend's to honour — and this function reaches a fallible backend call, so the
+///   state can arrive from there and is passed through as it came.
 /// - IM001 (driver does not support this function): driver-manager-handled.
 /// - IM017: Polling disabled; not returned here (the asynchronous notification model is not
 ///   supported — not DM-annotated in the spec).
@@ -705,7 +715,9 @@ pub unsafe fn sql_fetch_scroll<B: Backend>(
 ///   including the "cannot be mixed with `SQLFetch`" ordering rule, so all are
 ///   driver-manager-handled. The shared body still returns `HY010` when no
 ///   result set is open, which is `SQLFetch`'s own unmarked clause.
-/// - HY013 (memory management error): not returned.
+/// - HY013 (memory management error): not returned: `SqlState` has no `HY013` constant and no factory for it, so no path in
+///   core can produce it. Rust's allocator aborts on OOM rather than returning an error,
+///   and `panic_safe` contains any unwind.
 /// - HY106 (fetch type out of range): **returned by this driver** for any
 ///   orientation other than `SQL_FETCH_NEXT`. The row's first clause carries
 ///   (DM), but the clause describing this driver — "The value of the
@@ -722,7 +734,10 @@ pub unsafe fn sql_fetch_scroll<B: Backend>(
 /// - HYT00 (timeout expired): **returned by this driver**, via the shared body,
 ///   which arms the core-side deadline for a backend answering
 ///   [`crate::types::QueryTimeout::CoreCancels`].
-/// - HYT01 (connection timeout expired): not implemented.
+/// - HYT01 (connection timeout expired): propagated from the backend unchanged. Core
+///   implements no connection timeout of its own — `SQL_ATTR_CONNECTION_TIMEOUT` is the
+///   backend's to honour — and this function reaches a fallible backend call, so the
+///   state can arrive from there and is passed through as it came.
 /// - IM001 (driver does not support this function): driver-manager-handled; not
 ///   returned here.
 ///
@@ -943,7 +958,9 @@ pub unsafe fn sql_extended_fetch<B: Backend>(
 ///   data-at-execution *input* and otherwise a completion code, so there is no state in
 ///   which an application could reach this clause. A driver gaining streamed output
 ///   parameters takes it on.
-/// - HY013 (memory management error): not returned.
+/// - HY013 (memory management error): not returned: `SqlState` has no `HY013` constant and no factory for it, so no path in
+///   core can produce it. Rust's allocator aborts on OOM rather than returning an error,
+///   and `panic_safe` contains any unwind.
 /// - HY090 (invalid string or buffer length): **returned by this driver** when
 ///   `buffer_length < 0`. That clause is `(DM)`-marked, and the check is kept anyway because
 ///   the Arguments section attributes it to the driver in as many words: "**SQLGetData**
@@ -961,7 +978,10 @@ pub unsafe fn sql_extended_fetch<B: Backend>(
 /// - HY117 (connection suspended): driver-manager-handled; not returned here.
 /// - HYC00 (optional feature not implemented): not returned by `write_column_value`; its
 ///   unsupported-conversion paths return 07006 (see above).
-/// - HYT01 (connection timeout expired): not implemented.
+/// - HYT01 (connection timeout expired): propagated from the backend unchanged. Core
+///   implements no connection timeout of its own — `SQL_ATTR_CONNECTION_TIMEOUT` is the
+///   backend's to honour — and this function reaches a fallible backend call, so the
+///   state can arrive from there and is passed through as it came.
 /// - HYT00 is **absent from this function's diagnostics table** — deliberately, and not an
 ///   oversight in this list. `SQLFetch` and `SQLFetchScroll` both carry it; `SQLGetData` carries
 ///   only `HYT01`. So core arms no `SQL_ATTR_QUERY_TIMEOUT` deadline here, and a driver must not

@@ -978,8 +978,9 @@ impl<B: Backend> StatementHandle<B> {
     }
 
     /// The token for the descriptor implicitly allocated with this statement,
-    /// ignoring any override. Statement teardown, and reverting a statement whose
-    /// explicit descriptor was freed, are its only callers.
+    /// ignoring any override. Two callers: [`Self::set_app_descriptor`], which stores a
+    /// token equal to this one as `None` rather than as an override of itself, and
+    /// `free_statement_allocation`, which frees all four at teardown.
     ///
     /// A `match` rather than `implicit_desc[role as usize]`: [`DescriptorRole`]
     /// has a fifth variant, `App`, for an explicitly allocated descriptor whose
@@ -1337,13 +1338,15 @@ pub unsafe fn alloc_statement<B: Backend>(
 /// `connection: &B::Connection` argument itself is obtainable in production
 /// only through `HandleScope::get`/`stmt_with_parent`, both of which require
 /// `&mut HandleScope`, and a `HandleScope` is only ever constructed while its
-/// group lock is held (`HandleScope::new` is `pub(crate)` with exactly three
-/// callers — `panic_safe`, `HandleScope::with_child_group`, and `sql_cancel`
-/// — all three of which lock first). This function is never reached through
-/// `sql_cancel`'s own scope: that scope only ever calls `scope.get::<StatementHandle<B>>`,
-/// never obtains a `&B::Connection`, so it is irrelevant to the argument here
-/// beyond being one more site that upholds the same "lock before scope"
-/// precondition the other two do.
+/// group lock is held (`HandleScope::new` is `pub(crate)` with exactly four
+/// production callers — `panic_safe`, `HandleScope::with_child_group_in`,
+/// `HandleScope::with_group` and `sql_cancel` — all four of which lock first).
+/// This function is never reached through `sql_cancel`'s own scope: that scope
+/// only ever calls `scope.get::<StatementHandle<B>>`, never obtains a
+/// `&B::Connection`, so it is irrelevant to the argument here beyond being one
+/// more site that upholds the same "lock before scope" precondition the other
+/// three do. `with_group` is `SQLCopyDesc` phase one's, which takes the
+/// *source*'s group and materialises an owned snapshot.
 ///
 /// What is stored is a [`CancelState<B::CancelToken>`], not the bare
 /// `B::CancelToken`: the wrapper adds core's own record of *why* the token was

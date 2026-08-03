@@ -1431,8 +1431,11 @@ unsafe fn dae_nts_byte_count(
 ///   data-at-execution sequence discards the sequence; the following `SQLParamData` is what
 ///   reports it.
 /// - HY009: Invalid use of null pointer — (DM) the row is driver-manager-marked. Core keeps a
-///   guard anyway, because unixODBC does not always run it and the alternative is
-///   dereferencing a null pointer, and the guard matches the clause exactly: "(DM) The
+///   guard anyway, because the alternative is dereferencing a null pointer, and because core
+///   is also linked with no Driver Manager in front of it. Not because unixODBC skips the
+///   check: it runs exactly this one, at `DriverManager/SQLPutData.c`'s
+///   `data == NULL && strlen_or_ind != 0 && ... != SQL_NULL_DATA`, before dispatching to the
+///   driver. The guard matches the clause exactly: "(DM) The
 ///   argument DataPtr was a null pointer, and the argument StrLen_or_Ind was not 0,
 ///   SQL_DEFAULT_PARAM, or SQL_NULL_DATA." A null pointer with a length of 0 is a legal
 ///   zero-length put and is accepted.
@@ -1589,7 +1592,9 @@ pub unsafe fn sql_put_data<B: Backend>(
 
             // A refusal to dereference a null pointer, not a spec check: the
             // row is `(DM)`-marked and belongs to the Driver Manager. It is
-            // kept because unixODBC does not always run it, and it is written
+            // kept because core is also linked with no Driver Manager in front
+            // of it — unixODBC does run this exact check, at
+            // `DriverManager/SQLPutData.c` — and it is written
             // to match the clause exactly — "(DM) The argument DataPtr was a
             // null pointer, and the argument StrLen_or_Ind was not 0,
             // SQL_DEFAULT_PARAM, or SQL_NULL_DATA". The other two values are

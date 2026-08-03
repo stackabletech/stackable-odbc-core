@@ -822,10 +822,13 @@ mechanism:
   `HandleScope`.** `panic_safe` locks the target's group before constructing
   the scope and ties the scope's lifetime to that lock, so "the group lock is
   held" is a fact the borrow checker enforces rather than a rule a comment
-  states. The two other callers of `HandleScope::new` are
-  `HandleScope::with_child_group` (the nested-lock case below) and
-  `sql_cancel`, which builds one only on the branch where its own `try_lock`
-  succeeded.
+  states. The three other production callers of `HandleScope::new` are
+  `HandleScope::with_child_group_in` (the nested-lock case below),
+  `HandleScope::with_group` (`SQLCopyDesc` phase one, which takes the *source*'s
+  group and materialises an owned snapshot), and `sql_cancel`, which builds one
+  only on the branch where its own `try_lock` succeeded. Four in total, which is
+  what `handles/scope.rs`'s own doc comment says; count them before repeating a
+  number here.
 - **A `Backend` method must never re-enter a `SQLxxx` entry point on the same
   connection.** Every `Backend` method, including `connect`, runs while
   `panic_safe` holds that connection's group lock, and the lock is not
@@ -929,16 +932,23 @@ mechanism:
   module would be invisible to loom and silently opt its code out of the
   interleaving proof.
 
-  **One documented exception**: `query_timer.rs`'s `Condvar` and its `Mutex`
-  come from `std::sync`. loom's `Condvar` has no `wait_timeout_while`, and its
-  `wait_timeout` ignores the duration outright — loom 0.7.2's source says
+  **Two documented exceptions.** First, `query_timer.rs`'s `Condvar` and its
+  `Mutex` come from `std::sync`. loom's `Condvar` has no `wait_timeout_while`,
+  and its `wait_timeout` ignores the duration outright — loom 0.7.2's source says
   "TODO: implement timing out" and always returns `WaitTimeoutResult(false)` —
   so an instrumented query timer could not model a timeout, which is the only
-  thing about it worth modelling. No loom model reaches that code either. The
-  rule being enforced is "no lock silently opts itself out", so an exception
-  stated in `sync.rs`, in `query_timer.rs` and here does not break it; a quiet
-  one would. Check first whether loom can model the primitive at all: if it
-  can, import it from `sync.rs`.
+  thing about it worth modelling. No loom model reaches that code either.
+
+  Second, `logging.rs` hands `std::sync::Mutex::new(file)` to
+  `tracing_subscriber` as its writer. That one is not a preference:
+  `tracing_subscriber` implements `MakeWriter` for `std::sync::Mutex<W>`
+  specifically, and loom's `Mutex` is an unrelated type with no such impl, so the
+  substitution would not compile. No loom model reaches logging either.
+
+  The rule being enforced is "no lock silently opts itself out", so an exception
+  stated at its site, in `sync.rs` and here does not break it; a quiet one would.
+  Check first whether loom can model the primitive at all: if it can, import it
+  from `sync.rs`.
 
 **Loom models** the primitives this discipline is built from — `Registry`,
 `GroupLock`, and the crate's own nested-lock path
@@ -1399,7 +1409,7 @@ Generic framework. Zero database-specific code.
 | `conformance.rs` | Shared support for the `SQLGetInfoW` info-type conformance test (return shape + Driver-Manager-safe value), reused by core and by driver test suites |
 | `escape.rs` | ODBC escape-sequence translation (`{fn}`, `{d/t/ts}`, `{oj}`, `{escape}`); a shared scanner with a per-backend `EscapeDialect` |
 | `errors.rs` | `OdbcError` with SQLSTATE mapping and `SqlReturn` conversion |
-| `descriptor.rs` | `DescriptorRecord`, `DescriptorRole`, the per-role field tables (`field_access`, the sole authority on `HY091`), the header-field mapping, and the `HY021` consistency check. No FFI, no handles |
+| `descriptor.rs` | `DescriptorRecord`, `DescriptorRole`, the per-role field tables (`field_access`, which decides `HY091` for every identifier naming a real field; one naming none is refused earlier by `ffi::desc::field_from_raw`), the header-field mapping, and the `HY021` consistency check. No FFI, no handles |
 | `diagnostics.rs` | Per-handle diagnostic queue (`SQLGetDiagRecW` reads from here) |
 | `handles/mod.rs` | `EnvironmentHandle<B>`, `ConnectionHandle<B>`, `StatementHandle<B>`, alloc/free (`pub(crate)`) |
 | `handles/registry.rs` | The live-handle table (`Registry`, `Slot`), per-connection `GroupLock`s, cancel tokens, and the loom models (`#[cfg(all(test, loom))] mod loom_tests`) |

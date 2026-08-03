@@ -523,9 +523,11 @@ pub unsafe fn sql_free_stmt<B: Backend>(statement_handle: *mut c_void, option: u
         option
     );
     // SQL_DROP (1) is deprecated. The ODBC 3.x spec says the Driver Manager maps this to
-    // SQLFreeHandle(SQL_HANDLE_STMT) before it reaches the driver. unixODBC does this correctly,
-    // but the Windows DM passes SQL_DROP through to the driver directly. Handle it here for
-    // Windows DM compatibility.
+    // SQLFreeHandle(SQL_HANDLE_STMT) before it reaches the driver, and unixODBC does exactly
+    // that: `DriverManager/SQLFreeStmt.c`'s `case SQL_DROP:` calls `__SQLFreeHandle(
+    // SQL_HANDLE_STMT, ...)` and returns, never reaching the `SQLFREESTMT(...)` dispatch that
+    // the SQL_RESET_PARAMS and SQL_UNBIND arms just below it use. The Windows DM passes
+    // SQL_DROP through to the driver instead, so this arm exists for it.
     if option == crate::types::SQL_DROP {
         tracing::warn!(
             "SQLFreeStmt: received SQL_DROP (Windows DM compat) - forwarding to sql_free_handle"
@@ -1185,8 +1187,8 @@ mod tests {
     #[test]
     fn free_stmt_drop_option_frees_statement() {
         // SQL_DROP (1) is deprecated. unixODBC maps it to SQLFreeHandle before it reaches
-        // the driver, but the Windows DM passes it through directly. The driver must handle
-        // it by freeing the statement (Windows DM compat).
+        // the driver (`DriverManager/SQLFreeStmt.c`, `case SQL_DROP:`), but the Windows DM
+        // passes it through directly. The driver must handle it by freeing the statement.
         unsafe {
             let mut env: *mut c_void = std::ptr::null_mut();
             let _ = sql_alloc_handle::<MockBackend>(

@@ -464,9 +464,12 @@ pub enum FieldAccess {
 /// read-only set. Reviewing this function means reading it against that page
 /// cell by cell — nothing about it is inferable from the rest of the crate.
 ///
-/// This is the sole authority on `HY091`. It covers the header fields as well
-/// as the record ones, because the caller decides *where* a field is stored and
-/// this decides whether it may be touched at all.
+/// This decides `HY091` for every field identifier that names a real field, header
+/// or record alike, because the caller decides *where* a field is stored and this
+/// decides whether it may be touched at all. It is not the only source of that
+/// state: an integer naming no field at all never reaches here, being refused by
+/// `ffi::desc::field_from_raw` with the same `HY091` at the FFI boundary, before any
+/// role is consulted.
 pub fn field_access(role: DescriptorRole, field: Desc) -> FieldAccess {
     use DescriptorRole::{Apd, App, Ard, Ipd, Ird};
     use FieldAccess::{ReadOnly, ReadWrite, Undefined};
@@ -750,7 +753,10 @@ pub fn set_record_field(
     match field {
         // Setting the concise type sets the verbose type and the
         // datetime/interval code with it — the spec makes them one act. See
-        // [`DescriptorRecord::set_concise_type`], which every writer shares.
+        // [`DescriptorRecord::set_concise_type`]. The `Desc::Type` and
+        // `Desc::DatetimeIntervalCode` arms below write the trio's fields directly
+        // instead, so this is the shared helper for *this* field rather than the
+        // only path into those three.
         Desc::ConciseType => record.set_concise_type(narrow_i16(n, field)?),
         // The other direction. For a non-datetime type the two are equal, so
         // the concise type follows; for `SQL_DATETIME` or `SQL_INTERVAL` the

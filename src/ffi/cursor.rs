@@ -54,7 +54,10 @@ static CURSOR_NAME_COUNTER: AtomicU32 = AtomicU32::new(1);
 ///   driver-manager-handled; not returned here.
 /// - HY013 (memory management error): not applicable; Rust memory access cannot fail silently.
 /// - HY117 (connection suspended): (driver-manager-handled; not returned here)
-/// - HYT01 (connection timeout): not applicable; the framework is in-process.
+/// - HYT01 (connection timeout): not returned. Core implements no connection timeout of
+///   its own, and the only backend method this function calls —
+///   `StatementBackend::column_count` — returns a plain `i16` rather than a `Result`, so no SQLSTATE
+///   can reach here from the backend either.
 /// - IM001 (driver does not support function): (driver-manager-handled; not returned here)
 /// - IM017 (polling disabled): not returned here (the asynchronous notification model is not
 ///   supported — not DM-annotated in the spec).
@@ -165,7 +168,10 @@ pub(crate) fn statement_row_count<B: Backend>(stmt: &StatementHandle<B>) -> isiz
 ///   variants (async in progress, etc.) are driver-manager-handled; not returned here.
 /// - HY013 (memory management error): not applicable; Rust memory access cannot fail silently.
 /// - HY117 (connection suspended): (driver-manager-handled; not returned here)
-/// - HYT01 (connection timeout): not applicable; the framework is in-process.
+/// - HYT01 (connection timeout): not returned. Core implements no connection timeout of
+///   its own, and the only backend method this function calls —
+///   `StatementBackend::row_count` — returns an `Option<i64>` rather than a `Result`, so no SQLSTATE
+///   can reach here from the backend either.
 /// - IM001 (driver does not support function): (driver-manager-handled; not returned here)
 ///
 /// # Safety
@@ -241,7 +247,9 @@ pub unsafe fn sql_row_count<B: Backend>(
 /// - HY010 (function sequence error): (driver-manager-handled; not returned here)
 /// - HY013 (memory management error): not applicable; Rust memory access cannot fail silently.
 /// - HY117 (connection suspended): (driver-manager-handled; not returned here)
-/// - HYT01 (connection timeout): not applicable; the framework is in-process.
+/// - HYT01 (connection timeout): propagated from the backend unchanged. Core implements no
+///   connection timeout of its own, and this function calls the fallible
+///   `StatementBackend::close_cursor`, so the state can arrive from there.
 /// - IM001 (driver does not support function): (driver-manager-handled; not returned here)
 /// - IM017 (polling disabled): not returned here (the asynchronous notification model is not
 ///   supported — not DM-annotated in the spec).
@@ -344,7 +352,9 @@ pub unsafe fn sql_more_results<B: Backend>(statement_handle: *mut c_void) -> Sql
 /// - HY010 (function sequence error): (driver-manager-handled; not returned here)
 /// - HY013 (memory management error): not applicable; Rust memory access cannot fail silently.
 /// - HY117 (connection suspended): (driver-manager-handled; not returned here)
-/// - HYT01 (connection timeout): not applicable; the framework is in-process.
+/// - HYT01 (connection timeout): propagated from the backend unchanged. Core implements no
+///   connection timeout of its own, and this function calls the fallible
+///   `StatementBackend::close_cursor`, so the state can arrive from there.
 /// - IM001 (driver does not support function): (driver-manager-handled; not returned here)
 ///
 /// # Safety
@@ -639,7 +649,9 @@ fn signal_cancel<B: Backend>(
 ///   (driver-manager-handled; not returned here). A short but non-negative buffer is not an
 ///   error: `write_utf16` reports it as `01004` and writes what fits.
 /// - HY117 (connection suspended): (driver-manager-handled; not returned here)
-/// - HYT01 (connection timeout): not applicable; the framework is in-process.
+/// - HYT01 (connection timeout): not returned. Core implements no connection timeout of
+///   its own, and this function makes no backend call at all — it reads and writes
+///   handle state only — so there is no path by which the state could arrive.
 /// - IM001 (driver does not support function): (driver-manager-handled; not returned here)
 ///
 /// # Safety
@@ -760,7 +772,9 @@ pub unsafe fn sql_get_cursor_name_w<B: Backend>(
 ///   `set_cursor_name_refuses_an_nts_name_that_runs_to_the_scan_cap` and
 ///   `set_cursor_name_still_reports_hy009_for_a_null_pointer`.
 /// - HY117 (connection suspended): (driver-manager-handled; not returned here)
-/// - HYT01 (connection timeout): not applicable; the framework is in-process.
+/// - HYT01 (connection timeout): not returned. Core implements no connection timeout of
+///   its own, and this function makes no backend call at all — it reads and writes
+///   handle state only — so there is no path by which the state could arrive.
 /// - IM001 (driver does not support function): (driver-manager-handled; not returned here)
 ///
 /// # Safety
@@ -975,7 +989,9 @@ pub unsafe fn sql_set_cursor_name_w<B: Backend>(
 /// - HYC00 (optional feature not implemented): returned for all valid `operation` values —
 ///   this driver does not support bulk operations or bookmarks.
 /// - HYT00 (timeout expired): not applicable; the framework is in-process.
-/// - HYT01 (connection timeout): not applicable; the framework is in-process.
+/// - HYT01 (connection timeout): not returned. Core implements no connection timeout of
+///   its own, and this function makes no backend call at all — it reads and writes
+///   handle state only — so there is no path by which the state could arrive.
 /// - IM001 (driver does not support function): (driver-manager-handled; not returned here)
 /// - IM017 (polling disabled): not returned here (the asynchronous notification model is not
 ///   supported — not DM-annotated in the spec).
@@ -1103,7 +1119,9 @@ pub unsafe fn sql_bulk_operations<B: Backend>(
 /// - HYC00 (optional feature not implemented): returned for all valid `operation`/`lock_type`
 ///   combinations — this driver does not support scrollable cursors or positioned operations.
 /// - HYT00 (timeout expired): not applicable; the framework is in-process.
-/// - HYT01 (connection timeout): not applicable; the framework is in-process.
+/// - HYT01 (connection timeout): not returned. Core implements no connection timeout of
+///   its own, and this function makes no backend call at all — it reads and writes
+///   handle state only — so there is no path by which the state could arrive.
 /// - IM001 (driver does not support function): (driver-manager-handled; not returned here)
 /// - IM017 (polling disabled): not returned here (the asynchronous notification model is not
 ///   supported — not DM-annotated in the spec).

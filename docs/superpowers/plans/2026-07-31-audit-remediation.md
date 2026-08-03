@@ -497,10 +497,65 @@ what previous `docs:` commits in this branch did.
 
 ### Task 4.2: The HYT01 cluster and rotted uniqueness claims
 
-- [ ] Replace "HYT01: not implemented / not applicable" with "propagated from the backend unchanged" at `fetch.rs:263, 566, 732, 927`, `cursor.rs:243, 346`, `metadata.rs:1519, 1726`; same treatment for the reason-less "HY013: not returned" lines (`fetch.rs:246, 549, 715, 912`).
-- [ ] Fix uniqueness claims: `col_attr.rs:483` + `descriptor.rs:667` (set_concise_type "only writer" — name the `Desc::Type`/`Desc::DatetimeIntervalCode` arms); `handles/mod.rs:918` (`implicit_descriptor_token` callers); `handles/mod.rs:1276` + AGENTS.md ("three callers of HandleScope::new" → four); `sync.rs:27` + `logging.rs:72` (record the tracing `MakeWriter` Mutex as the second stated exception, with the loom justification, in both files + AGENTS.md); `backend.rs:440, 878` ("nine statement-producing methods" → the actual count, or replace with "the methods taking `cancel:`" so it cannot rot); `descriptor.rs:382` + `desc.rs:25` (HY091 "sole authority" → name `field_from_raw`'s unknown-integer mint).
-- [ ] Add the found evidence to the bare driver citations: `handle.rs:526, 1187`, `backend.rs:979`, `params.rs:1379` (look each up in the named driver's source while writing the citation; if unverifiable, soften the sentence instead).
-- [ ] Commit: `docs: whole-path SQLSTATE claims, uniqueness claims and driver citations match reality`
+- [x] Replace "HYT01: not implemented / not applicable" with "propagated from the backend unchanged" at `fetch.rs:263, 566, 732, 927`, `cursor.rs:243, 346`, `metadata.rs:1519, 1726`; same treatment for the reason-less "HY013: not returned" lines (`fetch.rs:246, 549, 715, 912`).
+- [x] Fix uniqueness claims: `col_attr.rs:483` + `descriptor.rs:667` (set_concise_type "only writer" — name the `Desc::Type`/`Desc::DatetimeIntervalCode` arms); `handles/mod.rs:918` (`implicit_descriptor_token` callers); `handles/mod.rs:1276` + AGENTS.md ("three callers of HandleScope::new" → four); `sync.rs:27` + `logging.rs:72` (record the tracing `MakeWriter` Mutex as the second stated exception, with the loom justification, in both files + AGENTS.md); `backend.rs:440, 878` ("nine statement-producing methods" → the actual count, or replace with "the methods taking `cancel:`" so it cannot rot); `descriptor.rs:382` + `desc.rs:25` (HY091 "sole authority" → name `field_from_raw`'s unknown-integer mint).
+- [x] Add the found evidence to the bare driver citations: `handle.rs:526, 1187`, `backend.rs:979`, `params.rs:1379` (look each up in the named driver's source while writing the citation; if unverifiable, soften the sentence instead).
+- [x] Commit: `docs: whole-path SQLSTATE claims, uniqueness claims and driver citations match reality`
+
+
+**Outcome (2026-08-03).** All three items done. What the line numbers hid:
+
+- **`HYT01` needed four different answers, not one.** "Propagated from the
+  backend unchanged" is right only where the function reaches a *fallible*
+  backend method. `StatementBackend::column_count` returns a plain `i16` and
+  `row_count` an `Option<i64>`, so `SQLNumResultCols` and `SQLRowCount` cannot
+  receive a SQLSTATE from the backend at all; `SQLGetCursorName`,
+  `SQLSetCursorName`, `SQLBulkOperations` and `SQLSetPos` make no backend call.
+  Each of the eight `cursor.rs` bullets now states which case it is. The plan
+  named only `more_results` and `close_cursor`, and those are exactly the two
+  where propagation is possible — the other six had a blanket "the framework is
+  in-process", which is a claim about core that says nothing about the backend.
+- **Ten `HY013` bullets in `metadata.rs` asserted the opposite of the truth.**
+  They said "returned if underlying allocation fails"; `SqlState` has no `HY013`
+  constant and no factory, so no path in core can produce it. Found while giving
+  `fetch.rs`'s four reason-less "not returned" lines a reason, and fixed with
+  them.
+- **The `HandleScope::new` count was wrong in two places and right in a third.**
+  Four production callers — `panic_safe`, `with_child_group_in`, `with_group`
+  (`SQLCopyDesc` phase one) and `sql_cancel`. `handles/scope.rs` already said
+  four; `handles/mod.rs` said three and AGENTS.md implied three, both omitting
+  `with_group`. Three further call sites are in tests and the loom models.
+- **`set_concise_type` is not the only writer of the type trio**:
+  `descriptor::set_field`'s `Desc::Type` arm writes all three fields and its
+  `Desc::DatetimeIntervalCode` arm writes one. Both the `col_attr.rs` claim and
+  descriptor.rs's own "which every writer shares" said otherwise.
+- **`field_access` is not the sole authority on `HY091`.** An integer naming no
+  field never reaches it — `ffi::desc::field_from_raw` refuses it with the same
+  state at the FFI boundary. Corrected in `descriptor.rs`, `ffi/desc.rs`'s module
+  header and AGENTS.md's crate-layout row.
+- **`implicit_descriptor_token`'s doc named a caller that does not exist.** Its
+  two callers are `set_app_descriptor` (storing a self-referential override as
+  `None`) and `free_statement_allocation` (teardown), not "reverting a statement
+  whose explicit descriptor was freed".
+- **The count in `backend.rs` was replaced rather than corrected** — "the nine
+  statement-producing methods" is now "every method taking a `cancel:` argument",
+  since fifteen methods take one and the number has already moved twice.
+- **`logging.rs`'s `MakeWriter` mutex is the second lock exception**, and it is
+  forced rather than chosen: `tracing_subscriber` implements `MakeWriter` for
+  `std::sync::Mutex<W>` specifically, so loom's unrelated `Mutex` would not
+  compile. Recorded at the site, in `sync.rs` and in AGENTS.md, and `sync.rs` no
+  longer calls the `Condvar` "the crate's one exception".
+- **One driver citation was not merely bare but wrong.** `sql_put_data` claimed
+  its `HY009` guard was kept "because unixODBC does not always run it";
+  `DriverManager/SQLPutData.c` runs exactly that check
+  (`data == NULL && strlen_or_ind != 0 && … != SQL_NULL_DATA`) before dispatching
+  to the driver. The guard is kept for the reason that survives — core is linked
+  without a Driver Manager too — and the claim is gone from both the doc comment
+  and the code comment. The other three citations are now file-and-arm specific:
+  unixODBC's `SQLFreeStmt.c` `case SQL_DROP:` calling `__SQLFreeHandle` and
+  never reaching the `SQLFREESTMT` dispatch its neighbours use, psqlODBC's
+  `info.c` answering `SQL_CB_PRESERVE`, and MySQL's `driver/info.cc` answering it
+  for commit and rollback in one arm.
 
 ### Task 4.3: Module headers and crate-level counts
 
