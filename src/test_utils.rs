@@ -4659,3 +4659,113 @@ impl Backend for MockPrompterBackend {
 
     minimal_capability_decls!();
 }
+
+/// A backend whose `connect` fails, for the `SQLDriverConnectW` /
+/// `SQLConnectW` error paths.
+///
+/// `MockBackend` cannot reach them: its `connect` always succeeds, and its
+/// `MockError` collapses to `NotImplemented`/`HYC00`, so it could not carry a
+/// connection-specific SQLSTATE even if it did fail. This one answers `08004`
+/// ("server rejected the connection"), the state `SQLDriverConnect`'s own
+/// diagnostics table gives a backend refusal — core has no factory for it,
+/// because it is the data source's answer rather than core's.
+pub struct MockFailBackend;
+
+impl Backend for MockFailBackend {
+    type Connection = MockConnection;
+    type Statement = MockStatement;
+    type Error = OdbcError;
+    type CancelToken = MockCancelToken;
+
+    fn connect(_: &ConnectParams) -> Result<MockConnection, OdbcError> {
+        Err(OdbcError::general(
+            "mock backend refused the connection",
+            crate::types::SqlState::new("08004"),
+        ))
+    }
+    fn disconnect(_: &mut MockConnection) -> Result<(), OdbcError> {
+        Ok(())
+    }
+    fn cancel_token(_conn: &Self::Connection) -> Self::CancelToken {
+        MockCancelToken::default()
+    }
+    fn cancel(token: &Self::CancelToken) -> Result<(), Self::Error> {
+        token
+            .cancelled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+    fn is_cancelled(token: &Self::CancelToken) -> bool {
+        token.cancelled.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    // Everything below is unreachable through this mock — no test can obtain a
+    // connection from it — but the trait requires them.
+    fn exec_direct(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: &str,
+    ) -> Result<MockStatement, OdbcError> {
+        Ok(MockStatement)
+    }
+    fn prepare(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: &str,
+    ) -> Result<MockStatement, OdbcError> {
+        Ok(MockStatement)
+    }
+    fn execute(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: &mut MockStatement,
+        _: &[crate::types::ColumnValue],
+    ) -> Result<crate::types::ExecuteOutcome, OdbcError> {
+        Ok(crate::types::ExecuteOutcome::default())
+    }
+    fn get_info(_: &MockConnection, _: crate::types::InfoType) -> Result<InfoValue, OdbcError> {
+        Err(OdbcError::NotImplemented {
+            feature: "mock".into(),
+        })
+    }
+    fn get_functions() -> Cow<'static, [crate::function_id::FunctionId]> {
+        Cow::Borrowed(&[])
+    }
+    fn get_type_info(_conn: &Self::Connection) -> Cow<'static, [TypeInfoRow]> {
+        Cow::Borrowed(&[])
+    }
+    fn tables(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: &crate::types::TablesQuery<'_>,
+    ) -> Result<Vec<TableRow>, OdbcError> {
+        Ok(Vec::new())
+    }
+    fn columns(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: &crate::types::ColumnsQuery<'_>,
+    ) -> Result<Vec<ColumnRow>, OdbcError> {
+        Ok(Vec::new())
+    }
+    fn supports_catalogs(_conn: &Self::Connection) -> bool {
+        false
+    }
+    fn supports_schemas(_conn: &Self::Connection) -> bool {
+        false
+    }
+    fn alter_table_support(_conn: &Self::Connection) -> u32 {
+        0
+    }
+    fn outer_join_capabilities(_conn: &Self::Connection) -> u32 {
+        0
+    }
+    fn default_txn_isolation(_conn: &Self::Connection) -> u32 {
+        0
+    }
+    fn txn_isolation_options(_conn: &Self::Connection) -> u32 {
+        0
+    }
+
+    minimal_capability_decls!();
+}

@@ -645,9 +645,35 @@ stream.
 
 **Files:** `src/test_utils.rs` (new `MockFailBackend`: `connect` returns `Err` with SQLSTATE `08004`), `src/ffi/connect.rs` tests.
 
-- [ ] Tests: `failed_connect_surfaces_the_backends_sqlstate` (SQLDriverConnectW → `SQL_ERROR`, `first_sqlstate == "08004"`), `failed_connect_leaves_the_handle_unconnected` (subsequent `SQLDisconnect` → `08003`), `pending_attr_failure_tears_the_connection_down` (backend connects OK but `set_current_catalog` fails → error propagates, connection torn down — exercises `connect.rs:221-230`).
-- [ ] These are new tests over existing code — expected to pass; if any fails, that is a real bug: stop and report before fixing.
-- [ ] GATE. Commit: `test: the Backend::connect failure path is exercised`
+- [x] Tests: `failed_connect_surfaces_the_backends_sqlstate` (SQLDriverConnectW → `SQL_ERROR`, `first_sqlstate == "08004"`), `failed_connect_leaves_the_handle_unconnected` (subsequent `SQLDisconnect` → `08003`), `pending_attr_failure_tears_the_connection_down` (backend connects OK but `set_current_catalog` fails → error propagates, connection torn down — exercises `connect.rs:221-230`).
+- [x] These are new tests over existing code — expected to pass; if any fails, that is a real bug: stop and report before fixing.
+- [x] GATE. Commit: `test: the Backend::connect failure path is exercised`
+
+
+**Outcome (2026-08-03).** Three tests, all passing, and **no bug found** — but
+the third failed first, and the reason is worth recording because it is a trap
+for anyone writing a test against a defaulted hook:
+
+- **`MockBackend` overrides `set_current_catalog` to `Ok(())`**
+  (`test_utils.rs:572`), so the pending attribute applied cleanly and the connect
+  *rightly* succeeded. The failure was the test's premise, not core's behaviour;
+  checked before concluding, per this task's own instruction. The test now drives
+  `MockNoCatalogBackend`, which leaves the hook defaulted and so answers `HYC00`.
+  A test that needs a defaulted hook has to check no mock has overridden it.
+- **`MockFailBackend` uses `type Error = OdbcError`, not `MockError`.** `MockError`
+  collapses everything to `NotImplemented`/`HYC00` by design, so it cannot carry
+  `08004` — the state `SQLDriverConnect`'s table gives a backend refusal, and one
+  core has no factory for because it is the data source's answer. The mock builds
+  it with `SqlState::new("08004")`.
+- **`dbc_sqlstate` had to be generalised over the backend.** A handle is a
+  `ConnectionHandle<B>`, so reading a `MockFailBackend` connection's diagnostics
+  through `MockBackend` would be the wrong type at the same registry slot — the
+  hazard the module's own `alloc_env_and_conn_for` comment already warns about.
+  `dbc_sqlstate_for::<B>` is the general form and `dbc_sqlstate` the `MockBackend`
+  wrapper, mirroring that pair.
+
+The phantom `MockFailBackend` that Task 4.3 removed from `test_utils.rs`'s header
+now exists, so that header's promise is kept rather than merely made honest.
 
 ### Task 5.2: Misalignment tests for every marshalling family
 

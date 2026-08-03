@@ -1226,7 +1226,10 @@ mod tests {
     use odbc_sys::HandleType;
 
     use crate::ffi::handle::{sql_alloc_handle, sql_free_handle};
-    use crate::test_utils::{MockBackend, MockBrowseBackend};
+    use crate::test_utils::{
+        MockBackend, MockBrowseBackend, MockFailBackend, MockNoCatalogBackend,
+    };
+    use crate::types::ConnectionAttribute;
 
     /// Helper: allocate env + connection handles **for the backend the test
     /// then calls through**, returning both raw pointers.
@@ -2521,8 +2524,153 @@ mod tests {
     // against a *different data source* than the application named.
     // -----------------------------------------------------------------------
 
-    /// The `HY090` a scan overrun posts on a connection handle.
-    unsafe fn dbc_sqlstate(conn: *mut c_void) -> String {
+    // -----------------------------------------------------------------------
+    // The Backend::connect failure path
+    //
+    // `MockBackend` connects unconditionally, so until `MockFailBackend` existed
+    // nothing exercised what happens when a backend refuses: whether its
+    // SQLSTATE survives, and whether the handle is left connected.
+    // -----------------------------------------------------------------------
+
+    /// The state the backend chose is what the application reads, not a generic
+    /// `HY000` or `08001` substituted by core.
+    #[test]
+    fn failed_connect_surfaces_the_backends_sqlstate() {
+        unsafe {
+            let (env, conn) = alloc_env_and_conn_for::<MockFailBackend>();
+
+            let wide: Vec<u16> = "Host=localhost".encode_utf16().collect();
+            let mut out_buf = [0u16; 64];
+            let mut out_len: i16 = 0;
+            let ret = sql_driver_connect_w::<MockFailBackend>(
+                conn,
+                std::ptr::null_mut(),
+                wide.as_ptr(),
+                i16::try_from(wide.len()).expect("short"),
+                out_buf.as_mut_ptr(),
+                64,
+                &mut out_len,
+                DriverConnectOption::NoPrompt as u16,
+            );
+            assert_eq!(ret, SqlReturn::ERROR);
+            assert_eq!(
+                dbc_sqlstate_for::<MockFailBackend>(conn),
+                "08004",
+                "the backend's own state must not be replaced by core's"
+            );
+
+            let _ = sql_free_handle::<MockFailBackend>(HandleType::Dbc as i16, conn);
+            let _ = sql_free_handle::<MockFailBackend>(HandleType::Env as i16, env);
+        }
+    }
+
+    /// A refused connect must leave nothing behind: the next `SQLDisconnect`
+    /// answers `08003` ("connection not open"), which it can only do if
+    /// `handle.connection` is still `None`.
+    #[test]
+    fn failed_connect_leaves_the_handle_unconnected() {
+        unsafe {
+            let (env, conn) = alloc_env_and_conn_for::<MockFailBackend>();
+
+            let wide: Vec<u16> = "Host=localhost".encode_utf16().collect();
+            let mut out_len: i16 = 0;
+            let ret = sql_driver_connect_w::<MockFailBackend>(
+                conn,
+                std::ptr::null_mut(),
+                wide.as_ptr(),
+                i16::try_from(wide.len()).expect("short"),
+                std::ptr::null_mut(),
+                0,
+                &mut out_len,
+                DriverConnectOption::NoPrompt as u16,
+            );
+            assert_eq!(ret, SqlReturn::ERROR);
+
+            let ret = sql_disconnect::<MockFailBackend>(conn);
+            assert_eq!(ret, SqlReturn::ERROR);
+            assert_eq!(
+                dbc_sqlstate_for::<MockFailBackend>(conn),
+                crate::types::sql_state::CONNECTION_NOT_OPEN,
+                "a handle whose connect failed is not connected"
+            );
+
+            let _ = sql_free_handle::<MockFailBackend>(HandleType::Dbc as i16, conn);
+            let _ = sql_free_handle::<MockFailBackend>(HandleType::Env as i16, env);
+        }
+    }
+
+    /// The other half of the path: the backend connects, and then a *pending*
+    /// connection attribute fails to apply. `sql_driver_connect_w` must fail the
+    /// whole connect and tear the connection down rather than hand back a
+    /// half-configured one.
+    ///
+    /// `MockNoCatalogBackend`, not `MockBackend`: the latter **overrides**
+    /// `set_current_catalog` to `Ok(())`, so the pending attribute applies
+    /// cleanly and the connect rightly succeeds. This mock leaves the hook
+    /// defaulted, which is the `HYC00` the path needs.
+    #[test]
+    fn pending_attr_failure_tears_the_connection_down() {
+        unsafe {
+            let (env, conn) = alloc_env_and_conn_for::<MockNoCatalogBackend>();
+
+            // Set before connecting, so it is stored and applied at connect.
+            let catalog: Vec<u16> = "somedb".encode_utf16().collect();
+            let ret = crate::ffi::connect_attr::sql_set_connect_attr_w::<MockNoCatalogBackend>(
+                conn,
+                ConnectionAttribute::CURRENT_CATALOG.0,
+                catalog.as_ptr().cast_mut().cast::<c_void>(),
+                i32::try_from(catalog.len() * 2).expect("short"),
+            );
+            assert_eq!(
+                ret,
+                SqlReturn::SUCCESS,
+                "storing it must not need a connection"
+            );
+
+            let wide: Vec<u16> = "Host=localhost".encode_utf16().collect();
+            let mut out_len: i16 = 0;
+            let ret = sql_driver_connect_w::<MockNoCatalogBackend>(
+                conn,
+                std::ptr::null_mut(),
+                wide.as_ptr(),
+                i16::try_from(wide.len()).expect("short"),
+                std::ptr::null_mut(),
+                0,
+                &mut out_len,
+                DriverConnectOption::NoPrompt as u16,
+            );
+            assert_eq!(
+                ret,
+                SqlReturn::ERROR,
+                "an unimplemented pending attribute fails the connect"
+            );
+            assert_eq!(
+                dbc_sqlstate_for::<MockNoCatalogBackend>(conn),
+                crate::types::sql_state::OPTIONAL_FEATURE_NOT_IMPLEMENTED,
+                "the hook's own state is propagated, not degraded to HY000"
+            );
+
+            // Torn down: the connection was taken back out of the handle, so
+            // SQLDisconnect has nothing to close.
+            let ret = sql_disconnect::<MockNoCatalogBackend>(conn);
+            assert_eq!(ret, SqlReturn::ERROR);
+            assert_eq!(
+                dbc_sqlstate_for::<MockNoCatalogBackend>(conn),
+                crate::types::sql_state::CONNECTION_NOT_OPEN,
+                "a connect that failed on a pending attribute leaves no connection"
+            );
+
+            let _ = sql_free_handle::<MockNoCatalogBackend>(HandleType::Dbc as i16, conn);
+            let _ = sql_free_handle::<MockNoCatalogBackend>(HandleType::Env as i16, env);
+        }
+    }
+
+    /// The first SQLSTATE on a connection handle, for whichever backend owns it.
+    ///
+    /// Generic because the handle's type parameter is part of what the registry
+    /// checks: reading a `MockFailBackend` connection's diagnostics through
+    /// `MockBackend` would be a different handle kind.
+    unsafe fn dbc_sqlstate_for<B: Backend>(conn: *mut c_void) -> String {
         use crate::ffi::diag::sql_get_diag_rec_w;
         let mut state = [0u16; 6];
         let mut native_err: i32 = 0;
@@ -2530,7 +2678,7 @@ mod tests {
         let mut msg_len: i16 = 0;
         // SAFETY: every buffer is a live local of the declared size.
         let ret = unsafe {
-            sql_get_diag_rec_w::<MockBackend>(
+            sql_get_diag_rec_w::<B>(
                 HandleType::Dbc as i16,
                 conn,
                 1,
@@ -2543,6 +2691,12 @@ mod tests {
         };
         assert_eq!(ret, SqlReturn::SUCCESS, "no diagnostic record was posted");
         String::from_utf16_lossy(&state[..5])
+    }
+
+    /// [`dbc_sqlstate_for`] for [`MockBackend`], which is what most tests here
+    /// want — including the `HY090` a scan overrun posts.
+    unsafe fn dbc_sqlstate(conn: *mut c_void) -> String {
+        unsafe { dbc_sqlstate_for::<MockBackend>(conn) }
     }
 
     /// A buffer of exactly `MAX_NTS_SCAN` units with no terminator: the scan
