@@ -311,10 +311,13 @@ Available conversion functions (all in `src/types/conversions.rs` unless noted):
 - `statement_attribute_from_raw(i32) -> Option<StatementAttribute>`
 - `completion_type_from_raw(i16) -> Option<CompletionType>`
 - `fetch_orientation_from_raw(i16) -> Option<FetchOrientation>`
-- `identifier_type_from_raw(i16) -> Option<IdentifierType>`
-- `nullable_from_raw(i16) -> Option<Nullable>`
-- `scope_from_raw(i16) -> Option<Scope>`
+- `identifier_type_from_raw(u16) -> Option<IdentifierType>`
+- `nullable_from_raw(u16) -> Option<Nullable>`
+- `scope_from_raw(u16) -> Option<Scope>`
 - `bulk_operation_from_raw(i16) -> Option<BulkOperation>`
+- `interval_from_raw(i16) -> Option<Interval>`
+- `declared_odbc_version_from_raw(i32) -> Option<DeclaredOdbcVersion>`
+- `driver_connect_option_from_raw(u16) -> Option<DriverConnectOption>`
 - `function_id_from_raw(u16) -> Option<FunctionId>` (in `function_id.rs`)
 
 If `odbc-sys` adds a new enum that we need to convert from raw values, add a `xxx_from_raw` function following the same pattern. Do not use `transmute`.
@@ -704,9 +707,16 @@ MIRIFLAGS="-Zmiri-disable-isolation" \
   cargo +nightly miri test -p stackable-odbc-core --lib -- --skip proptest
 ```
 
-Takes about 5 to 6 minutes for ~1320 tests, with warm build artifacts; the CI
-job, whose artifacts are never warm and whose core is slower, runs about twice
-that. **Re-measure this figure rather than trusting it** — it was "110 seconds
+The non-proptest set is **1511 tests** today, twelve of which carry a `miri`
+ignore, and it grows with every commit — take the count from
+`cargo test --lib -- --skip proptest --list`, not from this sentence.
+
+**The wall-clock figure that used to be here is deleted rather than updated,
+because it could not be re-measured**: Miri needs to write `~/.cache/miri` to
+build its sysroot, which the development sandbox denies, so the run fails before
+it interprets anything. Measure it on a host where Miri can run and put the number
+back with the date you took it. **Re-measure rather than trusting a figure here** —
+the last one was "110 seconds
 for 675 tests" for four days after it stopped being true, and the run had
 reached 28.5 minutes against a `timeout-minutes: 30` budget before anyone
 noticed. `-Z unstable-options --report-time` after the `--` gives the per-test
@@ -731,7 +741,7 @@ breakdown that tells you which test is responsible. Notes:
   `types/diagnostics_table.rs` are the case to learn from: they take no
   parameters and read no files at runtime, so nothing about them reads as
   expensive, and they finish in 0.018 s and 0.003 s natively. But they scan the
-  1.72 MB of FFI source that module `include_str!`s, and Miri interprets that
+  1.86 MB of FFI source that module `include_str!`s, and Miri interprets that
   byte by byte — **553 s and 136 s**, together 68% of the whole run, on a module
   containing no `unsafe` whatsoever. The signal to watch for is `include_str!`,
   a full-`u16`-space scan, or any other input baked in at compile time rather
@@ -1215,6 +1225,8 @@ See [`fuzz/README.md`](fuzz/README.md) for what is and is not worth fuzzing.
 ### Unit tests
 
 - `stackable-odbc-core` tests use a shared `MockBackend` from `test_utils.rs`
+  (the examples below are a sample, not an inventory — grep `struct Mock` for the
+  current set)
   (connect/disconnect succeed, everything else returns `NotImplemented`), plus a
   family of purpose-built mocks for paths `MockBackend` cannot reach:
   `MockAltBackend` (declares a different value for every capability method, so
@@ -1387,7 +1399,7 @@ Generic framework. Zero database-specific code.
 | `types/conversions.rs` | `*_from_raw()` conversion functions for all ODBC ABI types |
 | `types/sql_state.rs` | `SqlState` — five-character ODBC diagnostic code and factory methods |
 | `types/value.rs` | `ColumnValue`, `FetchResult`, `Nullable`, `TypeInfoRow`, `ColumnDescriptor` |
-| `types/result_cols.rs` | `TablesResultCol`, `ColumnsResultCol`, `PrimaryKeysResultCol`, `ForeignKeysResultCol` |
+| `types/result_cols.rs` | `TablesResultCol`, `ColumnsResultCol`, `PrimaryKeysResultCol`, `ForeignKeysResultCol`, and `CatalogResultColumnWidths` — the per-backend widths those result sets declare |
 | `types/connect_params.rs` | `ConnectParams` — ODBC connection string parser |
 | `types/col_attr.rs` | `ColAttrValue` and column attribute logic for `SQLColAttributeW` |
 | `types/cursor_behavior.rs` | `CursorBehavior` — the `SQL_CB_*` cursor behaviour `SQLEndTran` applies, declared by the backend and reported by `SQLGetInfoW` |
@@ -1395,6 +1407,9 @@ Generic framework. Zero database-specific code.
 | `types/column_size.rs` | Shared ODBC column-size formulas (`catalog_column_size`/`column_size`); keeps declared vs maximum precision distinct |
 | `types/info_type_shape.rs` | The `SQLGetInfo` spec's per-`InfoType` return-value shape, transcribed for the conformance test |
 | `types/version.rs` | Parsed data-source version numbers, for a backend gating capabilities on server version |
+| `types/odbc_version.rs` | `DeclaredOdbcVersion` — the version an application declared through `SQL_ATTR_ODBC_VERSION`, and what it changes |
+| `types/catalog_queries.rs` | The ten sealed `XxxQuery` argument objects the catalog hooks take |
+| `types/diagnostics_table.rs` | Every function's spec Diagnostics table transcribed, plus the three guards that check the doc comments against it |
 | `types/redacted.rs` | `Redacted<T>` — `Debug` wrapper that prints `*****` for sensitive fields (e.g. passwords) |
 | `column_value.rs` | `write_column_value()` — core data marshalling for `SQLGetData` (NULL, truncation, type coercion) |
 | `param_convert.rs` | `text_to_sql_type()` — the reverse direction: converts `SQL_C_CHAR`/`SQL_C_WCHAR` parameter text to the SQL type `SQLBindParameter` declared. The spec's "C to SQL: Character" table, transcribed. Also owns the size checks all three C-to-SQL tables share (`DecimalLiteral`, `check_declared_char_size`, `check_declared_decimal_size`, `check_declared_binary_size`) |
@@ -1402,10 +1417,11 @@ Generic framework. Zero database-specific code.
 | `numeric_convert.rs` | The spec's "C to SQL: Numeric" table, transcribed. Every numeric C type to any of its six target rows, including the interval row and footnote [b]'s optional `01S07`. `numeric_pairing_is_supported` is `SQLBindParameter`'s gate |
 | `prompt.rs` | `Prompter` — the trait a driver implements to present a login URL to the user during a connect. Definition only: core ships no implementation and gains no dependency |
 | `query_timer.rs` | `QueryTimer` — core-side `SQL_ATTR_QUERY_TIMEOUT` enforcement: a timer thread that calls `Backend::cancel` on expiry and relabels the resulting failure `HYT00` |
+| `cancel.rs` | `CancelState` — a backend's cancel token plus core's `timed_out` flag, and the one implementation of "a cancelled call reports `HY008`" |
 | `synthetic.rs` | `SyntheticStatement` — in-memory result set for `SQLGetTypeInfo` and catalog functions |
 | `catalog_sort.rs` | Sorts a catalog result set into its spec-mandated order; NULL placement from `Backend::null_collation` |
 | `catalog_ident.rs` | `SQL_ATTR_METADATA_ID` identifier normalisation and the `SQLTables` `TableType` value-list parser |
-| `types/catalog_rows.rs` | The six typed catalog row structs a `Backend` returns, and their spec-order conversion to `ColumnValue`s |
+| `types/catalog_rows.rs` | The ten typed catalog row structs a `Backend` returns (`TableRow`, `ColumnRow`, `PrimaryKeyRow`, `ForeignKeyRow`, `StatisticsRow`, `SpecialColumnRow`, `ProcedureRow`, `ProcedureColumnRow`, `ColumnPrivilegeRow`, `TablePrivilegeRow`), and their spec-order conversion to `ColumnValue`s |
 | `conformance.rs` | Shared support for the `SQLGetInfoW` info-type conformance test (return shape + Driver-Manager-safe value), reused by core and by driver test suites |
 | `escape.rs` | ODBC escape-sequence translation (`{fn}`, `{d/t/ts}`, `{oj}`, `{escape}`); a shared scanner with a per-backend `EscapeDialect` |
 | `errors.rs` | `OdbcError` with SQLSTATE mapping and `SqlReturn` conversion |
@@ -1427,11 +1443,11 @@ Generic framework. Zero database-specific code.
 | `ffi/diag.rs` | `sql_get_diag_rec_w<B>`, `sql_get_diag_field_w<B>` |
 | `ffi/cursor.rs` | `sql_num_result_cols<B>`, `sql_row_count<B>`, `sql_more_results<B>`, `sql_close_cursor<B>`, `sql_cancel<B>`, `sql_get_cursor_name_w<B>`, `sql_set_cursor_name_w<B>`, `sql_bulk_operations<B>`, `sql_set_pos<B>` |
 | `ffi/execute.rs` | `sql_exec_direct_w<B>`, `sql_prepare_w<B>`, `sql_execute<B>` |
-| `ffi/fetch.rs` | `sql_fetch<B>`, `sql_fetch_scroll<B>`, `sql_get_data<B>` |
+| `ffi/fetch.rs` | `sql_fetch<B>`, `sql_fetch_scroll<B>`, `sql_extended_fetch<B>`, `sql_get_data<B>` |
 | `ffi/metadata.rs` | `sql_describe_col_w<B>`, `sql_col_attribute_w<B>`, `sql_tables_w<B>`, `sql_columns_w<B>`, `sql_primary_keys_w<B>`, `sql_foreign_keys_w<B>`, `sql_statistics_w<B>`, `sql_special_columns_w<B>`, `sql_procedures_w<B>`, `sql_procedure_columns_w<B>`, `sql_column_privileges_w<B>`, `sql_table_privileges_w<B>` |
 | `ffi/params.rs` | `sql_bind_parameter<B>`, `sql_num_params<B>`, `sql_describe_param<B>`, `sql_put_data<B>`, `sql_param_data<B>` |
 | `ffi/bind.rs` | `sql_bind_col<B>` |
-| `ffi/desc.rs` | `sql_get_desc_field_w<B>`, `sql_set_desc_field_w<B>`, `sql_get_desc_rec_w<B>`, `sql_set_desc_rec<B>` — argument marshalling over `descriptor.rs`'s tables |
+| `ffi/desc.rs` | `sql_get_desc_field_w<B>`, `sql_set_desc_field_w<B>`, `sql_get_desc_rec_w<B>`, `sql_set_desc_rec<B>`, `sql_copy_desc<B>` — argument marshalling over `descriptor.rs`'s tables |
 | `ffi/stmt_attr.rs` | `sql_set_stmt_attr_w<B>`, `sql_get_stmt_attr_w<B>` |
 | `ffi/info.rs` | `sql_get_info_w<B>`, `sql_get_type_info<B>`, `sql_get_functions<B>` |
 | `ffi/tran.rs` | `sql_end_tran<B>` |

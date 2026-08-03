@@ -595,12 +595,49 @@ recorded, and the fix was to stop counting:
 
 ### Task 4.4: Markdown drift (README, AGENTS, CHANGELOG)
 
-- [ ] README: 4 associated types / 47 required methods (or drop the numbers); "deprecated ODBC 2.x left out (except SQLExtendedFetch, which the DM does not map)"; drop or caveat the "1345 unit tests" count.
-- [ ] AGENTS.md: "six" → "ten" catalog row structs (:1339); add crate-layout rows for `cancel.rs`, `types/catalog_queries.rs`, `types/diagnostics_table.rs`, `types/odbc_version.rs`; add `sql_extended_fetch` and `sql_copy_desc` to their rows; fix the three `*_from_raw` signatures (`u16`) and add the three missing functions; "~1320 tests" → re-measured figure; `result_cols.rs` row mentions `CatalogResultColumnWidths`; mock list rephrased as examples; "1.72 MB" → current figure (also in `diagnostics_table.rs:2058, 2064, 2160`).
-- [ ] CHANGELOG migration §6: `tables` takes `&TablesQuery<'_>`; re-check §§1-8 against the query-type signatures.
-- [ ] Commit: `docs: README, AGENTS and CHANGELOG match the current code`
+- [x] README: 4 associated types / 47 required methods (or drop the numbers); "deprecated ODBC 2.x left out (except SQLExtendedFetch, which the DM does not map)"; drop or caveat the "1345 unit tests" count.
+- [x] AGENTS.md: "six" → "ten" catalog row structs (:1339); add crate-layout rows for `cancel.rs`, `types/catalog_queries.rs`, `types/diagnostics_table.rs`, `types/odbc_version.rs`; add `sql_extended_fetch` and `sql_copy_desc` to their rows; fix the three `*_from_raw` signatures (`u16`) and add the three missing functions; "~1320 tests" → re-measured figure; `result_cols.rs` row mentions `CatalogResultColumnWidths`; mock list rephrased as examples; "1.72 MB" → current figure (also in `diagnostics_table.rs:2058, 2064, 2160`).
+- [x] CHANGELOG migration §6: `tables` takes `&TablesQuery<'_>`; re-check §§1-8 against the query-type signatures.
+- [x] Commit: `docs: README, AGENTS and CHANGELOG match the current code`
 
 ---
+
+
+**Outcome (2026-08-03).** Done, and every number was re-derived rather than
+adjusted. Phase 4 closes with this.
+
+- **README's `Backend` figures were both wrong**, and the plan's replacements were
+  right: 4 associated types (`Connection`, `Statement`, `Error`, `CancelToken`)
+  and 47 required methods against 33 defaulted, where it said 3 and 35. "Write the
+  three associated types" is now four. The "1345 unit tests" and "59 C entry
+  points" counts are gone rather than updated — 1521 and 61 today, and both move
+  weekly.
+- **Ten catalog row structs, not six**, and they are now named in the layout row
+  so the next drift is visible.
+- **The three wrong `*_from_raw` signatures were exactly the three the plan
+  named** — `identifier_type_from_raw`, `nullable_from_raw` and `scope_from_raw`
+  all take `u16` — and the three missing entries were `interval_from_raw`,
+  `declared_odbc_version_from_raw` and `driver_connect_option_from_raw`. The list
+  is 18 functions in `conversions.rs` plus `function_id_from_raw`.
+- **The `include_str!` total is 1.86 MB, not 1.72** (17 files, 1 946 107 bytes),
+  corrected in AGENTS.md and at all four sites in `diagnostics_table.rs`.
+- **The Miri wall-clock figure could not be re-measured, so it is deleted rather
+  than guessed.** Miri needs to write `~/.cache/miri` to build its sysroot and the
+  sandbox denies it (`nono why`: `path_not_granted`), so the run aborts before
+  interpreting anything. AGENTS.md now says so, keeps the historical anecdote about
+  the stale figure, and gives the count instead — 1511 tests in the non-proptest
+  set, twelve carrying a `miri` ignore, with the command to re-derive it.
+  **This blocks Task 7.1**: the deferred Miri pass has to run outside the sandbox.
+- **CHANGELOG migration point 6 described an argument list that no longer
+  exists** ("`tables`' last parameter is now `table_types: &[String]`"). All ten
+  hooks take one sealed `&XxxQuery<'_>`; point 6 now says that and point 1
+  cross-references it. Points 2-5, 7 and 8 re-checked against the signatures and
+  are accurate.
+
+One process note worth keeping: a `python3 … 2>/dev/null` added to silence the
+sandbox's `/etc/apt` warning also silenced an `AssertionError`, so a script
+reported success while writing nothing. Filter the known warning, never the
+stream.
 
 ## Phase 5 — Test gaps
 

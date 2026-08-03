@@ -89,7 +89,7 @@ Everything a driver has to change for the catalog rework, in one place.
    `Vec<PrimaryKeyRow>`, `foreign_keys` → `Vec<ForeignKeyRow>`, `statistics` →
    `Vec<StatisticsRow>`, `special_columns` → `Vec<SpecialColumnRow>`. Keep the
    query helpers; return their rows as structs and delete the statement
-   construction.
+   construction. Their *arguments* changed shape at the same time — see point 6.
 2. **`Backend::table_types` is new and required.** Return the data source's
    table types, e.g. `["TABLE", "VIEW"]`, upper case.
 3. **`Backend::catalogs` and `Backend::schemas` are new and defaulted.**
@@ -101,8 +101,14 @@ Everything a driver has to change for the catalog rework, in one place.
    redundant, though harmless.
 5. **Delete any `SQL_ATTR_METADATA_ID` handling.** Core normalises identifier
    arguments before calling the backend.
-6. **`Backend::tables`' last parameter is now `table_types: &[String]`.** Delete
-   any driver-side splitting of the raw `TableType` string; core does it once.
+6. **Every one of the ten hooks takes a single sealed query object**, not a list of
+   positional arguments: `tables(conn, cancel, &TablesQuery<'_>)`,
+   `columns(conn, cancel, &ColumnsQuery<'_>)` and so on through
+   `TablePrivilegesQuery`. Read the arguments back through the accessors —
+   `query.catalog()`, `query.schema()`, `query.table()`. `SQLTables`' table-type list
+   is `query.table_types()`, already split, so delete any driver-side splitting of the
+   raw `TableType` string. Because the types are sealed, an argument added to a catalog
+   hook later is a source-compatible change.
 7. **Four more methods are new and defaulted:** `procedures`,
    `procedure_columns`, `column_privileges` and `table_privileges`, returning
    `Vec<ProcedureRow>`, `Vec<ProcedureColumnRow>`, `Vec<ColumnPrivilegeRow>` and

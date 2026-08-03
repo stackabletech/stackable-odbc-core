@@ -89,7 +89,9 @@ spec-compliance rules, see [AGENTS.md](AGENTS.md).
   binary and numeric — including the awkward interval row and its optional
   `01S07` "your fractional seconds were rounded" warning.
 
-- **Checked by more than unit tests.** 1345 unit tests, plus three tools that
+- **Checked by more than unit tests.** Fifteen hundred-odd unit tests — run
+  `cargo test` for today's figure rather than trusting this sentence — plus three
+  tools that
   catch what ordinary tests cannot: Miri runs the code in an interpreter that
   detects undefined behaviour and leaked handles, loom re-runs the locking code
   under every possible thread interleaving rather than the one that happened to
@@ -115,10 +117,13 @@ five *descriptor* functions work (descriptors are the standard's own way of
 describing a bound column or parameter, and can be shared between queries on one
 connection).
 
-59 C entry points are exported. The deprecated ODBC 2.x functions are
-deliberately left out: the Driver Manager already emulates them on top of the
-modern ones, usually better than a driver would, and exporting your own version
-switches that off rather than adding anything.
+Every entry point in `CORE_EXPORTED_FUNCTIONS` (`src/function_id.rs`) is exported —
+read that list rather than a count, which is what a guard test checks against. The
+deprecated ODBC 2.x functions are deliberately left out: the Driver Manager already
+emulates them on top of the modern ones, usually better than a driver would, and
+exporting your own version switches that off rather than adding anything. The one
+exception is `SQLExtendedFetch`, which the Driver Manager does **not** map, so core
+exports it.
 
 Deliberately out of scope:
 
@@ -181,8 +186,8 @@ Adding a new database backend requires three steps:
    }
    ```
 
-   The sketch above is deliberately incomplete. `Backend` has 3 associated types
-   and 35 required methods, but most are one-line *capability declarations* —
+   The sketch above is deliberately incomplete. `Backend` has 4 associated types
+   and 47 required methods, but most are one-line *capability declarations* —
    `supports_catalogs`, `identifier_case`, `sql_conformance` — each answering a
    single yes/no or pick-a-value question about your database.
 
@@ -193,7 +198,7 @@ Adding a new database backend requires three steps:
    `StatementBackend`, by contrast, has one associated type and no required
    methods at all — override only what your backend supports.
 
-   In practice you do not look this list up. Write the three associated types,
+   In practice you do not look this list up. Write the four associated types,
    run `cargo check`, and the compiler names exactly what is still missing.
 
 3. **Generate the FFI entry points** in `lib.rs` using the `forward_ffi!` macro:

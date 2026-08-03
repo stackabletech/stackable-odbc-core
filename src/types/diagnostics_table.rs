@@ -2146,13 +2146,13 @@ fn the_transcription_is_well_formed() {
 /// Skipped under Miri, on the same grounds as
 /// `escape::tests::pathological_nesting_returns_an_error_rather_than_killing_the_process`:
 /// the cost is algorithmic rather than memory-safety-related. This module holds
-/// no `unsafe` at all — it scans the 1.72 MB of `include_str!`'d FFI source
+/// no `unsafe` at all — it scans the 1.86 MB of `include_str!`'d FFI source
 /// above as `&'static str` — so Miri has nothing here to check, and interpreting
 /// that byte by byte cost **553 seconds** against 0.018 seconds native. It and
 /// its neighbour below were together 68% of the entire Miri run.
 #[cfg_attr(
     miri,
-    ignore = "1.72 MB string scan; no unsafe in this module for Miri to check"
+    ignore = "1.86 MB string scan; no unsafe in this module for Miri to check"
 )]
 #[test]
 fn every_doc_comment_matches_the_spec_diagnostics_table() {
@@ -2257,7 +2257,7 @@ fn every_doc_comment_matches_the_spec_diagnostics_table() {
 /// for Miri to check.
 #[cfg_attr(
     miri,
-    ignore = "1.72 MB string scan; no unsafe in this module for Miri to check"
+    ignore = "1.86 MB string scan; no unsafe in this module for Miri to check"
 )]
 #[test]
 fn every_exported_ffi_function_has_a_transcribed_diagnostics_table() {
@@ -2313,7 +2313,7 @@ fn every_exported_ffi_function_has_a_transcribed_diagnostics_table() {
 /// same `include_str!`'d source and this module holds no `unsafe`.
 #[cfg_attr(
     miri,
-    ignore = "1.72 MB string scan; no unsafe in this module for Miri to check"
+    ignore = "1.86 MB string scan; no unsafe in this module for Miri to check"
 )]
 #[test]
 fn every_sqlstate_a_function_body_returns_is_in_its_table_or_declared_off_table() {
