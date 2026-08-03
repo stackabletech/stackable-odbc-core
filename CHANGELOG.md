@@ -1554,6 +1554,41 @@ call `SQLCloseCursor` or `SQLFreeStmt(SQL_CLOSE)` first, as it already must for
 
 ### Fixed
 
+- **A fetch that narrows a number too large for `SQL_C_FLOAT` now returns
+  `SQL_ERROR` with `22003` and writes nothing, where it used to write an
+  infinity and call it a warning.** A finite `f64` beyond `±f32::MAX` — a
+  `SQL_DOUBLE` column holding `1e300`, say — saturated to `±inf` on the way
+  into the application's `SQLREAL`, and the arm reported `SQL_SUCCESS_WITH_INFO`
+  with `01S07` ("fractional truncation") because the value had changed. The
+  *SQL to C: Numeric* row for `SQL_C_FLOAT`/`SQL_C_DOUBLE` has only two cells,
+  in range → *Data* / n/a and out of range → *Undefined* / `22003`, and no
+  `01S07` at all: an application that treated the warning as a warning kept an
+  infinity its data source never held.
+
+  **This is a severity change from warning to error, visible at all five entry
+  points that reach `write_column_value`** — `SQLFetch`, `SQLFetchScroll` and
+  `SQLGetData`, plus `SQLExecDirect` and `SQLExecute` through their bound
+  output parameters. Both output columns are now left alone, so a buffer and a
+  length indicator that previously came back written come back untouched, which
+  is what the row's two "Undefined" cells require.
+
+  Three neighbouring cases are unchanged, and deliberately:
+
+  - **A source value that really is `±infinity`** narrows exactly and is
+    delivered as before. The finiteness half of the new test is what keeps a
+    PostgreSQL `'Infinity'::float8` readable through `SQL_C_FLOAT`.
+  - **Underflow is not overflow.** A subnormal `f32` and zero are values `f32`
+    can hold, so they stay inside the row's in-range cell: `1e-300` still
+    writes `0.0`, and the smallest positive `f32` subnormal still returns
+    `SQL_SUCCESS`. psqlODBC (`convert.c`, `case SQL_C_FLOAT`) and MySQL
+    Connector/ODBC (`driver/results.cc`, `sql_get_data`) both narrow with a
+    plain C cast and range-check neither end, so neither treats an underflow as
+    an error.
+  - **An in-range narrowing that loses precision still reports `01S07`** with
+    the value written — `0.1` as an `f64` still warns. That warning is core's
+    own rather than the row's, and the `i64` → `SQL_C_FLOAT` arm makes the same
+    claim; changing either is a separate question from this one.
+
 - **A cancellation delivered by core's own query timer now reports `HYT00` on
   every later call in that cursor's life, not `HY008` on all but the first.**
   A `SQL_ATTR_QUERY_TIMEOUT` that core enforces (a backend answering

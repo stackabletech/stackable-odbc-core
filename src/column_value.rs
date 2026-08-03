@@ -1575,15 +1575,18 @@ fn column_value_as_numeric(
 ///
 /// Handles all signed and unsigned integer C types, `SQL_C_FLOAT`, `SQL_C_DOUBLE`,
 /// and `SQL_C_BIT`. Returns `SQL_ERROR` with SQLSTATE `22003` (numeric value out of
-/// range) when the value does not fit the target type, and `SQL_SUCCESS_WITH_INFO`
+/// range) when the value does not fit the target type — including a finite `f64`
+/// whose magnitude exceeds `f32::MAX` on its way to `SQL_C_FLOAT`, which the
+/// *SQL to C: Numeric* row for that target calls "outside the range of the data
+/// type to which the number is being converted" — and `SQL_SUCCESS_WITH_INFO`
 /// with SQLSTATE `01S07` (fractional truncation) in the four cases that drop
-/// something: an `i64` or an `f64` narrowed to `f32` with precision loss, a
-/// fraction between 0 and 2 losing its fractional part to reach `SQL_C_BIT`, an
-/// exact decimal losing a non-zero fraction to reach an integer target (see
-/// [`write_exact_integer`]), and an `f64` losing a non-zero fraction to reach
-/// an integer target (see [`write_truncated_float`]). Any `CDataType` not
-/// covered by the numeric arms returns `SQL_ERROR` with SQLSTATE `HY003`
-/// (invalid application buffer type).
+/// something: an `i64` or an `f64` narrowed to `f32` with precision loss but
+/// *not* out of its range, a fraction between 0 and 2 losing its fractional
+/// part to reach `SQL_C_BIT`, an exact decimal losing a non-zero fraction to
+/// reach an integer target (see [`write_exact_integer`]), and an `f64` losing a
+/// non-zero fraction to reach an integer target (see [`write_truncated_float`]).
+/// Any `CDataType` not covered by the numeric arms returns `SQL_ERROR` with
+/// SQLSTATE `HY003` (invalid application buffer type).
 unsafe fn write_numeric_pivot(
     pivot: NumericPivot<'_>,
     target_type: CDataType,
@@ -1743,11 +1746,56 @@ unsafe fn write_numeric_pivot(
             write_truncated_float::<u64>(v, target_ptr, len_ind_ptr)
         },
         // --- Float pivot → float targets ---
-        // f64 → f32: narrowing loses precision for most values, and overflows
-        // to ±inf beyond f32::MAX. Write the value, then report 01S07 when the
-        // round trip is not exact, matching the Int → Float arm above.
+        // The SQL_C_FLOAT / SQL_C_DOUBLE row has exactly two outcomes: "Data is
+        // within the range of the data type to which the number is being
+        // converted" → *Data* / n/a, and "Data is outside the range of the data
+        // type to which the number is being converted" → *Undefined* / 22003.
+        //
+        // A finite f64 beyond ±f32::MAX is the second of those: `as f32`
+        // saturates it to ±inf, so writing the result would hand the
+        // application an infinity the data source never held and call it a
+        // warning. Nothing is written, and the length indicator is left alone
+        // too, which is what the row's two "Undefined" cells require.
+        //
+        // **The `v.is_finite()` half is load-bearing, not defensive.** A source
+        // value that really is ±infinity (PostgreSQL's 'Infinity'::float8, say)
+        // narrows to ±infinity exactly and is delivered unchanged; testing only
+        // `f.is_infinite()` would make that column unreadable through
+        // SQL_C_FLOAT. `f64_infinity_to_float_is_the_value_the_source_held`
+        // pins it. One thing that half cannot distinguish: character text that
+        // *parsed* to an infinity, since `"1e400".parse::<f64>()` is `Ok(inf)`,
+        // so a SQL_VARCHAR holding `1e400` still arrives here as a legitimate
+        // infinity and is written. That is unchanged by this arm and not its
+        // to fix — the overflow information is lost in `parse_numeric_text`,
+        // the governing table is *SQL to C: Character* rather than this one,
+        // and the same text reaches SQL_C_DOUBLE by a path this arm never sees.
+        //
+        // Underflow is deliberately *not* the second outcome: a subnormal f32,
+        // and zero, are values f32 can hold, so they are inside the row's
+        // "within the range" cell. `1e-300` therefore writes `0.0` rather than
+        // failing — the reading psqlODBC and MySQL Connector/ODBC also take,
+        // both of which narrow with a plain C cast and range-check neither end
+        // (psqlODBC `convert.c`, `case SQL_C_FLOAT`; MySQL `driver/results.cc`,
+        // `sql_get_data`).
+        //
+        // What is left after the range test is an inexact narrowing, reported
+        // as 01S07 with the value written, matching the Int → Float arm above.
+        // That warning is core's own: the row's in-range cell says "n/a", and
+        // neither driver above reports anything. It is out of this arm's scope
+        // to remove — the Int → Float arm makes the same claim and is pinned by
+        // its own tests — but it is the reason this arm has a 01S07 at all.
+        // A NaN source falls into it as well, since NaN never compares equal to
+        // itself: the NaN is written faithfully and reported as a fractional
+        // truncation that did not happen. Also core's own, also not this
+        // change's to make.
         (NumericPivot::Float(v), CDataType::Float) => {
             let f = v as f32;
+            if f.is_infinite() && v.is_finite() {
+                return Err(OdbcError::general(
+                    format!("Numeric value out of range: {v} exceeds the range of SQL_C_FLOAT"),
+                    SqlState::numeric_value_out_of_range(),
+                ));
+            }
             unsafe {
                 let _ = write_fixed(target_ptr, len_ind_ptr, f)?;
             };
@@ -4752,6 +4800,116 @@ mod tests {
         .expect("0.5 is exact in f32");
         assert_eq!(ret, SqlReturn::SUCCESS);
         assert_eq!(out, 0.5f32);
+    }
+
+    #[test]
+    fn f64_overflowing_f32_to_float_is_22003_with_nothing_written() {
+        // Both directions of the narrowing: 1e300 is finite as an f64 and
+        // beyond f32::MAX either way round, so `as f32` saturates to ±inf.
+        // The table's SQL_C_FLOAT/SQL_C_DOUBLE row calls that "outside the
+        // range of the data type to which the number is being converted" and
+        // gives it 22003 with both output columns "Undefined", so the
+        // sentinels below must survive.
+        for v in [1e300_f64, -1e300_f64] {
+            let mut out = 9.0f32;
+            let mut ind = 99isize;
+            let err = unsafe {
+                write_column_value(
+                    &ColumnValue::F64(v),
+                    CDataType::Float,
+                    std::ptr::from_mut(&mut out).cast(),
+                    size_of::<f32>() as isize,
+                    &mut ind,
+                )
+            }
+            .expect_err("a magnitude beyond f32::MAX is outside the range of SQL_C_FLOAT");
+            assert_eq!(
+                sqlstate_of_err(&err),
+                SqlState::numeric_value_out_of_range().as_str()
+            );
+            assert_eq!(err.sql_return(), SqlReturn::ERROR);
+            assert_eq!(out, 9.0f32, "*TargetValuePtr must be left alone");
+            assert_eq!(ind, 99, "*StrLen_or_IndPtr must be left alone");
+        }
+    }
+
+    #[test]
+    fn f64_infinity_to_float_is_the_value_the_source_held() {
+        // The finiteness half of the overflow test above is load-bearing: a
+        // source that really is ±infinity narrows to ±infinity exactly, so it
+        // is inside the range of SQL_C_FLOAT in the only sense f32 has and is
+        // delivered unchanged. Without that half, a data source with an
+        // IEEE infinity in a column (PostgreSQL's 'Infinity'::float8) could
+        // never read it back through SQL_C_FLOAT.
+        for v in [f64::INFINITY, f64::NEG_INFINITY] {
+            let mut out = 9.0f32;
+            let mut ind = 0isize;
+            let ret = unsafe {
+                write_column_value(
+                    &ColumnValue::F64(v),
+                    CDataType::Float,
+                    std::ptr::from_mut(&mut out).cast(),
+                    size_of::<f32>() as isize,
+                    &mut ind,
+                )
+            }
+            .expect("an infinity the source held narrows to f32 exactly");
+            assert_eq!(ret, SqlReturn::SUCCESS);
+            assert_eq!(out, v as f32);
+            assert_eq!(ind, size_of::<f32>() as isize);
+        }
+    }
+
+    #[test]
+    fn f64_narrowing_to_the_smallest_f32_subnormal_is_success() {
+        // Underflow is not overflow. A subnormal f32 is a value f32 can hold,
+        // so it is inside the row's "within the range" cell, not outside it:
+        // this must stay SQL_SUCCESS and must not become 22003. The smallest
+        // positive f32 subnormal is exactly representable as an f64, so the
+        // round trip is exact and there is nothing to warn about either.
+        let v = f64::from(f32::from_bits(1));
+        let mut out = 0f32;
+        let mut ind = 0isize;
+        let ret = unsafe {
+            write_column_value(
+                &ColumnValue::F64(v),
+                CDataType::Float,
+                std::ptr::from_mut(&mut out).cast(),
+                size_of::<f32>() as isize,
+                &mut ind,
+            )
+        }
+        .expect("a subnormal is within the range of SQL_C_FLOAT");
+        assert_eq!(ret, SqlReturn::SUCCESS);
+        assert_eq!(out, f32::from_bits(1));
+        assert_eq!(ind, size_of::<f32>() as isize);
+    }
+
+    #[test]
+    fn f64_underflowing_to_zero_in_f32_is_01s07_with_zero_written() {
+        // 1e-300 is far below the smallest f32 subnormal, so it narrows to
+        // 0.0. Zero is inside the range of SQL_C_FLOAT, so this is not the
+        // 22003 cell; what is left is an inexact narrowing, which this arm
+        // reports exactly as it reports 0.1 -> 0.1f32.
+        let mut out = 9.0f32;
+        let mut ind = 0isize;
+        let err = unsafe {
+            write_column_value(
+                &ColumnValue::F64(1e-300),
+                CDataType::Float,
+                std::ptr::from_mut(&mut out).cast(),
+                size_of::<f32>() as isize,
+                &mut ind,
+            )
+        }
+        .expect_err("1e-300 is not exactly representable in f32");
+        assert_eq!(
+            sqlstate_of_err(&err),
+            SqlState::fractional_truncation().as_str()
+        );
+        assert_eq!(err.sql_return(), SqlReturn::SUCCESS_WITH_INFO);
+        assert_eq!(out, 0.0f32);
+        assert_eq!(ind, size_of::<f32>() as isize);
     }
 
     // -----------------------------------------------------------------------
