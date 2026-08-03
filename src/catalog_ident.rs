@@ -7,6 +7,36 @@
 //! the data source's identifier case, quote characters and pattern-escape
 //! character, and normalising to an ordinary pattern that matches exactly one
 //! name means a backend needs no code for the feature at all.
+//!
+//! # The spec contradicts itself about quoting, and core follows its first half
+//!
+//! *Identifier Arguments* states the rule core implements: "If a string in an
+//! identifier argument is quoted, the driver removes leading and trailing blanks
+//! and treats literally the string within the quotation marks. If the string is
+//! not quoted, the driver removes trailing blanks and folds the string to
+//! uppercase."
+//!
+//! Two paragraphs later the same page says the opposite: identifiers "must not
+//! be quoted when passed as catalog function arguments, because quote characters
+//! passed to catalog functions are interpreted literally", with a worked example
+//! in which `SQLTables` given `"\"Accounts Payable\""` looks for a table whose
+//! name *includes* the quotation marks — "which is probably not what was
+//! intended".
+//!
+//! The two implementing drivers are on the side of the second paragraph, or
+//! silent: psqlODBC does not implement `SQL_ATTR_METADATA_ID` at all, and MySQL
+//! Connector/ODBC implements it as a case-insensitive comparison with no
+//! delimiter handling (see [`strip_delimiters`] for the citations). So core
+//! recognising a delimiter pair is a deviation from both of them, taken from the
+//! page's first paragraph.
+//!
+//! It is left as it stands deliberately, not by default: [`normalise_identifier`]
+//! is the only reason a `SQL_IC_UPPER` data source can be asked about a
+//! mixed-case name at all, and the fourth paragraph of the same page depends on
+//! quoting being significant ("Quoted identifiers are used to distinguish a true
+//! column name from a pseudo-column of the same name"). Reversing it would make
+//! `SQL_ATTR_METADATA_ID` unable to express a case-sensitive name, which is what
+//! an application sets it for.
 
 use crate::types::{SQL_IC_LOWER, SQL_IC_UPPER};
 
@@ -46,6 +76,30 @@ pub(crate) fn normalise_identifier(
 ///
 /// Requires at least two characters: a lone `"` is not a pair, and stripping
 /// first-and-last unconditionally would turn it into an empty string.
+///
+/// # A doubled delimiter inside the identifier is not collapsed
+///
+/// `"a""b"` yields `a""b`, not `a"b`, so a table actually named `a"b` is not
+/// found by that spelling. This was investigated rather than overlooked, and
+/// the finding is that **nothing corroborates a doubling convention here**:
+///
+/// - *Quoted Identifiers* defines a quoted identifier as SQL-92's delimited
+///   identifier but says nothing about escaping a delimiter inside one, and
+///   *Identifier Arguments* — the page that governs `SQL_ATTR_METADATA_ID` —
+///   does not mention it either.
+/// - psqlODBC does not implement `SQL_ATTR_METADATA_ID` at all: it is absent
+///   from `options.c`, whose `default` arm answers "Unknown statement option",
+///   so the attribute cannot even be set.
+/// - MySQL Connector/ODBC threads the flag through to
+///   `add_name_condition_oa_id`/`add_name_condition_pv_id` (`driver/catalog.cc`)
+///   and uses it for one thing only: comparing with `=` instead of `= BINARY`,
+///   which is how it makes the match case-insensitive. It strips no delimiters,
+///   recognises none, and carries a `/* Need also code to remove trailing
+///   blanks */` TODO for another clause of the same paragraph.
+///
+/// So neither driver reaches the question, because neither strips delimiters in
+/// the first place. That is a larger divergence than the doubling itself, and
+/// it is recorded in the module docs above rather than settled here.
 fn strip_delimiters(value: &str, quotes: &[(char, char)]) -> (String, bool) {
     let mut chars = value.chars();
     let (Some(first), Some(last)) = (chars.next(), chars.next_back()) else {

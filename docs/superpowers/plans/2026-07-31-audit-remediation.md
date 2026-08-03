@@ -359,9 +359,38 @@ Four corrections to what this task assumed:
 
 ### Task 3.2: METADATA_ID delimited identifiers with embedded quotes
 
-- [ ] Check psqlODBC/MySQL handling of doubled quotes inside delimited identifiers under `SQL_ATTR_METADATA_ID`.
+- [x] Check psqlODBC/MySQL handling of doubled quotes inside delimited identifiers under `SQL_ATTR_METADATA_ID`.
 - [ ] If un-doubling is the norm: fix `src/catalog_ident.rs:49-63` (`strip_delimiters` collapses `""` → `"`; a non-terminal closing quote means "not delimited"). Tests: `doubled_quote_inside_a_delimited_identifier_is_collapsed`, `identifier_with_interior_quote_is_not_treated_as_delimited`. Commit: `fix: METADATA_ID identifier stripping collapses doubled delimiters`
-- [ ] Otherwise: document the evidence in the function's comment; no behaviour change. Commit as `docs:`.
+- [x] Otherwise: document the evidence in the function's comment; no behaviour change. Commit as `docs:`.
+
+**Outcome (2026-08-03).** The "otherwise" branch: **there is no norm to follow**,
+because neither driver strips delimiters at all, so neither reaches the doubling
+question. Documented in `catalog_ident.rs` (module docs plus
+`strip_delimiters`), no behaviour change.
+
+- psqlODBC does not implement `SQL_ATTR_METADATA_ID`: absent from `options.c`,
+  whose `default` arm answers "Unknown statement option", so it cannot be set.
+- MySQL Connector/ODBC threads it into `add_name_condition_oa_id` /
+  `add_name_condition_pv_id` (`driver/catalog.cc`) and uses it for one thing —
+  `=` instead of `= BINARY`, i.e. a case-insensitive compare. No delimiter
+  handling, and a `/* Need also code to remove trailing blanks */` TODO for
+  another clause of the same paragraph.
+- Neither *Quoted Identifiers* nor *Identifier Arguments* mentions escaping a
+  delimiter inside a delimited identifier.
+
+**The bigger finding, escalated rather than acted on:** *Identifier Arguments*
+contradicts itself within one page. Its first paragraph states the rule core
+implements ("if a string in an identifier argument is quoted, the driver removes
+leading and trailing blanks and treats literally the string within the quotation
+marks"); its third says identifiers "must not be quoted when passed as catalog
+function arguments, because quote characters passed to catalog functions are
+interpreted literally", with a worked `SQLTables` example. Both drivers are on
+the side of the third paragraph or silent, so core's delimiter recognition is a
+deviation from both. Left as it stands — it is the only way `SQL_ATTR_METADATA_ID`
+can name a case-sensitive identifier on a `SQL_IC_UPPER` source, and the page's
+fourth paragraph (pseudo-column disambiguation) needs quoting to be significant —
+but the decision is Andrew's, and reversing it would be a behaviour change across
+all ten catalog functions.
 
 ### Task 3.3: sql_bind_parameter's off-table HY024 + guard blind spot
 
