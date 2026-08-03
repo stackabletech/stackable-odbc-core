@@ -928,9 +928,81 @@ asked for would have been a spec-ordering bug.
 
 Restructure `fetch_with_report` around one `stmt_with_desc` resolution per AGENTS.md's own `descriptor_token` guidance (~6 → ~4 acquisitions); same for `sql_get_data`'s 3. `handle_lookup` + `ffi_fetch_bound` show the delta; loom models unaffected (no new acquisition *sites* — the site-closure guard `the_set_of_group_lock_acquisition_sites_is_closed` must stay green unmodified, which is the real test here). Commit: `perf: fetch resolves the statement once per call`
 
+
+**Outcome (2026-08-03). No change made: both of this item's premises are wrong,
+measured.** `HandleScope::get` was instrumented with a counter and a
+type-name trace, and the probe reverted.
+
+| call | audit expected | measured |
+|---|---|---|
+| `sql_fetch`, one bound column | ~6, reducible to ~4 | **4** |
+| `sql_get_data` | 3 | **1** |
+
+- **`sql_get_data` is already at the floor.** One resolution, of the statement.
+  There is nothing to remove.
+- **`sql_fetch`'s four are** `panic_safe` resolving the statement to lock its
+  group, then `desc_of` resolving the statement again to read
+  `descriptor_token(Ard)`, then the ARD itself, then the statement a third time
+  for the body. So the redundancy the audit sensed is real — the statement is
+  resolved three times — but it is **not removable by restructuring**, which is
+  the part the item got wrong:
+  - Following AGENTS.md's `descriptor_token` guidance (resolve the statement,
+    copy the token, then `scope.descriptor(token)`) removes `desc_of`'s lookup
+    and *adds one back*: the descriptor borrow ends the statement borrow, so the
+    body must resolve the statement again. Still 4.
+  - `stmt_with_desc` needs the ARD token, which needs the statement. 1 + 2 = 4.
+  - `panic_safe`'s lookup cannot be dropped: it is what proves the token names a
+    live handle in the locked group before any scope exists.
+- **The only route below 4 is a one-entry memo inside `HandleScope`** — cache
+  `(token, kind) → addr` for the scope's lifetime. It is sound for a specific
+  reason: freeing a handle requires that handle's group lock, and the scope holds
+  it, so a token that resolved once cannot be freed or its slot recycled while
+  the scope lives. It would benefit **every** FFI function rather than just this
+  one, since three-resolutions-of-one-token is the shape of the whole layer.
+  It also touches the crate's primary safety mechanism, so it is Andrew's
+  decision, not a drive-by. **Not implemented.**
+- The site-closure guard `the_set_of_group_lock_acquisition_sites_is_closed` is
+  green and unmodified, trivially: nothing changed.
+
 ### Task 6.5: Persistent query-timer thread (P3)
 
 `src/query_timer.rs`: one lazily-started deadline thread (register/deregister via the existing std Condvar — the documented loom exception carries over; update the exception comments). All existing timer tests (HYT00 at execute and fetch, disarm, poisoning) are the contract; add `arming_twice_reuses_the_thread` via a thread-count probe if cheaply assertable, else rely on the existing behavioural suite. Benchmark: timed-fetch variant added to `ffi_fetch_bound`. Commit: `perf: SQL_ATTR_QUERY_TIMEOUT uses one timer thread, not one per fetch`
+
+
+**Outcome (2026-08-03). Implemented, then reverted — the design a shared timer
+thread needs breaks a documented project invariant.** Andrew's call, with the
+measurement and both design options below.
+
+- **The win is real and large: 88×.** Measured in isolation, arming a deadline
+  costs **12.265 µs** as a thread spawn against **139 ns** to register on a shared
+  thread. A fetch loop with `SQL_ATTR_QUERY_TIMEOUT` set pays that on every row —
+  ~1.2 s over 100 000 rows — though only for a backend answering
+  `QueryTimeout::CoreCancels`, since anything else never arms.
+- **A single service thread was written and worked**: whole timer suite green,
+  plus `arming_twice_starts_one_service_thread` (a spawn counter beside the one
+  `spawn`, which proves one thread directly where a `/proc/self/task` probe could
+  only show the count not growing), and the timing-sensitive tests survived 35
+  repeat runs with no failure.
+- **Then clippy refused it, correctly.** The crate bans `Instant::now()`, and the
+  lint's own note says why this module is exempt from being timing-free: it
+  "expresses its deadline as a `Condvar::wait_timeout` rather than by reading a
+  clock, **which is what keeps this ban intact**". One thread serving N deadlines
+  *must* read a clock — it has to know how much time has passed to tell which
+  entries expired, and a spurious wake makes relative arithmetic impossible. So
+  the design silently changes an invariant that was set deliberately, and the
+  lint's escape hatch is scoped to "if the spec forces an actual clock read",
+  which a performance choice is not. Reverted rather than `#[allow]`-ed.
+- **There is a design that keeps both**, and it is what a retry should build: a
+  **pool of waiter threads**, each handling one deadline at a time with its own
+  relative `wait_timeout`. That removes the spawn — the 12 µs — while every wait
+  stays a relative duration, so no clock is read and the ban stays intact.
+  Registration hands a deadline to an idle waiter and spawns only when none is
+  idle, so the steady state after warm-up spawns nothing. More moving parts than
+  the single service (idle-worker tracking, bounded growth), which is why it is
+  worth deciding on before building rather than after.
+
+**Nothing committed for this task.** The 88× figure, the invariant, and the pool
+design are recorded here so a retry starts from them.
 
 ### Task 6.6: Small wins + logging hardening (LOW batch, one commit)
 
