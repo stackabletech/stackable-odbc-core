@@ -301,7 +301,13 @@ unsafe fn write_fixed_or_chunked(
         CDataType::WChar | CDataType::Char => {
             let owned;
             let s: &str = match value {
-                ColumnValue::String(s) => s,
+                // Both variants hold the string form already, so this borrows
+                // instead of going through `column_value_to_string` — which
+                // returns `s.clone()` for each of them, so the two agree. The
+                // clone was a full copy of the value on every call, and for
+                // `Decimal` that is every numeric column an application binds as
+                // character data.
+                ColumnValue::String(s) | ColumnValue::Decimal(s) => s,
                 _ => {
                     owned = column_value_to_string(value);
                     &owned
@@ -1384,10 +1390,52 @@ unsafe fn write_wchar(
     len_ind_ptr: *mut isize,
     offset: usize,
 ) -> Result<(SqlReturn, usize), OdbcError> {
-    // Pre-size to UTF-8 byte length, which is always >= UTF-16 code unit count.
-    let mut wide = Vec::with_capacity(s.len());
-    wide.extend(s.encode_utf16());
-    unsafe { write_wchar_units(&wide, target_ptr, buf_len, len_ind_ptr, offset) }
+    // Encoded straight into the caller's buffer: no intermediate `Vec`.
+    //
+    // The allocation this replaces was on every bound-column fetch of every
+    // character column — `sql_fetch`'s loop calls this once per column per row —
+    // and it was pure overhead, since the units were built only to be copied out
+    // and dropped. The chunked path keeps a materialised copy on purpose (see
+    // [`CachedChunkSource`]) and enters at [`write_wchar_units`] instead.
+    //
+    // Two passes over the string, still allocation-free. The first counts, and
+    // cannot be avoided: the indicator must report the total length *remaining*,
+    // which is a property of the whole string and not of the part that fits.
+    let total_units = s.encode_utf16().count();
+    let remaining_units = total_units.saturating_sub(offset);
+    let total_bytes = (remaining_units * 2) as isize;
+
+    if !len_ind_ptr.is_null() {
+        unsafe { std::ptr::write_unaligned(len_ind_ptr, total_bytes) };
+    }
+
+    // Both carve-outs are `write_wchar_units`', for the reasons documented
+    // there: a null target is the bound-column indicator-only binding, and a
+    // buffer with no room for even the terminator is total truncation rather
+    // than a length query.
+    if target_ptr.is_null() {
+        return Ok((SqlReturn::SUCCESS, 0));
+    }
+    if buf_len < 2 {
+        return Ok((SqlReturn::SUCCESS_WITH_INFO, 0));
+    }
+
+    let capacity_units = ((buf_len as usize) / 2).saturating_sub(1);
+    let out = target_ptr.cast::<u16>();
+    let mut written = 0usize;
+    // Per-unit `write_unaligned`: an application's buffer may sit at any offset
+    // in a packed row-wise binding, so a `u16`-aligned store would be UB.
+    for unit in s.encode_utf16().skip(offset).take(capacity_units) {
+        unsafe { std::ptr::write_unaligned(out.add(written), unit) };
+        written += 1;
+    }
+    unsafe { std::ptr::write_unaligned(out.add(written), 0u16) };
+
+    if written < remaining_units {
+        Ok((SqlReturn::SUCCESS_WITH_INFO, written))
+    } else {
+        Ok((SqlReturn::SUCCESS, written))
+    }
 }
 
 /// [`write_wchar`] from the point the UTF-16 units exist.

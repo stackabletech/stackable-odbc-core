@@ -847,6 +847,51 @@ Miri; it is part of what Task 7.1 must cover outside the sandbox.
 
 `src/column_value.rs` `write_wchar`: bounded `encode_utf16()` write via per-unit `write_unaligned`, `count()` for the remainder — no intermediate `Vec` on the single-shot path (the Task 6.1 cache covers chunked). Numeric→char: format into a stack buffer. Red/green via `ffi_fetch_bound` benchmark delta + existing conversion tests. Commit: `perf: string and numeric fetch conversions stop allocating per value`
 
+
+**Outcome (2026-08-03). Partly done, and the task's verification method does not
+work.** `write_wchar` no longer allocates; the numeric→char stack buffer is
+**deferred with a measurement and a design**, below.
+
+- **`ffi_fetch_bound` cannot verify this task.** Two consecutive runs of
+  *identical* code reported **−16.3%** and **+15.7%**, both at p = 0.00. The
+  harness's run-to-run variance swamps the effect of removing one allocation per
+  column per row, so "red/green via the benchmark delta" cannot be carried out as
+  written. An earlier single run of it reported "+17.1% regression" for this
+  change, which is noise of the same size. Anything Phase 6 concludes from a
+  single `ffi_fetch_bound` comparison should be re-checked the same way.
+- **Measured in isolation instead, which is stable to ±1%.** Encoding straight
+  into the caller's buffer against building a `Vec<u16>` and bulk-copying:
+
+  | input | ratio (direct ÷ via-Vec) |
+  |---|---|
+  | 16 B ASCII | **0.35×** |
+  | 64 B ASCII | 0.62× |
+  | 1 KiB ASCII | 0.67× |
+  | 1 KiB Cyrillic (2-byte UTF-8) | 0.51× |
+  | 1 KiB emoji (surrogate pairs) | 0.61× |
+
+  A win everywhere, and largest for *short* strings, where the allocation is the
+  whole cost — which is the common column, not the 1 KiB one the FFI benchmark
+  uses. Two passes over the string remain and one cannot be removed: the
+  indicator must report the total length remaining, which is a property of the
+  whole string rather than of the part that fits.
+- **`ColumnValue::Decimal` is now borrowed, not cloned**, in the character arm,
+  alongside `String` — `column_value_to_string` returns `s.clone()` for both, so
+  the two agree, and the clone was a full copy of the value on every call to
+  every numeric column an application binds as character data. No new machinery.
+- **The numeric→char stack buffer is deferred, on purpose.** Measured worth:
+  i64→text into a stack buffer is **0.60×** a heap `String` (1.67× faster). But
+  the obvious implementation is a second renderer beside
+  `column_value_to_string`, duplicating fifteen match arms — two renderings of
+  one value, which is the hazard AGENTS.md names, and the failure mode is a
+  numeric column formatting differently depending on which path ran. The
+  non-duplicating design is to invert `column_value_to_string` into
+  `write_column_text(value, &mut impl fmt::Write)` with the current function as a
+  thin wrapper, then have the character arm try a stack buffer and fall back to
+  the wrapper on overflow (`Bytes`, `Json`, `Array`, `Map`, `Row` have no bounded
+  length). That is an ~80-line refactor of a heavily-tested conversion for a
+  1.67× saving on one step, so it is Andrew's call rather than a drive-by.
+
 ### Task 6.3: One binding collection per fetch (P4)
 
 `src/ffi/fetch.rs:319-322, 408-427`: fuse `collect_bindings` and `binding_info` (apply `c_type_of` + offset inside the first pass); sort by column number for deterministic write order. Existing fetch tests green; benchmark delta. Commit: `perf: sql_fetch builds its binding list once, in column order`
