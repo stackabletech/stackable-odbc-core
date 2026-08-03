@@ -91,7 +91,7 @@ use crate::utf16::{utf16_to_string, utf16_to_string_named, write_utf16};
 ///   or when `buffer_length < 0`. Note: spec marks the row's own clauses as `(DM)`, but they
 ///   are checked here as a defence-in-depth guard when called outside a full Driver Manager
 ///   stack. **Also returned** for a condition the row does not state: `InConnectionString`
-///   passed as `SQL_NTS` with no null terminator within `MAX_NTS_SCAN` (32 767) code units,
+///   passed as `SQL_NTS` with no null terminator within `MAX_NTS_SCAN` (1 048 576) code units,
 ///   which is a length the driver cannot determine. It is this function's only `SQL_NTS`
 ///   argument, so that is the whole set. A truncated connection string is quieter than a
 ///   truncated statement — `ConnectParams` parses whatever it is handed — so the connect
@@ -325,7 +325,7 @@ pub unsafe fn sql_driver_connect_w<B: Backend>(
 ///
 ///   **Also returned here**, for a condition neither clause states: any of `ServerName`,
 ///   `UserName` or `Authentication` — all three, and no other argument — passed as
-///   `SQL_NTS` with no null terminator within `MAX_NTS_SCAN` (32 767) code units, which is a
+///   `SQL_NTS` with no null terminator within `MAX_NTS_SCAN` (1 048 576) code units, which is a
 ///   length the driver cannot determine. The diagnostic names which of the three it was. The
 ///   two credential arguments were read inside `if let Ok(..)` and so *discarded* the error:
 ///   a swallowed overrun connected with whatever credentials the DSN supplied, under a
@@ -581,7 +581,7 @@ pub unsafe fn sql_connect_w<B: Backend>(
 ///   or when `buffer_length < 0`. Note: spec marks these as `(DM)`, but checked here as
 ///   defence-in-depth when called outside a full Driver Manager stack. **Also returned** for
 ///   a condition the row does not state: `InConnectionString` passed as `SQL_NTS` with no
-///   null terminator within `MAX_NTS_SCAN` (32 767) code units, which is a length the driver
+///   null terminator within `MAX_NTS_SCAN` (1 048 576) code units, which is a length the driver
 ///   cannot determine. It is this function's only `SQL_NTS` argument, so that is the whole
 ///   set. The scanned prefix used to be browsed with instead, so the browse round-tripped
 ///   against a *different data source* than the application named. See
@@ -1091,7 +1091,7 @@ pub unsafe fn sql_disconnect<B: Backend>(connection_handle: *mut c_void) -> SqlR
 ///   guarded defensively here for the reason `HY009` gives: returned when
 ///   `text_length1 < 0 && != SQL_NTS`, or when `buffer_length < 0` and `out_statement_text`
 ///   is not null. **Also returned** for `InStatementText` passed as `SQL_NTS` with no null
-///   terminator within `MAX_NTS_SCAN` (32 767) code units — this function's only `SQL_NTS`
+///   terminator within `MAX_NTS_SCAN` (1 048 576) code units — this function's only `SQL_NTS`
 ///   argument, so the whole set — which is a length the driver cannot determine, and where
 ///   the scanned prefix used to be translated and echoed back as though complete. An
 ///   explicitly measured `TextLength1` is not limited, at any size. See
@@ -2692,6 +2692,51 @@ mod tests {
             assert_eq!(
                 dbc_sqlstate(conn),
                 crate::types::sql_state::INVALID_STRING_OR_BUFFER_LENGTH
+            );
+
+            let _ = sql_disconnect::<MockBackend>(conn);
+            let _ = sql_free_handle::<MockBackend>(HandleType::Dbc as i16, conn);
+            let _ = sql_free_handle::<MockBackend>(HandleType::Env as i16, env);
+        }
+    }
+
+    /// A 100 000-character `SQL_NTS` statement is translated in full, and the
+    /// length reported back proves it — `SQLNativeSql` is the one function in
+    /// the crate that echoes an `SQL_NTS` argument's resolved length to the
+    /// application, so it can distinguish "accepted" from "accepted a prefix".
+    ///
+    /// 100 000 is above `i16::MAX` (32 767), which `MAX_NTS_SCAN` used to be, so
+    /// this call was `HY090` until the cap was raised. A literal rather than a
+    /// fraction of `MAX_NTS_SCAN`, because a test written against the constant
+    /// passes at every value of it.
+    #[test]
+    fn native_sql_translates_an_nts_statement_of_a_hundred_thousand_characters_in_full() {
+        const STATEMENT_UNITS: usize = 100_000;
+
+        unsafe {
+            let (env, conn) = alloc_env_and_conn();
+            assert_eq!(connect_handle(conn), SqlReturn::SUCCESS);
+
+            let mut wide = vec![b'a' as u16; STATEMENT_UNITS + 1];
+            wide[STATEMENT_UNITS] = 0;
+            let mut out = vec![0u16; STATEMENT_UNITS + 1];
+            let mut out_len: i32 = 0;
+
+            assert_eq!(
+                sql_native_sql_w::<MockBackend>(
+                    conn,
+                    wide.as_ptr(),
+                    SQL_NTS,
+                    out.as_mut_ptr(),
+                    i32::try_from(out.len()).expect("fits in i32"),
+                    &mut out_len,
+                ),
+                SqlReturn::SUCCESS,
+            );
+            assert_eq!(
+                usize::try_from(out_len).expect("a length is not negative"),
+                STATEMENT_UNITS,
+                "the whole statement was translated, not the prefix a capped scan would take",
             );
 
             let _ = sql_disconnect::<MockBackend>(conn);

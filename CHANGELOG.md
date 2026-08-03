@@ -1613,21 +1613,22 @@ call `SQLCloseCursor` or `SQLFreeStmt(SQL_CLOSE)` first, as it already must for
 
   No driver-facing API changed; `Backend::CancelToken` is untouched.
 
-- **An `SQL_NTS` argument longer than the 32 767-unit scan limit is now
-  `HY090`, where it used to be silently truncated to its first 32 767 units.**
+- **An `SQL_NTS` argument longer than the `MAX_NTS_SCAN` scan limit is now
+  `HY090`, where it used to be silently truncated to that many units.**
   Most seriously, **a statement passed to `SQLExecDirectW` as `SQL_NTS` was
   executed truncated** — usually a syntax error with a baffling message, and
   where the cut landed after a syntactically complete prefix, *a different
   statement than the application wrote*. A multi-row
   `INSERT ... VALUES (...),(...)` past the limit is the ordinary way to hit it.
 
-  Core bounds every `SQL_NTS` scan at `MAX_NTS_SCAN` (32 767 units) so that a
-  buffer whose terminator the application forgot is not read past its own
-  allocation. That bound stays. What changed is that reaching it is now
-  reported instead of being indistinguishable from success: no scan can tell
-  "there is no terminator" from "the terminator is past the limit", so the rule
-  is stated as the one that needs no such distinction — **an `SQL_NTS` argument
-  is limited to 32 767 units, whatever is in it.**
+  Core bounds every `SQL_NTS` scan at `MAX_NTS_SCAN` (1 048 576 units — see the
+  next entry for how that value is arrived at) so that a buffer whose terminator
+  the application forgot is not read past its own allocation. That bound stays.
+  What changed is that reaching it is now reported instead of being
+  indistinguishable from success: no scan can tell "there is no terminator" from
+  "the terminator is past the limit", so the rule is stated as the one that
+  needs no such distinction — **an `SQL_NTS` argument is limited to
+  `MAX_NTS_SCAN` units, whatever is in it.**
 
   An **explicitly declared** length is not limited, at any size: there is
   nothing to scan for. An application with a statement, connection string or
@@ -1676,6 +1677,67 @@ call `SQLCloseCursor` or `SQLFreeStmt(SQL_CLOSE)` first, as it already must for
 
   `ConfigDSNW`'s attribute-list parser already reported its own overrun
   (`AttributeSyntaxError::Unterminated`) and is unchanged.
+
+- **`MAX_NTS_SCAN` is 1 048 576 units, not 32 767, so an `SQL_NTS` statement of
+  ordinary generated length is no longer refused.** The entry above turned a
+  silent truncation into a clean `HY090`, which is strictly better for the same
+  input but did not make the *value* right. 32 767 is `i16::MAX`, the width of
+  ODBC's *name-length* arguments — `SQLDriverConnect`'s `StringLength1`, the
+  catalog functions' `NameLength` group — and not the width of the arguments the
+  bound actually governs: `SQLExecDirect`'s and `SQLPrepare`'s `TextLength` and
+  `SQLNativeSql`'s `TextLength1` are `SQLINTEGER`. A batched
+  `INSERT ... VALUES`, or an `IN` list built from a key set, passes 32 767
+  characters routinely, so core was refusing **for length** input that no other
+  driver refuses for length. That is narrower than "the other drivers execute
+  these statements", which is the data source's answer rather than the driver's:
+  what the surveyed source shows is that no length threshold exists in them at
+  all — psqlODBC's `ucs2strlen` and `make_string`, MySQL Connector/ODBC's
+  `sqlwcharlen` and FreeTDS's `strlen`/`wcslen` are unbounded, and
+  `strnlen`/`wcsnlen` appear in none of them. The survey's one counter-example,
+  recorded rather than dropped: MySQL Connector/ODBC does have an `HY090` length
+  limit, `GET_NAME_LEN` at 192 bytes, but it is a post-hoc MySQL identifier check
+  on the catalog functions' name arguments and is never applied to SQL text.
+
+  It was not hidden behind a Driver Manager either: unixODBC forwards `SQL_NTS`
+  unchanged for a Unicode application talking to a Unicode driver, resolving the
+  length itself only on the ANSI path, so a W-only driver sees raw `SQL_NTS` from
+  every Unicode application.
+
+  It also contradicted core's own answer to `SQL_MAX_STATEMENT_LEN`, which
+  `default_get_info` reports as `0` — the spec's "no maximum length or the
+  length is unknown".
+
+  **Nothing else about the rule changed.** It is still a length limit on
+  `SQL_NTS` and not a malformed-input check, still `HY090` at exactly the same
+  entry points and arguments listed in the table above, and an explicitly
+  declared length is still unlimited at any size.
+
+  The spec fixes no maximum, so the value is core's judgement and the reasoning
+  is recorded on the constant. In short: for a correct application the cap costs
+  nothing at any value, because the scan stops at the terminator; it is paid
+  only by a buffer that reaches it, where the read is already past the
+  allocation and already undefined, and a smaller cap makes that read shorter
+  rather than sound. The size is then set against a statement anyone can
+  construct and count rather than a remembered field figure: a key-set `IN` list
+  of UUIDs in canonical text form costs 39 **code units** per key (36 plus two
+  quotes and a comma), so ten thousand keys is 390 000 code units. 1 048 576 is
+  the first power of two above 10^6 and 2.7× that; `1 << 19` is only 1.34× it,
+  inside the band the construction generates rather than above it; `1 << 21` and
+  beyond buy headroom no construction here reaches. Code units, not bytes — the
+  scanned buffer is `u16`, so a byte figure would be twice the number compared
+  against the cap.
+
+  Worst case, reached only by a buffer whose terminator is not inside the cap:
+  `utf16_to_string` reads 2 MiB and holds a 2 MiB `Vec<u16>` (plus, only on the
+  path that finds a terminator and decodes, a `String` of up to 3 bytes per code
+  unit); `nts_utf16_len` reads 2 MiB and allocates nothing; `nts_byte_len` reads
+  1 MiB and allocates nothing.
+
+  `ConfigDSNW`'s `MAX_ATTRIBUTE_SCAN` stays at `i16::MAX` and is now documented
+  as a sibling bound rather than a mirror of this one. It governs a single
+  `Keyword=Value` segment of a DSN attribute list, whose parts the spec sizes at
+  `SQL_MAX_DSN_LENGTH` (32) and `SQL_MAX_OPTION_STRING_LENGTH` (256); a shared
+  constant would tie a DSN keyword's length to a statement's.
 
 - **`SQLAllocHandle` now answers `HY014` when the handle registry is
   exhausted.** It previously returned `SQL_ERROR` with *no diagnostic record at

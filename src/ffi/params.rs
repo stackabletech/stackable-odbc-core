@@ -1454,7 +1454,7 @@ unsafe fn dae_nts_byte_count(
 ///   complete set. (1) `str_len_or_ind` is negative and none of `SQL_NTS`, `SQL_NULL_DATA`
 ///   or `SQL_DEFAULT_PARAM`, which are the three the spec's *StrLen_or_Ind* description
 ///   lists. (2) `str_len_or_ind` **is** `SQL_NTS` and the chunk at `DataPtr` has no
-///   terminator within `MAX_NTS_SCAN` (32 767) units — code units for a `SQL_C_WCHAR`
+///   terminator within `MAX_NTS_SCAN` (1 048 576) units — code units for a `SQL_C_WCHAR`
 ///   parameter, bytes for every other C type, per `dae_nts_byte_count` — which is a length
 ///   the driver cannot determine. The second is not stated by the row; `HY090` is the state
 ///   the condition names. It previously took the capped length, which truncated the
@@ -1601,9 +1601,10 @@ pub unsafe fn sql_put_data<B: Backend>(
                 // by this function's own `unsafe` block, as the reads below are.
                 //
                 // A chunk running to `MAX_NTS_SCAN` with no terminator is
-                // `HY090` rather than a 32 767-unit chunk: a capped length is
-                // the same silent truncation the text paths had, and here it
-                // would corrupt the *middle* of a long value with nothing said.
+                // `HY090` rather than a `MAX_NTS_SCAN`-unit chunk: a capped
+                // length is the same silent truncation the text paths had, and
+                // here it would corrupt the *middle* of a long value with
+                // nothing said.
                 dae_nts_byte_count(c_type, data_ptr.cast::<u8>())?
             } else if str_len_or_ind < 0 {
                 // Spec HY090: a negative length that is none of the three the
@@ -2747,8 +2748,8 @@ mod tests {
     /// A `SQL_NTS` chunk running to `MAX_NTS_SCAN` with no terminator is
     /// `HY090`, and nothing is appended to the accumulated value.
     ///
-    /// This test used to assert the opposite — `SQL_SUCCESS` with a
-    /// `MAX_NTS_SCAN`-byte chunk — on the grounds that the bound was the point
+    /// This test used to assert the opposite — `SQL_SUCCESS` with a cap-length
+    /// chunk — on the grounds that the bound was the point
     /// and the length was merely its consequence. The bound *is* the point and
     /// stays; what changed is that reaching it is now reported. A capped length
     /// silently truncated the middle of a long data-at-execution value.
@@ -4388,10 +4389,10 @@ mod tests {
     /// the allocation to terminate.
     ///
     /// The scan is `crate::utf16::nts_byte_len` now and is bounded at
-    /// `MAX_NTS_SCAN`, which turns the over-read into a bounded one — 32 767
-    /// bytes rather than however far the first stray zero is. That is a smaller
-    /// hole, not a closed one, and this test pins the thing that actually
-    /// closes it: `collect_params` never reads an output-only binding at all.
+    /// `MAX_NTS_SCAN`, which turns the over-read into a bounded one — a megabyte
+    /// rather than however far the first stray zero is. That is a smaller hole,
+    /// not a closed one, and this test pins the thing that actually closes it:
+    /// `collect_params` never reads an output-only binding at all.
     ///
     /// Under Miri this test is the check: reading out of bounds is reported
     /// rather than merely producing a wrong string.

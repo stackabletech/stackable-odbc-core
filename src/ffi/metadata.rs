@@ -258,12 +258,12 @@ fn table_enumeration(
 ///
 ///   **Also returned here**, for a condition this row does not itself state: **any** of this
 ///   function's name arguments, passed as `SQL_NTS`, whose null terminator is not within
-///   `MAX_NTS_SCAN` (32 767) code units. Every one of them is resolved by the same helper
+///   `MAX_NTS_SCAN` (1 048 576) code units. Every one of them is resolved by the same helper
 ///   (`parse_filter_param`), so the limit applies to all of them alike and the diagnostic
 ///   names which one overran. It is a length the driver cannot determine, which is what
-///   `HY090` names; `utf16_to_string` used to hand back the 32 767-unit prefix instead, so
-///   the call filtered on a truncated pattern and returned a result set that was wrong
-///   rather than absent. An **explicitly measured** length is not limited by this, at any
+///   `HY090` names; `utf16_to_string` used to hand back a cap-length prefix
+///   instead, so the call filtered on a truncated pattern and returned a result set that
+///   was wrong rather than absent. An **explicitly measured** length is not limited by this, at any
 ///   size. See `tables_refuses_an_nts_filter_that_runs_to_the_scan_cap` and
 ///   `foreign_keys_names_the_argument_whose_nts_scan_overran`.
 /// - HY117: Connection suspended (DM) (driver-manager-handled; not returned here).
@@ -515,12 +515,12 @@ pub unsafe fn sql_tables_w<B: Backend>(
 ///
 ///   **Also returned here**, for a condition this row does not itself state: **any** of this
 ///   function's name arguments, passed as `SQL_NTS`, whose null terminator is not within
-///   `MAX_NTS_SCAN` (32 767) code units. Every one of them is resolved by the same helper
+///   `MAX_NTS_SCAN` (1 048 576) code units. Every one of them is resolved by the same helper
 ///   (`parse_filter_param`), so the limit applies to all of them alike and the diagnostic
 ///   names which one overran. It is a length the driver cannot determine, which is what
-///   `HY090` names; `utf16_to_string` used to hand back the 32 767-unit prefix instead, so
-///   the call filtered on a truncated pattern and returned a result set that was wrong
-///   rather than absent. An **explicitly measured** length is not limited by this, at any
+///   `HY090` names; `utf16_to_string` used to hand back a cap-length prefix
+///   instead, so the call filtered on a truncated pattern and returned a result set that
+///   was wrong rather than absent. An **explicitly measured** length is not limited by this, at any
 ///   size. See `tables_refuses_an_nts_filter_that_runs_to_the_scan_cap` and
 ///   `foreign_keys_names_the_argument_whose_nts_scan_overran`.
 /// - HY117: Connection suspended (DM) (driver-manager-handled; not returned here).
@@ -714,12 +714,12 @@ pub unsafe fn sql_columns_w<B: Backend>(
 ///
 ///   **Also returned here**, for a condition this row does not itself state: **any** of this
 ///   function's name arguments, passed as `SQL_NTS`, whose null terminator is not within
-///   `MAX_NTS_SCAN` (32 767) code units. Every one of them is resolved by the same helper
+///   `MAX_NTS_SCAN` (1 048 576) code units. Every one of them is resolved by the same helper
 ///   (`parse_filter_param`), so the limit applies to all of them alike and the diagnostic
 ///   names which one overran. It is a length the driver cannot determine, which is what
-///   `HY090` names; `utf16_to_string` used to hand back the 32 767-unit prefix instead, so
-///   the call filtered on a truncated pattern and returned a result set that was wrong
-///   rather than absent. An **explicitly measured** length is not limited by this, at any
+///   `HY090` names; `utf16_to_string` used to hand back a cap-length prefix
+///   instead, so the call filtered on a truncated pattern and returned a result set that
+///   was wrong rather than absent. An **explicitly measured** length is not limited by this, at any
 ///   size. See `tables_refuses_an_nts_filter_that_runs_to_the_scan_cap` and
 ///   `foreign_keys_names_the_argument_whose_nts_scan_overran`.
 /// - HY117: Connection suspended (DM) (driver-manager-handled; not returned here).
@@ -907,12 +907,12 @@ pub unsafe fn sql_primary_keys_w<B: Backend>(
 ///
 ///   **Also returned here**, for a condition this row does not itself state: **any** of this
 ///   function's name arguments, passed as `SQL_NTS`, whose null terminator is not within
-///   `MAX_NTS_SCAN` (32 767) code units. Every one of them is resolved by the same helper
+///   `MAX_NTS_SCAN` (1 048 576) code units. Every one of them is resolved by the same helper
 ///   (`parse_filter_param`), so the limit applies to all of them alike and the diagnostic
 ///   names which one overran. It is a length the driver cannot determine, which is what
-///   `HY090` names; `utf16_to_string` used to hand back the 32 767-unit prefix instead, so
-///   the call filtered on a truncated pattern and returned a result set that was wrong
-///   rather than absent. An **explicitly measured** length is not limited by this, at any
+///   `HY090` names; `utf16_to_string` used to hand back a cap-length prefix
+///   instead, so the call filtered on a truncated pattern and returned a result set that
+///   was wrong rather than absent. An **explicitly measured** length is not limited by this, at any
 ///   size. See `tables_refuses_an_nts_filter_that_runs_to_the_scan_cap` and
 ///   `foreign_keys_names_the_argument_whose_nts_scan_overran`.
 /// - HY117: Connection suspended (DM) (driver-manager-handled; not returned here).
@@ -1131,12 +1131,12 @@ pub unsafe fn sql_foreign_keys_w<B: Backend>(
 ///
 ///   **Also returned here**, for a condition this row does not itself state: **any** of this
 ///   function's name arguments, passed as `SQL_NTS`, whose null terminator is not within
-///   `MAX_NTS_SCAN` (32 767) code units. Every one of them is resolved by the same helper
+///   `MAX_NTS_SCAN` (1 048 576) code units. Every one of them is resolved by the same helper
 ///   (`parse_filter_param`), so the limit applies to all of them alike and the diagnostic
 ///   names which one overran. It is a length the driver cannot determine, which is what
-///   `HY090` names; `utf16_to_string` used to hand back the 32 767-unit prefix instead, so
-///   the call filtered on a truncated pattern and returned a result set that was wrong
-///   rather than absent. An **explicitly measured** length is not limited by this, at any
+///   `HY090` names; `utf16_to_string` used to hand back a cap-length prefix
+///   instead, so the call filtered on a truncated pattern and returned a result set that
+///   was wrong rather than absent. An **explicitly measured** length is not limited by this, at any
 ///   size. See `tables_refuses_an_nts_filter_that_runs_to_the_scan_cap` and
 ///   `foreign_keys_names_the_argument_whose_nts_scan_overran`.
 /// - HY100: Uniqueness option type out of range (DM) (driver-manager-handled; not returned here).
@@ -1351,12 +1351,12 @@ pub unsafe fn sql_statistics_w<B: Backend>(
 ///
 ///   **Also returned here**, for a condition this row does not itself state: **any** of this
 ///   function's name arguments, passed as `SQL_NTS`, whose null terminator is not within
-///   `MAX_NTS_SCAN` (32 767) code units. Every one of them is resolved by the same helper
+///   `MAX_NTS_SCAN` (1 048 576) code units. Every one of them is resolved by the same helper
 ///   (`parse_filter_param`), so the limit applies to all of them alike and the diagnostic
 ///   names which one overran. It is a length the driver cannot determine, which is what
-///   `HY090` names; `utf16_to_string` used to hand back the 32 767-unit prefix instead, so
-///   the call filtered on a truncated pattern and returned a result set that was wrong
-///   rather than absent. An **explicitly measured** length is not limited by this, at any
+///   `HY090` names; `utf16_to_string` used to hand back a cap-length prefix
+///   instead, so the call filtered on a truncated pattern and returned a result set that
+///   was wrong rather than absent. An **explicitly measured** length is not limited by this, at any
 ///   size. See `tables_refuses_an_nts_filter_that_runs_to_the_scan_cap` and
 ///   `foreign_keys_names_the_argument_whose_nts_scan_overran`.
 /// - HY097: Column type out of range (DM) (driver-manager-handled; not returned here). Should
@@ -2092,12 +2092,12 @@ pub(crate) fn procedures_columns(widths: &CatalogResultColumnWidths) -> Vec<Colu
 ///
 ///   **Also returned here**, for a condition this row does not itself state: **any** of this
 ///   function's name arguments, passed as `SQL_NTS`, whose null terminator is not within
-///   `MAX_NTS_SCAN` (32 767) code units. Every one of them is resolved by the same helper
+///   `MAX_NTS_SCAN` (1 048 576) code units. Every one of them is resolved by the same helper
 ///   (`parse_filter_param`), so the limit applies to all of them alike and the diagnostic
 ///   names which one overran. It is a length the driver cannot determine, which is what
-///   `HY090` names; `utf16_to_string` used to hand back the 32 767-unit prefix instead, so
-///   the call filtered on a truncated pattern and returned a result set that was wrong
-///   rather than absent. An **explicitly measured** length is not limited by this, at any
+///   `HY090` names; `utf16_to_string` used to hand back a cap-length prefix
+///   instead, so the call filtered on a truncated pattern and returned a result set that
+///   was wrong rather than absent. An **explicitly measured** length is not limited by this, at any
 ///   size. See `tables_refuses_an_nts_filter_that_runs_to_the_scan_cap` and
 ///   `foreign_keys_names_the_argument_whose_nts_scan_overran`.
 /// - HY117: Connection suspended (DM) (driver-manager-handled; not returned here).
@@ -2324,12 +2324,12 @@ pub(crate) fn procedure_columns_columns(
 ///
 ///   **Also returned here**, for a condition this row does not itself state: **any** of this
 ///   function's name arguments, passed as `SQL_NTS`, whose null terminator is not within
-///   `MAX_NTS_SCAN` (32 767) code units. Every one of them is resolved by the same helper
+///   `MAX_NTS_SCAN` (1 048 576) code units. Every one of them is resolved by the same helper
 ///   (`parse_filter_param`), so the limit applies to all of them alike and the diagnostic
 ///   names which one overran. It is a length the driver cannot determine, which is what
-///   `HY090` names; `utf16_to_string` used to hand back the 32 767-unit prefix instead, so
-///   the call filtered on a truncated pattern and returned a result set that was wrong
-///   rather than absent. An **explicitly measured** length is not limited by this, at any
+///   `HY090` names; `utf16_to_string` used to hand back a cap-length prefix
+///   instead, so the call filtered on a truncated pattern and returned a result set that
+///   was wrong rather than absent. An **explicitly measured** length is not limited by this, at any
 ///   size. See `tables_refuses_an_nts_filter_that_runs_to_the_scan_cap` and
 ///   `foreign_keys_names_the_argument_whose_nts_scan_overran`.
 /// - HY117: Connection suspended (DM) (driver-manager-handled; not returned here).
@@ -2543,12 +2543,12 @@ pub(crate) fn column_privileges_columns(
 ///
 ///   **Also returned here**, for a condition this row does not itself state: **any** of this
 ///   function's name arguments, passed as `SQL_NTS`, whose null terminator is not within
-///   `MAX_NTS_SCAN` (32 767) code units. Every one of them is resolved by the same helper
+///   `MAX_NTS_SCAN` (1 048 576) code units. Every one of them is resolved by the same helper
 ///   (`parse_filter_param`), so the limit applies to all of them alike and the diagnostic
 ///   names which one overran. It is a length the driver cannot determine, which is what
-///   `HY090` names; `utf16_to_string` used to hand back the 32 767-unit prefix instead, so
-///   the call filtered on a truncated pattern and returned a result set that was wrong
-///   rather than absent. An **explicitly measured** length is not limited by this, at any
+///   `HY090` names; `utf16_to_string` used to hand back a cap-length prefix
+///   instead, so the call filtered on a truncated pattern and returned a result set that
+///   was wrong rather than absent. An **explicitly measured** length is not limited by this, at any
 ///   size. See `tables_refuses_an_nts_filter_that_runs_to_the_scan_cap` and
 ///   `foreign_keys_names_the_argument_whose_nts_scan_overran`.
 /// - HY117: Connection suspended (DM) (driver-manager-handled; not returned here).
@@ -2769,12 +2769,12 @@ pub(crate) fn table_privileges_columns(
 ///
 ///   **Also returned here**, for a condition this row does not itself state: **any** of this
 ///   function's name arguments, passed as `SQL_NTS`, whose null terminator is not within
-///   `MAX_NTS_SCAN` (32 767) code units. Every one of them is resolved by the same helper
+///   `MAX_NTS_SCAN` (1 048 576) code units. Every one of them is resolved by the same helper
 ///   (`parse_filter_param`), so the limit applies to all of them alike and the diagnostic
 ///   names which one overran. It is a length the driver cannot determine, which is what
-///   `HY090` names; `utf16_to_string` used to hand back the 32 767-unit prefix instead, so
-///   the call filtered on a truncated pattern and returned a result set that was wrong
-///   rather than absent. An **explicitly measured** length is not limited by this, at any
+///   `HY090` names; `utf16_to_string` used to hand back a cap-length prefix
+///   instead, so the call filtered on a truncated pattern and returned a result set that
+///   was wrong rather than absent. An **explicitly measured** length is not limited by this, at any
 ///   size. See `tables_refuses_an_nts_filter_that_runs_to_the_scan_cap` and
 ///   `foreign_keys_names_the_argument_whose_nts_scan_overran`.
 /// - HY117: Connection suspended (DM) (driver-manager-handled; not returned here).

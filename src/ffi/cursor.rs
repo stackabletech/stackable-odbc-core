@@ -753,7 +753,7 @@ pub unsafe fn sql_get_cursor_name_w<B: Backend>(
 ///
 ///   `HY090` **is** returned here for a condition the row does not state: `CursorName` —
 ///   this function's only string argument, so the whole set — passed as `SQL_NTS` with no
-///   null terminator within `MAX_NTS_SCAN` (32 767) code units, a length the driver cannot
+///   null terminator within `MAX_NTS_SCAN` (1 048 576) code units, a length the driver cannot
 ///   determine. Note that this function used to rewrite *every* failure from
 ///   `utf16_to_string` as `HY009`, so the state is now the condition's rather than the
 ///   call site's. A null `CursorName` is still `HY009`. See

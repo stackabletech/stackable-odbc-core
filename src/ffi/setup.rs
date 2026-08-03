@@ -3,8 +3,17 @@
 use std::collections::HashMap;
 
 /// Longest single DSN attribute segment scanned before giving up, in UTF-16
-/// code units. Mirrors `utf16.rs`'s `MAX_NTS_SCAN`: without a bound, an
-/// attribute list missing its terminator walks memory until it faults.
+/// code units. Serves the same purpose as `utf16.rs`'s `MAX_NTS_SCAN` — without
+/// a bound, an attribute list missing its terminator walks memory until it
+/// faults — over a different subject, so the two values are set separately.
+///
+/// `MAX_NTS_SCAN` had to be raised past `i16::MAX` because it governs SQL text,
+/// which is routinely longer than that. This one governs one `Keyword=Value`
+/// segment of a `ConfigDSN` attribute list, whose parts the spec sizes at
+/// `SQL_MAX_DSN_LENGTH` (32) and `SQL_MAX_OPTION_STRING_LENGTH` (256).
+/// `i16::MAX` is already three orders of magnitude above that, so nothing here
+/// argues for moving it, and a shared constant would tie a DSN keyword's length
+/// to a statement's.
 const MAX_ATTRIBUTE_SCAN: usize = i16::MAX as usize;
 
 /// What went wrong while reading an attribute list.

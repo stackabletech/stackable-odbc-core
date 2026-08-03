@@ -331,7 +331,7 @@ fn connection_has_result_set_pending<B: Backend>(
 ///   **Also returned here**, for a condition the row does not state:
 ///   `SQL_ATTR_CURRENT_CATALOG` — the one attribute of this function whose value
 ///   is a string, and so the whole set — passed with `StringLength` of `SQL_NTS`
-///   and no null terminator within `MAX_NTS_SCAN` (32 767) code units. That is a
+///   and no null terminator within `MAX_NTS_SCAN` (1 048 576) code units. That is a
 ///   length the driver cannot determine; the scanned prefix used to be stored and
 ///   sent to `Backend::set_current_catalog` as though it were the whole name, which
 ///   selects a *different catalog* rather than failing. See

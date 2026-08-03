@@ -453,7 +453,7 @@ fn read_ird_field<B: Backend>(
 ///   the row's own clauses is returned here. `HY090` **is** returned for a condition the row
 ///   does not state: `SQL_DESC_NAME` — the one field of this function whose value is a
 ///   string, and so the whole set — set with a `BufferLength` of `SQL_NTS` and no null
-///   terminator within `MAX_NTS_SCAN` (32 767) code units, a length the driver cannot
+///   terminator within `MAX_NTS_SCAN` (1 048 576) code units, a length the driver cannot
 ///   determine. It precedes the `22001` identifier-length check by construction: that check
 ///   compares the decoded name, and there is no decoded name. See
 ///   `set_desc_field_refuses_an_nts_name_that_runs_to_the_scan_cap`

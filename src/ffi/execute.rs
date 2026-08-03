@@ -179,16 +179,16 @@ fn zero_row_searched_dml<B: Backend>(stmt: &StatementHandle<B>) -> bool {
 ///   backend.
 ///
 ///   **Also returned here**, for a condition none of those four sentences states: an
-///   `SQL_NTS` argument whose null terminator is not within `MAX_NTS_SCAN` (32 767) units,
+///   `SQL_NTS` argument whose null terminator is not within `MAX_NTS_SCAN` (1 048 576) units,
 ///   which is a length the driver cannot determine. Two arguments of this call can reach it
 ///   — `StatementText` itself, and a `SQL_C_CHAR` or `SQL_C_WCHAR` parameter bound with an
 ///   `SQL_NTS` (or absent) length indicator — and those are the complete set. Before this,
-///   `utf16_to_string` returned the 32 767-unit prefix as though it were the whole string,
-///   so a longer statement was **executed truncated**: harmless when the prefix is a syntax
+///   `utf16_to_string` returned a cap-length prefix as though it were the whole
+///   string, so a longer statement was **executed truncated**: harmless when the prefix is a syntax
 ///   error, and a different statement than the application wrote when it is not. An
 ///   explicitly measured `TextLength` is not limited by this, at any size. See
 ///   `nts_input_longer_than_the_scan_cap_is_hy090_not_a_truncated_statement` and
-///   `an_explicitly_measured_statement_far_beyond_the_scan_cap_still_executes`.
+///   `an_explicitly_measured_statement_past_the_scan_cap_still_executes`.
 /// - HY105: Invalid parameter type — propagated from backend.
 /// - HY109: Invalid cursor position — propagated from backend.
 /// - HY117: Connection suspended — (driver-manager-handled; not returned here).
@@ -461,7 +461,7 @@ pub unsafe fn sql_exec_direct_w<B: Backend>(
 /// - HY090: Invalid string or buffer length — (DM case `TextLength <= 0 and != SQL_NTS`:
 ///   driver-manager-handled); fails if `TextLength < 0` and `!= SQL_NTS` (checked here).
 ///   **Also returned here**, for the condition the row does not state: a `StatementText`
-///   passed as `SQL_NTS` whose null terminator is not within `MAX_NTS_SCAN` (32 767) units.
+///   passed as `SQL_NTS` whose null terminator is not within `MAX_NTS_SCAN` (1 048 576) units.
 ///   `StatementText` is this function's only `SQL_NTS` argument, so it is the whole set —
 ///   parameters are bound but not read until `SQLExecute`. An explicitly measured
 ///   `TextLength` is not limited, at any size. See
@@ -703,7 +703,7 @@ pub unsafe fn sql_prepare_w<B: Backend>(
 /// - HY090: Invalid string or buffer length — propagated from backend (parameter buffer length
 ///   validation). **Also returned here**, for a bound `SQL_C_CHAR` or `SQL_C_WCHAR`
 ///   parameter whose `SQL_NTS` (or absent) length indicator sends core scanning and whose
-///   null terminator is not within `MAX_NTS_SCAN` (32 767) units. Those two C types are the
+///   null terminator is not within `MAX_NTS_SCAN` (1 048 576) units. Those two C types are the
 ///   complete set: every other bound type has a fixed width or an explicit indicator, and
 ///   this function takes no string argument of its own. The `SQL_C_WCHAR` arm previously
 ///   sent the **empty string** in that case (`unwrap_or_default`) and the `SQL_C_CHAR` arm
@@ -1786,11 +1786,32 @@ mod tests {
         }
     }
 
-    /// The cap bounds a scan, never a declared length. A statement three times
-    /// the cap, passed with its real `TextLength`, is unaffected — which is the
-    /// property that keeps generated multi-row `INSERT` statements working.
+    /// A 100 000-character `SQL_NTS` statement executes.
+    ///
+    /// The length is the point: it is above `i16::MAX` (32 767), which is what
+    /// `MAX_NTS_SCAN` used to be, and far below the cap now. Machine-generated
+    /// SQL — a batched `INSERT … VALUES`, an `IN` list built from a key set —
+    /// passes that mark routinely, and unixODBC forwards `SQL_NTS` unchanged
+    /// from a Unicode application to a Unicode driver, so such a statement
+    /// reaches this function still needing a scan. While the cap was `i16::MAX`
+    /// this call was `HY090`.
+    ///
+    /// What the driver survey on `MAX_NTS_SCAN` establishes is narrower than
+    /// "the other drivers run this statement", which depends on the data source
+    /// and not on the driver: it is that **none of them refuses it for length**.
+    /// Their `SQL_NTS` scans are unbounded, so no length threshold exists at
+    /// which they stop. MySQL Connector/ODBC is the one that has an `HY090`
+    /// length limit at all — `GET_NAME_LEN`, 192 bytes — and it does not bear on
+    /// this: it is a post-hoc MySQL identifier check applied to catalog-function
+    /// name arguments, never to SQL text.
+    ///
+    /// A literal rather than a fraction of `MAX_NTS_SCAN`: a test written
+    /// against the constant passes at every value of it, including the one this
+    /// test exists to rule out.
     #[test]
-    fn an_explicitly_measured_statement_far_beyond_the_scan_cap_still_executes() {
+    fn an_nts_statement_of_a_hundred_thousand_characters_executes() {
+        const STATEMENT_UNITS: usize = 100_000;
+
         unsafe {
             let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockRecordingBackend>();
             with_handle::<MockRecordingBackend, ConnectionHandle<MockRecordingBackend>, _>(
@@ -1800,7 +1821,39 @@ mod tests {
                 },
             );
 
-            let wide = vec![b'a' as u16; crate::utf16::MAX_NTS_SCAN * 3];
+            let mut wide = vec![b'a' as u16; STATEMENT_UNITS + 1];
+            wide[STATEMENT_UNITS] = 0;
+            assert_eq!(
+                sql_exec_direct_w::<MockRecordingBackend>(stmt, wide.as_ptr(), SQL_NTS),
+                SqlReturn::SUCCESS,
+                "a {STATEMENT_UNITS}-character SQL_NTS statement is ordinary generated SQL, \
+                 not a length the driver may refuse",
+            );
+
+            cleanup_env_conn_stmt_for::<MockRecordingBackend>(env, conn, stmt);
+        }
+    }
+
+    /// The cap bounds a scan, never a declared length. A statement one unit past
+    /// the cap, passed with its real `TextLength`, is unaffected — which is the
+    /// property that keeps generated multi-row `INSERT` statements working
+    /// however long they get.
+    ///
+    /// One unit past rather than some larger multiple: that is the boundary the
+    /// claim is about, and every further unit only lengthens a scan the
+    /// neighbouring tests already pay for at the cap itself.
+    #[test]
+    fn an_explicitly_measured_statement_past_the_scan_cap_still_executes() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockRecordingBackend>();
+            with_handle::<MockRecordingBackend, ConnectionHandle<MockRecordingBackend>, _>(
+                conn,
+                |c| {
+                    c.connection = Some(MockConnection);
+                },
+            );
+
+            let wide = vec![b'a' as u16; crate::utf16::MAX_NTS_SCAN + 1];
             assert_eq!(
                 sql_exec_direct_w::<MockRecordingBackend>(
                     stmt,
