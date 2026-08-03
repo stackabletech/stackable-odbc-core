@@ -736,7 +736,10 @@ breakdown that tells you which test is responsible. Notes:
   containing no `unsafe` whatsoever. The signal to watch for is `include_str!`,
   a full-`u16`-space scan, or any other input baked in at compile time rather
   than passed in; the native runtime will not warn you, because the ratio, not
-  the absolute time, is what Miri multiplies.
+  the absolute time, is what Miri multiplies. There are **three** such guards
+  there now — the third scans function *bodies* for `SqlState::` factory calls
+  — and each carries the same `#[cfg_attr(miri, ignore = …)]`. A fourth scanner
+  added to that module needs one too, or it silently buys back the 68%.
 - **Leak reporting is deliberately left on.** It is what catches a handle or
   descriptor allocation that a teardown path forgets to free. If you add a
   test that allocates handles, it must free them or the job goes red.

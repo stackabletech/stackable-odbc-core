@@ -1589,6 +1589,27 @@ call `SQLCloseCursor` or `SQLFreeStmt(SQL_CLOSE)` first, as it already must for
 
 ### Fixed
 
+- **`SQLBindParameter` reports `HY105` for an unrecognised `InputOutputType`,
+  not `HY024`.** `HY105` ("Invalid parameter type") is the row that function's
+  page gives this exact condition — "(DM) The value specified for the argument
+  *InputOutputType* was invalid" — while `HY024` appears nowhere on the page, so
+  an application matching on the states the spec lists never saw it coming. The
+  row carries `(DM)` and is guarded anyway, on the same footing as the `07009`
+  beside it: core is linked directly by its own tests and by embedders with no
+  Driver Manager in front of it, and core cannot proceed without knowing whether
+  a parameter is an input or an output, so there is no most-permissive fallback
+  to take instead.
+
+  Found by a new guard rather than by review, and the guard is the more durable
+  half of this entry:
+  `every_sqlstate_a_function_body_returns_is_in_its_table_or_declared_off_table`
+  scans each FFI function's body for `SqlState::` factory calls and fails the
+  build unless each state is in that function's transcribed diagnostics table or
+  declared with the house off-table phrase. The existing guard reads doc comments
+  and asks whether the spec agrees, which cannot see a state the code returns and
+  the doc comment never mentions — the gap this site sat in. It found exactly one
+  violation across all sixty exported functions.
+
 - **`SQLGetDescRecW` counts its `Name` buffer and length in characters, not
   bytes.** `BufferLength` was halved and `*StringLengthPtr` doubled, so an
   application that passed a buffer of *n* `SQLWCHAR`s got half of it used, and a

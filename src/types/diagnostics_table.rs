@@ -52,6 +52,21 @@
 //! sweep wrote are recorded in the doc comments rather than here so that the
 //! next reader inherits the evidence.
 //!
+//! # The blind spot those three properties leave
+//!
+//! All three start from the doc comment, so a SQLSTATE the code returns and the
+//! doc comment never mentions satisfies every one of them — there is no bullet
+//! to check. `SQLBindParameter` sat in that gap, answering `HY024` for an
+//! unrecognised `InputOutputType` while its own page lists `HY105` for exactly
+//! that condition and no `HY024` at all.
+//!
+//! [`every_sqlstate_a_function_body_returns_is_in_its_table_or_declared_off_table`]
+//! closes it from the other end: it scans each function's *body* for
+//! `SqlState::` factory calls and requires each state to be in the transcribed
+//! table or declared with the off-table phrase. It is an under-approximation by
+//! construction — see its own docs for what it cannot see — which is why the
+//! prose reasons still matter.
+//!
 //! # The four verdict phrasings
 //!
 //! The corrections use a closed vocabulary, so the guard can recognise a
@@ -352,6 +367,75 @@ fn claims_driver_manager(text: &str) -> bool {
 /// table omits it. Already in use for `08S01` in `sql_describe_col_w` and
 /// `3D000` in `sql_connect_w`.
 const OFF_TABLE: &str = "absent from this function's diagnostics table";
+
+/// This module's own source, for the factory-name mapping below.
+const SQL_STATE_RS: &str = include_str!("sql_state.rs");
+
+/// Every `SqlState` factory paired with the SQLSTATE it produces, read out of
+/// `sql_state.rs` rather than restated here.
+///
+/// Two passes over that file: `pub const NAME: &str = "XXXXX";` gives the
+/// constants, and `pub fn factory() -> Self { Self::new(NAME) }` gives the
+/// factory that returns each. Deriving it is the point — a hand-written second
+/// copy of fifty state names is exactly the thing this module exists to stop
+/// existing.
+fn sql_state_factories() -> Vec<(String, &'static str)> {
+    let mut constants: Vec<(&str, &str)> = Vec::new();
+    for line in SQL_STATE_RS.lines() {
+        let trimmed = line.trim();
+        let Some(rest) = trimmed.strip_prefix("pub const ") else {
+            continue;
+        };
+        let Some((name, value)) = rest.split_once(": &str = ") else {
+            continue;
+        };
+        let value = value.trim_end_matches(';').trim_matches('"');
+        if is_sqlstate(value) {
+            constants.push((name, value));
+        }
+    }
+
+    let mut factories: Vec<(String, &'static str)> = Vec::new();
+    let mut pending: Option<&str> = None;
+    for line in SQL_STATE_RS.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("pub fn ") {
+            pending = rest.split('(').next();
+            continue;
+        }
+        if let Some(name) = pending
+            && let Some(rest) = trimmed.strip_prefix("Self::new(")
+        {
+            let konst = rest.trim_end_matches(')');
+            if let Some(&(_, value)) = constants.iter().find(|(c, _)| *c == konst) {
+                factories.push((format!("SqlState::{name}()"), value));
+            }
+            pending = None;
+        }
+    }
+    factories
+}
+
+/// The body text of `func`, from its signature to the closing brace in column
+/// zero.
+///
+/// Deliberately textual, like [`doc_lines`]: the alternative is a parser, and
+/// what this needs is "which `SqlState::` factories appear between these two
+/// points". Stopping at a column-zero `}` works because every function here is
+/// a top-level item, and it is what keeps the test module — which names plenty
+/// of SQLSTATEs — out of the scan.
+fn body_of<'a>(source: &'a str, func: &str) -> &'a str {
+    let needle = format!("\npub unsafe fn {func}");
+    let at = match source.find(&needle) {
+        Some(at) => at + 1,
+        None => panic!("{func} is not defined in the module declared for it"),
+    };
+    let rest = &source[at..];
+    match rest.find("\n}\n") {
+        Some(end) => &rest[..end],
+        None => rest,
+    }
+}
 
 #[rustfmt::skip]
 const DIAGNOSTICS_TABLES: &[FunctionDiagnostics] = &[
@@ -2187,5 +2271,95 @@ fn every_exported_ffi_function_has_a_transcribed_diagnostics_table() {
         "these FFI entry points have no transcribed diagnostics table, so nothing \
          checks their doc comment:\n{}",
         missing.join("\n")
+    );
+}
+
+/// The sibling guard, in the other direction: a SQLSTATE the function's **body**
+/// returns must be either in its transcribed table or declared off-table in the
+/// doc comment.
+///
+/// [`every_doc_comment_matches_the_spec_diagnostics_table`] reads the doc comment
+/// and asks whether the spec agrees. That leaves a blind spot it cannot see: a
+/// state the code returns and the doc comment never mentions passes both of its
+/// first two properties, because there is no bullet to check. The audit found
+/// `SQLBindParameter` answering `HY024` for an unrecognised `InputOutputType`
+/// while its own table lists `HY105` and no `HY024` at all, undocumented either
+/// way.
+///
+/// # What it can and cannot see
+///
+/// It scans for literal `SqlState::factory()` calls between a function's
+/// signature and its closing brace, so it is an **under**-approximation, and
+/// deliberately: it misses a state produced inside a helper the function calls,
+/// one carried by an [`crate::errors::OdbcError`] variant such as
+/// `FractionalTruncation`, and one propagated from a backend. Those are why the
+/// doc comments carry prose reasons a test cannot check. What it does catch is
+/// the case that actually went wrong — a factory called at the entry point
+/// itself, naming a state nobody reconciled against the page.
+///
+/// Skipped under Miri for the same reason as its two neighbours: it scans the
+/// same `include_str!`'d source and this module holds no `unsafe`.
+#[cfg_attr(
+    miri,
+    ignore = "1.72 MB string scan; no unsafe in this module for Miri to check"
+)]
+#[test]
+fn every_sqlstate_a_function_body_returns_is_in_its_table_or_declared_off_table() {
+    let factories = sql_state_factories();
+    assert!(
+        factories.len() > 20,
+        "the factory scan found only {} entries, so it has stopped matching \
+         sql_state.rs's shape and this guard is passing vacuously",
+        factories.len()
+    );
+
+    let mut problems: Vec<String> = Vec::new();
+    let mut observed = 0usize;
+
+    for entry in DIAGNOSTICS_TABLES {
+        let body = body_of(entry.source, entry.func);
+        let bullets = spec_compliance_bullets(&doc_lines(entry.source, entry.func));
+        let where_ = format!("{} ({}, {})", entry.func, entry.odbc_name, entry.module);
+
+        let mut reported: Vec<&str> = Vec::new();
+        for (call, state) in &factories {
+            if !body.contains(call.as_str()) || reported.contains(state) {
+                continue;
+            }
+            reported.push(state);
+            observed += 1;
+
+            if entry.rows.iter().any(|r| r.sqlstate == *state) {
+                continue;
+            }
+            let declared = bullets.iter().any(|b| {
+                b.states.iter().any(|s| s == state) && b.text.to_lowercase().contains(OFF_TABLE)
+            });
+            if !declared {
+                problems.push(format!(
+                    "{where_}: the body calls {call}, so it can return {state}, which is \
+                     not in this function's diagnostics table. Either return the state the \
+                     table does list, or document it with `**{OFF_TABLE}**` and why."
+                ));
+            }
+        }
+    }
+
+    // The other way this guard could pass without proving anything: `body_of`
+    // returning nothing useful, because a signature or a closing brace moved.
+    // 90-odd (function, state) pairs are visible today; the floor is well under
+    // that and still far from zero.
+    assert!(
+        observed > 60,
+        "the body scan observed only {observed} (function, SQLSTATE) pairs, so \
+         `body_of` has stopped finding function bodies and this guard is passing \
+         vacuously"
+    );
+
+    assert!(
+        problems.is_empty(),
+        "these functions return a SQLSTATE their own spec table does not list, \
+         without saying so:\n{}",
+        problems.join("\n")
     );
 }

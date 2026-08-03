@@ -394,8 +394,34 @@ all ten catalog functions.
 
 ### Task 3.3: sql_bind_parameter's off-table HY024 + guard blind spot
 
-- [ ] First close the guard gap: extend `every_doc_comment_matches_the_spec_diagnostics_table` (or add a sibling test) to flag SQLSTATEs *returned by the function body* (grep for `SqlState::` factories per file, as the existing site-audit tests do) that are neither in the transcribed table nor documented with the "absent from this function's diagnostics table" phrasing. Verify the new guard fails on current `params.rs:169` (red).
-- [ ] Then decide the behaviour with Andrew: (a) return `07009`-style defensive `HY105` (matching how the function already treats other (DM) rows), or (b) keep HY024 with the house phrasing. Implement the chosen one; guard goes green. Tests: `bind_parameter_with_unknown_param_type_returns_<chosen state>` asserting the SQLSTATE via `first_sqlstate`. Commit: `fix: undocumented off-table SQLSTATEs are caught by the diagnostics guard`
+- [x] First close the guard gap: extend `every_doc_comment_matches_the_spec_diagnostics_table` (or add a sibling test) to flag SQLSTATEs *returned by the function body* (grep for `SqlState::` factories per file, as the existing site-audit tests do) that are neither in the transcribed table nor documented with the "absent from this function's diagnostics table" phrasing. Verify the new guard fails on current `params.rs:169` (red).
+- [x] Then decide the behaviour with Andrew: (a) return `07009`-style defensive `HY105` (matching how the function already treats other (DM) rows), or (b) keep HY024 with the house phrasing. Implement the chosen one; guard goes green. Tests: `bind_parameter_with_unknown_param_type_returns_<chosen state>` asserting the SQLSTATE via `first_sqlstate`. Commit: `fix: undocumented off-table SQLSTATEs are caught by the diagnostics guard`
+
+**Outcome (2026-08-03).** Andrew chose (a), `HY105`. The live page confirms the
+row is "(DM) The value specified for the argument *InputOutputType* was invalid"
+and that `HY024` occurs **nowhere** on it. Guarded defensively for the reason the
+neighbouring `07009` already gives, plus one this task did not anticipate: unlike
+`SQLDriverConnect`'s `DriverCompletion`, where an unrecognised value has a
+defensible most-permissive fallback, there is none here — defaulting would
+silently mis-bind an output parameter as an input.
+
+Notes for whoever extends the guard:
+
+- **The guard found exactly one violation across all sixty functions**, so the
+  blind spot was narrow. It sees only literal `SqlState::factory()` calls between
+  a function's signature and its column-zero closing brace, and therefore misses
+  a state produced in a helper, one carried by an `OdbcError` variant such as
+  `FractionalTruncation`, and one propagated from a backend. Under-approximating
+  is deliberate; the doc comments' prose reasons are still the only thing
+  covering the rest.
+- **Two vacuity floors were needed, not one.** The factory map is parsed out of
+  `sql_state.rs` (47 factories) rather than restated, and the body scan sees ~90
+  (function, state) pairs; both are asserted, because either a changed
+  `pub fn`/`Self::new` shape or a changed function-signature shape would make the
+  guard pass while checking nothing.
+- **It is the third `include_str!` scanner in that module and carries the same
+  `#[cfg_attr(miri, ignore)]`.** AGENTS.md's Miri section is updated to say three
+  and to warn that a fourth needs the attribute too.
 
 ---
 

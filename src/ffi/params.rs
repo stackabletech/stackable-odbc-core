@@ -103,9 +103,14 @@ use crate::{
 ///   characters, or a binary one longer than `column_size` bytes (`crate::param_convert`).
 ///   That is a different question — whether *this value* fits *this declaration* — and a
 ///   different SQLSTATE.
-/// - `HY105` Invalid parameter type — (DM) the spec marks HY105 as DM-only. When the driver
-///   receives an unrecognised `input_output_type`, it returns `HY024` (invalid attribute value)
-///   instead, since the DM should have rejected it first.
+/// - `HY105` Invalid parameter type — the spec annotates this `(DM)`, and its single clause
+///   is "the value specified for the argument *InputOutputType* was invalid"; it is guarded
+///   defensively here, on the same grounds as `07009` above. `param_type_from_raw` declining
+///   a value is exactly that clause, and core cannot proceed without knowing whether the
+///   parameter is an input or an output — unlike `SQLDriverConnect`'s `DriverCompletion`,
+///   where an unrecognised value has a defensible most-permissive fallback, defaulting here
+///   would silently mis-bind an output parameter as an input. This was `HY024` until
+///   2026-08-03, a state that appears nowhere on this function's page.
 /// - `HY117` Connection is suspended — (driver-manager-handled; not returned here)
 /// - `HYC00` Optional feature not implemented — not returned here, and the row carries no
 ///   `(DM)` marker. Core refuses a C-type/SQL-type pairing its three conversion tables do
@@ -170,10 +175,14 @@ pub unsafe fn sql_bind_parameter<B: Backend>(
                 ));
             }
 
+            // HY105 is the row this page gives this exact condition: "(DM) The
+            // value specified for the argument InputOutputType was invalid." It
+            // carries `(DM)` and is guarded anyway, on the same grounds as the
+            // `07009` above.
             let io_type = param_type.ok_or_else(|| {
                 OdbcError::general(
                     format!("Unknown input/output type: {input_output_type}"),
-                    SqlState::invalid_attribute_value(),
+                    SqlState::invalid_parameter_type(),
                 )
             })?;
 
@@ -3307,6 +3316,59 @@ mod tests {
                 std::ptr::null_mut(),
             );
             assert_eq!(ret, SqlReturn::SUCCESS);
+            cleanup(env, conn, stmt);
+        }
+    }
+
+    /// An unrecognised `InputOutputType` is `HY105`, the state this function's
+    /// page gives that exact condition: "(DM) The value specified for the
+    /// argument *InputOutputType* was invalid."
+    ///
+    /// It carries `(DM)`, and is checked anyway on the same grounds as the
+    /// `07009` above it — core is linked directly by its own tests and by an
+    /// embedder with no Driver Manager in front of it, so a value the DM would
+    /// have caught still has to be refused with something. It used to be
+    /// `HY024`, which appears nowhere on the page.
+    #[test]
+    fn bind_parameter_with_an_unknown_input_output_type_returns_hy105() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            let mut val: i32 = 0;
+
+            // 99 is not one of SQL_PARAM_INPUT, SQL_PARAM_INPUT_OUTPUT,
+            // SQL_PARAM_OUTPUT, SQL_PARAM_INPUT_OUTPUT_STREAM or
+            // SQL_PARAM_OUTPUT_STREAM, so `param_type_from_raw` declines it.
+            const NOT_A_PARAM_TYPE: i16 = 99;
+            assert!(
+                crate::types::param_type_from_raw(NOT_A_PARAM_TYPE).is_none(),
+                "the test's premise: this value must not be a valid ParamType"
+            );
+
+            let ret = sql_bind_parameter::<MockBackend>(
+                stmt,
+                1,
+                NOT_A_PARAM_TYPE,
+                CDataType::SLong as i16,
+                SqlDataType::INTEGER.0,
+                0,
+                0,
+                std::ptr::from_mut(&mut val).cast::<c_void>(),
+                4,
+                std::ptr::null_mut(),
+            );
+            assert_eq!(ret, SqlReturn::ERROR);
+
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+                let record = handle
+                    .diagnostics
+                    .get(0)
+                    .expect("no diagnostic was recorded for the invalid InputOutputType");
+                assert_eq!(
+                    record.sqlstate.as_str(),
+                    crate::types::sql_state::INVALID_PARAMETER_TYPE
+                );
+            });
+
             cleanup(env, conn, stmt);
         }
     }
