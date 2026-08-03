@@ -286,6 +286,33 @@ Part B for both `SQL_C_FLOAT` and `SQL_C_DOUBLE`; Part A needs the three pinned
 tests above inverted plus one asserting `SQL_SUCCESS` on a genuinely inexact
 narrowing. Commit: `fix: a float target reports only the diagnostics its spec row defines`
 
+**Outcome (2026-08-03).** Both parts done as argued; both rows were re-fetched
+first and quoted in the code comments. Three things the task did not predict:
+
+- **A fourth Part A test was needed.** A NaN reached the removed warning by the
+  same equality test, so `f64_nan_to_float_is_written_without_a_diagnostic`
+  pins the case that shows the `01S07` was *wrong* rather than merely
+  unauthorised — a NaN never compares equal to its source, so nothing had been
+  truncated.
+- **Part B needed a three-way parse outcome, not a two-way one.**
+  `parse_numeric_text` returned `Option`, whose `None` the call site read as
+  `22018`; the new `NumericPivotError` separates that cell from the `22003` one
+  and from the `07006` a non-numeric `ColumnValue` variant gets.
+- **`parse_numeric_literal` is the wrong discriminator for Part B**, which is
+  the near-miss worth recording: it parses the exponent as an `i32`, so
+  `"1e2147483648"` is `None` there and would have slipped through as an
+  infinity. The check is "does the text contain a digit" instead — among the
+  strings Rust's float parser accepts, the only digitless ones are the
+  `inf`/`infinity`/`nan` spellings. Both near-miss inputs are in the test.
+
+Part B's reach is narrower than the task feared: `parse_numeric_text` has one
+non-test caller (`column_value_as_numeric`), which has one caller (the numeric
+arm of `write_column_value`). An integer target keeps the SQLSTATE it had —
+`22003` either way, by the exact-numeric row — so only its diagnostic message
+changes, and `SQL_C_BIT` likewise. Two stale CHANGELOG claims about this
+behaviour were corrected in the same commit, one of them Task 2.12's own
+deferral bullet.
+
 ---
 
 ## Phase 3 — Investigations (mature-driver checks; ask before changing)

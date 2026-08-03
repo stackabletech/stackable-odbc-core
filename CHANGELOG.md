@@ -1589,6 +1589,59 @@ call `SQLCloseCursor` or `SQLFreeStmt(SQL_CLOSE)` first, as it already must for
 
 ### Fixed
 
+- **A float C target no longer reports `01S07` for an inexact narrowing.**
+  Fetching an `f64` or an `i64` into `SQL_C_FLOAT` returned
+  `SQL_SUCCESS_WITH_INFO` with `01S07` ("fractional truncation") whenever the
+  `f32` written back did not compare equal to the source: `0.1`, `16_777_217`,
+  and an underflow to `0.0` all warned. They now return `SQL_SUCCESS`, with the
+  same value written as before.
+
+  The *SQL to C: Numeric* row for `SQL_C_FLOAT`/`SQL_C_DOUBLE` has exactly two
+  cells — in range → *Data* / n/a, out of range → *Undefined* / `22003` — and no
+  `01S07`. The rows either side of it do have one, the integer row for
+  "truncation of fractional digits" and the `SQL_C_BIT` row for "greater than 0,
+  less than 2, and not equal to 1", so the float row's omission is a distinction
+  the table draws rather than a gap. Neither psqlODBC (`convert.c`, `case
+  SQL_C_FLOAT`) nor MySQL Connector/ODBC (`driver/results.cc`, `sql_get_data`)
+  reports anything on this path.
+
+  **This is a severity change from warning to success, at all five entry points
+  that reach `write_column_value`** — `SQLFetch`, `SQLFetchScroll` and
+  `SQLGetData`, plus `SQLExecDirect` and `SQLExecute` through their bound output
+  parameters. An application that watched for `01S07` to detect precision loss
+  in a `SQL_DOUBLE`-to-`SQLREAL` fetch stops seeing it; there is no diagnostic
+  that reports it, because the table defines none.
+
+  A NaN is the case that shows the warning was wrong and not merely
+  unauthorised: no comparison calls a NaN equal to its source, so a faithfully
+  delivered NaN reported a truncation that never happened. It is now delivered
+  with `SQL_SUCCESS`. Unchanged either side of this: an out-of-range narrowing
+  is still `22003` with nothing written, and a dropped *fraction* still reports
+  `01S07` on the paths whose own rows define it — an integer target and
+  `SQL_C_BIT`.
+
+- **A character or decimal literal too large for `f64` is now `22003` with
+  nothing written, where it used to deliver an infinity and call it success.** A
+  `SQL_VARCHAR` column holding `1e400`, fetched as `SQL_C_FLOAT` or
+  `SQL_C_DOUBLE`, parsed to `f64::INFINITY` and was written as one. *SQL to C:
+  Character*'s row for those two targets gives it the second of its three cells,
+  "outside the range of the data type to which the number is being converted" →
+  *Undefined* / `22003`, so neither the buffer nor the length indicator is
+  touched now. This is the same reading the bind direction already took
+  (`param_convert`'s `to_double` rejects a non-finite parse as out of range), so
+  the two directions now agree on the same literal.
+
+  The check is at the parse rather than in the conversion arm, because by the
+  time an overflowed literal reaches the arm it is the same `f64` as a column
+  that genuinely holds an infinity — and a genuine `'Infinity'::float8` must
+  stay readable. Text *spelled* `Infinity`, `inf` or `NaN` is therefore
+  unaffected, and so are the neighbouring cells: text that is not a
+  *numeric-literal* stays `22018`, and an underflow (`1e-400`) stays
+  `SQL_SUCCESS` with `0.0`, because zero is a value the target holds. An
+  integer C target is unaffected in SQLSTATE — an over-range literal was
+  already `22003` there, by the exact-numeric row — and only its diagnostic
+  message changes.
+
 - **A fetch that narrows a number too large for `SQL_C_FLOAT` now returns
   `SQL_ERROR` with `22003` and writes nothing, where it used to write an
   infinity and call it a warning.** A finite `f64` beyond `±f32::MAX` — a
@@ -1619,10 +1672,11 @@ call `SQLCloseCursor` or `SQLFreeStmt(SQL_CLOSE)` first, as it already must for
     Connector/ODBC (`driver/results.cc`, `sql_get_data`) both narrow with a
     plain C cast and range-check neither end, so neither treats an underflow as
     an error.
-  - **An in-range narrowing that loses precision still reports `01S07`** with
-    the value written — `0.1` as an `f64` still warns. That warning is core's
-    own rather than the row's, and the `i64` → `SQL_C_FLOAT` arm makes the same
-    claim; changing either is a separate question from this one.
+  - **An in-range narrowing that loses precision reported `01S07`** with the
+    value written when this entry was written — `0.1` as an `f64` warned. That
+    warning was core's own rather than the row's, and the `i64` → `SQL_C_FLOAT`
+    arm made the same claim; both were removed together by the entry above,
+    which was the separate question this one deferred.
 
 - **A cancellation delivered by core's own query timer now reports `HYT00` on
   every later call in that cursor's life, not `HY008` on all but the first.**
@@ -3713,9 +3767,10 @@ call `SQLCloseCursor` or `SQLFreeStmt(SQL_CLOSE)` first, as it already must for
   rather than to a digit count — `SQL to C: Bit`'s "*BufferLength* <= 1" and the
   date, time and timestamp pages' minimum widths ("*BufferLength* < 20" for a
   timestamp). Core returns `01004` for all of those. Two further numeric gaps
-  also remain open and are **not** addressed here: an `f64` overflowing an
-  `SQL_C_FLOAT` target still reports `01S07` where the same table says `22003`,
-  and `SQL_C_NUMERIC` has no conversion arm at all.
+  were also open when this entry was written and are **not** addressed here: an
+  `f64` overflowing an `SQL_C_FLOAT` target reported `01S07` where the same table
+  says `22003` — closed since, by the two float entries above — and
+  `SQL_C_NUMERIC` has no conversion arm at all, which is still open.
 
 - **A backend reporting a column count that does not fit `u16` no longer makes
   `SQLDescribeColW` and `SQLColAttributeW` reject every column, including

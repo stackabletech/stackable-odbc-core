@@ -416,25 +416,32 @@ unsafe fn write_fixed_or_chunked(
             | CDataType::Double
             | CDataType::Bit,
         ) => match column_value_as_numeric(value, target_type) {
-            Some(pivot) => unsafe {
+            Ok(pivot) => unsafe {
                 write_numeric_pivot(pivot, target_type, target_ptr, len_ind_ptr)
             },
-            None => Err(match value {
-                // Text that should have been numeric but was not parseable.
-                ColumnValue::String(_) | ColumnValue::Decimal(_) => OdbcError::general(
-                    format!("Invalid character value for cast: {value:?}"),
-                    SqlState::invalid_character_value_for_cast(),
+            // Text that should have been numeric but was not parseable.
+            Err(NumericPivotError::NotNumericLiteral) => Err(OdbcError::general(
+                format!("Invalid character value for cast: {value:?}"),
+                SqlState::invalid_character_value_for_cast(),
+            )),
+            // Numeric text of a magnitude no C target holds. Nothing is written
+            // and the length indicator is left alone, which is what the two
+            // "Undefined" cells of that row require.
+            Err(NumericPivotError::OutOfRange) => Err(OdbcError::general(
+                format!(
+                    "Numeric value out of range: {value:?} exceeds the range of {target_type:?}"
                 ),
-                // The column value's type has no defined conversion to the
-                // requested C type (e.g. a Bytes/Guid/structured value asked
-                // to become a numeric target). Spec 07006: "The data value of
-                // a column in the result set could not be converted to the
-                // data type specified by the TargetType argument."
-                _ => OdbcError::general(
-                    format!("Unsupported conversion from {value:?} to {target_type:?}"),
-                    SqlState::restricted_data_type_attribute_violation(),
-                ),
-            }),
+                SqlState::numeric_value_out_of_range(),
+            )),
+            // The column value's type has no defined conversion to the
+            // requested C type (e.g. a Bytes/Guid/structured value asked
+            // to become a numeric target). Spec 07006: "The data value of
+            // a column in the result set could not be converted to the
+            // data type specified by the TargetType argument."
+            Err(NumericPivotError::NotNumericType) => Err(OdbcError::general(
+                format!("Unsupported conversion from {value:?} to {target_type:?}"),
+                SqlState::restricted_data_type_attribute_violation(),
+            )),
         },
 
         // --- Date ---
@@ -1523,20 +1530,74 @@ const fn is_exact_integer_target(target_type: CDataType) -> bool {
 /// The `i64`-then-`f64` fallback still runs for the float targets, and for text
 /// that is not a *numeric-literal* at all — `inf` and `NaN`, which
 /// [`parse_numeric_literal`] rejects and Rust's float parser accepts.
-fn parse_numeric_text(s: &str, target_type: CDataType) -> Option<NumericPivot<'_>> {
+///
+/// **A literal whose magnitude no `f64` holds is [`NumericPivotError::OutOfRange`]
+/// here, not an infinity downstream.** Rust's parser saturates `"1e400"` to
+/// `f64::INFINITY`, and every caller below this point sees a legitimate infinity
+/// — the value a `'Infinity'::float8` column really holds — so the overflow has
+/// to be caught at the parse or not at all. *SQL to C: Character*'s row for
+/// `SQL_C_FLOAT`/`SQL_C_DOUBLE` gives it the second of its three cells: "outside
+/// the range of the data type to which the number is being converted" →
+/// *Undefined* / `22003`.
+///
+/// The discriminator is **whether the text contains a digit**, which needs a word
+/// because the obvious spelling is wrong twice over. Testing the parsed value
+/// alone cannot work: an overflowing literal and the text `"Infinity"` produce
+/// the same `f64`, and `the_infinity_spelling_parses_back_into_a_float` pins that
+/// the second must survive. Testing `parse_numeric_literal(t).is_some()` is
+/// closer but leaks: it parses the exponent as an `i32`, so `"1e99999999999999"`
+/// is `None` there and would slip through as an infinity. Among the strings
+/// Rust's float parser accepts at all, the only digitless ones are the
+/// `inf`/`infinity`/`nan` spellings — so a digit is exactly the line between
+/// "a numeric-literal that overflowed" and "the source said infinity".
+///
+/// Underflow is deliberately not out of range: `"1e-400"` parses to `0.0`, and
+/// zero is a value the target holds, so it is the row's *first* cell. The same
+/// reading the `F64` → `f32` narrowing takes.
+fn parse_numeric_text(
+    s: &str,
+    target_type: CDataType,
+) -> Result<NumericPivot<'_>, NumericPivotError> {
     let t = s.trim();
     if is_exact_integer_target(target_type)
         && let Some(literal) = parse_numeric_literal(t)
     {
-        return Some(NumericPivot::Exact { literal, text: t });
+        return Ok(NumericPivot::Exact { literal, text: t });
     }
     if let Ok(i) = t.parse::<i64>() {
-        return Some(NumericPivot::Int(i));
+        return Ok(NumericPivot::Int(i));
     }
-    t.parse::<f64>().ok().map(NumericPivot::Float)
+    match t.parse::<f64>() {
+        Ok(f) if f.is_infinite() && t.bytes().any(|b| b.is_ascii_digit()) => {
+            Err(NumericPivotError::OutOfRange)
+        }
+        Ok(f) => Ok(NumericPivot::Float(f)),
+        Err(_) => Err(NumericPivotError::NotNumericLiteral),
+    }
 }
 
-/// Map a [`ColumnValue`] to a [`NumericPivot`], or `None` if the variant is not numeric.
+/// Why a [`ColumnValue`] has no [`NumericPivot`] reading, and therefore which
+/// SQLSTATE the numeric arm of [`write_column_value`] answers with.
+///
+/// Three variants rather than the plain `None` this used to be, because the two
+/// text failures are different cells of the *SQL to C: Character* row and were
+/// being collapsed into one: an overflowing literal reached the pivot as an
+/// infinity and was delivered as a success.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NumericPivotError {
+    /// The variant has no numeric reading at all — a `Bytes`, a `Guid`, a
+    /// structured value. `07006`, and off both tables: neither has a row for a
+    /// source type that is not numeric or character in the first place.
+    NotNumericType,
+    /// Text that is not a *numeric-literal*. The character table's `22018` cell.
+    NotNumericLiteral,
+    /// Text that *is* a *numeric-literal*, of a magnitude no `f64` holds. The
+    /// character table's `22003` cell.
+    OutOfRange,
+}
+
+/// Map a [`ColumnValue`] to a [`NumericPivot`], or to the [`NumericPivotError`]
+/// that says which SQLSTATE the caller answers with.
 ///
 /// This match is intentionally exhaustive (no wildcard) so that adding a new
 /// `ColumnValue` variant causes a compile error here, forcing an explicit decision
@@ -1544,15 +1605,15 @@ fn parse_numeric_text(s: &str, target_type: CDataType) -> Option<NumericPivot<'_
 fn column_value_as_numeric(
     value: &ColumnValue,
     target_type: CDataType,
-) -> Option<NumericPivot<'_>> {
+) -> Result<NumericPivot<'_>, NumericPivotError> {
     match value {
-        ColumnValue::I8(v) => Some(NumericPivot::Int(i64::from(*v))),
-        ColumnValue::I16(v) => Some(NumericPivot::Int(i64::from(*v))),
-        ColumnValue::I32(v) => Some(NumericPivot::Int(i64::from(*v))),
-        ColumnValue::I64(v) => Some(NumericPivot::Int(*v)),
-        ColumnValue::F32(v) => Some(NumericPivot::Float(f64::from(*v))),
-        ColumnValue::F64(v) => Some(NumericPivot::Float(*v)),
-        ColumnValue::Bool(v) => Some(NumericPivot::Int(*v as i64)),
+        ColumnValue::I8(v) => Ok(NumericPivot::Int(i64::from(*v))),
+        ColumnValue::I16(v) => Ok(NumericPivot::Int(i64::from(*v))),
+        ColumnValue::I32(v) => Ok(NumericPivot::Int(i64::from(*v))),
+        ColumnValue::I64(v) => Ok(NumericPivot::Int(*v)),
+        ColumnValue::F32(v) => Ok(NumericPivot::Float(f64::from(*v))),
+        ColumnValue::F64(v) => Ok(NumericPivot::Float(*v)),
+        ColumnValue::Bool(v) => Ok(NumericPivot::Int(*v as i64)),
         ColumnValue::Decimal(s) | ColumnValue::String(s) => parse_numeric_text(s, target_type),
         // Non-numeric variants: explicitly listed so the compiler flags any new variant
         ColumnValue::Null
@@ -1567,7 +1628,7 @@ fn column_value_as_numeric(
         | ColumnValue::Map(_)
         | ColumnValue::Row(_)
         | ColumnValue::IntervalYearMonth { .. }
-        | ColumnValue::IntervalDayTime { .. } => None,
+        | ColumnValue::IntervalDayTime { .. } => Err(NumericPivotError::NotNumericType),
     }
 }
 
@@ -1579,12 +1640,19 @@ fn column_value_as_numeric(
 /// whose magnitude exceeds `f32::MAX` on its way to `SQL_C_FLOAT`, which the
 /// *SQL to C: Numeric* row for that target calls "outside the range of the data
 /// type to which the number is being converted" — and `SQL_SUCCESS_WITH_INFO`
-/// with SQLSTATE `01S07` (fractional truncation) in the four cases that drop
-/// something: an `i64` or an `f64` narrowed to `f32` with precision loss but
-/// *not* out of its range, a fraction between 0 and 2 losing its fractional
-/// part to reach `SQL_C_BIT`, an exact decimal losing a non-zero fraction to
-/// reach an integer target (see [`write_exact_integer`]), and an `f64` losing a
-/// non-zero fraction to reach an integer target (see [`write_truncated_float`]).
+/// with SQLSTATE `01S07` (fractional truncation) in the three cases that drop a
+/// *fraction*: a value between 0 and 2 losing its fractional part to reach
+/// `SQL_C_BIT`, an exact decimal losing a non-zero fraction to reach an integer
+/// target (see [`write_exact_integer`]), and an `f64` losing a non-zero fraction
+/// to reach an integer target (see [`write_truncated_float`]).
+///
+/// **A float target reports no `01S07` at all**, however inexact the narrowing:
+/// the *SQL to C: Numeric* row for `SQL_C_FLOAT`/`SQL_C_DOUBLE` has exactly two
+/// cells — in range → *Data* / `n/a`, out of range → *Undefined* / `22003` — and
+/// the integer row above it and the `SQL_C_BIT` row below it both do carry
+/// `01S07`, so the omission is a distinction the table draws. See the
+/// `SQL_C_FLOAT` arm for the rest of that argument.
+///
 /// Any `CDataType` not covered by the numeric arms returns `SQL_ERROR` with
 /// SQLSTATE `HY003` (invalid application buffer type).
 unsafe fn write_numeric_pivot(
@@ -1691,17 +1759,16 @@ unsafe fn write_numeric_pivot(
             unsafe { write_fixed(target_ptr, len_ind_ptr, n) }
         }
         // --- Int pivot → float targets ---
-        // i64 → f32: values with |v| > 2^24 lose precision; return 01S07 after writing.
-        (NumericPivot::Int(v), CDataType::Float) => {
-            let f = v as f32;
-            unsafe {
-                let _ = write_fixed(target_ptr, len_ind_ptr, f)?;
-            };
-            if f as i64 != v {
-                return Err(OdbcError::FractionalTruncation);
-            }
-            Ok(SqlReturn::SUCCESS)
-        }
+        // An `i64` beyond 2^24 loses precision reaching `f32`, and that is not
+        // reported: the row's in-range cell says `n/a`, and every `i64` is inside
+        // the range of `f32` (`i64::MAX` is about 9.2e18, `f32::MAX` about
+        // 3.4e38), so no `i64` can reach the row's second cell either. This arm
+        // therefore has one outcome. See the `Float` → `SQL_C_FLOAT` arm below
+        // for why the omitted `01S07` is the table's decision and not an
+        // oversight; the two arms answer one question and must answer it alike.
+        (NumericPivot::Int(v), CDataType::Float) => unsafe {
+            write_fixed(target_ptr, len_ind_ptr, v as f32)
+        },
         (NumericPivot::Int(v), CDataType::Double) => unsafe {
             write_fixed(target_ptr, len_ind_ptr, v as f64)
         },
@@ -1763,12 +1830,13 @@ unsafe fn write_numeric_pivot(
         // `f.is_infinite()` would make that column unreadable through
         // SQL_C_FLOAT. `f64_infinity_to_float_is_the_value_the_source_held`
         // pins it. One thing that half cannot distinguish: character text that
-        // *parsed* to an infinity, since `"1e400".parse::<f64>()` is `Ok(inf)`,
-        // so a SQL_VARCHAR holding `1e400` still arrives here as a legitimate
-        // infinity and is written. That is unchanged by this arm and not its
-        // to fix — the overflow information is lost in `parse_numeric_text`,
-        // the governing table is *SQL to C: Character* rather than this one,
-        // and the same text reaches SQL_C_DOUBLE by a path this arm never sees.
+        // *parsed* to an infinity, since `"1e400".parse::<f64>()` is `Ok(inf)` —
+        // by the time such a value reaches this arm it is indistinguishable from
+        // a column that really holds an infinity. That is why the overflow of a
+        // character literal is caught in `parse_numeric_text` instead, which is
+        // also where it has to be for the other two reasons: its governing table
+        // is *SQL to C: Character* rather than this one, and the same text
+        // reaches SQL_C_DOUBLE by a path this arm never sees.
         //
         // Underflow is deliberately *not* the second outcome: a subnormal f32,
         // and zero, are values f32 can hold, so they are inside the row's
@@ -1778,16 +1846,26 @@ unsafe fn write_numeric_pivot(
         // (psqlODBC `convert.c`, `case SQL_C_FLOAT`; MySQL `driver/results.cc`,
         // `sql_get_data`).
         //
-        // What is left after the range test is an inexact narrowing, reported
-        // as 01S07 with the value written, matching the Int → Float arm above.
-        // That warning is core's own: the row's in-range cell says "n/a", and
-        // neither driver above reports anything. It is out of this arm's scope
-        // to remove — the Int → Float arm makes the same claim and is pinned by
-        // its own tests — but it is the reason this arm has a 01S07 at all.
-        // A NaN source falls into it as well, since NaN never compares equal to
-        // itself: the NaN is written faithfully and reported as a fractional
-        // truncation that did not happen. Also core's own, also not this
-        // change's to make.
+        // What is left after the range test is an inexact narrowing, and it is
+        // reported as **nothing**: the row's in-range cell is *Data* / `n/a`, and
+        // it has no third cell to hold a warning. The row either side of it does
+        // — the integer row's "truncation of fractional digits" and the
+        // `SQL_C_BIT` row's "greater than 0, less than 2, and not equal to 1"
+        // both carry `01S07` — so the float row's omission is a distinction the
+        // table draws rather than a gap to fill, and neither psqlODBC
+        // (`convert.c`, `case SQL_C_FLOAT`) nor MySQL Connector/ODBC
+        // (`driver/results.cc`, `sql_get_data`) reports anything here. Core did
+        // report `01S07`, which was its own invention; an application watching
+        // for it to detect precision loss no longer sees it, and CHANGELOG.md
+        // carries that as a behaviour change.
+        //
+        // A NaN is the clearest case of why the equality test that produced it
+        // was wrong rather than merely unauthorised: no comparison calls a NaN
+        // equal to its source, so a faithfully delivered NaN reported a
+        // fractional truncation that never happened. It is now delivered and
+        // nothing is reported — note the contrast with the `SQL_C_BIT` arm
+        // below, which has a range test a NaN fails, where `SQL_C_FLOAT` has no
+        // range a NaN is outside of.
         (NumericPivot::Float(v), CDataType::Float) => {
             let f = v as f32;
             if f.is_infinite() && v.is_finite() {
@@ -1796,13 +1874,7 @@ unsafe fn write_numeric_pivot(
                     SqlState::numeric_value_out_of_range(),
                 ));
             }
-            unsafe {
-                let _ = write_fixed(target_ptr, len_ind_ptr, f)?;
-            };
-            if f64::from(f) != v {
-                return Err(OdbcError::FractionalTruncation);
-            }
-            Ok(SqlReturn::SUCCESS)
+            unsafe { write_fixed(target_ptr, len_ind_ptr, f) }
         }
         (NumericPivot::Float(v), CDataType::Double) => unsafe {
             write_fixed(target_ptr, len_ind_ptr, v)
@@ -1930,8 +2002,8 @@ unsafe fn write_truncated_float<T: Copy + TryFrom<i128>>(
 /// same three outcomes, in the same order and with the same SQLSTATEs. The one
 /// difference is a fourth row that only the character table has — "Data is not a
 /// *numeric-literal*" → `22018` — which a numeric SQL source cannot reach, and
-/// which is handled by [`column_value_as_numeric`] returning `None` rather than
-/// here.
+/// which is handled by [`column_value_as_numeric`] returning
+/// [`NumericPivotError::NotNumericLiteral`] rather than here.
 ///
 /// The three shared outcomes, in the tables' own order:
 ///
@@ -3465,11 +3537,16 @@ mod tests {
         // An integer target is the interesting one: none of these is a
         // *numeric-literal*, so the exact path declines them and the `f64`
         // fallback is what answers.
+        //
+        // This is also the other half of the overflow check
+        // `a_character_literal_beyond_f64_range_is_22003_with_nothing_written`
+        // pins: these four parse to the same `f64` an overflowing literal does,
+        // so a check that looked only at the parsed value would fail them.
         for text in ["Infinity", "-Infinity", "inf", "-inf"] {
             assert!(
                 matches!(
                     parse_numeric_text(text, CDataType::SBigInt),
-                    Some(NumericPivot::Float(f)) if f.is_infinite()
+                    Ok(NumericPivot::Float(f)) if f.is_infinite()
                 ),
                 "{text} should parse back to an infinite f64"
             );
@@ -4678,8 +4755,15 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn int_to_float_precision_loss_returns_01s07() {
-        // 2^24 + 1 = 16_777_217 cannot be represented exactly as f32
+    fn int_to_float_precision_loss_is_success_with_the_narrowed_value() {
+        // 2^24 + 1 = 16_777_217 cannot be represented exactly as f32, so the
+        // narrowing is inexact. The *SQL to C: Numeric* row for
+        // SQL_C_FLOAT/SQL_C_DOUBLE has only two cells — in range -> *Data* /
+        // n/a, out of range -> *Undefined* / 22003 — and 16_777_216.0 is
+        // in range, so the outcome is the first cell: the value is written and
+        // nothing is reported. The integer row above and the SQL_C_BIT row
+        // below both carry 01S07; the float row's omission is a distinction
+        // the table draws.
         let mut buf: f32 = 0.0;
         let ret = unsafe {
             write_column_value(
@@ -4689,11 +4773,9 @@ mod tests {
                 4,
                 std::ptr::null_mut(),
             )
-        };
-        let err = ret.unwrap_err();
-        assert_eq!(err.sql_return(), SqlReturn::SUCCESS_WITH_INFO);
-        assert_eq!(sqlstate_of_err(&err), "01S07");
-        // Value is still written (truncated)
+        }
+        .expect("an in-range inexact narrowing is the row's first cell");
+        assert_eq!(ret, SqlReturn::SUCCESS);
         assert_eq!(buf, 16_777_216.0_f32);
     }
 
@@ -4762,10 +4844,13 @@ mod tests {
     }
 
     #[test]
-    fn f64_narrowed_to_f32_with_precision_loss_warns() {
+    fn f64_narrowed_to_f32_with_precision_loss_is_success() {
+        // 0.1 is a genuinely inexact narrowing: the nearest f32 is not the
+        // f64 the source held. It is still inside the range of SQL_C_FLOAT,
+        // so it is the float row's "within the range" cell — *Data* / n/a.
         let mut out = 0f32;
         let mut ind = 0isize;
-        let err = unsafe {
+        let ret = unsafe {
             write_column_value(
                 &ColumnValue::F64(0.1),
                 CDataType::Float,
@@ -4774,14 +4859,10 @@ mod tests {
                 &mut ind,
             )
         }
-        .expect_err("0.1 is not exactly representable in f32");
-        assert_eq!(
-            err.sqlstate().as_str(),
-            crate::types::sql_state::FRACTIONAL_TRUNCATION
-        );
-        assert_eq!(err.sql_return(), SqlReturn::SUCCESS_WITH_INFO);
-        // The value must still be written despite the warning.
+        .expect("an inexact but in-range narrowing reports nothing");
+        assert_eq!(ret, SqlReturn::SUCCESS);
         assert_eq!(out, 0.1f32);
+        assert_eq!(ind, size_of::<f32>() as isize);
     }
 
     #[test]
@@ -4886,14 +4967,14 @@ mod tests {
     }
 
     #[test]
-    fn f64_underflowing_to_zero_in_f32_is_01s07_with_zero_written() {
+    fn f64_underflowing_to_zero_in_f32_is_success_with_zero_written() {
         // 1e-300 is far below the smallest f32 subnormal, so it narrows to
         // 0.0. Zero is inside the range of SQL_C_FLOAT, so this is not the
-        // 22003 cell; what is left is an inexact narrowing, which this arm
-        // reports exactly as it reports 0.1 -> 0.1f32.
+        // 22003 cell; what is left is an inexact narrowing, which the row's
+        // "within the range" cell reports as nothing at all.
         let mut out = 9.0f32;
         let mut ind = 0isize;
-        let err = unsafe {
+        let ret = unsafe {
             write_column_value(
                 &ColumnValue::F64(1e-300),
                 CDataType::Float,
@@ -4902,19 +4983,162 @@ mod tests {
                 &mut ind,
             )
         }
-        .expect_err("1e-300 is not exactly representable in f32");
-        assert_eq!(
-            sqlstate_of_err(&err),
-            SqlState::fractional_truncation().as_str()
-        );
-        assert_eq!(err.sql_return(), SqlReturn::SUCCESS_WITH_INFO);
+        .expect("underflow to zero is inside the range of SQL_C_FLOAT");
+        assert_eq!(ret, SqlReturn::SUCCESS);
         assert_eq!(out, 0.0f32);
+        assert_eq!(ind, size_of::<f32>() as isize);
+    }
+
+    #[test]
+    fn f64_nan_to_float_is_written_without_a_diagnostic() {
+        // A NaN narrows to a NaN, which no comparison can call equal to its
+        // source — so the equality test that used to gate 01S07 reported a
+        // fractional truncation that never happened. With that warning gone
+        // the NaN is delivered and nothing is reported. Note the contrast with
+        // `float_nan_to_bit_returns_22003`: SQL_C_BIT has a range test a NaN
+        // fails, and SQL_C_FLOAT has no range a NaN is outside of.
+        let mut out = 9.0f32;
+        let mut ind = 0isize;
+        let ret = unsafe {
+            write_column_value(
+                &ColumnValue::F64(f64::NAN),
+                CDataType::Float,
+                std::ptr::from_mut(&mut out).cast(),
+                size_of::<f32>() as isize,
+                &mut ind,
+            )
+        }
+        .expect("a NaN is not outside the range of SQL_C_FLOAT");
+        assert_eq!(ret, SqlReturn::SUCCESS);
+        assert!(out.is_nan(), "the NaN the source held must be delivered");
         assert_eq!(ind, size_of::<f32>() as isize);
     }
 
     // -----------------------------------------------------------------------
     // Tests for Decimal/String → numeric C type conversion
     // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_character_literal_beyond_f64_range_is_22003_with_nothing_written() {
+        // "1e400" is a *numeric-literal* — so not the SQL to C: Character row's
+        // 22018 cell — whose magnitude no f64 holds. Rust's parser saturates it
+        // to an infinity, so before this was fixed the application received
+        // +inf and SQL_SUCCESS: a number the data source never held, reported as
+        // exact. The row's second cell governs it, "outside the range of the
+        // data type to which the number is being converted" → *Undefined* /
+        // 22003, so both sentinels must survive.
+        //
+        // A Decimal source is checked alongside a String one because the two
+        // share this parse path, and SQL to C: Numeric's float row draws the
+        // same distinction for it.
+        //
+        // The last two cases are what rule out the near-miss implementation of
+        // this check. `"9" * 400` has no exponent to inspect at all, and
+        // `1e2147483648`'s exponent does not fit an `i32` — so
+        // `parse_numeric_literal` answers `None` for it, and a check written in
+        // terms of that function would let it through as an infinity.
+        for text in ["1e400", "-1e400", "9".repeat(400).as_str(), "1e2147483648"] {
+            for value in [
+                ColumnValue::String(text.into()),
+                ColumnValue::Decimal(text.into()),
+            ] {
+                let mut f32_out = 9.0f32;
+                let mut ind = 99isize;
+                let err = unsafe {
+                    write_column_value(
+                        &value,
+                        CDataType::Float,
+                        std::ptr::from_mut(&mut f32_out).cast(),
+                        size_of::<f32>() as isize,
+                        &mut ind,
+                    )
+                }
+                .expect_err("a literal beyond f64 range is outside the range of SQL_C_FLOAT");
+                assert_eq!(
+                    sqlstate_of_err(&err),
+                    SqlState::numeric_value_out_of_range().as_str(),
+                    "{value:?} to SQL_C_FLOAT"
+                );
+                assert_eq!(err.sql_return(), SqlReturn::ERROR);
+                assert_eq!(f32_out, 9.0f32, "*TargetValuePtr must be left alone");
+                assert_eq!(ind, 99, "*StrLen_or_IndPtr must be left alone");
+
+                // SQL_C_DOUBLE is reached by the same parse, so it must agree.
+                let mut f64_out = 9.0f64;
+                let mut ind = 99isize;
+                let err = unsafe {
+                    write_column_value(
+                        &value,
+                        CDataType::Double,
+                        std::ptr::from_mut(&mut f64_out).cast(),
+                        size_of::<f64>() as isize,
+                        &mut ind,
+                    )
+                }
+                .expect_err("a literal beyond f64 range is outside the range of SQL_C_DOUBLE");
+                assert_eq!(
+                    sqlstate_of_err(&err),
+                    SqlState::numeric_value_out_of_range().as_str(),
+                    "{value:?} to SQL_C_DOUBLE"
+                );
+                assert_eq!(err.sql_return(), SqlReturn::ERROR);
+                assert_eq!(f64_out, 9.0f64, "*TargetValuePtr must be left alone");
+                assert_eq!(ind, 99, "*StrLen_or_IndPtr must be left alone");
+            }
+        }
+    }
+
+    #[test]
+    fn a_character_literal_underflowing_f64_is_zero_and_success() {
+        // The other end of the range, and deliberately not symmetrical with the
+        // test above: zero is a value f64 holds, so "1e-400" is the row's
+        // *first* cell rather than its second. The same reading the F64 → f32
+        // underflow takes (`f64_underflowing_to_zero_in_f32_is_success_with_zero_written`),
+        // so the parse site and the narrowing site agree.
+        let mut out = 9.0f64;
+        let mut ind = 0isize;
+        let ret = unsafe {
+            write_column_value(
+                &ColumnValue::String("1e-400".into()),
+                CDataType::Double,
+                std::ptr::from_mut(&mut out).cast(),
+                size_of::<f64>() as isize,
+                &mut ind,
+            )
+        }
+        .expect("an underflow to zero is inside the range of SQL_C_DOUBLE");
+        assert_eq!(ret, SqlReturn::SUCCESS);
+        assert_eq!(out, 0.0f64);
+        assert_eq!(ind, size_of::<f64>() as isize);
+    }
+
+    #[test]
+    fn text_that_is_not_a_numeric_literal_stays_22018() {
+        // The cell either side of the overflow one: "Data is not a
+        // *numeric-literal*" → 22018. The overflow fix must not swallow it,
+        // which is the failure mode of deciding "out of range" from the parsed
+        // value alone — an infinity spelling parses to the same f64 as an
+        // overflow does. `parse_numeric_literal` is what separates them, and
+        // `the_infinity_spelling_parses_back_into_a_float` pins the other half.
+        let mut out = 9.0f32;
+        let mut ind = 99isize;
+        let err = unsafe {
+            write_column_value(
+                &ColumnValue::String("not a number".into()),
+                CDataType::Float,
+                std::ptr::from_mut(&mut out).cast(),
+                size_of::<f32>() as isize,
+                &mut ind,
+            )
+        }
+        .expect_err("text that is not a numeric literal is 22018");
+        assert_eq!(
+            sqlstate_of_err(&err),
+            SqlState::invalid_character_value_for_cast().as_str()
+        );
+        assert_eq!(out, 9.0f32, "*TargetValuePtr must be left alone");
+        assert_eq!(ind, 99, "*StrLen_or_IndPtr must be left alone");
+    }
 
     #[test]
     fn decimal_converts_to_double() {
