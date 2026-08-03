@@ -127,6 +127,100 @@ pub trait Backend: Sized + Send + Sync + 'static {
         None
     }
 
+    /// Present the driver's DSN setup UI and return the data source's final
+    /// keywords.
+    ///
+    /// Called by `ConfigDSN` — the entry point the Windows ODBC Administrator's
+    /// **Add…** and **Configure…** buttons reach. Core does everything else:
+    /// validating *fRequest*, rejecting a `DRIVER=` keyword, calling
+    /// `SQLValidDSN`, and writing the data source through `SQLWriteDSNToIni` and
+    /// `SQLWritePrivateProfileString`. This hook supplies the one thing that
+    /// varies per backend — which keywords the data source needs, and how to ask
+    /// the user for them.
+    ///
+    /// # Arguments
+    ///
+    /// - `hwnd_parent` is the ODBC Administrator's window, to parent a dialog
+    ///   on. It is passed through untouched and never dereferenced by core, so
+    ///   it is `*mut c_void` on every platform; a driver's own `#[cfg(windows)]`
+    ///   is where it becomes an `HWND`. It may be null, which the spec defines
+    ///   as "the function will not display any dialog boxes".
+    /// - `request` is which of the three operations was asked for. **All three
+    ///   reach this hook**, [`Remove`](crate::setup::ConfigRequest::Remove)
+    ///   included, so a driver can confirm a removal or clean up something that
+    ///   does not live in `ODBC.INI` — a cached token, a keytab.
+    /// - `attributes` is the keyword-value list the Driver Manager supplied. For
+    ///   `Config` and `Remove` core has already merged in the data source's
+    ///   existing keywords, read from `ODBC.INI`, so the map is complete and the
+    ///   driver never has to touch `odbcinst`. The spec requires that merge
+    ///   rather than merely permitting it: "for information not in
+    ///   *lpszAttributes*, it uses information from the system information."
+    ///   Supplied attributes win over stored ones. For `Add` there is no merge —
+    ///   `SQLWriteDSNToIni` removes the old section before creating the new one,
+    ///   so prefilling would resurrect exactly the keywords the caller meant to
+    ///   drop. On **Add…** the map is typically empty: the dialog is what
+    ///   produces the `DSN` keyword, which is why core calls this hook *before*
+    ///   it looks for one.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(Some(attrs))` — proceed, writing `attrs`. Core uses the
+    ///   **returned** map's `DSN` value for every request, `Remove` included.
+    ///
+    ///   **If `attributes` carried a `DSN` keyword, the returned map must carry
+    ///   the same one.** The spec: "if a data source name was passed to it,
+    ///   **ConfigDSN** displays that name but does not allow the user to change
+    ///   it." Core enforces this rather than trusting the hook, because the
+    ///   failure it prevents is destructive — a hook altering `DSN=` on a
+    ///   `Remove` would delete a data source the user never named. A mismatch
+    ///   fails the call. When no `DSN` keyword was supplied — the **Add…** case
+    ///   — the hook may return any name, since there is nothing it could have
+    ///   changed.
+    /// - `Ok(None)` — the user cancelled. `ConfigDSN` returns FALSE and posts
+    ///   **no** installer error, because nothing failed.
+    /// - `Err(e)` — the hook could not complete. Core posts `e.code` and
+    ///   `e.message` with `SQLPostInstallerError`.
+    ///   [`SetupError::request_failed`](crate::setup::SetupError::request_failed)
+    ///   is the usual constructor.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the driver's setup UI could not do — no display, no permission
+    /// to open a window, a value the driver itself rejected.
+    ///
+    /// # Panics
+    ///
+    /// A panic here is caught: `ConfigDSN` runs inside `panic_safe_unlocked` and
+    /// reports `ODBC_ERROR_REQUEST_FAILED`. Returning `Err` is still better,
+    /// since it carries a message.
+    ///
+    /// Defaulted to the identity function, so a driver with no setup dialog
+    /// never has to think about it and keeps core's headless behaviour.
+    fn configure_dsn(
+        hwnd_parent: *mut std::ffi::c_void,
+        request: crate::setup::ConfigRequest,
+        attributes: std::collections::HashMap<String, String>,
+    ) -> Result<Option<std::collections::HashMap<String, String>>, crate::setup::SetupError> {
+        let _ = request;
+        if !hwnd_parent.is_null() {
+            // AGENTS.md: an ignored feature gets a `warn!`. The spec attaches
+            // real behaviour to this argument ("If it matches an existing name
+            // and hwndParent is not null, ConfigDSN prompts the user to
+            // overwrite the existing name"), and a driver that has not
+            // overridden this hook has no dialog to prompt with, so the prompt
+            // becomes an unconditional overwrite. Only a caller that passed
+            // non-null is affected: "The function will not display any dialog
+            // boxes if the handle is null" is exactly what a null caller gets.
+            tracing::warn!(
+                "ConfigDSN: hwndParent is non-null but this driver has not \
+                 overridden Backend::configure_dsn, so it ships no setup dialog \
+                 and proceeds headlessly. An existing data source of the same \
+                 name is overwritten without prompting."
+            );
+        }
+        Ok(Some(attributes))
+    }
+
     /// Closes an existing connection and releases associated resources.
     ///
     /// Called by `SQLDisconnect`.
@@ -2142,6 +2236,67 @@ mod tests {
         SQL_SQ_QUANTIFIED, SQL_TC_ALL, SQL_TXN_SERIALIZABLE, SQL_U_UNION, SQL_U_UNION_ALL,
         SQL_UNSPECIFIED,
     };
+
+    /// The default hook is the identity function, so a driver that has not
+    /// overridden it behaves exactly as core did before the hook existed.
+    ///
+    /// This is what makes the change non-breaking: every existing driver keeps
+    /// both its compilation and its behaviour.
+    #[test]
+    fn the_default_configure_dsn_returns_the_attributes_unchanged() {
+        use crate::setup::ConfigRequest;
+        use std::collections::HashMap;
+
+        let mut attrs = HashMap::new();
+        attrs.insert("DSN".to_string(), "MyDSN".to_string());
+        attrs.insert("Host".to_string(), "example.com".to_string());
+
+        for request in [
+            ConfigRequest::Add,
+            ConfigRequest::Config,
+            ConfigRequest::Remove,
+        ] {
+            let out = MockBackend::configure_dsn(std::ptr::null_mut(), request, attrs.clone())
+                .expect("the default hook never fails");
+            assert_eq!(
+                out,
+                Some(attrs.clone()),
+                "the default hook must pass {request:?}'s attributes through untouched"
+            );
+        }
+    }
+
+    /// A non-null `hwndParent` must be warned about, and the warning belongs to
+    /// the *default* implementation rather than to core's call site: core
+    /// forwards the handle, so core is not the thing ignoring it. A driver that
+    /// overrides the hook must emit nothing.
+    ///
+    /// Source-audited because the crate has no log-capture harness for unit
+    /// tests; the precedent is `a_non_null_parent_window_is_warned_about` in
+    /// `ffi/setup.rs`.
+    #[test]
+    fn the_default_configure_dsn_warns_only_about_a_non_null_parent_window() {
+        let source = include_str!("backend.rs");
+        let start = source
+            .find("fn configure_dsn(")
+            .expect("Backend declares configure_dsn");
+        let body = &source[start..];
+        let end = body
+            .find("\n    }")
+            .expect("configure_dsn's default body has a closing brace");
+        let body = &body[..end];
+
+        assert!(
+            body.contains("tracing::warn!"),
+            "the default configure_dsn must warn that it ships no setup dialog"
+        );
+        assert!(
+            body.contains("if !hwnd_parent.is_null()"),
+            "a null hwndParent is fully conforming ('The function will not \
+             display any dialog boxes if the handle is null') and must not be \
+             warned about"
+        );
+    }
 
     enum Expected {
         Str(&'static str),

@@ -108,6 +108,7 @@ pub(crate) mod panic;
 pub(crate) mod param_convert;
 pub mod prompt;
 pub(crate) mod query_timer;
+pub mod setup;
 mod sync;
 pub mod synthetic;
 /// Hooks a driver's test suite needs and its production build must not have.
