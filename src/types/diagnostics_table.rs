@@ -784,7 +784,10 @@ FunctionDiagnostics {
         DiagnosticsRow { sqlstate: "HY003", dm: DmMarking::All },
         DiagnosticsRow { sqlstate: "HY008", dm: DmMarking::None },
         DiagnosticsRow { sqlstate: "HY009", dm: DmMarking::All },
-        DiagnosticsRow { sqlstate: "HY010", dm: DmMarking::All },
+        // Five of the six clauses are `(DM)`-marked; the last is not — a
+        // SQL_PARAM_DATA_AVAILABLE result read with SQLGetData instead of
+        // SQLParamData.
+        DiagnosticsRow { sqlstate: "HY010", dm: DmMarking::Split("SQL_PARAM_DATA_AVAILABLE") },
         DiagnosticsRow { sqlstate: "HY013", dm: DmMarking::None },
         // Two clauses: the negative-BufferLength one is marked, the ODBC 2.x
         // bookmark one is not.
@@ -979,7 +982,7 @@ FunctionDiagnostics {
         DiagnosticsRow { sqlstate: "HY009", dm: DmMarking::Split("sql_catalog_name") },
         DiagnosticsRow { sqlstate: "HY010", dm: DmMarking::All },
         DiagnosticsRow { sqlstate: "HY013", dm: DmMarking::None },
-        DiagnosticsRow { sqlstate: "HY090", dm: DmMarking::All },
+        DiagnosticsRow { sqlstate: "HY090", dm: DmMarking::Split("maximum length") },
         DiagnosticsRow { sqlstate: "HY117", dm: DmMarking::All },
         DiagnosticsRow { sqlstate: "HYC00", dm: DmMarking::None },
         DiagnosticsRow { sqlstate: "HYT00", dm: DmMarking::None },
@@ -1035,7 +1038,7 @@ FunctionDiagnostics {
         DiagnosticsRow { sqlstate: "HY009", dm: DmMarking::Split("sql_catalog_name") },
         DiagnosticsRow { sqlstate: "HY010", dm: DmMarking::All },
         DiagnosticsRow { sqlstate: "HY013", dm: DmMarking::None },
-        DiagnosticsRow { sqlstate: "HY090", dm: DmMarking::All },
+        DiagnosticsRow { sqlstate: "HY090", dm: DmMarking::Split("maximum length") },
         DiagnosticsRow { sqlstate: "HY117", dm: DmMarking::All },
         DiagnosticsRow { sqlstate: "HYC00", dm: DmMarking::None },
         DiagnosticsRow { sqlstate: "HYT00", dm: DmMarking::None },
@@ -1230,7 +1233,7 @@ FunctionDiagnostics {
         DiagnosticsRow { sqlstate: "HY009", dm: DmMarking::Split("sql_catalog_name") },
         DiagnosticsRow { sqlstate: "HY010", dm: DmMarking::All },
         DiagnosticsRow { sqlstate: "HY013", dm: DmMarking::None },
-        DiagnosticsRow { sqlstate: "HY090", dm: DmMarking::All },
+        DiagnosticsRow { sqlstate: "HY090", dm: DmMarking::Split("maximum length") },
         DiagnosticsRow { sqlstate: "HY117", dm: DmMarking::All },
         DiagnosticsRow { sqlstate: "HYC00", dm: DmMarking::None },
         DiagnosticsRow { sqlstate: "HYT00", dm: DmMarking::None },
@@ -2217,7 +2220,16 @@ fn every_doc_comment_matches_the_spec_diagnostics_table() {
                                  comment does not acknowledge."
                             ));
                         }
-                        if !bullet.text.to_lowercase().contains(unmarked) {
+                        // Both sides lowercased. Comparing a raw needle against a
+                        // lowercased haystack silently never matches for a needle
+                        // carrying a capital, which every `Split` string happened
+                        // not to until `SQL_PARAM_DATA_AVAILABLE` — the guard
+                        // would have reported a defect no edit could clear.
+                        if !bullet
+                            .text
+                            .to_lowercase()
+                            .contains(&unmarked.to_lowercase())
+                        {
                             problems.push(format!(
                                 "{where_}: {state} is marked `(DM)` on only some of its \
                                  clauses. The doc comment must name the unmarked one, \

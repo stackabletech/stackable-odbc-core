@@ -431,7 +431,7 @@ Doc-only changes cannot be test-verified except via the doc guards and `pre-comm
 
 ### Task 4.1: Diagnostics-table and doc-comment corrections (code-adjacent)
 
-- [ ] **Three catalog `HY090` rows are transcribed wrong — found during Task
+- [x] **Three catalog `HY090` rows are transcribed wrong — found during Task
   2.7's review, verified against the live pages.** `SQLColumns`,
   `SQLForeignKeys` and `SQLColumnPrivileges` are marked `DmMarking::All`, but
   each live page carries an unmarked "exceeded the maximum length value for the
@@ -449,10 +449,51 @@ Doc-only changes cannot be test-verified except via the doc guards and `pre-comm
   behaviour. Verify each against the live spec page, not against the
   transcription: reading the transcription is how this slipped through in the
   first place.
-- [ ] `src/types/diagnostics_table.rs:699`: SQLGetData HY010 `All` → `Split("SQL_PARAM_DATA_AVAILABLE")`; update the `sql_get_data` doc bullet (`fetch.rs:911`) to answer the unmarked clause ("cannot arise — core never returns SQL_PARAM_DATA_AVAILABLE"). The guard test enforces the pairing (it will fail between the two edits — that is the red step).
-- [ ] Reword to the "guarded defensively"/"returned here as a defence-in-depth guard" verdicts: `fetch.rs:888-895` (24000), `metadata.rs:237-238` (SQLTables HY010 — and sweep the other 11 catalog functions for the same pattern), `fetch.rs:243-245` (HY010, align with the inline comment at :364), `connect.rs:57-58, 291-292` (08002 — copy browse_connect's wording), `connect_attr.rs:326-328` (HY090), `fetch.rs:229-231` (24000 S2/S3 extension is core's choice, not the spec's).
-- [ ] Delete the dangling "Deferred." at `connect_attr.rs:304-313`.
-- [ ] Commit: `docs: diagnostics doc comments state defensive guards honestly; SQLGetData HY010 is Split`
+- [x] `src/types/diagnostics_table.rs:699`: SQLGetData HY010 `All` → `Split("SQL_PARAM_DATA_AVAILABLE")`; update the `sql_get_data` doc bullet (`fetch.rs:911`) to answer the unmarked clause ("cannot arise — core never returns SQL_PARAM_DATA_AVAILABLE"). The guard test enforces the pairing (it will fail between the two edits — that is the red step).
+- [x] Reword to the "guarded defensively"/"returned here as a defence-in-depth guard" verdicts: `fetch.rs:888-895` (24000), `metadata.rs:237-238` (SQLTables HY010 — and sweep the other 11 catalog functions for the same pattern), `fetch.rs:243-245` (HY010, align with the inline comment at :364), `connect.rs:57-58, 291-292` (08002 — copy browse_connect's wording), `connect_attr.rs:326-328` (HY090), `fetch.rs:229-231` (24000 S2/S3 extension is core's choice, not the spec's).
+- [x] Delete the dangling "Deferred." at `connect_attr.rs:304-313`.
+- [x] Commit: `docs: diagnostics doc comments state defensive guards honestly; SQLGetData HY010 is Split`
+
+
+**Outcome (2026-08-03).** All four items done, verified against the pages'
+**source markdown** (`raw.githubusercontent.com/MicrosoftDocs/sql-docs`) rather
+than the rendered HTML — which is both faster to grep and the thing the rendering
+is generated from. Five findings worth carrying forward:
+
+- **The two-clause rows use two different encodings, and one is invisible to a
+  grep for the SQLSTATE.** `SQLTablePrivileges` puts both clauses in one cell
+  separated by `<br /><br />`; `SQLColumns`, `SQLForeignKeys` and
+  `SQLColumnPrivileges` use a **continuation row** whose first two cells are
+  empty (`|||The value of one of the name length arguments exceeded…`). A grep
+  for `|HY090|` finds the first clause and silently misses the second, which is
+  exactly how three rows came to be transcribed `All`. Grep with `-A 1`.
+- **The guard could not have gone green on `SQL_PARAM_DATA_AVAILABLE`**: its
+  `Split` check compared a raw needle against a lowercased haystack, so any
+  needle containing a capital never matched and no doc edit could have cleared
+  the failure. Every pre-existing needle happened to be lowercase. Both sides are
+  lowercased now.
+- **Two sites making the same "no maximum-length sentence" claim were correct and
+  left alone.** `SQLDescribeCol` and `SQLColAttribute` really do have
+  single-clause `(DM)`-only `HY090` rows. The three named in this task were the
+  only wrong ones.
+- **The catalog `HY010` sweep is exactly ten functions, not twelve.** The ten
+  that call `SqlState::function_sequence_error()` are the ten catalog functions;
+  `sql_describe_col_w` and `sql_col_attribute_w` do not return `HY010` at all, so
+  their `(DM)`-only bullets were already true.
+- **Every clause of those `HY010` rows is `(DM)`, and none of them is the
+  condition core actually checks.** The rows enumerate async execution,
+  `SQL_PARAM_DATA_AVAILABLE` and `SQL_NEED_DATA`; core returns `HY010` when the
+  connection is not open, which no clause states. The bullets now say that rather
+  than implying core answers one of the row's own clauses. The same correction
+  applied to `SQLFetch` (all six clauses `(DM)`, including the one core acts on),
+  `SQLGetData`'s `24000` (core's `cursor_open` test overlaps a `(DM)` clause and
+  extends past the row for S2/S3), `SQLFetch`'s `24000` (unmarked, so core's — but
+  the S2/S3 half is core's own extension), the three `08002` bullets in
+  `connect.rs` (each of which said "not returned here" *and* "checked as
+  defence-in-depth" in consecutive sentences), and `connect_attr.rs`'s `HY090`.
+
+No CHANGELOG entry: doc-comment corrections with no behaviour change, matching
+what previous `docs:` commits in this branch did.
 
 ### Task 4.2: The HYT01 cluster and rotted uniqueness claims
 

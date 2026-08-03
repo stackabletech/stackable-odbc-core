@@ -54,8 +54,10 @@ use crate::utf16::{utf16_to_string, utf16_to_string_named, write_utf16};
 ///   returns, so core never opens it and has no write to fail.
 /// - 01S09: Invalid keyword (SAVEFILE without DRIVER/FILEDSN) — (driver-manager-handled; not returned here).
 /// - 08001: Client unable to establish connection — returned by the backend via `B::connect`.
-/// - 08002: Connection name in use — (driver-manager-handled; not returned here).
-///   Note: 08002 is also checked at the framework level as a defence-in-depth guard.
+/// - 08002: Connection name in use — the spec annotates this `(DM)`; it is guarded
+///   defensively here. The check is `handle.connection.is_some()`, kept because core is
+///   also linked without a Driver Manager in front of it, and because connecting twice
+///   through one handle would leak the first connection.
 /// - 08004: Server rejected the connection — may be returned by the backend via `B::connect`.
 /// - 08S01: Communication link failure — not returned here; a failure while
 ///   establishing the connection is 08001. 08S01 applies once the connection
@@ -295,8 +297,10 @@ pub unsafe fn sql_driver_connect_w<B: Backend>(
 /// - 01S02: Option value changed — not returned here (no connection attribute substitution is
 ///   performed during connect).
 /// - 08001: Client unable to establish connection — returned by the backend via `B::connect`.
-/// - 08002: Connection name in use — (driver-manager-handled; not returned here).
-///   Note: 08002 is also checked at the framework level as a defence-in-depth guard.
+/// - 08002: Connection name in use — the spec annotates this `(DM)`; it is guarded
+///   defensively here. The check is `handle.connection.is_some()`, kept because core is
+///   also linked without a Driver Manager in front of it, and because connecting twice
+///   through one handle would leak the first connection.
 /// - 08004: Server rejected the connection — may be returned by the backend via `B::connect`.
 /// - 08S01: Communication link failure — not returned here; a failure while
 ///   establishing the connection is 08001. 08S01 applies once the connection
@@ -549,8 +553,10 @@ pub unsafe fn sql_connect_w<B: Backend>(
 ///   silently ignored by `ConnectParams::parse`).
 /// - 01S02: Option value changed — not returned here (no attribute substitution at connect time).
 /// - 08001: Client unable to establish connection — returned by the backend via `B::connect`.
-/// - 08002: Connection name in use — returned here as a defence-in-depth guard; also
-///   (driver-manager-handled; not returned here) via DM.
+/// - 08002: Connection name in use — the spec annotates this `(DM)`; it is guarded
+///   defensively here. The check is `handle.connection.is_some()`, kept because core is
+///   also linked without a Driver Manager in front of it, and because connecting twice
+///   through one handle would leak the first connection.
 /// - 08004: Server rejected the connection — may be returned by the backend via `B::connect`.
 /// - 08S01: Communication link failure — not returned here; a failure while
 ///   establishing the connection is 08001. 08S01 applies once the connection

@@ -199,9 +199,14 @@ unsafe fn report_rows_fetched_only<B: Backend>(
 /// - 22012 (division by zero): propagated from the backend if the data source reports it.
 /// - 22015 (interval field overflow): returned via `write_column_value`.
 /// - 22018 (invalid character value for cast specification): returned via `write_column_value`.
-/// - 24000 (invalid cursor state): returned when the statement was executed but produced no
-///   result set (ODBC state S4), and when it is prepared but not yet executed (S2/S3). The
-///   row carries no (DM) marker, so the driver owes it.
+/// - 24000 (invalid cursor state): **returned by this driver**. The row carries no `(DM)`
+///   marker and has one clause — "the *StatementHandle* was in an executed state but no
+///   result set was associated with the *StatementHandle*" — which is ODBC state S4 and is
+///   core's to answer. Core also returns it for a statement that is **prepared but not yet
+///   executed** (S2/S3), which that clause does not describe: it is core's own extension,
+///   taken because the alternative is driving the backend for a row in a state where no
+///   cursor exists. `cursor_open` is what both cases test, rather than `statement.is_some()`,
+///   because a statement outlives its cursor.
 /// - 40001 (serialization failure): propagated from the backend.
 /// - 40003 (statement completion unknown): propagated from the backend.
 /// - HY000 (general error): propagated from the backend.
@@ -213,9 +218,12 @@ unsafe fn report_rows_fetched_only<B: Backend>(
 ///   driver**: the row carries no `(DM)` marker, and when a backend call fails with
 ///   `Backend::is_cancelled` reporting its token signalled, core reports `HY008` in place of
 ///   the backend's own SQLSTATE.
-/// - HY010 (function sequence error): returned when `stmt.statement` is `None`, i.e. no
-///   result set is open. (DM) variants (async context, `SQLExtendedFetch` mixing) are
-///   driver-manager-handled; not returned here.
+/// - HY010 (function sequence error): the spec annotates this `(DM)`; it is guarded
+///   defensively here. **Every one of the row's six clauses carries the marker**, including
+///   the one core acts on — "the specified *StatementHandle* was not in an executed state"
+///   — so this is not a case of core answering an unmarked half. The check (`stmt.statement`
+///   is `None`) is kept because core is also linked without a Driver Manager in front of it,
+///   by its own tests and by an embedder, and the inline comment at the site says the same.
 /// - HY013 (memory management error): not returned.
 /// - HY090 (invalid string or buffer length): not applicable, and the row carries no `(DM)`
 ///   marker, so this is the driver's answer to give. Its single clause describes a column-0
@@ -904,10 +912,13 @@ pub unsafe fn sql_extended_fetch<B: Backend>(
 ///   `false`), which includes a statement that is only prepared, one that executed without
 ///   producing a result set, and one whose cursor `SQLEndTran` closed under `SQL_CB_CLOSE`.
 ///   Two of the row's three clauses are `(DM)`-marked — not yet fetched, and an executed
-///   statement with no result set — and are not returned here. The third carries no marker
-///   and is the driver's: a cursor open and fetched, but positioned before the start of the
-///   result set or after its end. It cannot arise, because this driver's cursor is
-///   forward-only and never rests outside the result set with a value still to read.
+///   statement with no result set. The second of those **is** what `cursor_open` tests, so
+///   the spec annotates it `(DM)` and it is guarded defensively here, for a driver loaded
+///   without a Driver Manager. The prepared-but-not-executed case (S2/S3) is core's own
+///   extension: no clause of this row describes it. The third clause carries no marker and is
+///   the driver's — a cursor open and fetched, but positioned before the start of the result
+///   set or after its end — and it cannot arise, because this driver's cursor is forward-only
+///   and never rests outside the result set with a value still to read.
 /// - HY000 (general error): propagated from the backend; `write_column_value` does not produce
 ///   this code — its coercion-failure paths return 07006 (see above).
 /// - HY001 (memory allocation error): not returned; Rust panics on allocation failure.
@@ -923,7 +934,15 @@ pub unsafe fn sql_extended_fetch<B: Backend>(
 ///   the backend's own SQLSTATE.
 /// - HY009 (invalid use of null pointer): not checked; `target_value_ptr` null is not
 ///   validated. (DM) — driver-manager-handled.
-/// - HY010 (function sequence error): driver-manager-handled; not returned here.
+/// - HY010 (function sequence error): five of the row's six clauses carry `(DM)` and are
+///   driver-manager-handled. The sixth does not — "a call to **SQLExecute**,
+///   **SQLExecDirect**, or **SQLMoreResults** returned `SQL_PARAM_DATA_AVAILABLE`, but
+///   **SQLGetData** was called, instead of **SQLParamData**" — and it cannot arise here:
+///   `SQL_PARAM_DATA_AVAILABLE` describes a streamed *output* parameter, which core never
+///   produces. `sql_execute` and `sql_exec_direct_w` answer `SQL_NEED_DATA` for
+///   data-at-execution *input* and otherwise a completion code, so there is no state in
+///   which an application could reach this clause. A driver gaining streamed output
+///   parameters takes it on.
 /// - HY013 (memory management error): not returned.
 /// - HY090 (invalid string or buffer length): **returned by this driver** when
 ///   `buffer_length < 0`. That clause is `(DM)`-marked, and the check is kept anyway because

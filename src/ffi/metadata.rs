@@ -244,8 +244,13 @@ fn table_enumeration(
 ///   `SQL_TRUE`, `CatalogName` was a null pointer, and `SQL_CATALOG_NAME` reports that
 ///   catalog names are supported. The `SchemaName`/`TableName` clause beside it *is*
 ///   `(DM)`-marked and is deliberately not checked here.
-/// - HY010: Function sequence error — returned if connection is not open (HY010). DM cases
-///   (async, etc.) are driver-manager-handled; not returned here.
+/// - HY010: Function sequence error — the spec annotates this `(DM)`, on **every** clause:
+///   the row enumerates asynchronous execution, `SQL_PARAM_DATA_AVAILABLE` and
+///   `SQL_NEED_DATA`, none of which core implements, so none of its clauses is returned
+///   here. Core does return `HY010` for a condition the row does not describe — the
+///   statement's connection is not open — which is core's own reading rather than a clause
+///   of the table, and the state the ODBC state table gives a catalog function called
+///   before a connection exists.
 /// - HY013: Memory management error; returned if underlying allocation fails.
 /// - HY090: Invalid string or buffer length — the row has two sentences and only the first
 ///   carries `(DM)`: a name length argument less than 0 but not equal to `SQL_NTS`. The
@@ -505,13 +510,23 @@ pub unsafe fn sql_tables_w<B: Backend>(
 ///   `SQL_TRUE`, `CatalogName` was a null pointer, and `SQL_CATALOG_NAME` reports that
 ///   catalog names are supported. The `SchemaName`/`TableName` clause beside it *is*
 ///   `(DM)`-marked and is deliberately not checked here.
-/// - HY010: Function sequence error — returned if connection is not open (HY010). DM cases
-///   (async, etc.) are driver-manager-handled; not returned here.
+/// - HY010: Function sequence error — the spec annotates this `(DM)`, on **every** clause:
+///   the row enumerates asynchronous execution, `SQL_PARAM_DATA_AVAILABLE` and
+///   `SQL_NEED_DATA`, none of which core implements, so none of its clauses is returned
+///   here. Core does return `HY010` for a condition the row does not describe — the
+///   statement's connection is not open — which is core's own reading rather than a clause
+///   of the table, and the state the ODBC state table gives a catalog function called
+///   before a connection exists.
 /// - HY013: Memory management error; returned if underlying allocation fails.
-/// - HY090: Invalid string or buffer length — every clause of this row is `(DM)`
-///   (driver-manager-handled), so none of the row's own clauses is returned here. Unlike
-///   several of its siblings' rows, this one has only the name-length-below-zero sentence
-///   and no maximum-length sentence, so nothing in it is the driver's.
+/// - HY090: Invalid string or buffer length — the row has two clauses and only the
+///   first carries `(DM)`: a name length argument less than 0 but not equal to
+///   `SQL_NTS`. The second is the driver's — a name length exceeding "the maximum
+///   length value for the corresponding catalog or name" — and it cannot arise here, because
+///   core declares no maximum name lengths: `SQL_MAX_CATALOG_NAME_LEN`,
+///   `SQL_MAX_SCHEMA_NAME_LEN`, `SQL_MAX_TABLE_NAME_LEN` and
+///   `SQL_MAX_COLUMN_NAME_LEN` all answer `0`, which the `SQLGetInfo` page defines as
+///   "no specified limit or the limit is unknown". A driver overriding those to a real
+///   limit takes on this clause.
 ///
 ///   **Also returned here**, for a condition this row does not itself state: **any** of this
 ///   function's name arguments, passed as `SQL_NTS`, whose null terminator is not within
@@ -700,8 +715,13 @@ pub unsafe fn sql_columns_w<B: Backend>(
 ///   sentence *without* the marker and do check it — the difference between the three
 ///   functions is intentional, not an omission here. See
 ///   `primary_keys_does_not_check_null_table_name`.
-/// - HY010: Function sequence error — returned if connection is not open. DM cases (async, etc.)
-///   are driver-manager-handled; not returned here.
+/// - HY010: Function sequence error — the spec annotates this `(DM)`, on **every** clause:
+///   the row enumerates asynchronous execution, `SQL_PARAM_DATA_AVAILABLE` and
+///   `SQL_NEED_DATA`, none of which core implements, so none of its clauses is returned
+///   here. Core does return `HY010` for a condition the row does not describe — the
+///   statement's connection is not open — which is core's own reading rather than a clause
+///   of the table, and the state the ODBC state table gives a catalog function called
+///   before a connection exists.
 /// - HY013: Memory management error; returned if underlying allocation fails.
 /// - HY090: Invalid string or buffer length — the row has two sentences and only the first
 ///   carries `(DM)`: a name length argument less than 0 but not equal to `SQL_NTS`. The
@@ -897,13 +917,23 @@ pub unsafe fn sql_primary_keys_w<B: Backend>(
 ///   it and this driver deliberately does **not** — unlike `SQLStatistics` and
 ///   `SQLSpecialColumns`, whose equivalent sentence is unmarked. See
 ///   `foreign_keys_does_not_check_null_table_names`.
-/// - HY010: Function sequence error — returned if connection is not open. DM cases (async, etc.)
-///   are driver-manager-handled; not returned here.
+/// - HY010: Function sequence error — the spec annotates this `(DM)`, on **every** clause:
+///   the row enumerates asynchronous execution, `SQL_PARAM_DATA_AVAILABLE` and
+///   `SQL_NEED_DATA`, none of which core implements, so none of its clauses is returned
+///   here. Core does return `HY010` for a condition the row does not describe — the
+///   statement's connection is not open — which is core's own reading rather than a clause
+///   of the table, and the state the ODBC state table gives a catalog function called
+///   before a connection exists.
 /// - HY013: Memory management error; returned if underlying allocation fails.
-/// - HY090: Invalid string or buffer length — every clause of this row is `(DM)`
-///   (driver-manager-handled), so none of the row's own clauses is returned here. Unlike
-///   several of its siblings' rows, this one has only the name-length-below-zero sentence
-///   and no maximum-length sentence, so nothing in it is the driver's.
+/// - HY090: Invalid string or buffer length — the row has two clauses and only the
+///   first carries `(DM)`: a name length argument less than 0 but not equal to
+///   `SQL_NTS`. The second is the driver's — a name length exceeding "the maximum
+///   length value for the corresponding name" — and it cannot arise here, because
+///   core declares no maximum name lengths: `SQL_MAX_CATALOG_NAME_LEN`,
+///   `SQL_MAX_SCHEMA_NAME_LEN`, `SQL_MAX_TABLE_NAME_LEN` and
+///   `SQL_MAX_COLUMN_NAME_LEN` all answer `0`, which the `SQLGetInfo` page defines as
+///   "no specified limit or the limit is unknown". A driver overriding those to a real
+///   limit takes on this clause.
 ///
 ///   **Also returned here**, for a condition this row does not itself state: **any** of this
 ///   function's name arguments, passed as `SQL_NTS`, whose null terminator is not within
@@ -1117,8 +1147,13 @@ pub unsafe fn sql_foreign_keys_w<B: Backend>(
 ///   marker and therefore must not check it; and (2) `SQL_ATTR_METADATA_ID` was `SQL_TRUE`,
 ///   `CatalogName` was a null pointer, and `SQL_CATALOG_NAME` reports that catalog names are
 ///   supported. The `SchemaName` half of clause (2) *is* `(DM)`-marked and is not checked.
-/// - HY010: Function sequence error — returned if connection is not open. DM cases (async, etc.)
-///   are driver-manager-handled; not returned here.
+/// - HY010: Function sequence error — the spec annotates this `(DM)`, on **every** clause:
+///   the row enumerates asynchronous execution, `SQL_PARAM_DATA_AVAILABLE` and
+///   `SQL_NEED_DATA`, none of which core implements, so none of its clauses is returned
+///   here. Core does return `HY010` for a condition the row does not describe — the
+///   statement's connection is not open — which is core's own reading rather than a clause
+///   of the table, and the state the ODBC state table gives a catalog function called
+///   before a connection exists.
 /// - HY013: Memory management error; returned if underlying allocation fails.
 /// - HY090: Invalid string or buffer length — the row has two sentences and only the first
 ///   carries `(DM)`: a name length argument less than 0 but not equal to `SQL_NTS`. The
@@ -1337,8 +1372,13 @@ pub unsafe fn sql_statistics_w<B: Backend>(
 ///   marker and therefore must not check it; and (2) `SQL_ATTR_METADATA_ID` was `SQL_TRUE`,
 ///   `CatalogName` was a null pointer, and `SQL_CATALOG_NAME` reports that catalog names are
 ///   supported. The `SchemaName` half of clause (2) *is* `(DM)`-marked and is not checked.
-/// - HY010: Function sequence error — returned if connection is not open. DM cases (async, etc.)
-///   are driver-manager-handled; not returned here.
+/// - HY010: Function sequence error — the spec annotates this `(DM)`, on **every** clause:
+///   the row enumerates asynchronous execution, `SQL_PARAM_DATA_AVAILABLE` and
+///   `SQL_NEED_DATA`, none of which core implements, so none of its clauses is returned
+///   here. Core does return `HY010` for a condition the row does not describe — the
+///   statement's connection is not open — which is core's own reading rather than a clause
+///   of the table, and the state the ODBC state table gives a catalog function called
+///   before a connection exists.
 /// - HY013: Memory management error; returned if underlying allocation fails.
 /// - HY090: Invalid string or buffer length — the row has two sentences and only the first
 ///   carries `(DM)`: a name length argument less than 0 but not equal to `SQL_NTS`. The
@@ -2078,8 +2118,13 @@ pub(crate) fn procedures_columns(widths: &CatalogResultColumnWidths) -> Vec<Colu
 ///   accepted — unlike `SQLColumnPrivileges`, whose `TableName` sentence carries no marker
 ///   and no `METADATA_ID` condition and *is* checked. See
 ///   `the_procedure_functions_do_not_check_null_name_arguments`.
-/// - HY010: Function sequence error — returned if connection is not open. DM cases (async, etc.)
-///   are driver-manager-handled; not returned here.
+/// - HY010: Function sequence error — the spec annotates this `(DM)`, on **every** clause:
+///   the row enumerates asynchronous execution, `SQL_PARAM_DATA_AVAILABLE` and
+///   `SQL_NEED_DATA`, none of which core implements, so none of its clauses is returned
+///   here. Core does return `HY010` for a condition the row does not describe — the
+///   statement's connection is not open — which is core's own reading rather than a clause
+///   of the table, and the state the ODBC state table gives a catalog function called
+///   before a connection exists.
 /// - HY013: Memory management error; returned if underlying allocation fails.
 /// - HY090: Invalid string or buffer length — the row has two sentences and only the first
 ///   carries `(DM)`: a name length argument less than 0 but not equal to `SQL_NTS`. The
@@ -2308,8 +2353,13 @@ pub(crate) fn procedure_columns_columns(
 ///   `ColumnName` is accepted — unlike `SQLColumnPrivileges`, whose `TableName` sentence
 ///   carries no marker and no `METADATA_ID` condition and *is* checked. See
 ///   `the_procedure_functions_do_not_check_null_name_arguments`.
-/// - HY010: Function sequence error — returned if connection is not open. DM cases (async, etc.)
-///   are driver-manager-handled; not returned here.
+/// - HY010: Function sequence error — the spec annotates this `(DM)`, on **every** clause:
+///   the row enumerates asynchronous execution, `SQL_PARAM_DATA_AVAILABLE` and
+///   `SQL_NEED_DATA`, none of which core implements, so none of its clauses is returned
+///   here. Core does return `HY010` for a condition the row does not describe — the
+///   statement's connection is not open — which is core's own reading rather than a clause
+///   of the table, and the state the ODBC state table gives a catalog function called
+///   before a connection exists.
 /// - HY013: Memory management error — **absent from this function's diagnostics table**,
 ///   which is the one difference from its eleven siblings' tables. Core would report it the
 ///   same way regardless, if an underlying allocation failed.
@@ -2533,13 +2583,23 @@ pub(crate) fn column_privileges_columns(
 ///      `SQL_CATALOG_NAME` reports that catalog names are supported.
 ///
 ///   The `SchemaName`/`ColumnName` clause beside them *is* `(DM)`-marked and is not checked.
-/// - HY010: Function sequence error — returned if connection is not open. DM cases (async, etc.)
-///   are driver-manager-handled; not returned here.
+/// - HY010: Function sequence error — the spec annotates this `(DM)`, on **every** clause:
+///   the row enumerates asynchronous execution, `SQL_PARAM_DATA_AVAILABLE` and
+///   `SQL_NEED_DATA`, none of which core implements, so none of its clauses is returned
+///   here. Core does return `HY010` for a condition the row does not describe — the
+///   statement's connection is not open — which is core's own reading rather than a clause
+///   of the table, and the state the ODBC state table gives a catalog function called
+///   before a connection exists.
 /// - HY013: Memory management error; returned if underlying allocation fails.
-/// - HY090: Invalid string or buffer length — every clause of this row is `(DM)`
-///   (driver-manager-handled), so none of the row's own clauses is returned here. Unlike
-///   several of its siblings' rows, this one has only the name-length-below-zero sentence
-///   and no maximum-length sentence, so nothing in it is the driver's.
+/// - HY090: Invalid string or buffer length — the row has two clauses and only the
+///   first carries `(DM)`: a name length argument less than 0 but not equal to
+///   `SQL_NTS`. The second is the driver's — a name length exceeding "the maximum
+///   length value for the corresponding name" — and it cannot arise here, because
+///   core declares no maximum name lengths: `SQL_MAX_CATALOG_NAME_LEN`,
+///   `SQL_MAX_SCHEMA_NAME_LEN`, `SQL_MAX_TABLE_NAME_LEN` and
+///   `SQL_MAX_COLUMN_NAME_LEN` all answer `0`, which the `SQLGetInfo` page defines as
+///   "no specified limit or the limit is unknown". A driver overriding those to a real
+///   limit takes on this clause.
 ///
 ///   **Also returned here**, for a condition this row does not itself state: **any** of this
 ///   function's name arguments, passed as `SQL_NTS`, whose null terminator is not within
@@ -2755,8 +2815,13 @@ pub(crate) fn table_privileges_columns(
 ///   `SQLColumnPrivileges` carries an *unmarked and unconditional* null-`TableName` sentence
 ///   and does check it; the difference between the two is intentional, not an omission here.
 ///   See `table_privileges_does_not_check_null_table_name`.
-/// - HY010: Function sequence error — returned if connection is not open. DM cases (async, etc.)
-///   are driver-manager-handled; not returned here.
+/// - HY010: Function sequence error — the spec annotates this `(DM)`, on **every** clause:
+///   the row enumerates asynchronous execution, `SQL_PARAM_DATA_AVAILABLE` and
+///   `SQL_NEED_DATA`, none of which core implements, so none of its clauses is returned
+///   here. Core does return `HY010` for a condition the row does not describe — the
+///   statement's connection is not open — which is core's own reading rather than a clause
+///   of the table, and the state the ODBC state table gives a catalog function called
+///   before a connection exists.
 /// - HY013: Memory management error; returned if underlying allocation fails.
 /// - HY090: Invalid string or buffer length — the row has two sentences and only the first
 ///   carries `(DM)`: a name length argument less than 0 but not equal to `SQL_NTS`. The

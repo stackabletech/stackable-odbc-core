@@ -310,7 +310,6 @@ fn connection_has_result_set_pending<B: Backend>(
 ///   statement-producing call runs under manual commit and cleared by
 ///   `SQLEndTran` or by switching autocommit back on. Note this is *not* the
 ///   cursor condition 24000 describes.
-///   Deferred.
 /// - HY013 Memory management error: not returned; Rust panics on memory errors,
 ///   caught by `panic_safe` and converted to `SQL_ERROR`/HY000.
 /// - HY024 Invalid attribute value: returned for `SQL_ATTR_ACCESS_MODE` (not 0 or 1),
@@ -323,10 +322,10 @@ fn connection_has_result_set_pending<B: Backend>(
 ///   Manager only validates attributes "that accept a discrete set of values",
 ///   and "for all other connection and statement attributes, the driver must
 ///   verify the value specified in ValuePtr".
-/// - HY090 Invalid string or buffer length: every clause of this row is
-///   (driver-manager-handled), so none of the row's own clauses is returned
-///   here. A `string_length < 0` check for `SQL_ATTR_CURRENT_CATALOG` is
-///   performed as a defensive measure.
+/// - HY090 Invalid string or buffer length: the spec annotates every clause of
+///   this row `(DM)`; the `string_length < 0` check for
+///   `SQL_ATTR_CURRENT_CATALOG` is guarded defensively here, so the row's own
+///   condition **is** answered by core when no Driver Manager caught it first.
 ///
 ///   **Also returned here**, for a condition the row does not state:
 ///   `SQL_ATTR_CURRENT_CATALOG` — the one attribute of this function whose value
