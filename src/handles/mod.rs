@@ -640,7 +640,7 @@ impl<'a> ParamRecords<'a> {
 /// that a repeated call for the same column returns the *next* part.
 ///
 /// See [`StatementHandle::get_data_cursor`] for why only one column is tracked.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GetDataCursor {
     /// The 1-based column this position refers to. A call for any other column
     /// discards this cursor and starts that column from zero.
@@ -658,6 +658,22 @@ pub struct GetDataCursor {
     /// same column returns `SQL_NO_DATA` rather than restarting it. Also set
     /// immediately for a fixed-width target, which cannot be read in parts.
     pub done: bool,
+    /// The converted value being drained, and the C type it was converted for,
+    /// materialised on the first call for this column.
+    ///
+    /// This is what stops a chunked read costing O(N²/K) — see
+    /// [`crate::column_value::CachedChunkSource`]. `None` means every call
+    /// re-asks the backend, which is still the path for a target the cache does
+    /// not cover (a fixed-width one, or a value that has to be *rendered* rather
+    /// than borrowed).
+    ///
+    /// The C type is part of the key because an application may legally change
+    /// target type between parts, which invalidates the conversion and not
+    /// merely the offset.
+    pub(crate) cached: Option<(
+        crate::types::CDataType,
+        crate::column_value::CachedChunkSource,
+    )>,
 }
 
 /// What `SQLPutData` has delivered so far for the parameter

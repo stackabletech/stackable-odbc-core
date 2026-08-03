@@ -1595,6 +1595,34 @@ call `SQLCloseCursor` or `SQLFreeStmt(SQL_CLOSE)` first, as it already must for
 
 ### Fixed
 
+- **A chunked `SQLGetData` no longer re-reads and re-converts the whole column
+  for every part.** Each call asked the backend for the value again and converted
+  it again, so draining an N-byte column through a K-byte buffer cost O(N²/K).
+  With the 64 KiB column and 512-byte buffer the benchmark uses, that was 128
+  materialisations of 64 KiB to deliver 64 KiB — and the chunk size is the
+  *application's* own buffer, so nothing it could do avoided the amplification.
+  A hostile or merely large value therefore multiplied both CPU and allocator
+  traffic by the number of parts, which is the denial-of-service class the
+  security audit raised as S1.
+
+  `GetDataCursor` now carries the converted value — `CachedChunkSource`, either
+  UTF-16 code units for `SQL_C_WCHAR` or bytes for `SQL_C_CHAR` and
+  `SQL_C_BINARY` — materialised on the first call for a column and reused by
+  every later part. Measured on `ffi_get_data_chunked/64KiB_over_512B_chunks`:
+  **219.03 µs → 23.47 µs**, −89.9% (p = 0.00), 285 MiB/s → 2.60 GiB/s.
+  `ffi_fetch_bound` is unchanged (p = 0.94), which is the check that the shared
+  character writers were split without cost to the bound-column path.
+
+  Three properties are deliberately preserved. The C type is part of the cache
+  key, because an application may legally change target type between parts and
+  that invalidates the conversion rather than only the offset. The cache is
+  cleared before every `SQLFetch`, as the cursor position already was, so it
+  cannot outlive its row. And it is built only where the string or byte form
+  *is* the value — `ColumnValue::String` and `ColumnValue::Bytes` — so a value
+  that must be *rendered* to text keeps the previous path, which is what leaves
+  the per-call `22003` whole-digits check (which reads `BufferLength`, and so
+  must be re-evaluated) exactly where it was.
+
 - **`SQLBindParameter` reports `HY105` for an unrecognised `InputOutputType`,
   not `HY024`.** `HY105` ("Invalid parameter type") is the row that function's
   page gives this exact condition — "(DM) The value specified for the argument

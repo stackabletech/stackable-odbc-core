@@ -802,9 +802,46 @@ that out was the substance of the task.
 
 **Files:** `src/handles/mod.rs:576` (`GetDataCursor` gains a cached payload, e.g. `enum CachedChunkSource { Utf16(Vec<u16>), Bytes(Vec<u8>) }` + total length), `src/ffi/fetch.rs:1046-1071`, `src/column_value.rs` chunk writers take the cached slice.
 
-- [ ] Red: capture the `ffi_get_data_chunked` baseline; write `chunked_get_data_converts_the_value_once` — instrument via a counting mock whose `get_data` increments a counter; assert one backend materialisation per column per row, not one per chunk (fails now).
-- [ ] Implement; all existing chunking tests (interleaved columns, restart-on-new-column, indicator remaining-length) must stay green — they define the contract.
-- [ ] Verify: benchmark shows the quadratic gone (record numbers in the commit message). This also closes security finding S1. GATE + targeted Miri. CHANGELOG (Fixed — DoS class). Commit: `perf: chunked SQLGetData converts each value once instead of per chunk`
+- [x] Red: capture the `ffi_get_data_chunked` baseline; write `chunked_get_data_converts_the_value_once` — instrument via a counting mock whose `get_data` increments a counter; assert one backend materialisation per column per row, not one per chunk (fails now).
+- [x] Implement; all existing chunking tests (interleaved columns, restart-on-new-column, indicator remaining-length) must stay green — they define the contract.
+- [x] Verify: benchmark shows the quadratic gone (record numbers in the commit message). This also closes security finding S1. GATE + targeted Miri. CHANGELOG (Fixed — DoS class). Commit: `perf: chunked SQLGetData converts each value once instead of per chunk`
+
+
+**Outcome (2026-08-03).** Done. **219.03 µs → 23.47 µs**, −89.9% (p = 0.00) on
+`ffi_get_data_chunked/64KiB_over_512B_chunks`; 285 MiB/s → 2.60 GiB/s.
+`ffi_fetch_bound` shows no change (p = 0.94), which is what proves the shared
+writer split cost the bound path nothing. Closes S1.
+
+- **The red test's number is the finding.** `chunked_get_data_converts_the_value_once`
+  counted **586** backend materialisations to deliver one 4096-character column
+  in seven-character parts. It needed a mock serving a genuinely long value —
+  `LONG_TEXT` is 36 characters, which chunks into 6 parts and understates the
+  problem — and it lives in `test_utils.rs` rather than in `fetch.rs`, because
+  `minimal_capability_decls!` is not exported beyond that module.
+- **The cache is narrower than the plan sketched, on purpose.** Only
+  `ColumnValue::String` → `SQL_C_WCHAR`/`SQL_C_CHAR` and `ColumnValue::Bytes` →
+  `SQL_C_BINARY` are cached. Those are the variants a data source makes long
+  enough to chunk, and they are the two whose conversion is a borrow rather than
+  a rendering. The reason it matters: `check_whole_digits_fit` reads `BufferLength`
+  and so must be re-evaluated per call, and it applies only to numeric sources —
+  leaving those on the uncached path keeps that check where it was instead of
+  needing the value cached alongside its conversion.
+- **The C type is part of the cache key.** An application may legally change
+  target type between parts (this crate documents that as costing nothing to
+  allow), and that invalidates the *conversion*, not just the offset.
+- **`GetDataCursor` is no longer `Copy`**, so `sql_get_data` takes it out of the
+  handle and puts it back rather than copying it. The cache is released by the
+  existing `get_data_cursor = None` before each fetch, so it cannot outlive its
+  row — memory held is one copy of the value for the duration of one drain,
+  against one copy per call before.
+- **The writers were split at their conversion boundary** — `write_wchar_units`
+  and `write_char_bytes` — so the cached and uncached paths share one
+  implementation of the chunking contract (indicator reports bytes *remaining*,
+  terminator, `SUCCESS_WITH_INFO` means more to come) rather than having two.
+
+**Not verified here: the targeted Miri run.** The sandbox denies
+`~/.cache/miri`, so the pointer work on this path has not been re-checked under
+Miri; it is part of what Task 7.1 must cover outside the sandbox.
 
 ### Task 6.2: Encode strings directly into the target buffer (P2)
 

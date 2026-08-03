@@ -4769,3 +4769,152 @@ impl Backend for MockFailBackend {
 
     minimal_capability_decls!();
 }
+
+/// Counts `StatementBackend::get_data` calls, for
+/// `chunked_get_data_converts_the_value_once`.
+///
+/// A counter rather than an assertion inside the mock, because the property is
+/// "how many times", which only the test can judge. Process-global and reset by
+/// the test: the alternative is threading a handle through `Backend::connect`,
+/// which the trait gives no place for.
+static GET_DATA_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Reset the counter [`get_data_calls`] reads.
+pub fn reset_get_data_calls() {
+    GET_DATA_CALLS.store(0, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// How many times [`MockCountingBackend`]'s statement has materialised a value.
+pub fn get_data_calls() -> usize {
+    GET_DATA_CALLS.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// One row, one long text column, and a `get_data` that counts its calls.
+pub struct MockCountingStatement {
+    rows_left: u8,
+}
+
+impl StatementBackend for MockCountingStatement {
+    type Error = OdbcError;
+
+    fn column_count(&self) -> i16 {
+        1
+    }
+
+    fn fetch(&mut self) -> Result<crate::types::FetchResult, OdbcError> {
+        if self.rows_left == 0 {
+            return Ok(crate::types::FetchResult::NoData);
+        }
+        self.rows_left -= 1;
+        Ok(crate::types::FetchResult::Row)
+    }
+
+    fn get_data(
+        &mut self,
+        _col: u16,
+        _target_type: crate::types::CDataType,
+    ) -> Result<Cow<'_, crate::types::ColumnValue>, OdbcError> {
+        GET_DATA_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(Cow::Owned(crate::types::ColumnValue::String(
+            "x".repeat(COUNTING_COLUMN_CHARS),
+        )))
+    }
+}
+
+/// Characters in [`MockCountingStatement`]'s one column. Long enough that a
+/// small application buffer needs many parts, which is the scale at which
+/// re-materialising per part stops being merely wasteful.
+pub const COUNTING_COLUMN_CHARS: usize = 4096;
+
+/// Hands out [`MockCountingStatement`]s.
+pub struct MockCountingBackend;
+
+impl Backend for MockCountingBackend {
+    type Connection = MockConnection;
+    type Statement = MockCountingStatement;
+    type Error = OdbcError;
+    type CancelToken = MockCancelToken;
+
+    fn connect(_: &ConnectParams) -> Result<MockConnection, OdbcError> {
+        Ok(MockConnection)
+    }
+    fn disconnect(_: &mut MockConnection) -> Result<(), OdbcError> {
+        Ok(())
+    }
+    fn cancel_token(_conn: &Self::Connection) -> Self::CancelToken {
+        MockCancelToken::default()
+    }
+    fn cancel(_token: &Self::CancelToken) -> Result<(), Self::Error> {
+        Ok(())
+    }
+    fn is_cancelled(_token: &Self::CancelToken) -> bool {
+        false
+    }
+    fn exec_direct(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: &str,
+    ) -> Result<MockCountingStatement, OdbcError> {
+        Ok(MockCountingStatement { rows_left: 1 })
+    }
+    fn prepare(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: &str,
+    ) -> Result<MockCountingStatement, OdbcError> {
+        Ok(MockCountingStatement { rows_left: 1 })
+    }
+    fn execute(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: &mut MockCountingStatement,
+        _: &[crate::types::ColumnValue],
+    ) -> Result<crate::types::ExecuteOutcome, OdbcError> {
+        Ok(crate::types::ExecuteOutcome::default())
+    }
+    fn get_info(_: &MockConnection, _: crate::types::InfoType) -> Result<InfoValue, OdbcError> {
+        Err(OdbcError::NotImplemented {
+            feature: "mock".into(),
+        })
+    }
+    fn get_functions() -> Cow<'static, [crate::function_id::FunctionId]> {
+        Cow::Borrowed(&[])
+    }
+    fn get_type_info(_conn: &Self::Connection) -> Cow<'static, [TypeInfoRow]> {
+        Cow::Borrowed(&[])
+    }
+    fn tables(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: &crate::types::TablesQuery<'_>,
+    ) -> Result<Vec<TableRow>, OdbcError> {
+        Ok(Vec::new())
+    }
+    fn columns(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: &crate::types::ColumnsQuery<'_>,
+    ) -> Result<Vec<ColumnRow>, OdbcError> {
+        Ok(Vec::new())
+    }
+    fn supports_catalogs(_conn: &Self::Connection) -> bool {
+        false
+    }
+    fn supports_schemas(_conn: &Self::Connection) -> bool {
+        false
+    }
+    fn alter_table_support(_conn: &Self::Connection) -> u32 {
+        0
+    }
+    fn outer_join_capabilities(_conn: &Self::Connection) -> u32 {
+        0
+    }
+    fn default_txn_isolation(_conn: &Self::Connection) -> u32 {
+        0
+    }
+    fn txn_isolation_options(_conn: &Self::Connection) -> u32 {
+        0
+    }
+
+    minimal_capability_decls!();
+}

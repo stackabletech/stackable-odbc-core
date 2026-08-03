@@ -1092,12 +1092,15 @@ pub unsafe fn sql_get_data<B: Backend>(
             // A cursor for a *different* column is discarded rather than kept:
             // "Successive calls to SQLGetData will retrieve data from the last
             // column requested; prior offsets become invalid."
-            let mut cursor = match stmt.get_data_cursor {
+            // Taken rather than copied: the cursor owns the cached conversion,
+            // so it is moved out, used, and put back.
+            let mut cursor = match stmt.get_data_cursor.take() {
                 Some(c) if c.column == col_or_param_num => c,
                 _ => GetDataCursor {
                     column: col_or_param_num,
                     delivered: 0,
                     done: false,
+                    cached: None,
                 },
             };
             if cursor.done {
@@ -1105,25 +1108,64 @@ pub unsafe fn sql_get_data<B: Backend>(
                 return Ok(SqlReturn::NO_DATA);
             }
 
-            let value = reclassify_cancelled_opt::<B, _, _>(
-                statement.get_data(col_or_param_num, c_type),
-                cancel,
-            )?;
-            // Spec 22002: data is NULL but no indicator variable was supplied.
-            if matches!(*value, ColumnValue::Null) && str_len_or_ind_ptr.is_null() {
-                return Err(OdbcError::general(
-                    "Data is NULL but no indicator variable was supplied (str_len_or_ind_ptr is null)",
-                    SqlState::indicator_variable_required(),
-                ));
-            }
-            let write = write_column_value_at(
-                &value,
-                c_type,
-                target_value_ptr,
-                buffer_length,
-                str_len_or_ind_ptr,
-                cursor.delivered,
-            )?;
+            // A cached conversion for *this* C type is the whole point: without
+            // it every part re-asks the backend for the value and re-converts
+            // it, so draining an N-byte column through a K-byte buffer costs
+            // O(N²/K). The C type is part of the match because an application
+            // may change target type between parts, which invalidates the
+            // conversion rather than just the offset.
+            let write = match &cursor.cached {
+                Some((cached_type, source)) if *cached_type == c_type => {
+                    crate::column_value::write_cached_chunk(
+                        source,
+                        c_type,
+                        target_value_ptr,
+                        buffer_length,
+                        str_len_or_ind_ptr,
+                        cursor.delivered,
+                    )?
+                }
+                _ => {
+                    let value = reclassify_cancelled_opt::<B, _, _>(
+                        statement.get_data(col_or_param_num, c_type),
+                        cancel,
+                    )?;
+                    // Spec 22002: data is NULL but no indicator variable was supplied.
+                    if matches!(*value, ColumnValue::Null) && str_len_or_ind_ptr.is_null() {
+                        return Err(OdbcError::general(
+                            "Data is NULL but no indicator variable was supplied (str_len_or_ind_ptr is null)",
+                            SqlState::indicator_variable_required(),
+                        ));
+                    }
+                    // Cache before writing, so the first part and every later
+                    // one go through exactly the same writer.
+                    match crate::column_value::cacheable_chunk_source(&value, c_type) {
+                        Some(source) => {
+                            let write = crate::column_value::write_cached_chunk(
+                                &source,
+                                c_type,
+                                target_value_ptr,
+                                buffer_length,
+                                str_len_or_ind_ptr,
+                                cursor.delivered,
+                            )?;
+                            cursor.cached = Some((c_type, source));
+                            write
+                        }
+                        // Not cacheable: a fixed-width target, or a value whose
+                        // character form has to be rendered rather than
+                        // borrowed. Unchanged path.
+                        None => write_column_value_at(
+                            &value,
+                            c_type,
+                            target_value_ptr,
+                            buffer_length,
+                            str_len_or_ind_ptr,
+                            cursor.delivered,
+                        )?,
+                    }
+                }
+            };
 
             // A fixed-width target is finished by definition — the spec forbids
             // reading it in parts — and so is a chunkable one that reported
@@ -1153,8 +1195,9 @@ mod tests {
     use crate::ffi::handle::{sql_alloc_handle, sql_free_handle};
     use crate::test_utils::{
         LONG_BYTES, LONG_TEXT, MockBackend, MockCancelAwareBackend, MockCancelToken,
-        MockConnection, MockError, MockFetchTimeoutBackend, MockLongDataBackend,
-        alloc_env_conn_stmt, cleanup_env_conn_stmt, with_descriptor, with_handle,
+        MockConnection, MockCountingBackend, MockError, MockFetchTimeoutBackend,
+        MockLongDataBackend, alloc_env_conn_stmt, cleanup_env_conn_stmt, with_descriptor,
+        with_handle,
     };
     use crate::types::CDataType;
     use odbc_sys::HandleType;
@@ -3006,6 +3049,59 @@ mod tests {
             );
             assert_eq!(ret, SqlReturn::ERROR);
             cleanup_env_conn_stmt(env, conn, stmt);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // One backend materialisation per column per row
+    // -----------------------------------------------------------------------
+
+    /// Draining one column in chunks must materialise the value **once**, not
+    /// once per chunk.
+    ///
+    /// Re-materialising per call makes reading an N-byte column in K-byte
+    /// chunks cost O(N²/K): the whole value is rebuilt for every part. With a
+    /// 64 KiB column and the 512-byte buffer a driver manager may choose, that
+    /// is 128 calls copying 8 MiB to deliver 64 KiB — a denial-of-service
+    /// amplification an application cannot avoid, since the chunk size is its
+    /// own buffer's.
+    #[test]
+    fn chunked_get_data_converts_the_value_once() {
+        unsafe {
+            crate::test_utils::reset_get_data_calls();
+            let (env, conn, stmt) = executed_stmt_for::<MockCountingBackend>();
+            assert_eq!(sql_fetch::<MockCountingBackend>(stmt), SqlReturn::SUCCESS);
+
+            // Drain the column in small parts until it reports completion.
+            let mut buf = [0u16; 8];
+            let mut ind: isize = 0;
+            let mut parts = 0;
+            loop {
+                let ret = sql_get_data::<MockCountingBackend>(
+                    stmt,
+                    1,
+                    CDataType::WChar as i16,
+                    buf.as_mut_ptr().cast::<c_void>(),
+                    16,
+                    &mut ind,
+                );
+                parts += 1;
+                assert!(parts < 10_000, "the drain loop failed to terminate");
+                if ret != SqlReturn::SUCCESS_WITH_INFO {
+                    assert_eq!(ret, SqlReturn::SUCCESS, "the last part must succeed");
+                    break;
+                }
+            }
+            assert!(parts > 10, "the column must really have been chunked");
+
+            assert_eq!(
+                crate::test_utils::get_data_calls(),
+                1,
+                "the value was materialised once per chunk over {parts} parts, \
+                 which is the quadratic this test exists to prevent"
+            );
+
+            cleanup_stmt_for::<MockCountingBackend>(env, conn, stmt);
         }
     }
 

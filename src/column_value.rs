@@ -113,6 +113,97 @@ pub unsafe fn write_column_value_at(
     unsafe { write_fixed_or_chunked(value, target_type, target_ptr, buf_len, len_ind_ptr, offset) }
 }
 
+/// A chunkable value, converted once, for a `SQLGetData` read to drain in parts.
+///
+/// # Why this exists
+///
+/// `SQLGetData` is called repeatedly for one column, each call delivering the
+/// next part. Every call used to ask the backend for the value again and convert
+/// it again, so draining an N-byte column through a K-byte buffer cost
+/// O(N²/K): 128 materialisations of 64 KiB to deliver 64 KiB through the
+/// 512-byte buffer a driver manager may pick. The chunk size is the
+/// application's own buffer, so nothing it could do avoided the amplification.
+///
+/// The variant records the shape the target C type needs, and the C type it was
+/// built for is stored beside it — an application may legally change target type
+/// between parts, and that invalidates the conversion, not just the offset.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CachedChunkSource {
+    /// UTF-16 code units, for `SQL_C_WCHAR`.
+    Utf16(Vec<u16>),
+    /// Bytes: UTF-8 for `SQL_C_CHAR`, the value's own bytes for `SQL_C_BINARY`.
+    /// Which writer applies is decided by the stored C type, since the character
+    /// one reserves a null terminator and the binary one does not.
+    Bytes(Vec<u8>),
+}
+
+/// The chunk source for a value whose string or byte form **is** the value, or
+/// `None` for every other combination.
+///
+/// Deliberately narrow. `ColumnValue::String` and `ColumnValue::Bytes` are the
+/// variants a data source makes long enough to chunk — a LOB — and they are the
+/// two whose conversion is a borrow rather than a rendering. Everything else
+/// keeps the uncached path unchanged, which matters for one reason beyond
+/// caution: [`check_whole_digits_fit`] must be re-evaluated per call, because it
+/// reads `buf_len`, and it applies only to numeric sources. Returning `None`
+/// here for those keeps that check where it was.
+pub(crate) fn cacheable_chunk_source(
+    value: &ColumnValue,
+    target_type: CDataType,
+) -> Option<CachedChunkSource> {
+    match (value, target_type) {
+        (ColumnValue::String(s), CDataType::WChar) => {
+            let mut wide = Vec::with_capacity(s.len());
+            wide.extend(s.encode_utf16());
+            Some(CachedChunkSource::Utf16(wide))
+        }
+        (ColumnValue::String(s), CDataType::Char) => {
+            Some(CachedChunkSource::Bytes(s.as_bytes().to_vec()))
+        }
+        (ColumnValue::Bytes(b), CDataType::Binary) => Some(CachedChunkSource::Bytes(b.clone())),
+        _ => None,
+    }
+}
+
+/// Write one chunk from an already-converted source.
+///
+/// The same three writers the uncached path uses, entered past their conversion
+/// step, so the chunking contract — the indicator reporting bytes *remaining*,
+/// the terminator, the `SUCCESS_WITH_INFO` that marks "more to come" — is one
+/// implementation rather than two.
+///
+/// # Safety
+///
+/// Same as [`write_column_value_at`]: `target_ptr` must be null or writable for
+/// `buf_len` bytes, and `len_ind_ptr` null or a writable `isize`.
+pub(crate) unsafe fn write_cached_chunk(
+    source: &CachedChunkSource,
+    target_type: CDataType,
+    target_ptr: *mut c_void,
+    buf_len: isize,
+    len_ind_ptr: *mut isize,
+    offset: usize,
+) -> Result<ChunkWrite, OdbcError> {
+    let (ret, delivered) = unsafe {
+        match (source, target_type) {
+            (CachedChunkSource::Utf16(units), _) => {
+                write_wchar_units(units, target_ptr, buf_len, len_ind_ptr, offset)?
+            }
+            (CachedChunkSource::Bytes(bytes), CDataType::Binary) => {
+                write_binary(bytes, target_ptr, buf_len, len_ind_ptr, offset)?
+            }
+            (CachedChunkSource::Bytes(bytes), _) => {
+                write_char_bytes(bytes, target_ptr, buf_len, len_ind_ptr, offset)?
+            }
+        }
+    };
+    Ok(ChunkWrite {
+        ret,
+        delivered,
+        chunkable: true,
+    })
+}
+
 /// A non-chunkable outcome: the whole value in one call.
 fn whole(ret: SqlReturn) -> ChunkWrite {
     ChunkWrite {
@@ -1296,6 +1387,21 @@ unsafe fn write_wchar(
     // Pre-size to UTF-8 byte length, which is always >= UTF-16 code unit count.
     let mut wide = Vec::with_capacity(s.len());
     wide.extend(s.encode_utf16());
+    unsafe { write_wchar_units(&wide, target_ptr, buf_len, len_ind_ptr, offset) }
+}
+
+/// [`write_wchar`] from the point the UTF-16 units exist.
+///
+/// Split out so a chunked read can encode once and write many times: encoding
+/// inside the per-chunk path made draining an N-unit column in K-unit parts cost
+/// O(N²/K). See [`CachedChunkSource`].
+unsafe fn write_wchar_units(
+    wide: &[u16],
+    target_ptr: *mut c_void,
+    buf_len: isize,
+    len_ind_ptr: *mut isize,
+    offset: usize,
+) -> Result<(SqlReturn, usize), OdbcError> {
     // An offset past the end yields an empty remainder rather than panicking:
     // the caller stops at `done`, but a truncating write that lands exactly on
     // the end would otherwise index one past it.
@@ -1383,7 +1489,21 @@ unsafe fn write_char(
     len_ind_ptr: *mut isize,
     offset: usize,
 ) -> Result<(SqlReturn, usize), OdbcError> {
-    let all = s.as_bytes();
+    unsafe { write_char_bytes(s.as_bytes(), target_ptr, buf_len, len_ind_ptr, offset) }
+}
+
+/// [`write_char`] over bytes that are already UTF-8.
+///
+/// The character path needs no re-encoding, so this exists for the same reason
+/// [`write_wchar_units`] does: a cached chunk source hands over bytes, not a
+/// `&str`, and `s.as_bytes()` is the only thing `write_char` ever wanted.
+unsafe fn write_char_bytes(
+    all: &[u8],
+    target_ptr: *mut c_void,
+    buf_len: isize,
+    len_ind_ptr: *mut isize,
+    offset: usize,
+) -> Result<(SqlReturn, usize), OdbcError> {
     let bytes = all.get(offset.min(all.len())..).unwrap_or(&[]);
     let total_bytes = bytes.len() as isize;
 
