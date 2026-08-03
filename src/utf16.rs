@@ -116,7 +116,42 @@ use crate::types::SqlReturn;
 /// terminator and goes on to decode — a `String` of up to 3 bytes per code unit.
 ///
 /// [`SqlState::invalid_string_or_buffer_length`]: crate::types::SqlState::invalid_string_or_buffer_length
+#[cfg(not(miri))]
 pub(crate) const MAX_NTS_SCAN: usize = 1 << 20;
+
+/// **Under Miri the cap is 4096 units, not 1 Mi**, and the whole reason is cost.
+///
+/// The nineteen boundary tests allocate a buffer of exactly this size and scan
+/// it, which is what makes them able to catch an over-read at the cap: the
+/// buffer has no terminator, so reading one unit past it is a heap overflow Miri
+/// sees. Interpreted byte by byte at `1 << 20`, **one** of those tests takes
+/// **392 seconds** — measured on 2026-08-03 — so the eighteen that are not
+/// ignored would need about two hours against the `miri` job's
+/// `timeout-minutes: 30`.
+///
+/// Shrinking the constant rather than ignoring the tests keeps the property they
+/// exist for. What they assert is "the scan stops at the cap, and does not read
+/// past it", which is true at any cap; the specific value is a policy choice
+/// (see the section above), not something the ODBC spec fixes, so a smaller one
+/// under interpretation tests the same mechanism at 1/256 of the cost. Every
+/// assertion in those tests is written against `MAX_NTS_SCAN` itself rather than
+/// a literal, which is what makes this substitution invisible to them.
+///
+/// Two tests pay for it and are `miri`-ignored as a result:
+/// `an_nts_statement_of_a_hundred_thousand_characters_executes` and
+/// `native_sql_translates_an_nts_statement_of_a_hundred_thousand_characters_in_full`
+/// assert that an **absolute** 100 000-character input is *accepted*, which is
+/// true under the production cap and false under this one. They are the only two
+/// that name a size instead of deriving it from `MAX_NTS_SCAN`, and a test that
+/// wants "large but under the cap" has nothing to ask for when the cap is 4096.
+/// Their property is correctness rather than memory safety, and `cargo test`
+/// covers it in full at the real cap.
+///
+/// This answers the question the constant's own history left open: raising the
+/// cap did make the boundary tests too expensive for Miri, and this is what to
+/// do about it.
+#[cfg(miri)]
+pub(crate) const MAX_NTS_SCAN: usize = 1 << 12;
 
 /// The one error every `SQL_NTS` scan in the crate raises on reaching
 /// `MAX_NTS_SCAN`.

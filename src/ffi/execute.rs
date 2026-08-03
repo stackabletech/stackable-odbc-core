@@ -1808,6 +1808,11 @@ mod tests {
     /// A literal rather than a fraction of `MAX_NTS_SCAN`: a test written
     /// against the constant passes at every value of it, including the one this
     /// test exists to rule out.
+    #[cfg_attr(
+        miri,
+        ignore = "asserts an absolute 100 000-character input is accepted, which the \
+                  Miri-only MAX_NTS_SCAN of 4096 refuses"
+    )]
     #[test]
     fn an_nts_statement_of_a_hundred_thousand_characters_executes() {
         const STATEMENT_UNITS: usize = 100_000;

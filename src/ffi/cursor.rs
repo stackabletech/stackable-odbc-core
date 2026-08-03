@@ -1645,6 +1645,13 @@ mod tests {
         unsafe {
             let _ =
                 crate::ffi::handle::sql_free_handle::<B>(odbc_sys::HandleType::Stmt as i16, stmt);
+            // Disconnect first: `free_connection` refuses a still-open
+            // connection with `HY010` and frees nothing, so a test that
+            // connected would leak the handle and whatever its diagnostic
+            // queue holds — which Miri reports as a leak and CI fails on.
+            // Harmless when nothing is connected: that answers `08003`,
+            // which this discards like the frees below.
+            let _ = crate::ffi::connect::sql_disconnect::<B>(conn);
             let _ =
                 crate::ffi::handle::sql_free_handle::<B>(odbc_sys::HandleType::Dbc as i16, conn);
             let _ = crate::ffi::handle::sql_free_handle::<B>(odbc_sys::HandleType::Env as i16, env);

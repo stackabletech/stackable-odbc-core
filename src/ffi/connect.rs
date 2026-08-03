@@ -2806,6 +2806,10 @@ mod tests {
     /// the application believes it passed — a silent authorisation change, not a
     /// missing diagnostic. Delete either `?` in `sql_connect_w`'s credential
     /// block and this test fails.
+    /// Unlike its `ServerName` sibling, this one reaches the DSN resolver: the
+    /// server name parses first and only the *credential* scan overruns, so
+    /// `read_dsn_keys` has already run by then.
+    #[cfg_attr(miri, ignore = "calls the foreign SQLGetPrivateProfileStringW")]
     #[test]
     fn connect_refuses_an_nts_credential_that_runs_to_the_scan_cap() {
         unsafe {
@@ -2879,6 +2883,11 @@ mod tests {
     /// this call was `HY090` until the cap was raised. A literal rather than a
     /// fraction of `MAX_NTS_SCAN`, because a test written against the constant
     /// passes at every value of it.
+    #[cfg_attr(
+        miri,
+        ignore = "asserts an absolute 100 000-character input is accepted, which the \
+                  Miri-only MAX_NTS_SCAN of 4096 refuses"
+    )]
     #[test]
     fn native_sql_translates_an_nts_statement_of_a_hundred_thousand_characters_in_full() {
         const STATEMENT_UNITS: usize = 100_000;

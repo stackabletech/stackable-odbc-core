@@ -164,7 +164,6 @@ call `SQLCloseCursor` or `SQLFreeStmt(SQL_CLOSE)` first, as it already must for
   disagree, and an application binds by column number. A driver has nothing to
   change; core's own catalog functions use the consuming form.
 
-
 - `Backend::configure_dsn`, a defaulted hook that supplies a data source's
   keywords to `ConfigDSN`. This is what makes the Windows ODBC Administrator's
   **Add…** and **Configure…** buttons work at all: the Administrator calls

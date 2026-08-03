@@ -454,7 +454,6 @@ Doc-only changes cannot be test-verified except via the doc guards and `pre-comm
 - [x] Delete the dangling "Deferred." at `connect_attr.rs:304-313`.
 - [x] Commit: `docs: diagnostics doc comments state defensive guards honestly; SQLGetData HY010 is Split`
 
-
 **Outcome (2026-08-03).** All four items done, verified against the pages'
 **source markdown** (`raw.githubusercontent.com/MicrosoftDocs/sql-docs`) rather
 than the rendered HTML — which is both faster to grep and the thing the rendering
@@ -501,7 +500,6 @@ what previous `docs:` commits in this branch did.
 - [x] Fix uniqueness claims: `col_attr.rs:483` + `descriptor.rs:667` (set_concise_type "only writer" — name the `Desc::Type`/`Desc::DatetimeIntervalCode` arms); `handles/mod.rs:918` (`implicit_descriptor_token` callers); `handles/mod.rs:1276` + AGENTS.md ("three callers of HandleScope::new" → four); `sync.rs:27` + `logging.rs:72` (record the tracing `MakeWriter` Mutex as the second stated exception, with the loom justification, in both files + AGENTS.md); `backend.rs:440, 878` ("nine statement-producing methods" → the actual count, or replace with "the methods taking `cancel:`" so it cannot rot); `descriptor.rs:382` + `desc.rs:25` (HY091 "sole authority" → name `field_from_raw`'s unknown-integer mint).
 - [x] Add the found evidence to the bare driver citations: `handle.rs:526, 1187`, `backend.rs:979`, `params.rs:1379` (look each up in the named driver's source while writing the citation; if unverifiable, soften the sentence instead).
 - [x] Commit: `docs: whole-path SQLSTATE claims, uniqueness claims and driver citations match reality`
-
 
 **Outcome (2026-08-03).** All three items done. What the line numbers hid:
 
@@ -564,7 +562,6 @@ what previous `docs:` commits in this branch did.
 - [x] `src/ffi/params.rs:1` (name all five entry points), `src/ffi/fetch.rs:1` (+ `sql_extended_fetch`), `src/handles/mod.rs:1` (+ descriptor), `src/forward_ffi.rs` (add a `//!`), `src/errors.rs:223` ("~70" → "the"), `src/test_utils.rs:3` (drop the nonexistent `MockFailBackend` mention — superseded by Task 5.1 which adds it for real, so instead make the sentence true there).
 - [x] Commit: `docs: module headers and crate docs describe what the modules now contain`
 
-
 **Outcome (2026-08-03).** All items done. The counts were worse than the plan
 recorded, and the fix was to stop counting:
 
@@ -601,7 +598,6 @@ recorded, and the fix was to stop counting:
 - [x] Commit: `docs: README, AGENTS and CHANGELOG match the current code`
 
 ---
-
 
 **Outcome (2026-08-03).** Done, and every number was re-derived rather than
 adjusted. Phase 4 closes with this.
@@ -649,7 +645,6 @@ stream.
 - [x] These are new tests over existing code — expected to pass; if any fails, that is a real bug: stop and report before fixing.
 - [x] GATE. Commit: `test: the Backend::connect failure path is exercised`
 
-
 **Outcome (2026-08-03).** Three tests, all passing, and **no bug found** — but
 the third failed first, and the reason is worth recording because it is a trap
 for anyone writing a test against a defaulted hook:
@@ -684,12 +679,15 @@ now exists, so that header's promise is kept rather than merely made honest.
 - [x] Also fix the fuzz target's alignment blind spot: `fuzz/fuzz_targets/column_value.rs:144` — allocate the arena as the widest target type and offset, so ASan/Miri luck is not required.
 - [x] GATE (+ `(cd fuzz && cargo +nightly build ...)` since fuzz/ changed). Commit: `test: every marshalling family has a deliberately misaligned-buffer test`
 
-
 **Outcome (2026-08-03).** Eight tests across five families, the fuzz arena fixed,
 and one AGENTS.md claim corrected by measurement.
 
-- **The Miri verification step could not run** (`~/.cache/miri` is not writable
-  in the sandbox), so the "bite" check was done a different way, and it worked:
+- **The Miri verification step has since run and is clean** — see Task 7.1, which
+  found that `XDG_CACHE_HOME` redirects the cache the sandbox denies. Both passes,
+  including `-Zmiri-symbolic-alignment-check`, report no alignment errors, so these
+  eight tests are verified for the property they exist for. At the time this task
+  ran the pass appeared blocked, so the "bite" check was done a different way, and
+  that worked too:
   `write_fixed`'s `write_unaligned` was temporarily replaced by a deref-assign,
   and `sbigint_target_may_be_misaligned` aborted with `misaligned pointer
   dereference: address must be a multiple of 0x8`, SIGABRT. That proves the test's
@@ -719,7 +717,6 @@ and one AGENTS.md claim corrected by measurement.
 - [x] Retrofit the ~15 return-code-only tests (list: `bind.rs:196, 447`; `connect.rs:1772, 1849`; `connect_attr.rs:2128` + 3 siblings; `params.rs:2984, 3006` + 3 siblings; `stmt_attr.rs:3313, 3337`; `tran.rs:591`; `fetch.rs:2216` + neighbours) with `first_sqlstate`-style assertions against the state their name claims. Where a file lacks the helper, copy the 6-line pattern from `execute.rs:1740`.
 - [x] Any retrofit that then FAILS reveals a wrong-state bug: stop, report, fix as its own red-green step within this task.
 - [x] GATE. Commit: `test: error-path tests assert the SQLSTATE their names claim`
-
 
 **Outcome (2026-08-03).** 21 tests retrofitted, one real defect found — in a
 test name, not in the code.
@@ -767,7 +764,6 @@ the same trap as Task 3.3), and `INVALID_ATTRIBUTE_IDENTIFIER` guessed for
 
 ---
 
-
 **Outcome (2026-08-03).** Eight tests. Phase 5 closes. The huge-ordinal item was
 built on an assumption that held for **one of its four** functions, and finding
 that out was the substance of the task.
@@ -806,7 +802,6 @@ that out was the substance of the task.
 - [x] Implement; all existing chunking tests (interleaved columns, restart-on-new-column, indicator remaining-length) must stay green — they define the contract.
 - [x] Verify: benchmark shows the quadratic gone (record numbers in the commit message). This also closes security finding S1. GATE + targeted Miri. CHANGELOG (Fixed — DoS class). Commit: `perf: chunked SQLGetData converts each value once instead of per chunk`
 
-
 **Outcome (2026-08-03).** Done. **219.03 µs → 23.47 µs**, −89.9% (p = 0.00) on
 `ffi_get_data_chunked/64KiB_over_512B_chunks`; 285 MiB/s → 2.60 GiB/s.
 `ffi_fetch_bound` shows no change (p = 0.94), which is what proves the shared
@@ -839,14 +834,14 @@ writer split cost the bound path nothing. Closes S1.
   implementation of the chunking contract (indicator reports bytes *remaining*,
   terminator, `SUCCESS_WITH_INFO` means more to come) rather than having two.
 
-**Not verified here: the targeted Miri run.** The sandbox denies
-`~/.cache/miri`, so the pointer work on this path has not been re-checked under
-Miri; it is part of what Task 7.1 must cover outside the sandbox.
+**Since verified under Miri.** The pointer work on this path was re-checked in
+Task 7.1 — plain and `-Zmiri-symbolic-alignment-check`, both clean — after that
+task found `XDG_CACHE_HOME` redirects the cache the sandbox denies. The claim that
+it could not be checked here was premature.
 
 ### Task 6.2: Encode strings directly into the target buffer (P2)
 
 `src/column_value.rs` `write_wchar`: bounded `encode_utf16()` write via per-unit `write_unaligned`, `count()` for the remainder — no intermediate `Vec` on the single-shot path (the Task 6.1 cache covers chunked). Numeric→char: format into a stack buffer. Red/green via `ffi_fetch_bound` benchmark delta + existing conversion tests. Commit: `perf: string and numeric fetch conversions stop allocating per value`
-
 
 **Outcome (2026-08-03). Partly done, and the task's verification method does not
 work.** `write_wchar` no longer allocates; the numeric→char stack buffer is
@@ -896,7 +891,6 @@ work.** `write_wchar` no longer allocates; the numeric→char stack buffer is
 
 `src/ffi/fetch.rs:319-322, 408-427`: fuse `collect_bindings` and `binding_info` (apply `c_type_of` + offset inside the first pass); sort by column number for deterministic write order. Existing fetch tests green; benchmark delta. Commit: `perf: sql_fetch builds its binding list once, in column order`
 
-
 **Outcome (2026-08-03).** Done, but **not as written** — half of what this item
 asked for would have been a spec-ordering bug.
 
@@ -927,7 +921,6 @@ asked for would have been a spec-ordering bug.
 ### Task 6.4: Fewer registry lookups per fetch/get_data (P5)
 
 Restructure `fetch_with_report` around one `stmt_with_desc` resolution per AGENTS.md's own `descriptor_token` guidance (~6 → ~4 acquisitions); same for `sql_get_data`'s 3. `handle_lookup` + `ffi_fetch_bound` show the delta; loom models unaffected (no new acquisition *sites* — the site-closure guard `the_set_of_group_lock_acquisition_sites_is_closed` must stay green unmodified, which is the real test here). Commit: `perf: fetch resolves the statement once per call`
-
 
 **Outcome (2026-08-03). No change made: both of this item's premises are wrong,
 measured.** `HandleScope::get` was instrumented with a counter and a
@@ -967,7 +960,6 @@ type-name trace, and the probe reverted.
 ### Task 6.5: Persistent query-timer thread (P3)
 
 `src/query_timer.rs`: one lazily-started deadline thread (register/deregister via the existing std Condvar — the documented loom exception carries over; update the exception comments). All existing timer tests (HYT00 at execute and fetch, disarm, poisoning) are the contract; add `arming_twice_reuses_the_thread` via a thread-count probe if cheaply assertable, else rely on the existing behavioural suite. Benchmark: timed-fetch variant added to `ffi_fetch_bound`. Commit: `perf: SQL_ATTR_QUERY_TIMEOUT uses one timer thread, not one per fetch`
-
 
 **Outcome (2026-08-03). Implemented, then reverted — the design a shared timer
 thread needs breaks a documented project invariant.** Andrew's call, with the
@@ -1012,7 +1004,6 @@ design are recorded here so a retry starts from them.
 - [x] `logging.rs` (S2): document the symlink-follow behaviour and same-user threat model in the module header; optionally add CRLF-stripping for backend-originated text in log lines (decide with Andrew — it changes log fidelity).
 - [x] GATE. Commit: `perf: small allocation wins on cold paths; logging threat model documented`
 
-
 **Outcome (2026-08-03).** Three items done and measured in isolation; the fourth
 is documented, with its optional half left as a question below.
 
@@ -1056,12 +1047,77 @@ Left to Andrew.
 
 ### Task 7.1: Deferred Miri pass and full-suite sign-off
 
-- [ ] `MIRIFLAGS="-Zmiri-disable-isolation" cargo +nightly miri test -p stackable-odbc-core --lib -- --skip proptest` — zero failures, zero leaks. Budget for a cold rebuild (AGENTS.md: the warm run is ~5-6 min; a rebuild dominates).
-- [ ] `MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-symbolic-alignment-check" cargo +nightly miri test -p stackable-odbc-core --lib -- --skip proptest` — the alignment class regardless of allocator luck (mandatory: this work touched pointer marshalling).
-- [ ] `RUSTFLAGS="--cfg loom" cargo test --lib loom_tests` — the lock-discipline models still hold (Tasks 6.4/6.5 are the risk).
-- [ ] `(cd bench && cargo build --benches)` and `(cd fuzz && cargo +nightly build --target x86_64-unknown-linux-gnu)` — the detached workspaces still compile (5.2 touched fuzz/, 0.1 touched bench/).
-- [ ] `cargo clippy --target x86_64-pc-windows-msvc --all-targets -- -D warnings` — the `#[cfg(windows)]` half.
-- [ ] Any failure: fix red-green as its own step, then re-run the failed check; the fixes join the nearest pending commit or a dedicated `fix:` commit for Andrew.
+- [x] `MIRIFLAGS="-Zmiri-disable-isolation" cargo +nightly miri test -p stackable-odbc-core --lib -- --skip proptest` — zero failures, zero leaks. Budget for a cold rebuild (AGENTS.md: the warm run is ~5-6 min; a rebuild dominates).
+- [x] `MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-symbolic-alignment-check" cargo +nightly miri test -p stackable-odbc-core --lib -- --skip proptest` — the alignment class regardless of allocator luck (mandatory: this work touched pointer marshalling).
+- [x] `RUSTFLAGS="--cfg loom" cargo test --lib loom_tests` — the lock-discipline models still hold (Tasks 6.4/6.5 are the risk).
+- [x] `(cd bench && cargo build --benches)` and `(cd fuzz && cargo +nightly build --target x86_64-unknown-linux-gnu)` — the detached workspaces still compile (5.2 touched fuzz/, 0.1 touched bench/).
+- [x] `cargo clippy --target x86_64-pc-windows-msvc --all-targets -- -D warnings` — the `#[cfg(windows)]` half.
+- [x] Any failure: fix red-green as its own step, then re-run the failed check; the fixes join the nearest pending commit or a dedicated `fix:` commit for Andrew.
+
+**Outcome (2026-08-03). Three real defects found, all fixed here.** The phase
+that looked like a formality was the one that caught the most.
+
+- **Miri runs at all only because of `XDG_CACHE_HOME`.** `cargo miri` builds its
+  sysroot under `~/.cache/miri`, which the development sandbox denies, so every
+  earlier attempt this branch died in "failed to build sysroot" before
+  interpreting anything. Pointing `XDG_CACHE_HOME` at a writable directory is the
+  whole workaround. Several earlier task entries said "not verified under Miri" on
+  the strength of that denial; they were wrong to stop there, and this run is what
+  they were waiting for.
+- **Defect 1: the Miri job had been red since `814167b` (Task 2.7).**
+  `connect_refuses_an_nts_credential_that_runs_to_the_scan_cap` reaches
+  `read_dsn_keys`, and Miri cannot call the foreign `SQLGetPrivateProfileStringW`.
+  Its `ServerName` sibling is exempt because that scan overruns *before* the DSN
+  read; the credential one parses the server name first. Three neighbouring
+  `SQLConnectW` tests already carried the same ignore, so only this one was
+  missing it.
+- **Defect 2: the Miri budget, which is Task 2.13's open question answered.**
+  `MAX_NTS_SCAN = 1 << 20`, and eighteen boundary tests allocate a buffer of
+  exactly that size. Measured: **392 seconds for one of them**, so eighteen is
+  about two hours against the job's `timeout-minutes: 30`. Task 2.13 asked whether
+  raising the cap would do this and the check was never made; the constant's own
+  doc even said those tests "run under Miri". Fixed by a `cfg(miri)` cap of
+  `1 << 12` rather than by ignoring them, which keeps the property they exist for
+  — the buffer has no terminator, so a read one unit past it is a heap overflow
+  Miri sees, and that holds at any cap. **All eighteen now run in 37 seconds.**
+  Two tests pay for it: they assert an *absolute* 100 000-character input is
+  accepted, which is true at the real cap and false at 4096, so they are
+  `miri`-ignored with the reason recorded at the constant. Verifying the
+  substitution by grepping for symbolic uses of `MAX_NTS_SCAN` missed them — only
+  the full run found them.
+- **Defect 3: a real handle leak in a test helper.** Six `memory leaked` reports,
+  all from `ffi/cursor.rs`'s `cleanup_env_conn_stmt_for`, which freed
+  `stmt → conn → env` without disconnecting. `free_connection` refuses a
+  still-open connection with `HY010` and frees nothing, so every test in that
+  module that connected leaked its connection handle and the `HY010` message
+  string its diagnostic queue held. Predates this work (`f09fb33`) and went
+  unnoticed because Miri was deferred. Fixed by disconnecting first, which is
+  harmless when nothing is connected.
+- **A static survey over-flagged the leak, twice over.** Three cleanup helpers
+  looked wrong; only one was. `test_utils::cleanup_env_conn_stmt` pairs with an
+  allocator that documents leaving the connection `None`, and `tran.rs`'s tests do
+  not connect — which Miri had already said by reporting leaks from `cursor.rs`
+  alone. Third time in this plan that a grep-shaped heuristic claimed more than
+  the evidence supported; the measurement was right each time.
+- **`markdownlint` found 15 MD012 violations, all introduced by this plan's own
+  outcome entries** (a stray blank line before each following heading) plus one in
+  the CHANGELOG. The hook needs a Node environment the sandbox cannot install, so
+  it never ran during the work — but MD012 is ten lines of Python, and
+  implementing the check was the right move at any point rather than reporting the
+  hook as simply unavailable.
+
+Results, all on 2026-08-03:
+
+| check | result |
+|---|---|
+| `cargo test --locked` | 1544 pass, zero warnings |
+| Miri, plain | **1514 pass, 0 failed, 20 ignored, no leaks, no UB** (783 s) |
+| Miri, `-Zmiri-symbolic-alignment-check` | **1514 pass, 0 failed, no alignment errors** (789 s) |
+| `RUSTFLAGS="--cfg loom" cargo test --lib loom_tests` | 7 models pass |
+| `pre-commit run --all-files` | passes |
+| `cargo deny --locked check` | advisories, bans, licenses, sources all ok — **first run on this branch** |
+| `cargo clippy --target x86_64-pc-windows-msvc` | clean |
+| `bench` and `fuzz` workspaces | build clean |
 
 ## Known limitations — found during this work, deliberately not fixed
 
