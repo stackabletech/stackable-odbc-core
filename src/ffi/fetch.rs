@@ -24,7 +24,15 @@ use crate::types::{ColumnValue, FetchResult, SqlReturn, SqlState, fetch_orientat
 ///
 /// The concise type stays **raw**, not parsed to a `CDataType`: reading it as a C
 /// type can fail, and the spec orders that failure *after* this call's `HY010`
-/// and `24000` checks. Collecting is not checking.
+/// and `24000` checks. Collecting is not checking, so `c_type_of` is called in
+/// the write loop instead — which is *why* this tuple carries an `i16` rather
+/// than a `CDataType`, and why fusing that parse into the collection pass would
+/// be a spec-ordering bug rather than an optimisation.
+///
+/// The two pointers **have** the row-bind offset applied, because that is
+/// infallible pointer arithmetic and so carries no ordering constraint. Applying
+/// it here is what lets the write loop read this list directly, instead of
+/// mapping it into a second vector allocated on every row.
 type Binding = (u16, i16, *mut c_void, isize, *mut isize);
 
 /// Every binding of an ARD that this fetch must serve, in no particular order.
@@ -52,20 +60,34 @@ type Binding = (u16, i16, *mut c_void, isize, *mut isize);
 /// A record carrying *neither* pointer is skipped. `SQLSetDescField` can create
 /// one by setting any single field, so presence in the map has never meant a
 /// binding.
-fn collect_bindings(ard: &Descriptor) -> Vec<Binding> {
-    ard.records
+///
+/// Sorted by column number, which the records themselves are not: they live in a
+/// `HashMap`, so the iteration order — and with it *which* bound column's error
+/// an application sees when two would fail — varied between runs of the same
+/// program. Ascending column order is the one an application can predict.
+fn collect_bindings(ard: &Descriptor, bind_offset: crate::descriptor::BindOffset) -> Vec<Binding> {
+    let mut bindings: Vec<Binding> = ard
+        .records
         .iter()
         .filter(|(_, record)| record.is_bound() || !record.indicator_ptr.is_null())
         .map(|(&col, r)| {
             (
                 col,
                 r.concise_type,
-                r.data_ptr,
+                // A null pointer is left alone rather than shifted, which is
+                // `BindOffset::apply`'s business: a record may carry either
+                // pointer null — the indicator-only binding the spec allows —
+                // and offsetting `0` would turn that absence into a non-null
+                // address the `22002` check and `write_column_value` would then
+                // treat as real.
+                bind_offset.apply(r.data_ptr),
                 r.octet_length,
-                r.indicator_ptr,
+                bind_offset.apply(r.indicator_ptr),
             )
         })
-        .collect()
+        .collect();
+    bindings.sort_unstable_by_key(|&(col, ..)| col);
+    bindings
 }
 
 /// `SQL_ROW_SUCCESS` — the row-status value for a row fetched without warning.
@@ -311,9 +333,10 @@ unsafe fn fetch_with_report<B: Backend>(
             // SAFETY: `Descriptor::bind_offset`'s contract — the stored attribute
             // is null or a pointer to a valid `SQLULEN`, which is the
             // application's undertaking when it sets the attribute.
-            let (bind_offset, bindings) = {
+            let bindings = {
                 let ard = scope.desc_of::<B>(statement_handle, DescriptorRole::Ard)?;
-                (ard.bind_offset(), collect_bindings(ard))
+                let bind_offset = ard.bind_offset();
+                collect_bindings(ard, bind_offset)
             };
 
             let stmt = scope.get::<StatementHandle<B>>(statement_handle)?;
@@ -392,52 +415,29 @@ unsafe fn fetch_with_report<B: Backend>(
 
             match timer.check_opt::<B, _, _>(statement.fetch(), cancel)? {
                 FetchResult::Row => {
-                    // Populate bound columns. The bindings were collected from
-                    // the ARD before this borrow of `stmt.statement`; the offset
-                    // is applied here, so one row uses one offset throughout.
+                    // Populate bound columns, reading the list `collect_bindings`
+                    // already built: the row-bind offset was applied there, so one
+                    // row uses one offset throughout, and there is no second
+                    // vector allocated per row to hold the same information twice.
                     //
                     // The application supplied both the base pointer and the
                     // offset, and the spec makes the sum its responsibility to
                     // keep in bounds — the same contract as the unoffset pointer.
-                    // Byte arithmetic, because the offset is in bytes.
                     //
-                    // A null pointer is left alone rather than shifted, which is
-                    // `BindOffset::apply`'s business and not restated here:
-                    // `collect_bindings` admits a record with either pointer
-                    // null — the indicator-only binding the spec allows — and
-                    // offsetting `0` would turn that absence into a non-null
-                    // address the 22002 check and `write_column_value` would
-                    // then treat as real.
-                    let binding_info: Vec<(
-                        u16,
-                        odbc_sys::CDataType,
-                        *mut c_void,
-                        isize,
-                        *mut isize,
-                    )> = bindings
-                        .iter()
-                        .map(
-                            |&(col, concise_type, data_ptr, octet_length, indicator_ptr)| {
-                                Ok((
-                                    col,
-                                    c_type_of(concise_type)?,
-                                    bind_offset.apply(data_ptr),
-                                    octet_length,
-                                    bind_offset.apply(indicator_ptr),
-                                ))
-                            },
-                        )
-                        .collect::<Result<Vec<_>, OdbcError>>()?;
-
+                    // `c_type_of` is called **here** rather than at collection
+                    // time, and the ordering is the reason: it can fail with
+                    // `HY003`, and the spec puts that failure after this call's
+                    // `HY010` and `24000` checks, both of which are above.
                     let mut truncated = false;
                     if let Some(ref mut statement) = stmt.statement {
-                        for (col, c_type, target_ptr, buf_len, ind_ptr) in &binding_info {
+                        for &(col, concise_type, target_ptr, buf_len, ind_ptr) in &bindings {
+                            let c_type = c_type_of(concise_type)?;
                             // Under the same deadline as the `fetch` above: these
                             // reads are part of `SQLFetch`'s own execution, so
                             // they fall under `SQLFetch`'s `HYT00` even though
                             // `SQLGetData` called directly has no such row.
                             let value = timer
-                                .check_opt::<B, _, _>(statement.get_data(*col, *c_type), cancel)?;
+                                .check_opt::<B, _, _>(statement.get_data(col, c_type), cancel)?;
                             // Spec 22002: if data is NULL and no indicator variable was supplied, return error.
                             if matches!(*value, ColumnValue::Null) && ind_ptr.is_null() {
                                 return Err(OdbcError::general(
@@ -447,13 +447,8 @@ unsafe fn fetch_with_report<B: Backend>(
                                     SqlState::indicator_variable_required(),
                                 ));
                             }
-                            let written = write_column_value(
-                                &value,
-                                *c_type,
-                                *target_ptr,
-                                *buf_len,
-                                *ind_ptr,
-                            )?;
+                            let written =
+                                write_column_value(&value, c_type, target_ptr, buf_len, ind_ptr)?;
                             if written == SqlReturn::SUCCESS_WITH_INFO {
                                 truncated = true;
                             }
@@ -3102,6 +3097,52 @@ mod tests {
             );
 
             cleanup_stmt_for::<MockCountingBackend>(env, conn, stmt);
+        }
+    }
+
+    /// Bound columns are written in ascending column order, so when two of them
+    /// would fail it is the lower-numbered one an application hears about.
+    ///
+    /// The records live in a `HashMap`, so before `collect_bindings` sorted them
+    /// this was whichever the iterator happened to yield first — stable within a
+    /// run and not across runs, because `RandomState` is seeded per process. With
+    /// the sort removed, this test fails **7 runs in 12**; with it, always passes.
+    /// So a failure here is a real ordering change rather than flakiness.
+    #[test]
+    fn bound_columns_are_written_in_ascending_column_order() {
+        unsafe {
+            let (env, conn, stmt) = null_stmt_no_fetch();
+
+            // MockNullBackend serves NULL for every column. Two bindings with no
+            // indicator, so each would raise 22002 on its own; the diagnostic
+            // names whichever is written first.
+            let mut a: i32 = 0;
+            let mut b: i32 = 0;
+            for (col, buf) in [(3u16, &mut a), (1u16, &mut b)] {
+                assert_eq!(
+                    crate::ffi::bind::sql_bind_col::<MockNullBackend>(
+                        stmt,
+                        col,
+                        CDataType::SLong as i16,
+                        std::ptr::from_mut(buf).cast::<c_void>(),
+                        4,
+                        std::ptr::null_mut(),
+                    ),
+                    SqlReturn::SUCCESS,
+                );
+            }
+
+            assert_eq!(sql_fetch::<MockNullBackend>(stmt), SqlReturn::ERROR);
+            with_handle::<MockNullBackend, StatementHandle<MockNullBackend>, _>(stmt, |handle| {
+                let rec = handle.diagnostics.get(0).expect("a 22002 was posted");
+                assert!(
+                    rec.message.contains("Column 1"),
+                    "the lowest-numbered bound column must be written first, got {:?}",
+                    rec.message
+                );
+            });
+
+            cleanup_stmt_for::<MockNullBackend>(env, conn, stmt);
         }
     }
 

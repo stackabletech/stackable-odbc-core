@@ -896,6 +896,34 @@ work.** `write_wchar` no longer allocates; the numeric→char stack buffer is
 
 `src/ffi/fetch.rs:319-322, 408-427`: fuse `collect_bindings` and `binding_info` (apply `c_type_of` + offset inside the first pass); sort by column number for deterministic write order. Existing fetch tests green; benchmark delta. Commit: `perf: sql_fetch builds its binding list once, in column order`
 
+
+**Outcome (2026-08-03).** Done, but **not as written** — half of what this item
+asked for would have been a spec-ordering bug.
+
+- **`c_type_of` must NOT move into the collection pass.** The `Binding` type
+  alias says why, and it was right: the concise type is kept raw because parsing
+  it can fail with `HY003`, and the spec orders that failure *after* `SQLFetch`'s
+  `HY010` and `24000` checks. `collect_bindings` runs before those checks, so
+  fusing the parse into it would change which SQLSTATE an application sees when
+  both conditions hold. `c_type_of` is now called in the write loop — which is
+  where it already was — and the doc comment says fusing it would be a bug rather
+  than an optimisation, so the next reader does not retry it.
+- **What did fuse is the offset**, which is infallible pointer arithmetic and so
+  carries no ordering constraint. That removes the second `Vec` entirely: it was
+  allocated **per row**, holding the same five fields with two of them shifted.
+- **The sort found a real defect, not just a performance shape.** The records live
+  in a `HashMap`, so the order bound columns were written in — and therefore
+  *which* column's error an application sees when two would fail — varied between
+  runs of the same program. `bound_columns_are_written_in_ascending_column_order`
+  pins it, and it bites: with the sort removed it fails **7 runs in 12**, because
+  `RandomState` is seeded per process.
+- **The benchmark cannot resolve this either, and this time it is quantifiable.**
+  The saving is one `Vec` allocation plus N tuple copies per row; over the
+  benchmark's 100 000 rows that is ~2–3 ms against a 45 ms total, ~5%, well inside
+  the ±16% run-to-run variance measured under Task 6.2. Quoting an
+  `ffi_fetch_bound` delta for this change would be quoting noise, so none is
+  quoted.
+
 ### Task 6.4: Fewer registry lookups per fetch/get_data (P5)
 
 Restructure `fetch_with_report` around one `stmt_with_desc` resolution per AGENTS.md's own `descriptor_token` guidance (~6 → ~4 acquisitions); same for `sql_get_data`'s 3. `handle_lookup` + `ffi_fetch_bound` show the delta; loom models unaffected (no new acquisition *sites* — the site-closure guard `the_set_of_group_lock_acquisition_sites_is_closed` must stay green unmodified, which is the real test here). Commit: `perf: fetch resolves the statement once per call`
