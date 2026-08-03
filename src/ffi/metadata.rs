@@ -5411,6 +5411,40 @@ mod tests {
         }
     }
 
+    /// A column ordinal at `u16::MAX` is `07009` from `SQLColAttributeW`, which is
+    /// the one of the four huge-ordinal cases that answers the state the spec
+    /// gives. The other three are `SQLGetData` (delegated, so the backend's
+    /// `HY000`), `SQLBindCol` (accepted, a documented deferral) and
+    /// `SQLBindParameter` (accepted, and correctly — its `07009` row has only the
+    /// `(DM)` lower-bound clause).
+    #[test]
+    fn col_attribute_with_a_huge_ordinal_returns_07009() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            stmt_with_named_column(stmt);
+
+            let mut buf = [0u16; 32];
+            let mut str_len: i16 = 0;
+            let mut num: isize = 0;
+            let ret = sql_col_attribute_w::<MockBackend>(
+                stmt,
+                u16::MAX,
+                Desc::Name as u16,
+                buf.as_mut_ptr().cast::<c_void>(),
+                64,
+                &mut str_len,
+                &mut num,
+            );
+            assert_eq!(ret, SqlReturn::ERROR);
+            assert_eq!(
+                first_sqlstate::<MockBackend>(stmt),
+                crate::types::sql_state::INVALID_DESCRIPTOR_INDEX,
+            );
+
+            cleanup(env, conn, stmt);
+        }
+    }
+
     /// Column 0 (the bookmark column) with a result set open is `07009`, whose
     /// second clause — "greater than the number of columns in the result set" —
     /// carries no `(DM)` marker and is therefore core's to return. Its

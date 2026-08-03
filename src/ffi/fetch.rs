@@ -3009,6 +3009,134 @@ mod tests {
         }
     }
 
+    /// `SQLGetData` on a NULL value with no indicator buffer is `22002`
+    /// ("indicator variable required but not supplied").
+    ///
+    /// The `SQLFetch` side of this is covered by
+    /// `row_bind_offset_does_not_offset_a_null_indicator_pointer`; this is the
+    /// other path, where the check lives in `sql_get_data` itself rather than in
+    /// the bound-column loop, so one implementation does not cover both.
+    #[test]
+    fn get_data_of_a_null_value_without_an_indicator_is_22002() {
+        unsafe {
+            let (env, conn, stmt) = null_stmt_no_fetch();
+            assert_eq!(sql_fetch::<MockNullBackend>(stmt), SqlReturn::SUCCESS);
+
+            let mut buf: i32 = -1;
+            let ret = sql_get_data::<MockNullBackend>(
+                stmt,
+                1,
+                CDataType::SLong as i16,
+                std::ptr::from_mut(&mut buf).cast::<c_void>(),
+                4,
+                std::ptr::null_mut(), // no indicator: the whole point
+            );
+            assert_eq!(ret, SqlReturn::ERROR);
+            assert_eq!(
+                first_sqlstate::<MockNullBackend>(stmt),
+                crate::types::sql_state::INDICATOR_VARIABLE_REQUIRED,
+            );
+            assert_eq!(
+                buf, -1,
+                "nothing may be written for a NULL with no indicator"
+            );
+
+            cleanup_stmt_for::<MockNullBackend>(env, conn, stmt);
+        }
+    }
+
+    /// A truncating `SQLGetData` posts a `01004` record whose **message** says so,
+    /// not merely a `SQL_SUCCESS_WITH_INFO` return.
+    ///
+    /// `SQL_SUCCESS_WITH_INFO` tells an application to call `SQLGetDiagRec`; a
+    /// record with an empty or unrelated message leaves it unable to tell
+    /// truncation from any other informational condition. The state alone is
+    /// already asserted elsewhere — this pins the record's content.
+    #[test]
+    fn a_truncating_get_data_posts_a_01004_record_that_says_so() {
+        unsafe {
+            let (env, conn, stmt) = long_data_stmt();
+
+            // A buffer far shorter than the column, so the write truncates.
+            let mut buf = [0u16; 4];
+            let mut ind: isize = 0;
+            let ret = sql_get_data::<MockLongDataBackend>(
+                stmt,
+                1,
+                CDataType::WChar as i16,
+                buf.as_mut_ptr().cast::<c_void>(),
+                8,
+                &mut ind,
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS_WITH_INFO, "must report truncation");
+
+            with_handle::<MockLongDataBackend, StatementHandle<MockLongDataBackend>, _>(
+                stmt,
+                |handle| {
+                    let rec = handle
+                        .diagnostics
+                        .get(0)
+                        .expect("a truncation must leave a diagnostic record");
+                    assert_eq!(rec.sqlstate.as_str(), "01004");
+                    assert!(
+                        rec.message.to_lowercase().contains("truncat"),
+                        "the message must name the condition, got {:?}",
+                        rec.message
+                    );
+                    assert_eq!(
+                        rec.native_error, 0,
+                        "a core-generated diagnostic has no native error code"
+                    );
+                },
+            );
+
+            cleanup_long_data(env, conn, stmt);
+        }
+    }
+
+    /// A column ordinal at `u16::MAX` with a row fetched. **Not `07009`**: this
+    /// function's own doc records that the row's "greater than the number of
+    /// columns" clause is delegated to the backend rather than checked here,
+    /// because a precise check would cost an extra round-trip, and the backend
+    /// answers `HY000`.
+    ///
+    /// Pinned so that changing it is a decision rather than an accident — the
+    /// audit expected `07009` here, which is what the spec would give if core
+    /// did the check itself.
+    #[test]
+    fn get_data_with_a_huge_ordinal_is_the_backends_hy000_not_07009() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+                handle.set_result_set(crate::handles::StatementData::Synthetic(
+                    crate::test_utils::synthetic_result_set(vec![vec![
+                        crate::types::ColumnValue::I32(42),
+                    ]]),
+                ));
+            });
+            assert_eq!(sql_fetch::<MockBackend>(stmt), SqlReturn::SUCCESS);
+
+            let mut buf: i64 = 0;
+            let mut ind: isize = 0;
+            let ret = sql_get_data::<MockBackend>(
+                stmt,
+                u16::MAX,
+                CDataType::SLong as i16,
+                std::ptr::from_mut(&mut buf).cast::<c_void>(),
+                8,
+                &mut ind,
+            );
+            assert_eq!(ret, SqlReturn::ERROR);
+            assert_eq!(
+                first_sqlstate::<MockBackend>(stmt),
+                crate::types::sql_state::GENERAL_ERROR,
+                "delegated to the backend, per this function's doc comment"
+            );
+
+            cleanup_stmt_for::<MockBackend>(env, conn, stmt);
+        }
+    }
+
     #[test]
     fn get_data_col_zero_returns_error() {
         unsafe {

@@ -654,6 +654,112 @@ mod tests {
         );
     }
 
+    /// `SQLColumns`' eighteen columns, in the order its spec page prints them.
+    ///
+    /// The count test below proves only that eighteen values come out; nothing
+    /// else pins *which* value is at which ordinal, and an application binds by
+    /// number. Every field here carries a distinguishable value so a transposed
+    /// pair cannot pass.
+    #[test]
+    fn column_row_converts_in_spec_column_order() {
+        let row = ColumnRow {
+            catalog: Some("cat".into()),
+            schema: Some("sch".into()),
+            table_name: "tbl".into(),
+            column_name: "col".into(),
+            data_type: 4,
+            type_name: "INTEGER".into(),
+            column_size: Some(10),
+            buffer_length: Some(4),
+            decimal_digits: Some(0),
+            num_prec_radix: Some(10),
+            nullable: 1,
+            remarks: Some("rem".into()),
+            column_def: Some("42".into()),
+            sql_data_type: 4,
+            sql_datetime_sub: None,
+            char_octet_length: Some(16),
+            ordinal_position: 7,
+            is_nullable: Some("YES".into()),
+        };
+        assert_eq!(
+            row.to_values(),
+            vec![
+                ColumnValue::String("cat".into()),     // 1 TABLE_CAT
+                ColumnValue::String("sch".into()),     // 2 TABLE_SCHEM
+                ColumnValue::String("tbl".into()),     // 3 TABLE_NAME
+                ColumnValue::String("col".into()),     // 4 COLUMN_NAME
+                ColumnValue::I16(4),                   // 5 DATA_TYPE
+                ColumnValue::String("INTEGER".into()), // 6 TYPE_NAME
+                ColumnValue::I32(10),                  // 7 COLUMN_SIZE
+                ColumnValue::I32(4),                   // 8 BUFFER_LENGTH
+                ColumnValue::I16(0),                   // 9 DECIMAL_DIGITS
+                ColumnValue::I16(10),                  // 10 NUM_PREC_RADIX
+                ColumnValue::I16(1),                   // 11 NULLABLE
+                ColumnValue::String("rem".into()),     // 12 REMARKS
+                ColumnValue::String("42".into()),      // 13 COLUMN_DEF
+                ColumnValue::I16(4),                   // 14 SQL_DATA_TYPE
+                ColumnValue::Null,                     // 15 SQL_DATETIME_SUB
+                ColumnValue::I32(16),                  // 16 CHAR_OCTET_LENGTH
+                ColumnValue::I32(7),                   // 17 ORDINAL_POSITION
+                ColumnValue::String("YES".into()),     // 18 IS_NULLABLE
+            ]
+        );
+    }
+
+    /// `SQLProcedureColumns`' nineteen columns, in spec order. One more than
+    /// `SQLColumns`, and the extra one — `COLUMN_TYPE` at ordinal 5 — sits in the
+    /// middle, shifting every column after it, so this is the row where an
+    /// off-by-one is easiest to introduce and hardest to notice.
+    #[test]
+    fn procedure_column_row_converts_in_spec_column_order() {
+        let row = ProcedureColumnRow {
+            catalog: Some("cat".into()),
+            schema: Some("sch".into()),
+            procedure_name: "proc".into(),
+            column_name: "arg".into(),
+            column_type: 1,
+            data_type: 4,
+            type_name: "INTEGER".into(),
+            column_size: Some(10),
+            buffer_length: Some(4),
+            decimal_digits: Some(0),
+            num_prec_radix: Some(10),
+            nullable: 1,
+            remarks: Some("rem".into()),
+            column_def: Some("42".into()),
+            sql_data_type: 4,
+            sql_datetime_sub: None,
+            char_octet_length: Some(16),
+            ordinal_position: 7,
+            is_nullable: Some("YES".into()),
+        };
+        assert_eq!(
+            row.to_values(),
+            vec![
+                ColumnValue::String("cat".into()),     // 1 PROCEDURE_CAT
+                ColumnValue::String("sch".into()),     // 2 PROCEDURE_SCHEM
+                ColumnValue::String("proc".into()),    // 3 PROCEDURE_NAME
+                ColumnValue::String("arg".into()),     // 4 COLUMN_NAME
+                ColumnValue::I16(1),                   // 5 COLUMN_TYPE
+                ColumnValue::I16(4),                   // 6 DATA_TYPE
+                ColumnValue::String("INTEGER".into()), // 7 TYPE_NAME
+                ColumnValue::I32(10),                  // 8 COLUMN_SIZE
+                ColumnValue::I32(4),                   // 9 BUFFER_LENGTH
+                ColumnValue::I16(0),                   // 10 DECIMAL_DIGITS
+                ColumnValue::I16(10),                  // 11 NUM_PREC_RADIX
+                ColumnValue::I16(1),                   // 12 NULLABLE
+                ColumnValue::String("rem".into()),     // 13 REMARKS
+                ColumnValue::String("42".into()),      // 14 COLUMN_DEF
+                ColumnValue::I16(4),                   // 15 SQL_DATA_TYPE
+                ColumnValue::Null,                     // 16 SQL_DATETIME_SUB
+                ColumnValue::I32(16),                  // 17 CHAR_OCTET_LENGTH
+                ColumnValue::I32(7),                   // 18 ORDINAL_POSITION
+                ColumnValue::String("YES".into()),     // 19 IS_NULLABLE
+            ]
+        );
+    }
+
     #[test]
     fn every_row_type_produces_its_spec_column_count() {
         // The descriptors and the row values are built by separate code and

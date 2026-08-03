@@ -52,7 +52,10 @@ use crate::types::SqlReturn;
 ///   exceeds the maximum number of columns in the result set. The binding is stored without
 ///   checking, because binding is legal before a result set exists: `SQLBindCol` is routinely
 ///   called before `SQLExecute`, when there is no column count to compare against, and the row
-///   carries no `(DM)` marker, so nothing else checks it either. Deferred.
+///   carries no `(DM)` marker, so nothing else checks it either. So the clause is
+///   genuinely the driver's and genuinely unimplemented — a gap, not a
+///   delegation. `bind_col_with_a_huge_ordinal_is_accepted` pins the current
+///   behaviour so that closing it is a deliberate change.
 /// - `HY000` General error — returned for unexpected failures
 /// - `HY001` Memory allocation error — not applicable: Rust's allocator aborts on OOM
 ///   rather than returning an error, and `panic_safe` contains any unwind, so there is
@@ -214,6 +217,37 @@ mod tests {
         };
         assert_eq!(ret, SqlReturn::SUCCESS, "no diagnostic record was posted");
         String::from_utf16_lossy(&state[..5])
+    }
+
+    /// A column ordinal at `u16::MAX` is **accepted**, which this function's own
+    /// `07009` bullet already states: the binding is stored without comparing
+    /// against a column count, because `SQLBindCol` is legally called before a
+    /// result set exists and the row carries no `(DM)` marker, so nothing else
+    /// checks it either.
+    ///
+    /// Pinned because the audit expected `07009`. The clause really is the
+    /// driver's and really is unimplemented; a future implementation should
+    /// change this test deliberately rather than discover it.
+    #[test]
+    fn bind_col_with_a_huge_ordinal_is_accepted() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            let mut buf: i64 = 0;
+            let ret = sql_bind_col::<MockBackend>(
+                stmt,
+                u16::MAX,
+                CDataType::SBigInt as i16,
+                std::ptr::from_mut(&mut buf).cast::<c_void>(),
+                std::mem::size_of::<i64>() as isize,
+                std::ptr::null_mut(),
+            );
+            assert_eq!(
+                ret,
+                SqlReturn::SUCCESS,
+                "stored without a column-count check, per the doc comment"
+            );
+            cleanup_env_conn_stmt(env, conn, stmt);
+        }
     }
 
     #[test]

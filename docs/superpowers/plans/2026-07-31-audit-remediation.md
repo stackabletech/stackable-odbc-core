@@ -759,13 +759,42 @@ the same trap as Task 3.3), and `INVALID_ATTRIBUTE_IDENTIFIER` guessed for
 
 ### Task 5.4: Remaining coverage gaps
 
-- [ ] `22002` assertions (both `sql_fetch` bound-column and `sql_get_data` paths — the fetch one lands with Task 1.1's test; add the get_data one).
-- [ ] One `01004` test asserting the diagnostic *record* content, not just SUCCESS_WITH_INFO.
-- [ ] Spec-order tests for `ColumnRow` (18 columns) and `ProcedureColumnRow` (19) in `types/catalog_rows.rs`, mirroring `table_row_converts_in_spec_column_order`.
-- [ ] Huge-ordinal tests: `column_number = u16::MAX` → `07009` for `sql_get_data`, `sql_bind_col`, `sql_bind_parameter`, `sql_col_attribute_w`.
-- [ ] GATE. Commit: `test: 22002, 01004 record content, wide catalog rows and huge ordinals are pinned`
+- [x] `22002` assertions (both `sql_fetch` bound-column and `sql_get_data` paths — the fetch one lands with Task 1.1's test; add the get_data one).
+- [x] One `01004` test asserting the diagnostic *record* content, not just SUCCESS_WITH_INFO.
+- [x] Spec-order tests for `ColumnRow` (18 columns) and `ProcedureColumnRow` (19) in `types/catalog_rows.rs`, mirroring `table_row_converts_in_spec_column_order`.
+- [x] Huge-ordinal tests: `column_number = u16::MAX` → `07009` for `sql_get_data`, `sql_bind_col`, `sql_bind_parameter`, `sql_col_attribute_w`.
+- [x] GATE. Commit: `test: 22002, 01004 record content, wide catalog rows and huge ordinals are pinned`
 
 ---
+
+
+**Outcome (2026-08-03).** Eight tests. Phase 5 closes. The huge-ordinal item was
+built on an assumption that held for **one of its four** functions, and finding
+that out was the substance of the task.
+
+- **`u16::MAX` gives `07009` only from `SQLColAttributeW`.** Probed rather than
+  assumed, and each of the other three is already documented behaviour rather
+  than a new bug:
+  - `SQLGetData` → the backend's `HY000`. Its own `07009` bullet says the
+    column-count clause "is delegated to the backend ... a precise check would
+    require an extra round-trip".
+  - `SQLBindCol` → **accepted**. Its `07009` bullet says the binding is stored
+    without a count check, because binding legally precedes a result set. That
+    clause carries no `(DM)` marker, so it is a real unimplemented gap; the test
+    pins the gap so closing it is deliberate.
+  - `SQLBindParameter` → **accepted, and correctly**: its `07009` row has exactly
+    one clause, the `(DM)` "less than 1", so there is no upper bound to enforce.
+  Each test is named for what it checks, with the reason in its doc.
+- **The first probe was wrong before the code was.** `SQLGetData` answered `24000`
+  until the probe fetched a row first — the setup's fault, not the function's.
+  Worth the extra step: `24000` looks like a finding.
+- **`SQLBindCol` carried the same dangling "Deferred."** that Task 4.1 removed
+  from `connect_attr.rs`. It now says what was deferred and points at the test.
+- The `01004` test asserts the record's **message** and `native_error`, not just
+  its state — the state alone was already covered in `info.rs`.
+- The two spec-order tests passed first time. `ProcedureColumnRow`'s extra column
+  (`COLUMN_TYPE` at ordinal 5) sits mid-row and shifts the fourteen after it,
+  which is why it is worth pinning separately from `ColumnRow`.
 
 ## Phase 6 — Performance (each verified by the Task 0.1 benchmark; correctness by existing tests)
 

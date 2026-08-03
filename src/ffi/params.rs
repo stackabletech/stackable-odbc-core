@@ -3432,6 +3432,38 @@ mod tests {
         }
     }
 
+    /// A parameter ordinal at `u16::MAX` is **accepted**, and unlike
+    /// `SQLBindCol`'s equivalent that is not a deferral: this function's `07009`
+    /// row has exactly one clause — "(DM) The value specified for the argument
+    /// *ParameterNumber* was less than 1" — so there is no upper bound for the
+    /// driver to enforce. A parameter count is not known until the statement is
+    /// prepared, and binding precedes that.
+    #[test]
+    fn bind_parameter_with_a_huge_ordinal_is_accepted() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            let mut val: i32 = 0;
+            let ret = sql_bind_parameter::<MockBackend>(
+                stmt,
+                u16::MAX,
+                ParamType::Input as i16,
+                CDataType::SLong as i16,
+                SqlDataType::INTEGER.0,
+                0,
+                0,
+                std::ptr::from_mut(&mut val).cast::<c_void>(),
+                4,
+                std::ptr::null_mut(),
+            );
+            assert_eq!(
+                ret,
+                SqlReturn::SUCCESS,
+                "the row's only clause is the (DM) lower bound"
+            );
+            cleanup(env, conn, stmt);
+        }
+    }
+
     #[test]
     fn bind_parameter_zero_number_returns_error() {
         unsafe {
