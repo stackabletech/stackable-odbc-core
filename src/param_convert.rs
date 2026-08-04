@@ -3,7 +3,7 @@
 //!
 //! `SQLBindParameter` takes two types: `ValueType`, the C type the value is
 //! delivered in, and `ParameterType`, the SQL type the data source is to
-//! receive. ODBC makes the driver convert between them — "If necessary, the
+//! receive. ODBC makes the driver convert between them: "If necessary, the
 //! driver converts the data from the data type specified by the *ValueType*
 //! argument in **SQLBindParameter** to the data type specified by the
 //! *ParameterType* argument, and then sends the data to the data source"
@@ -19,7 +19,7 @@
 //!
 //! This module is the [C to SQL: Character] table, transcribed. The table's
 //! first column gives the legal `ParameterType` values, and its third gives the
-//! SQLSTATE for each outcome — which is why the failures here are 22018 /
+//! SQLSTATE for each outcome, which is why the failures here are 22018 /
 //! 22001 / 22003 / 22008 rather than a single general error.
 //!
 //! This module owns the size checks all three C-to-SQL tables share, because
@@ -59,10 +59,10 @@ use crate::{
     types::{ColumnValue, SqlState, ULen},
 };
 
-// -- the four SQLSTATEs the table's third column names ----------------------
+// the four SQLSTATEs the table's third column names -------------------------
 
 /// "Data value is not a *numeric-literal*" / "not a hexadecimal value" / "not a
-/// valid *ODBC-date-literal*…" — the text does not denote a value of the
+/// valid *ODBC-date-literal*…": the text does not denote a value of the
 /// declared type at all.
 fn not_a_literal(text: &str, sql_type: &str) -> OdbcError {
     OdbcError::general(
@@ -72,7 +72,7 @@ fn not_a_literal(text: &str, sql_type: &str) -> OdbcError {
 }
 
 /// "Data converted with truncation of fractional digits" / "loss of whole …
-/// digits" — the value is well formed but does not survive the conversion
+/// digits": the value is well formed but does not survive the conversion
 /// intact, so it is not sent.
 pub(crate) fn truncation(text: &str, what: &str) -> OdbcError {
     OdbcError::general(
@@ -94,7 +94,7 @@ fn out_of_range(text: &str, sql_type: &str) -> OdbcError {
 /// [`MAX_DECIMAL_EXPANSION_DIGITS`].
 ///
 /// 22001, because the *C to SQL: Character* table's
-/// `SQL_DECIMAL`/`SQL_NUMERIC`/integer row offers exactly four outcomes —
+/// `SQL_DECIMAL`/`SQL_NUMERIC`/integer row offers exactly four outcomes:
 /// "Data converted without truncation" (n/a), "Data converted with truncation
 /// of fractional digits" (22001), "Conversion of data would result in loss of
 /// whole (as opposed to fractional) digits" (22001) and "Data value is not a
@@ -103,7 +103,7 @@ fn out_of_range(text: &str, sql_type: &str) -> OdbcError {
 /// decimal point lands on the same state whichever way it leans. 22018 would be
 /// wrong: the text *is* a numeric-literal.
 ///
-/// The read direction disagrees, and correctly so — see
+/// The read direction disagrees, and correctly so; see
 /// [`DecimalLiteral::to_integer`].
 fn unexpandable(text: &str) -> OdbcError {
     OdbcError::general(
@@ -131,12 +131,12 @@ fn datetime_overflow(text: &str, what: &str) -> OdbcError {
 ///
 /// SQL types the [C to SQL: Character] table does not list are returned as
 /// [`ColumnValue::String`] unchanged. That is not a silent fallback: the spec
-/// puts the rejection at bind time rather than here — "If the *ParameterType*
+/// puts the rejection at bind time rather than here: "If the *ParameterType*
 /// argument in **SQLBindParameter** contains the identifier of an ODBC SQL data
 /// type that is not shown in the table for a given C data type,
-/// **SQLBindParameter** returns SQLSTATE 07006" — so by the time a value
-/// reaches this function the pairing has already been accepted, and text is the
-/// only faithful thing left to send. It also covers the character SQL types,
+/// **SQLBindParameter** returns SQLSTATE 07006". By the time a value reaches
+/// this function the pairing has already been accepted, and text is the only
+/// faithful thing left to send. It also covers the character SQL types,
 /// where text *is* the answer, and driver-specific type identifiers, which only
 /// the backend can interpret.
 ///
@@ -146,7 +146,7 @@ fn datetime_overflow(text: &str, what: &str) -> OdbcError {
 /// `DecimalDigits`. Every row of the table that tests a value against them is
 /// enforced here:
 ///
-/// - **Exact numerics.** `SQL_DECIMAL` and `SQL_NUMERIC` — see
+/// - **Exact numerics.** `SQL_DECIMAL` and `SQL_NUMERIC`: see
 ///   [`check_declared_decimal_size`], which also records why the four integer
 ///   types need no such check.
 /// - **Character targets.** "Byte length of data > Column length" is 22001 for
@@ -154,15 +154,15 @@ fn datetime_overflow(text: &str, what: &str) -> OdbcError {
 ///   the same test in characters. Both are measured **in characters**, and the
 ///   narrow row's deviation from its own wording is deliberate: `ColumnSize`
 ///   for a character column is declared in characters, and the row's byte
-///   wording dates from when the two coincided. Under UTF-8 they do not —
-///   `"äöüßx"` is five characters and nine bytes — so reading it literally
+///   wording dates from when the two coincided. Under UTF-8 they do not
+///   (`"äöüßx"` is five characters and nine bytes), so reading it literally
 ///   would reject a value bound at its column's own declared length, which the
-///   data source would have accepted. A false 22001 is a worse outcome than
-///   the missing diagnostic this check replaced. An astral character therefore
-///   counts once against a `VARCHAR` and twice against a `WVARCHAR`; the two
-///   rows are different tests and a test pins both.
+///   data source would have accepted. A false 22001 is a worse outcome than no
+///   diagnostic at all. An astral character therefore counts once against a
+///   `VARCHAR` and twice against a `WVARCHAR`; the two rows are different tests
+///   and a test pins both.
 /// - **Binary targets.** "(Byte length of data) / 2 > column byte length" is
-///   22001, the halving being the hex-pair conversion — see
+///   22001, the halving being the hex-pair conversion; see
 ///   [`check_declared_binary_size`].
 ///
 /// A `col_size` of 0 disables all of them, for the reason
@@ -247,11 +247,11 @@ pub(crate) fn text_to_sql_type(
     // using the older number.
     //
     // `odbc_sys` names 9 `DATETIME`, which is the *verbose* `SQL_DATETIME`
-    // spelling of the same number — but `SQLBindParameter`'s `ParameterType` is
-    // a **concise** type, where 9 is `SQL_DATE`. It therefore belongs with date
-    // and not with timestamp, which is where it sat until this was checked
-    // against AWS's Redshift ODBC driver: `convertCParamDataToSQLData` opens
-    // that branch `case SQL_TYPE_DATE: case SQL_DATE:`.
+    // spelling of the same number. `SQLBindParameter`'s `ParameterType` is a
+    // **concise** type, though, where 9 is `SQL_DATE`, so it belongs with date
+    // and not with timestamp. AWS's Redshift ODBC driver agrees:
+    // `convertCParamDataToSQLData` opens that branch
+    // `case SQL_TYPE_DATE: case SQL_DATE:`.
     if sql_type == SqlDataType::DATE || sql_type == SqlDataType::DATETIME {
         return to_date(text);
     }
@@ -265,7 +265,7 @@ pub(crate) fn text_to_sql_type(
     // Character targets. The table gives the narrow row "Byte length of data >
     // Column length" and the wide row the same test in characters; both are
     // measured here in characters, and the narrow row's deviation from its own
-    // wording is deliberate — see this function's "Declared size" note.
+    // wording is deliberate; see this function's "Declared size" note.
     if sql_type == SqlDataType::CHAR
         || sql_type == SqlDataType::VARCHAR
         || sql_type == SqlDataType::EXT_LONG_VARCHAR
@@ -288,7 +288,7 @@ pub(crate) fn text_to_sql_type(
     Ok(ColumnValue::String(text.to_owned()))
 }
 
-// -- numeric-literal parsing -------------------------------------------------
+// numeric-literal parsing ----------------------------------------------------
 
 /// The maximum precision of an ODBC `SQL_DECIMAL` / `SQL_NUMERIC` value: a
 /// `SQL_NUMERIC_STRUCT` carries `SQL_MAX_NUMERIC_LEN` (16) mantissa bytes, and
@@ -300,7 +300,7 @@ pub(crate) const MAX_ODBC_DECIMAL_PRECISION: usize = 38;
 ///
 /// # What is bounded
 ///
-/// The characters a rendering has to *materialise* — the three
+/// The characters a rendering has to *materialise*: the three
 /// `"0".repeat(…)` calls, two in [`DecimalLiteral::to_decimal_string`] (one per
 /// scale sign) and one in [`DecimalLiteral::to_integer`]'s negative-scale
 /// branch. Significant digits the caller spelled out are memory it has already
@@ -310,13 +310,12 @@ pub(crate) const MAX_ODBC_DECIMAL_PRECISION: usize = 38;
 /// **Leading fractional zeros are the exception, and they are counted.**
 /// [`DecimalLiteral::significant`] strips them at parse time, so
 /// `to_decimal_string`'s positive-scale branch re-synthesises them with its own
-/// `"0".repeat` — they really are materialised, whoever typed them. A literal
-/// with every digit
-/// written out, `"0."` followed by 1 048 577 zeros and a `1`, therefore reports
-/// 1 048 577 synthesised digits and is refused. That is fail-closed and
-/// deliberate: the measurement matches what the renderer allocates, which is
-/// the property the bound needs. The alternative — counting supplied leading
-/// zeros as free — would understate the allocation by exactly their number.
+/// `"0".repeat`, so they really are materialised, whoever typed them. A literal
+/// with every digit written out, `"0."` followed by 1 048 577 zeros and a `1`,
+/// therefore reports 1 048 577 synthesised digits and is refused. That is
+/// fail-closed: the measurement matches what the renderer allocates, which is
+/// the property the bound needs. Counting supplied leading zeros as free would
+/// understate the allocation by exactly their number.
 ///
 /// # Derivation
 ///
@@ -327,19 +326,18 @@ pub(crate) const MAX_ODBC_DECIMAL_PRECISION: usize = 38;
 /// |---|---|
 /// | ODBC `SQL_DECIMAL` / `SQL_NUMERIC` | 38 ([`MAX_ODBC_DECIMAL_PRECISION`]) |
 /// | IEEE-754 binary64 (`SQL_DOUBLE`, `SQL_C_DOUBLE`) | 323 for the smallest subnormal `4.9e-324`; 307 for `1.8e308` |
-/// | PostgreSQL `numeric`, the widest exact type among the mainstream data sources | [`WIDEST_REAL_DATA_SOURCE_EXPANSION`] — 131 072 whole digits and 16 383 fractional, per its own documented limits |
+/// | PostgreSQL `numeric`, the widest exact type among the mainstream data sources | [`WIDEST_REAL_DATA_SOURCE_EXPANSION`]: 131 072 whole digits and 16 383 fractional, per its own documented limits |
 ///
 /// 2²⁰ clears the largest of those by more than seven times, so no value any of
 /// them can hold is refused, while capping the transient *peak* at about
-/// **2 MiB** — not 1 MiB: every `"0".repeat` is immediately consumed by a
+/// **2 MiB** rather than 1 MiB: every `"0".repeat` is immediately consumed by a
 /// `format!` that copies it, so the padding and the finished string are both
 /// live for a moment. That is about three orders of magnitude below the ~2 GiB
 /// a single unbounded `i32` exponent asks for, and small enough that exceeding
 /// it could never be the difference between a diagnostic and an abort. The
-/// `const` assertions below
-/// hold the derivation from both sides: tightening the bound onto the ODBC
-/// precision alone fails to compile, and so does loosening it back into a
-/// hazard.
+/// `const` assertions below hold the derivation from both sides: tightening the
+/// bound onto the ODBC precision alone fails to compile, and so does loosening
+/// it back into a hazard.
 ///
 /// # What is actually refused
 ///
@@ -351,10 +349,10 @@ pub(crate) const MAX_ODBC_DECIMAL_PRECISION: usize = 38;
 ///
 /// | literal | scale | refused? |
 /// |---|---|---|
-/// | non-zero mantissa, `scale < −2²⁰` (large non-negative exponent, `"1e2147483646"`) | very negative | **yes** — `"0".repeat(−scale)` |
-/// | **zero** mantissa, any `scale ≤ 0` (`"0e2147483646"`) | any ≤ 0 | no — renders `"0"`, allocates nothing |
-/// | any mantissa, `scale − significant digits > 2²⁰` (large *negative* exponent, `"0e-2147483647"`, `"1e-2147483647"`) | very positive | **yes** — the padding to `scale` characters happens whether or not the mantissa is zero |
-/// | non-zero mantissa, `scale > 0` and enough digits to cover it | positive | no — a decimal point is inserted, nothing is synthesised |
+/// | non-zero mantissa, `scale < −2²⁰` (large non-negative exponent, `"1e2147483646"`) | very negative | **yes**, via `"0".repeat(−scale)` |
+/// | **zero** mantissa, any `scale ≤ 0` (`"0e2147483646"`) | any ≤ 0 | no: renders `"0"`, allocates nothing |
+/// | any mantissa, `scale − significant digits > 2²⁰` (large *negative* exponent, `"0e-2147483647"`, `"1e-2147483647"`) | very positive | **yes**: the padding to `scale` characters happens whether or not the mantissa is zero |
+/// | non-zero mantissa, `scale > 0` and enough digits to cover it | positive | no: a decimal point is inserted, nothing is synthesised |
 ///
 /// So a zero mantissa is refused too, at a large negative exponent; only the
 /// `scale ≤ 0` half of the zero case is free. And it is still not a range check
@@ -365,34 +363,34 @@ pub(crate) const MAX_ODBC_DECIMAL_PRECISION: usize = 38;
 /// # The accepted range is total
 ///
 /// Everything inside the bound renders; being accepted and rendering
-/// successfully are the same thing. That is worth stating because it was once
-/// not true: [`DecimalLiteral::to_decimal_string`]'s positive-scale branch used
-/// `format!`'s `{digits:0>scale$}` width, which Rust caps at `u16::MAX`, so any
-/// `scale` from 65 536 up panicked with "Formatting argument out of range"
-/// instead of rendering — a range this bound accepts and PostgreSQL `numeric`
-/// can reach. That branch now builds its padding with `"0".repeat`, and two
-/// tests pin the old boundary from the far side.
+/// successfully are the same thing. [`DecimalLiteral::to_decimal_string`]'s
+/// positive-scale branch builds its padding with `"0".repeat` rather than
+/// `format!`'s `{digits:0>scale$}` width for that reason: Rust caps a format
+/// width at `u16::MAX`, so any `scale` from 65 536 up would panic with
+/// "Formatting argument out of range" instead of rendering, and that is a range
+/// this bound accepts and PostgreSQL `numeric` can reach. Two tests pin the
+/// 65 535 boundary from the far side.
 ///
-/// The alternative — lowering the bound to `u16::MAX` — was rejected: it would
-/// have traded a contained panic for wrong answers on legitimate data, since
-/// the derivation table above requires accepting scales far beyond 65 535.
+/// Lowering the bound to `u16::MAX` instead would trade a contained panic for
+/// wrong answers on legitimate data, since the derivation table above requires
+/// accepting scales far beyond 65 535.
 ///
 /// # Why a bound at all
 ///
 /// A failed allocation aborts the process rather than unwinding, so
 /// [`crate::panic::panic_safe`] cannot turn it into a `SQL_ERROR`. An exponent
-/// arrives from two directions — an application's `SQL_C_CHAR` parameter, and a
-/// `ColumnValue::Decimal`/`ColumnValue::String` the *data source* returned — and
+/// arrives from two directions, an application's `SQL_C_CHAR` parameter and a
+/// `ColumnValue::Decimal`/`ColumnValue::String` the *data source* returned, and
 /// the second is outside the driver's trust boundary.
 pub(crate) const MAX_DECIMAL_EXPANSION_DIGITS: usize = 1 << 20;
 
 /// The most decimal digits a `u128` can hold, and so the most a
 /// `SQL_NUMERIC_STRUCT`'s 16-byte `val` can carry.
 ///
-/// `u128::MAX` is 340282366920938463463374607431768211455 — 39 digits. Used by
-/// [`DecimalLiteral::to_numeric_struct`] to reject a shift before expanding it
-/// into a string, so a large exponent is `22003` rather than a multi-gigabyte
-/// allocation.
+/// `u128::MAX` is 340282366920938463463374607431768211455, which is 39 digits.
+/// Used by [`DecimalLiteral::to_numeric_struct`] to reject a shift before it is
+/// expanded into a string, so a large exponent is `22003` rather than a
+/// multi-gigabyte allocation.
 const MAX_U128_DIGITS: usize = 39;
 
 /// A plain-decimal rendering of the widest exact numeric type any mainstream
@@ -412,16 +410,16 @@ const MAX_BINARY64_SYNTHESISED_DIGITS: usize = 323;
 // prose. The bound clears every source in that table with room to spare, so no
 // value one of them can hold is refused.
 const _: () = assert!(MAX_DECIMAL_EXPANSION_DIGITS > WIDEST_REAL_DATA_SOURCE_EXPANSION);
-// Subsumed by the line above — 361 is far below 147 455 — and kept because it
-// is the pairing a reader checks first, and because dropping it would leave
-// both of its constants unreferenced. It documents; it cannot fail alone.
+// Subsumed by the line above (361 is far below 147 455) and kept because it is
+// the pairing a reader checks first, and because dropping it would leave both
+// of its constants unreferenced. It documents; it cannot fail alone.
 const _: () = assert!(
     MAX_DECIMAL_EXPANSION_DIGITS > MAX_ODBC_DECIMAL_PRECISION + MAX_BINARY64_SYNTHESISED_DIGITS
 );
 // And the direction the two above cannot see. They pin the bound from below
 // only, so a later "let us be safer still" edit raising it to `1 << 40` would
 // compile and silently restore the multi-gigabyte allocation this constant
-// exists to prevent — the hazard is a bound that is too *loose*, and only this
+// exists to prevent. The hazard is a bound that is too *loose*, and only this
 // line fails when one is introduced. 2^22 is about 4 MiB, still an order of
 // magnitude above the widest row of the table.
 const _: () = assert!(MAX_DECIMAL_EXPANSION_DIGITS <= 1 << 22);
@@ -445,9 +443,9 @@ pub(crate) struct DecimalLiteral {
 /// per "When character C data is converted to numeric, date, time, or timestamp
 /// SQL data, leading and trailing blanks are ignored."
 ///
-/// Deliberately stricter than `str::parse::<f64>()`, which also accepts `inf`
-/// and `NaN` — neither is a numeric-literal, and neither is something to send
-/// to a data source as one.
+/// Stricter than `str::parse::<f64>()`, which also accepts `inf` and `NaN`.
+/// Neither is a numeric-literal, and neither is something to send to a data
+/// source as one.
 ///
 /// Shared with [`crate::numeric_convert`], which canonicalises every numeric C
 /// type through a [`DecimalLiteral`] so its exact rows compare digits rather
@@ -494,7 +492,7 @@ impl DecimalLiteral {
     ///
     /// Built directly rather than by rendering to text and parsing it back,
     /// because [`crate::numeric_convert`] calls this for every bound integer
-    /// parameter of every execution — the one place in this family that is on a
+    /// parameter of every execution, the one place in this family that is on a
     /// hot path rather than a per-statement one.
     pub(crate) fn from_integer(value: i128) -> Self {
         Self {
@@ -515,7 +513,7 @@ impl DecimalLiteral {
     }
 
     /// The digits an expansion to plain decimal notation would have to
-    /// synthesise — zeros the source text did not contain.
+    /// synthesise: zeros the source text did not contain.
     ///
     /// This measures [`Self::to_decimal_string`] branch for branch, which is
     /// the property that keeps the bound from refusing a value that costs
@@ -557,16 +555,15 @@ impl DecimalLiteral {
     /// something every data source accepts where `150` is.
     ///
     /// Past [`MAX_DECIMAL_EXPANSION_DIGITS`] the plain form is not rendered and
-    /// the exponent form is returned instead. That keeps this function total —
-    /// seven call sites across two modules read it, and the exponent form is
-    /// still an exact, syntactically valid *numeric-literal* — while removing
-    /// the only unbounded allocation on the path. It is a fail-safe, not the
-    /// answer: [`text_to_sql_type`] refuses such a value with [`unexpandable`]
-    /// before it renders one, so nothing this branch produces is sent to a
-    /// data source today. The other six call sites are in
-    /// [`crate::numeric_convert`], whose literals come from
+    /// the exponent form is returned instead. That keeps this function total,
+    /// since the exponent form is still an exact, syntactically valid
+    /// *numeric-literal*, while removing the only unbounded allocation on the
+    /// path. It is a fail-safe rather than the answer: [`text_to_sql_type`]
+    /// refuses such a value with [`unexpandable`] before it renders one, so
+    /// nothing this branch produces reaches a data source. The remaining
+    /// callers are in [`crate::numeric_convert`], whose literals come from
     /// [`Self::from_integer`] (scale 0), from `SQL_C_NUMERIC`'s `i8` scale, or
-    /// from `f64::to_string`, which emits no exponent at all — so none of them
+    /// from `f64::to_string`, which emits no exponent at all, so none of them
     /// can reach this branch.
     pub(crate) fn to_decimal_string(&self) -> String {
         let sign = if self.negative && !self.is_zero() {
@@ -592,15 +589,15 @@ impl DecimalLiteral {
         } else {
             // The padding is built explicitly rather than with `format!`'s
             // `{digits:0>scale$}` width, which Rust caps at `u16::MAX` and
-            // which therefore *panicked* for any scale from 65 536 up — a range
+            // which therefore panics for any scale from 65 536 up, a range
             // `MAX_DECIMAL_EXPANSION_DIGITS` accepts and must render, since
             // PostgreSQL `numeric` alone reaches scale 16 383 and the bound is
             // sized for 147 455. Lowering the bound to `u16::MAX` instead would
             // trade a contained panic for a wrong answer on legitimate data.
             //
             // The repeat count is `synthesised_digits`' own expression for this
-            // cell — `scale.saturating_sub(significant().len())`, where `digits`
-            // *is* `significant()` — so the bound still measures this branch
+            // cell, `scale.saturating_sub(significant().len())`, where `digits`
+            // *is* `significant()`, so the bound still measures this branch
             // exactly and the allocation is the one already accounted for.
             let zeros = "0".repeat(scale.saturating_sub(digits.len()));
             format!("{sign}0.{zeros}{digits}")
@@ -629,8 +626,8 @@ impl DecimalLiteral {
     /// Truncated, not rounded: the *C to SQL: Numeric* table's exact-numeric row
     /// says "with truncated of fractional digits", and this is the conversion
     /// that row describes the driver performing. Used only by
-    /// [`crate::numeric_convert`] — this table refuses such a value instead, so
-    /// it has nothing to truncate.
+    /// [`crate::numeric_convert`], because this table refuses such a value
+    /// instead and so has nothing to truncate.
     ///
     /// A literal already at or below `scale`, or one with a negative scale
     /// (a whole number with implied trailing zeros), is returned unchanged.
@@ -687,7 +684,7 @@ impl DecimalLiteral {
     ///
     /// The struct is `±val × 10⁻ˢᶜᵃˡᵉ` with `val` a little-endian *unsigned*
     /// magnitude and no decimal point, which is the same shape a
-    /// [`DecimalLiteral`] already has — so this is a rescale and a base
+    /// [`DecimalLiteral`] already has. So this is a rescale and a base
     /// conversion, not a numeric conversion, and the digits never pass through a
     /// float.
     ///
@@ -786,19 +783,19 @@ impl DecimalLiteral {
     /// The value truncated toward zero, or `None` if it does not fit `i128`.
     ///
     /// A literal past [`MAX_DECIMAL_EXPANSION_DIGITS`] is `None` too, and
-    /// deliberately reported the same way: it is a magnitude no integer target
-    /// holds either, and every caller already maps `None` to the SQLSTATE its
-    /// own conversion table names for that — 22001 in [`to_integer`] (*C to
+    /// reported the same way on purpose, since it is a magnitude no integer
+    /// target holds either. Every caller already maps `None` to the SQLSTATE
+    /// its own conversion table names for that: 22001 in [`to_integer`] (*C to
     /// SQL: Character*), 22003 in `column_value::write_exact_integer` (*SQL to
     /// C: Character* and *SQL to C: Numeric*) and in
     /// [`crate::numeric_convert`] (*C to SQL: Numeric*). The two directions
     /// genuinely disagree about the state, so the bound must not name one.
     pub(crate) fn to_integer(&self) -> Option<i128> {
-        // REQUIRED FOR THE BOUND TO HOLD — not an optimisation, however much it
+        // REQUIRED FOR THE BOUND TO HOLD. Not an optimisation, however much it
         // reads like one. This is the only thing standing between a zero
         // mantissa and `"0".repeat(2_147_483_646)`.
         //
-        // The cell it covers is `is_zero()` with `scale <= 0` — a zero at a
+        // The cell it covers is `is_zero()` with `scale <= 0`: a zero at a
         // large *non-negative exponent*, such as `"0e2147483646"`.
         // [`Self::synthesised_digits`] reports **0** for that cell by design,
         // because [`Self::to_decimal_string`] renders it as `"0"` before
@@ -807,11 +804,11 @@ impl DecimalLiteral {
         // return the negative-scale branch would expand the exponent in full.
         // The two guards are complementary; neither covers this cell alone.
         //
-        // Deleting this reintroduces the original denial of service, and the
-        // test that fails is
-        // `tests::a_zero_mantissa_with_a_pathological_exponent_still_reaches_an_integer`
-        // — by wrong result as well as by allocation, since the expansion ends
-        // in a `parse::<i128>` failure and a `None`.
+        // Deleting this reintroduces a denial of service. The test that fails
+        // is
+        // `tests::a_zero_mantissa_with_a_pathological_exponent_still_reaches_an_integer`,
+        // by wrong result as well as by allocation, since the expansion ends in
+        // a `parse::<i128>` failure and a `None`.
         if self.is_zero() {
             return Some(0);
         }
@@ -846,8 +843,8 @@ fn decimal_literal(text: &str, sql_type: &str) -> Result<DecimalLiteral, OdbcErr
     parse_numeric_literal(text).ok_or_else(|| not_a_literal(text, sql_type))
 }
 
-/// The declared column size was exceeded — the [C to SQL: Character] table's
-/// "Byte length of data > Column length" row and its siblings.
+/// The declared column size was exceeded, as in the [C to SQL: Character]
+/// table's "Byte length of data > Column length" row and its siblings.
 ///
 /// The message names the measured length and the declared size rather than the
 /// value, unlike [`truncation`] and [`out_of_range`] next door. These are
@@ -867,7 +864,7 @@ pub(crate) fn oversized(actual: usize, unit: &str, declared: ULen) -> OdbcError 
 
 /// Apply the declared `ColumnSize` to a character target.
 ///
-/// `measured` is the value's length in the unit its row names — characters for
+/// `measured` is the value's length in the unit its row names: characters for
 /// `SQL_CHAR` and its siblings, UTF-16 code units for the `SQL_W*` ones. The
 /// caller picks the unit, because it is fixed by the target SQL type and not by
 /// the C type the value arrived in.
@@ -896,9 +893,10 @@ pub(crate) fn check_declared_char_size(measured: usize, col_size: ULen) -> Resul
 /// This serves a row in each of the two C-to-SQL tables, because both ask the
 /// same question of the same thing: the byte string about to be sent must not
 /// exceed the declared column length. [C to SQL: Character] words it as
-/// "(Byte length of data) / 2 > column byte length" — the halving is the
-/// hex-pair conversion, so the test is the produced byte count — and
-/// [C to SQL: Binary]'s binary row as "Length of data > column length".
+/// "(Byte length of data) / 2 > column byte length", the halving being the
+/// hex-pair conversion, so the test is the produced byte count.
+/// [C to SQL: Binary]'s binary row words it as "Length of data > column
+/// length".
 ///
 /// `len` is therefore the number of bytes that will reach the backend, not the
 /// length of whatever the application handed over. A `col_size` of 0 disables
@@ -920,7 +918,7 @@ pub(crate) fn check_declared_binary_size(len: usize, col_size: ULen) -> Result<(
 ///
 /// These are `SQLBindParameter`'s `ColumnSize` and `DecimalDigits`, which for
 /// `SQL_DECIMAL` and `SQL_NUMERIC` set the IPD's `SQL_DESC_PRECISION` and
-/// `SQL_DESC_SCALE`. Both of the row's truncation outcomes are 22001 —
+/// `SQL_DESC_SCALE`. Both of the row's truncation outcomes are 22001:
 /// "data converted with truncation of fractional digits" and "conversion of
 /// data would result in loss of whole (as opposed to fractional) digits".
 /// (`SQLExecute`'s own 22003 row is a different check: it is about assignment
@@ -930,7 +928,7 @@ pub(crate) fn check_declared_binary_size(len: usize, col_size: ULen) -> Result<(
 /// Only these two SQL types are checked. `ColumnSize` sets `SQL_DESC_PRECISION`
 /// for `SQL_FLOAT`, `SQL_REAL` and `SQL_DOUBLE` too, but there it is a count of
 /// mantissa bits and the row's own test is range, which [`to_double`] already
-/// applies. For every other type — the integers included — the spec says
+/// applies. For every other type, the integers included, the spec says
 /// plainly: "For other data types, the *ColumnSize* argument is ignored."
 ///
 /// The two declared-size checks the spec's table still asks for and this does
@@ -942,7 +940,7 @@ pub(crate) fn check_declared_binary_size(len: usize, col_size: ULen) -> Result<(
 ///
 /// | | this table | *C to SQL: Numeric* |
 /// |---|---|---|
-/// | fractional truncation | `22001`, refused | its "n/a" case — sent truncated, optional `01S07` |
+/// | fractional truncation | `22001`, refused | its "n/a" case: sent truncated, optional `01S07` |
 /// | whole-digit loss | `22001` | `22003` |
 ///
 /// A shared verdict would therefore have been wrong in both halves, not merely
@@ -1053,7 +1051,7 @@ fn to_binary(text: &str, col_size: ULen) -> Result<ColumnValue, OdbcError> {
     Ok(ColumnValue::Bytes(bytes))
 }
 
-// -- datetime targets --------------------------------------------------------
+// datetime targets -----------------------------------------------------------
 
 /// `SQL_TYPE_DATE`: a date literal, or a timestamp literal whose time is zero.
 fn to_date(text: &str) -> Result<ColumnValue, OdbcError> {
@@ -1069,7 +1067,7 @@ fn to_date(text: &str) -> Result<ColumnValue, OdbcError> {
 }
 
 /// `SQL_TYPE_TIME`: a time literal, or a timestamp literal whose fractional
-/// seconds are zero — "[b] The date portion of the timestamp is ignored."
+/// seconds are zero: "[b] The date portion of the timestamp is ignored."
 fn to_time(text: &str) -> Result<ColumnValue, OdbcError> {
     if let Ok((time, fraction)) = parse_sql_time(text) {
         return Ok(ColumnValue::Time {
@@ -1144,7 +1142,7 @@ mod tests {
     use super::*;
 
     // ---------------------------------------------------------------------
-    // to_numeric_struct — the SQL to C: Numeric exact row, as a number
+    // to_numeric_struct: the SQL to C: Numeric exact row, as a number
     // ---------------------------------------------------------------------
 
     use crate::column_value::NumericTarget;
@@ -1256,7 +1254,7 @@ mod tests {
     }
 
     /// A negative literal scale is how an exponent larger than the fraction is
-    /// carried — `1.5e2` is digits `15` at scale `-1`. It must reach `val` as
+    /// carried, so `1.5e2` is digits `15` at scale `-1`. It must reach `val` as
     /// 150, not 15.
     #[test]
     fn an_exponent_literal_expands_into_the_magnitude() {
@@ -1269,9 +1267,9 @@ mod tests {
     /// holds. `val` is 16 bytes, so the bound is `u128::MAX`.
     ///
     /// The digit *count* and the bound are not the same test, which is the
-    /// trap here. `u128::MAX` is 340282366920938463463374607431768211455 — 39
-    /// digits — but only the first ~3.4 of every 10 such numbers fit, so 39
-    /// nines (≈10³⁹) overflows while 38 nines (≈10³⁸) does not.
+    /// trap here. `u128::MAX` is 340282366920938463463374607431768211455, which
+    /// is 39 digits, but only the first ~3.4 of every 10 such numbers fit, so
+    /// 39 nines (≈10³⁹) overflows while 38 nines (≈10³⁸) does not.
     /// [`MAX_U128_DIGITS`] is therefore only a cheap pre-expansion guard
     /// against a pathological exponent; the real bound is the `parse::<u128>`
     /// itself.
@@ -1361,7 +1359,7 @@ mod tests {
             .to_owned()
     }
 
-    // -- character targets: text stays text ---------------------------------
+    // character targets: text stays text ------------------------------------
 
     #[test]
     fn a_varchar_parameter_stays_a_string() {
@@ -1389,7 +1387,7 @@ mod tests {
         );
     }
 
-    // -- DECIMAL / NUMERIC --------------------------------------------------
+    // DECIMAL / NUMERIC -----------------------------------------------------
 
     /// The reported defect: pyodbc binds a `Decimal` as `SQL_C_CHAR` +
     /// `SQL_NUMERIC`, and the declared type is the only thing distinguishing
@@ -1449,7 +1447,7 @@ mod tests {
         assert_eq!(sqlstate("", SqlDataType::DECIMAL), "22018");
     }
 
-    // -- DECIMAL / NUMERIC: the declared precision and scale -----------------
+    // DECIMAL / NUMERIC: the declared precision and scale --------------------
 
     #[test]
     fn a_decimal_within_its_declared_precision_and_scale_is_accepted() {
@@ -1565,7 +1563,7 @@ mod tests {
         );
     }
 
-    // -- exact integer targets ----------------------------------------------
+    // exact integer targets -------------------------------------------------
 
     #[test]
     fn an_integer_parameter_becomes_an_i32() {
@@ -1625,13 +1623,13 @@ mod tests {
         assert_eq!(sqlstate("1,000", SqlDataType::INTEGER), "22018");
     }
 
-    // -- pathological exponents ---------------------------------------------
+    // pathological exponents ------------------------------------------------
 
-    /// The exponent the audit reported. Before [`MAX_DECIMAL_EXPANSION_DIGITS`]
-    /// this reached `"0".repeat(2_147_483_646)` inside
-    /// [`DecimalLiteral::to_integer`] — a ~2 GB allocation, and the `format!`
-    /// on the next line copies it — where an allocation failure aborts the
-    /// process rather than unwinding, so `panic_safe` cannot contain it.
+    /// Without [`MAX_DECIMAL_EXPANSION_DIGITS`] this exponent reaches
+    /// `"0".repeat(2_147_483_646)` inside [`DecimalLiteral::to_integer`], a
+    /// ~2 GB allocation that the `format!` on the next line then copies. An
+    /// allocation failure aborts the process rather than unwinding, so
+    /// `panic_safe` cannot contain it.
     ///
     /// 22001 is the *C to SQL: Character* table's verdict for this row:
     /// "Conversion of data would result in loss of whole (as opposed to
@@ -1641,8 +1639,8 @@ mod tests {
         assert_eq!(sqlstate("1e2147483646", SqlDataType::EXT_BIG_INT), "22001");
     }
 
-    /// The same value against `SQL_DECIMAL` with no declared size — the one
-    /// path into [`DecimalLiteral::to_decimal_string`] with no size check in
+    /// The same value against `SQL_DECIMAL` with no declared size, which is the
+    /// one path into [`DecimalLiteral::to_decimal_string`] with no size check in
     /// front of it, since [`check_declared_decimal_size`] returns `Ok` when
     /// `col_size` is 0.
     #[test]
@@ -1650,9 +1648,9 @@ mod tests {
         assert_eq!(decimal_sqlstate("1e2147483646", 0, 0), "22001");
     }
 
-    /// A negative exponent expands the other way — the positive-scale branch of
+    /// A negative exponent expands the other way: the positive-scale branch of
     /// [`DecimalLiteral::to_decimal_string`] pads the digits out to `scale`
-    /// characters — so it needs the same bound.
+    /// characters, so it needs the same bound.
     #[test]
     fn a_pathological_negative_exponent_bound_as_decimal_is_refused() {
         assert_eq!(decimal_sqlstate("1e-2147483647", 0, 0), "22001");
@@ -1767,7 +1765,7 @@ mod tests {
             "-1e18",
             "123.45", // scale > 0, digits cover it: a point is inserted
             "-123.45",
-            "1e-65536", // scale > 0, padding synthesised — the tight case
+            "1e-65536", // scale > 0, padding synthesised: the tight case
             "-1.5e-10",
             "15e-200000",
             "5e-324",
@@ -1783,10 +1781,10 @@ mod tests {
         }
     }
 
-    /// Rust caps a `format!` width at `u16::MAX`, so the positive-scale branch
-    /// used to panic here rather than render. It builds its padding explicitly
-    /// now, so the whole accepted range is total. This is the exact boundary:
-    /// 65 535 always worked, 65 536 did not.
+    /// Rust caps a `format!` width at `u16::MAX`, so a positive-scale branch
+    /// built on that width would panic here rather than render. It builds its
+    /// padding explicitly instead, so the whole accepted range is total. This
+    /// is the exact boundary: 65 535 is inside the format width, 65 536 is not.
     #[test]
     fn a_scale_one_past_the_format_width_limit_renders() {
         let scale = usize::from(u16::MAX) + 1;
@@ -1816,7 +1814,7 @@ mod tests {
         );
     }
 
-    // -- approximate numeric targets ----------------------------------------
+    // approximate numeric targets -------------------------------------------
 
     #[test]
     fn a_double_parameter_becomes_an_f64() {
@@ -1853,7 +1851,7 @@ mod tests {
         assert_eq!(sqlstate("NaN-ish", SqlDataType::DOUBLE), "22018");
     }
 
-    // -- SQL_BIT ------------------------------------------------------------
+    // SQL_BIT ---------------------------------------------------------------
 
     #[test]
     fn a_bit_parameter_of_one_becomes_true() {
@@ -1888,7 +1886,7 @@ mod tests {
         assert_eq!(sqlstate("true", SqlDataType::EXT_BIT), "22018");
     }
 
-    // -- binary targets: hexadecimal pairs ----------------------------------
+    // binary targets: hexadecimal pairs -------------------------------------
 
     /// Spec: "each two bytes of character data are converted to a single byte
     /// (8 bits) of binary data … '01' is converted to a binary 00000001 and
@@ -1925,7 +1923,7 @@ mod tests {
         assert_eq!(sqlstate("zz", SqlDataType::EXT_BINARY), "22018");
     }
 
-    // -- SQL_TYPE_DATE ------------------------------------------------------
+    // SQL_TYPE_DATE ---------------------------------------------------------
 
     #[test]
     fn a_date_parameter_becomes_a_date() {
@@ -1964,7 +1962,7 @@ mod tests {
         assert_eq!(sqlstate("17/03/2024", SqlDataType::DATE), "22018");
     }
 
-    // -- SQL_TYPE_TIME ------------------------------------------------------
+    // SQL_TYPE_TIME ---------------------------------------------------------
 
     #[test]
     fn a_time_parameter_becomes_a_time() {
@@ -2009,7 +2007,7 @@ mod tests {
         assert_eq!(sqlstate("half past ten", SqlDataType::TIME), "22018");
     }
 
-    // -- SQL_TYPE_TIMESTAMP -------------------------------------------------
+    // SQL_TYPE_TIMESTAMP ----------------------------------------------------
 
     #[test]
     fn a_timestamp_parameter_becomes_a_timestamp() {
@@ -2074,7 +2072,7 @@ mod tests {
         assert_eq!(sqlstate("yesterday", SqlDataType::TIMESTAMP), "22018");
     }
 
-    // -- the ODBC 2.0 datetime type codes -----------------------------------
+    // the ODBC 2.0 datetime type codes --------------------------------------
 
     /// `SQL_DATE`/`SQL_TIME`/`SQL_TIMESTAMP` (9/10/11) are the ODBC 2.0
     /// spellings of the 91/92/93 codes. `types::col_attr` already treats the
@@ -2096,7 +2094,7 @@ mod tests {
         );
     }
 
-    // -- types the table does not list --------------------------------------
+    // types the table does not list -----------------------------------------
 
     /// `SQL_GUID` is absent from the character C table, so the pairing is
     /// `SQLBindParameter`'s 07006 to reject, not this function's to convert.
@@ -2122,7 +2120,7 @@ mod tests {
 
     /// `SqlDataType::DATETIME` is the number 9, which `odbc_sys` names after
     /// the *verbose* `SQL_DATETIME`. `SQLBindParameter`'s `ParameterType` is a
-    /// **concise** type, where 9 is the ODBC 2.0 `SQL_DATE` — so an ODBC 2.x
+    /// **concise** type, where 9 is the ODBC 2.0 `SQL_DATE`, so an ODBC 2.x
     /// application binding a date parameter gets a date, not a timestamp. AWS's
     /// Redshift ODBC driver reads it the same way, opening that branch of
     /// `convertCParamDataToSQLData` with `case SQL_TYPE_DATE: case SQL_DATE:`.
@@ -2138,7 +2136,7 @@ mod tests {
         );
     }
 
-    // -- character targets: the declared size -------------------------------
+    // character targets: the declared size ----------------------------------
 
     /// Convert as `VARCHAR(col_size)` and friends. `decimal_digits` is
     /// irrelevant to a character target, so it is fixed at 0.
@@ -2238,7 +2236,7 @@ mod tests {
         );
     }
 
-    // -- binary targets: the declared size ----------------------------------
+    // binary targets: the declared size -------------------------------------
 
     /// Eight hex characters are four bytes, which is what `ColumnSize`
     /// counts for a binary column.
@@ -2279,7 +2277,7 @@ mod tests {
     }
 
     /// "if the length of the character string is odd, the last byte of the
-    /// string ... is not converted" — so the dropped digit is not counted
+    /// string ... is not converted", so the dropped digit is not counted
     /// against the declared size either. Five hex characters are two bytes.
     #[test]
     fn an_odd_length_hex_value_counts_only_the_bytes_it_produces() {

@@ -1,4 +1,4 @@
-//! `SQLBindCol` — bind an application buffer to a result column.
+//! `SQLBindCol`: bind an application buffer to a result column.
 
 use std::ffi::c_void;
 
@@ -42,45 +42,45 @@ use crate::types::SqlReturn;
 ///
 /// Diagnostics from the ODBC spec Diagnostics table:
 ///
-/// - `01000` General warning — not returned here; core emits no driver-specific
+/// - `01000` General warning: not returned here; core emits no driver-specific
 ///   informational message from this function. The row carries no `(DM)` marker, so
 ///   this is the driver's answer to give.
-/// - `07006` Restricted data type attribute violation — (driver-manager-handled; emitted when
+/// - `07006` Restricted data type attribute violation: (driver-manager-handled; emitted when
 ///   `column_number == 0` and `target_type` is not `SQL_C_BOOKMARK` or `SQL_C_VARBOOKMARK`;
 ///   not returned here because bookmark columns are not supported)
-/// - `07009` Invalid descriptor index — the spec requires returning 07009 when `column_number`
+/// - `07009` Invalid descriptor index: the spec requires returning 07009 when `column_number`
 ///   exceeds the maximum number of columns in the result set. The binding is stored without
 ///   checking, because binding is legal before a result set exists: `SQLBindCol` is routinely
 ///   called before `SQLExecute`, when there is no column count to compare against, and the row
-///   carries no `(DM)` marker, so nothing else checks it either. So the clause is
-///   genuinely the driver's and genuinely unimplemented — a gap, not a
+///   carries no `(DM)` marker, so nothing else checks it either. The clause is therefore
+///   genuinely the driver's and genuinely unimplemented, a gap rather than a
 ///   delegation. `bind_col_with_a_huge_ordinal_is_accepted` pins the current
-///   behaviour so that closing it is a deliberate change.
-/// - `HY000` General error — returned for unexpected failures
-/// - `HY001` Memory allocation error — not applicable: Rust's allocator aborts on OOM
+///   behaviour so that closing it is an explicit change.
+/// - `HY000` General error: returned for unexpected failures
+/// - `HY001` Memory allocation error: not applicable, because Rust's allocator aborts on OOM
 ///   rather than returning an error, and `panic_safe` contains any unwind, so there is
 ///   no failure for this state to describe. The row carries no `(DM)` marker.
-/// - `HY003` Invalid application buffer type — returned when `target_type` is not a valid
+/// - `HY003` Invalid application buffer type: returned when `target_type` is not a valid
 ///   C data type identifier (`c_data_type_from_raw` returns `None`)
-/// - `HY010` Function sequence error — (driver-manager-handled; not returned here)
-/// - `HY021` Inconsistent descriptor information — **absent from this function's
+/// - `HY010` Function sequence error: (driver-manager-handled; not returned here)
+/// - `HY021` Inconsistent descriptor information: **absent from this function's
 ///   diagnostics table**, yet returned by this driver. `SQLSetDescRec`'s "Consistency
 ///   Checks" section states the mandate: "This check is always performed when
 ///   **SQLBindParameter** or **SQLBindCol** is called". The check runs before the record is
-///   inserted, so a rejected bind leaves the previous binding — or no binding — in place
+///   inserted, so a rejected bind leaves the previous binding (or no binding) in place
 ///   (`crate::descriptor::consistency_check`).
-/// - `HY013` Memory management error — not applicable, for the same reason as `HY001`.
+/// - `HY013` Memory management error: not applicable, for the same reason as `HY001`.
 ///   The row carries no `(DM)` marker.
-/// - `HY090` Invalid string or buffer length — (driver-manager-handled; not returned here;
+/// - `HY090` Invalid string or buffer length: (driver-manager-handled; not returned here;
 ///   the DM checks for `buffer_length < 0`)
-/// - `HY117` Connection is suspended — (driver-manager-handled; not returned here)
-/// - `HYC00` Optional feature not implemented — returned when `column_number == 0`
+/// - `HY117` Connection is suspended: (driver-manager-handled; not returned here)
+/// - `HYC00` Optional feature not implemented: returned when `column_number == 0`
 ///   (bookmark column; bookmarks are not supported because the `Backend` trait has no
 ///   concept of stable row identifiers)
-/// - `HYT01` Connection timeout expired — not returned here; core implements no
+/// - `HYT01` Connection timeout expired: not returned here; core implements no
 ///   connection timeout (`SQL_ATTR_CONNECTION_TIMEOUT` is not supported), so no
 ///   deadline exists to expire. The row carries no `(DM)` marker.
-/// - `IM001` Driver does not support this function — (driver-manager-handled; not returned
+/// - `IM001` Driver does not support this function: (driver-manager-handled; not returned
 ///   here)
 ///
 /// # Safety
@@ -129,8 +129,8 @@ pub unsafe fn sql_bind_col<B: Backend>(
             //
             // The two mature drivers disagree here, so this follows the spec
             // rather than a majority. MySQL Connector/ODBC draws the same line
-            // — `if (!TargetValuePtr && !StrLen_or_IndPtr) /* Handling
-            // unbinding */` in its own `SQLBindCol` — while psqlODBC's
+            // (`if (!TargetValuePtr && !StrLen_or_IndPtr) /* Handling
+            // unbinding */` in its own `SQLBindCol`), while psqlODBC's
             // `PGAPI_BindCol` clears the whole binding on a null `rgbValue`
             // without consulting `pcbValue` at all. The spec sentence above is
             // unconditional, and an application that asked only for a length
@@ -171,7 +171,7 @@ pub unsafe fn sql_bind_col<B: Backend>(
                 // Spec HY021, `SQLSetDescRec`'s "Consistency Checks": "This
                 // check is always performed when SQLBindParameter or
                 // SQLBindCol is called". Before the insert, so a rejected bind
-                // leaves the previous binding — or no binding — in place.
+                // leaves the previous binding (or no binding) in place.
                 crate::descriptor::consistency_check(&record, DescriptorRole::Ard)?;
                 scope
                     .descriptor(ard_token)?
@@ -257,7 +257,7 @@ mod tests {
             let mut buf: i64 = 0;
             let ret = sql_bind_col::<MockBackend>(
                 stmt,
-                0, // bookmark column — not supported
+                0, // bookmark column, not supported
                 CDataType::SBigInt as i16,
                 &mut buf as *mut i64 as *mut c_void,
                 std::mem::size_of::<i64>() as isize,
@@ -417,10 +417,10 @@ mod tests {
         }
     }
 
-    /// The spec makes binding a column *be* setting ARD fields — "when
-    /// `SQLBindCol` is called, the driver sets fields in the ARD". After this
-    /// change there is one storage rather than a binding map beside a
-    /// descriptor, so the two cannot disagree, which is the whole point.
+    /// The spec makes binding a column *be* setting ARD fields: "when
+    /// `SQLBindCol` is called, the driver sets fields in the ARD". There is one
+    /// storage rather than a binding map beside a descriptor, so the two cannot
+    /// disagree.
     ///
     /// Every field is checked, not just the key: a record found under the right
     /// number with the wrong buffer would satisfy `contains_key` above and
@@ -465,12 +465,11 @@ mod tests {
     /// The consistency check runs at `SQLBindCol` too, and a datetime column is
     /// where it would wrongly fire.
     ///
-    /// `SQL_DESC_DATETIME_INTERVAL_CODE` holds the *subcode* — `SQL_CODE_DATE`
-    /// is 1 — while the concise type is `SQL_TYPE_DATE`, which is 91. A record
+    /// `SQL_DESC_DATETIME_INTERVAL_CODE` holds the *subcode* (`SQL_CODE_DATE`
+    /// is 1) while the concise type is `SQL_TYPE_DATE`, which is 91. A record
     /// built by copying the concise type into the subcode would carry 91 in a
-    /// field whose only legal datetime values are 1, 2 and 3, and the check
-    /// would then reject a binding that has nothing wrong with it. That is the
-    /// one way this task could have broken an existing driver silently.
+    /// field whose only legal datetime values are 1, 2 and 3, so the check
+    /// would reject a binding that has nothing wrong with it.
     #[test]
     fn bind_col_accepts_a_date_column_and_records_its_subcode() {
         unsafe {

@@ -7,7 +7,7 @@
 //!
 //! This is the only mechanism available. Every statement-producing `Backend`
 //! method is synchronous and blocks the calling thread, so core cannot abandon
-//! one — it can only ask the backend to stop the work, which is exactly what
+//! one; it can only ask the backend to stop the work, which is what
 //! [`Backend::cancel`] does. The timer therefore runs on its own thread; the
 //! calling thread is inside the backend and cannot check a clock.
 //!
@@ -15,34 +15,34 @@
 //! [`Backend::cancel`]: crate::backend::Backend::cancel
 
 use std::any::Any;
-// Deliberately `std::sync::Arc`, not `crate::sync::Arc`, for the type-erased
-// cancel token below — the same exception `Slot::cancel` documents in
+// `std::sync::Arc`, not `crate::sync::Arc`, for the type-erased cancel token
+// below, which is the same exception `Slot::cancel` documents in
 // `handles/registry.rs`. It is a refcounted payload rather than a lock, so
 // instrumenting it under loom would buy nothing, and loom's `Arc` cannot hold a
 // `dyn Any` at all: it has no `CoerceUnsized` impl, so
-// `Arc::new(x) as Arc<dyn Any + Send + Sync>` does not compile for it. Using
-// `crate::sync::Arc` here made the whole crate fail to build under
-// `--cfg loom`, which took every loom model down with it.
+// `Arc::new(x) as Arc<dyn Any + Send + Sync>` does not compile for it.
+// `crate::sync::Arc` here makes the whole crate fail to build under
+// `--cfg loom`, taking every loom model down with it.
 use std::sync::Arc as StdArc;
 use std::time::Duration;
 
 use crate::backend::Backend;
 use crate::cancel::CancelState;
 use crate::errors::OdbcError;
-// `std::sync`, not `crate::sync`, and this is the crate's one documented
-// exception to that rule — see `sync.rs`, which records it too.
+// `std::sync`, not `crate::sync`, and this is one of the crate's two documented
+// exceptions to that rule; `sync.rs` records it too.
 //
 // Two facts make it the right call rather than a shortcut. loom's `Condvar`
 // has no `wait_timeout_while`, and its `wait_timeout` **ignores the duration
 // entirely**, always reporting `WaitTimeoutResult(false)` (loom 0.7.2's own
 // source says "TODO: implement timing out"). So an instrumented query timer
-// could not model a timeout — the only thing about it worth modelling. And no
-// loom model reaches this code: the models are of `Registry` and `GroupLock`
-// in `handles/registry.rs`, and this timer participates in neither.
+// could not model a timeout, which is the only thing about it worth modelling.
+// No loom model reaches this code either: the models are of `Registry` and
+// `GroupLock` in `handles/registry.rs`, and this timer participates in neither.
 //
-// Importing `crate::sync` here bought nothing and cost everything: it made the
-// whole crate fail to compile under `--cfg loom`, which took down the models
-// that do matter. `Arc` stays `std`'s for the separate reason above.
+// Importing `crate::sync` here makes the whole crate fail to compile under
+// `--cfg loom`, taking down the models that do matter. `Arc` stays `std`'s for
+// the separate reason above.
 use crate::types::SqlState;
 use std::sync::{Condvar, Mutex};
 
@@ -73,9 +73,9 @@ enum State {
 /// An armed query-timeout deadline, disarmed by dropping it.
 ///
 /// Held across exactly one backend call. `Drop` stands the timer down, so an
-/// early return — including one caused by a panic that `panic_safe` catches —
-/// cannot leave a timer running against a statement that is no longer
-/// executing.
+/// early return cannot leave a timer running against a statement that is no
+/// longer executing. That covers a return caused by a panic `panic_safe`
+/// catches, as much as an ordinary one.
 pub(crate) struct QueryTimer {
     /// `None` when no deadline applies, which is the overwhelmingly common
     /// case: no timeout set, or a backend that enforces its own. Nothing is
@@ -95,8 +95,8 @@ pub(crate) struct QueryTimer {
 impl QueryTimer {
     /// A timer that never fires, for a call with no core-enforced deadline.
     ///
-    /// For a call that has no cancel token at all — nothing has ever run on
-    /// this statement, so no earlier deadline can have signalled anything
+    /// For a call that has no cancel token at all, meaning nothing has ever run
+    /// on this statement, so no earlier deadline can have signalled anything
     /// either. A call that *has* a token but no deadline goes through
     /// [`Self::arm`], which keeps the token.
     pub(crate) fn disarmed() -> Self {
@@ -203,8 +203,8 @@ impl QueryTimer {
                 token: Some(StdArc::clone(token)),
             },
             Err(e) => {
-                // Out of threads. The call still runs, just without a deadline
-                // — strictly better than refusing to execute at all, and the
+                // Out of threads. The call still runs, just without a deadline,
+                // which is better than refusing to execute at all, and the
                 // application already holds a `SQL_SUCCESS` for the attribute.
                 tracing::error!("could not spawn the query-timeout thread: {e}; running untimed");
                 Self::untimed(token)
@@ -223,13 +223,14 @@ impl QueryTimer {
         })
     }
 
-    /// Whether a core timer — this call's or an earlier call's on the same
-    /// cursor — cancelled the token this call is running against.
+    /// Whether a core timer cancelled the token this call is running against,
+    /// whether that timer was this call's or an earlier call's on the same
+    /// cursor.
     ///
     /// Both halves are needed. [`Self::fired`] alone misses the window this
     /// method exists to close: a deadline that expires as the backend call is
     /// returning delivers its cancel, the call succeeds anyway (which the spec
-    /// permits), and *that* timer is then dropped — so the next failing call on
+    /// permits), and *that* timer is then dropped, so the next failing call on
     /// the cursor has a signalled token and a timer of its own that never
     /// fired. `CancelState::timed_out` alone would miss the other end of the
     /// same window, the instant after the thread records `FiredCancel` and
@@ -244,21 +245,21 @@ impl QueryTimer {
     }
 
     /// Relabel a failed backend call as `HYT00` when a core-side deadline
-    /// cancelled it — this call's, or an earlier one on the same token (see
-    /// [`Self::timed_out`]).
+    /// cancelled it, whether this call's deadline or an earlier one on the same
+    /// token (see [`Self::timed_out`]).
     ///
     /// Sits *outside* [`crate::cancel::reclassify_cancelled`] and runs first,
     /// because the two describe different events through the same mechanism.
     /// Both end in a cancelled statement, so both would otherwise report
-    /// `HY008` "operation canceled" — but an application that set a timeout is
+    /// `HY008` "operation canceled". An application that set a timeout is
     /// waiting to distinguish "my deadline passed" from "another thread called
     /// `SQLCancel`", and only `HYT00` says the first.
     ///
     /// As with `reclassify_cancelled`, only the error half is examined: the
     /// spec allows a cancelled execution to succeed anyway, and a query that
-    /// beat its deadline to the finish line has not timed out.
-    /// [`crate::cancel::reclassify_cancelled`] followed by [`Self::reclassify`]
-    /// — the form every statement-producing call site uses.
+    /// beat its deadline to the finish line has not timed out. This method is
+    /// `reclassify_cancelled` followed by [`Self::reclassify`], the form every
+    /// statement-producing call site uses.
     ///
     /// The order matters and is the reason this exists rather than two nested
     /// calls at each site. A timed-out call has a signalled token, so the
@@ -278,7 +279,7 @@ impl QueryTimer {
     /// [`Self::check`] for a caller that may not have a token.
     ///
     /// The cursor-consuming entry points read their token off the registry
-    /// rather than minting one, so they hold an `Option` — see
+    /// rather than minting one, so they hold an `Option`; see
     /// [`crate::cancel::reclassify_cancelled_opt`], whose `None` case this
     /// shares. The timeout pass still runs: `None` means no *cancellation* can
     /// be attributed, not that no deadline was armed, and a timer armed on this
@@ -287,8 +288,8 @@ impl QueryTimer {
     ///
     /// The `cancel` argument being `None` says nothing about the timeout pass
     /// either way. That pass reads the token this timer was *armed* with, which
-    /// is the same one when there is one at all — the entry point resolves it
-    /// once and hands it to both.
+    /// is the same one when there is one at all, because the entry point
+    /// resolves it once and hands it to both.
     pub(crate) fn check_opt<B: Backend, T, E: Into<OdbcError>>(
         &self,
         result: Result<T, E>,
@@ -350,7 +351,7 @@ mod tests {
 
     /// The whole point, end to end: a deadline that passes signals the token.
     ///
-    /// Not run under Miri — it is a wall-clock test with a real sleep, so
+    /// Not run under Miri: it is a wall-clock test with a real sleep, so
     /// Miri's slowdown would stretch it unpredictably, and there is no `unsafe`
     /// here for Miri to check.
     #[test]
@@ -456,9 +457,9 @@ mod tests {
     /// The bug this pins: a deadline that expires as the backend call is
     /// returning signals the token but leaves the call successful (which the
     /// spec permits), and the token then stays signalled for the life of the
-    /// cursor it opened. The next call that fails on that cursor — a
-    /// `SQLFetch`, quite likely one the delivered cancel caused — must report
-    /// the timeout that actually happened, not the `SQLCancel` that never did.
+    /// cursor it opened. The next call that fails on that cursor, likely a
+    /// `SQLFetch` failing because of the delivered cancel, must report the
+    /// timeout that actually happened, not the `SQLCancel` that never did.
     #[test]
     #[cfg_attr(miri, ignore = "wall-clock timing; no unsafe to check")]
     fn a_token_signalled_by_the_timer_reports_hyt00_on_the_next_failing_call() {
@@ -499,7 +500,7 @@ mod tests {
     /// the token's own allocation: `mint_cancel_token` builds a new one per
     /// execution, so a deadline that expired on one execution must be invisible
     /// to the next. A flag on the statement, or anywhere process-wide, would
-    /// fail this — and it is the same "cancelled forever" shape the spec rules
+    /// fail this, and it is the same "cancelled forever" shape the spec rules
     /// quoted on `mint_cancel_token` rule out ("After the statement has been
     /// canceled, the application can call SQLExecute or SQLExecDirect again").
     ///
@@ -544,18 +545,16 @@ mod tests {
 
     /// `QueryTimer::check`'s two passes in one call: the token is signalled
     /// *and* this call's timer fired, so both would produce a SQLSTATE and only
-    /// the second one to run survives. `HYT00` must win — reversing the passes
-    /// would report every expired deadline as a plain cancellation.
+    /// the second one to run survives. `HYT00` must win, because reversing the
+    /// passes would report every expired deadline as a plain cancellation.
     ///
-    /// The ordering was **not** unpinned before this test existed, contrary to
-    /// the test-gap audit that asked for it: swapping the two passes at the
-    /// parent commit already failed
+    /// Two FFI-level tests cover the same property,
     /// `execute::an_execution_that_overruns_its_query_timeout_reports_hyt00`
     /// and `fetch::a_fetch_that_overruns_its_query_timeout_reports_hyt00`,
-    /// both of which drive a real overrun through the FFI entry points. This
-    /// is the unit-level restatement: same property, failing in `check` itself
-    /// rather than three layers up, where the message names the pass ordering
-    /// instead of a diagnostic record on a statement handle.
+    /// both of which drive a real overrun through the entry points. This is the
+    /// unit-level restatement: it fails in `check` itself rather than three
+    /// layers up, so the message names the pass ordering instead of a
+    /// diagnostic record on a statement handle.
     #[test]
     #[cfg_attr(miri, ignore = "wall-clock timing; no unsafe to check")]
     fn simultaneous_cancel_and_timeout_reports_hyt00() {

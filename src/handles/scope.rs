@@ -2,7 +2,7 @@
 //!
 //! A `HandleScope` is the only way to obtain `&mut` to a handle. The only way
 //! to obtain one is through the four callers of the `pub(crate)`
-//! `HandleScope::new` in this crate — [`panic_safe`], which builds the
+//! `HandleScope::new` in this crate: [`panic_safe`], which builds the
 //! outermost scope for an FFI call; [`HandleScope::with_child_group`], which
 //! builds a nested scope for the one legitimate case of holding two groups at
 //! once; `sql_cancel`, which builds one only on the branch where its own
@@ -39,7 +39,7 @@ use odbc_sys::Desc;
 /// [`Self::with_child_group`], which builds a nested scope for the one
 /// legitimate case of holding two groups at once; `sql_cancel`
 /// (`ffi::cursor`), which builds one only on the branch where its own
-/// `try_lock` succeeded — never on the branch where another thread holds the
+/// `try_lock` succeeded, never on the branch where another thread holds the
 /// group; and `sql_copy_desc` (`ffi::desc`), which cannot use `panic_safe`
 /// because the lock it needs is the **source** descriptor's while every
 /// diagnostic it posts belongs to the target. All four lock the group
@@ -47,7 +47,7 @@ use odbc_sys::Desc;
 /// `new`'s `guard` parameter, which is what ties the lifetime `'a` to it: a
 /// `HandleScope<'a>` cannot be constructed, returned, or used once its
 /// originating guard is gone, so a live `HandleScope` always corresponds to a
-/// held group lock — or, for a null handle, to nothing needing one.
+/// held group lock, or, for a null handle, to nothing needing one.
 ///
 /// [`panic_safe`]: crate::panic::panic_safe
 pub struct HandleScope<'a> {
@@ -64,10 +64,10 @@ pub struct HandleScope<'a> {
     /// scoped thread receive one whose guard is held elsewhere, and reach handle
     /// contents while claiming a lock it does not hold.
     ///
-    /// Currently unreachable — every closure that receives a scope is in-crate
-    /// and none spawns — so this closes the hole rather than fixing a live bug.
-    /// It costs nothing: the lifetime is still tied, and `PhantomData<*const ()>`
-    /// carries no variance the scope relies on.
+    /// No in-crate closure that receives a scope spawns a thread, so this
+    /// closes the hole rather than fixing a live bug. It costs nothing: the
+    /// lifetime is still tied, and `PhantomData<*const ()>` carries no variance
+    /// the scope relies on.
     _guard: PhantomData<*const &'a ()>,
 }
 
@@ -77,7 +77,7 @@ impl<'a> HandleScope<'a> {
     /// `guard` is a borrow of the `MutexGuard` the caller is already holding
     /// for `group` (or `None`, for the null-handle case with nothing locked);
     /// its lifetime is what `'a` on the returned scope is unified with, so the
-    /// borrow checker — not just a doc comment — refuses a `HandleScope` that
+    /// borrow checker, and not just a doc comment, refuses a `HandleScope` that
     /// outlives the lock it claims to hold. `guard`'s value is never read:
     /// this scope reaches handles through the registry, not through the
     /// guard, so the parameter exists purely to carry the lifetime.
@@ -110,17 +110,17 @@ impl<'a> HandleScope<'a> {
     /// Borrow a handle from the locked group.
     ///
     /// Returns [`OdbcError::InvalidHandle`] for a stale token, a token of the
-    /// wrong kind, **or a token belonging to another group** — the last case
+    /// wrong kind, **or a token belonging to another group**, the last case
     /// being what stops a caller reaching a handle this scope does not protect.
     ///
     /// The returned lifetime is tied to `&mut self`, so two handles cannot be
     /// held at once. Use [`Self::stmt_with_parent`] when both a statement and
     /// its connection are needed.
-    /// One registry pass answers all three questions — live, right kind, right
-    /// group — because this is the hottest lookup in the crate: it is on every
-    /// FFI entry point. It used to be two, a [`Self::holds`] and a
-    /// `Registry::resolve`, each taking the lock and decoding the token
-    /// separately, plus an `Arc` clone `holds` made only to compare and drop.
+    /// One registry pass answers all three questions, live, right kind and
+    /// right group, because this is the hottest lookup in the crate: it is on
+    /// every FFI entry point. Splitting it into a [`Self::holds`] and a
+    /// `Registry::resolve` would take the lock and decode the token twice, plus
+    /// an `Arc` clone `holds` makes only to compare and drop.
     pub fn get<T: HasKind>(&mut self, token: *mut c_void) -> Result<&mut T, OdbcError> {
         // `None` is the null-handle case, where nothing is locked and so no
         // handle is reachable.
@@ -141,17 +141,17 @@ impl<'a> HandleScope<'a> {
     /// Sound because **neither handle is reachable from the other**: `conn` is
     /// an opaque token (`*mut c_void`), not a typed pointer the compiler could
     /// follow from `&mut StatementHandle` to reborrow the connection, and
-    /// `ConnectionHandle` holds no field pointing at its statements at all —
-    /// parentage lives in the registry (`Registry::children_of`), not in
+    /// `ConnectionHandle` holds no field pointing at its statements at all,
+    /// parentage living in the registry (`Registry::children_of`) rather than in
     /// either handle struct. Different [`HandleKind`]s alone would not be
-    /// enough to justify this: while `StatementHandle` owned four
-    /// `Box<Descriptor>` fields, those *were* reachable through its own `&mut`,
-    /// so a `stmt_with_desc` built the same way would have aliased under
-    /// Stacked/Tree Borrows despite the two addresses differing and
-    /// `debug_assert_ne!` seeing nothing wrong. Making each descriptor its own
-    /// registered allocation is what removed that, and
-    /// [`Self::stmt_with_desc`] is now the second combinator of this shape. Both
-    /// exist only for pairs that are actually mutually unreachable.
+    /// enough to justify this. A typed `Box<Descriptor>` field on
+    /// `StatementHandle` would be reachable through that handle's own `&mut`,
+    /// so a `stmt_with_desc` built over one would alias under Stacked/Tree
+    /// Borrows despite the two addresses differing and `debug_assert_ne!` seeing
+    /// nothing wrong. Each descriptor being its own registered allocation is
+    /// what avoids that, and [`Self::stmt_with_desc`] is the second combinator
+    /// of this shape. Both exist only for pairs that are actually mutually
+    /// unreachable.
     ///
     /// They share one group, so this needs no second acquisition.
     ///
@@ -175,7 +175,7 @@ impl<'a> HandleScope<'a> {
         // A statement and a connection are different `HandleKind`s, hence
         // different `Box` allocations from different `alloc_*` calls, so these
         // addresses can never be equal. This only pins the weaker fact that
-        // they are literally different allocations — the reason the two
+        // they are literally different allocations. The reason the two
         // references cannot alias is that neither handle is reachable from the
         // other (see the doc comment above), which distinct addresses alone
         // would not establish.
@@ -184,7 +184,7 @@ impl<'a> HandleScope<'a> {
         // against the registry and confirmed it belongs to the group this
         // scope holds, so neither is stale or foreign. The second `get` call
         // takes `&mut self`, but `self` is just `{ group, _guard: PhantomData }`
-        // — it holds no pointer into either handle's memory — so reborrowing
+        // and holds no pointer into either handle's memory, so reborrowing
         // it to make that call touches nothing `stmt_addr` points at.
         // `stmt_addr` itself was produced by casting `addr as *mut T` inside
         // the *first* `get` call, never derived from `self`, so it carries no
@@ -213,8 +213,8 @@ impl<'a> HandleScope<'a> {
     /// holds) is treated as a no-op instead: re-entering a group one already
     /// holds needs no second acquisition, so `f` runs directly against this
     /// scope and a [`tracing::warn!`] records the deviation. This runs
-    /// identically in every build profile — a debug-only guard (e.g.
-    /// `debug_assert!`) would leave the one branch that actually prevents the
+    /// identically in every build profile, because a debug-only guard such as
+    /// `debug_assert!` would leave the one branch that actually prevents the
     /// deadlock uncovered by every test this crate runs in debug, which is
     /// all of them.
     pub fn with_child_group<R>(
@@ -237,7 +237,7 @@ impl<'a> HandleScope<'a> {
     /// an active `loom::model` and cannot be called from inside one either (a
     /// `static` runs its initializer once, while loom replays the closure many
     /// times), so a model restricted to `with_child_group` could only lock two
-    /// `GroupLock`s of its own in the right order — which proves the ordering
+    /// `GroupLock`s of its own in the right order, which proves the ordering
     /// rule is safe to follow, not that this function follows it. Taking the
     /// registry as a parameter is what closes that gap: a regression reversing
     /// the acquisition order here now fails
@@ -267,7 +267,7 @@ impl<'a> HandleScope<'a> {
     /// `SQLCopyDesc`'s phase one, and the crate's only acquisition outside
     /// [`panic_safe`] that is not the called handle's own group: the lock it needs
     /// belongs to the *source* descriptor while every diagnostic it posts belongs
-    /// to the target, so `panic_safe` — which locks the handle it is given — is
+    /// to the target, so `panic_safe`, which locks the handle it is given, is
     /// the wrong tool. Phase two is an ordinary `panic_safe` on the target.
     ///
     /// `None` when `token` is not a live handle of `kind`, which is
@@ -275,7 +275,7 @@ impl<'a> HandleScope<'a> {
     /// been resolved yet, so there is no queue to post to.
     ///
     /// The return type carries no guard. That is what makes "phase one does not
-    /// retain the lock" a fact this signature states rather than a comment — and
+    /// retain the lock" a fact this signature states rather than a comment, and
     /// it is what the loom model relies on, since a version that handed the guard
     /// back would not compile against it.
     ///
@@ -315,9 +315,9 @@ impl<'a> HandleScope<'a> {
     /// a token outside the held group or of a kind that carries no queue
     /// (descriptors), because there is no better handle to report against.
     /// Expressed through [`Self::diagnostics`] because that method already
-    /// answers the same question — which queue, if any, does this token name —
-    /// and answers it in one registry pass. Spelling the dispatch out a second
-    /// time here cost seven lookups on a path that runs on **every** error:
+    /// answers the same question, which queue (if any) this token names, and
+    /// answers it in one registry pass. Spelling the dispatch out a second time
+    /// here would cost several lookups on a path that runs on **every** error:
     /// a `holds`, then up to three `get`s each doing a `holds` of its own.
     pub fn push_diagnostic<B: Backend>(&mut self, token: *mut c_void, err: &OdbcError) {
         if let Some(queue) = self.diagnostics::<B>(token) {
@@ -330,8 +330,8 @@ impl<'a> HandleScope<'a> {
     /// `SQLGetDiagRecW`/`SQLGetDiagFieldW` are the spec's own exception to
     /// clearing a handle's diagnostics at the start of a call: they read the
     /// queue and must leave it untouched, so this hands back a plain
-    /// `&mut DiagnosticQueue` rather than the whole handle, and — like
-    /// [`Self::get`] and [`Self::push_diagnostic`] — refuses a token outside
+    /// `&mut DiagnosticQueue` rather than the whole handle. Like
+    /// [`Self::get`] and [`Self::push_diagnostic`], it refuses a token outside
     /// the held group. A descriptor is dispatched to
     /// [`Self::descriptor_diagnostics`], which needs no backend type.
     pub fn diagnostics<B: Backend>(&mut self, token: *mut c_void) -> Option<&mut DiagnosticQueue> {
@@ -375,11 +375,12 @@ impl<'a> HandleScope<'a> {
     ///
     /// The single door onto descriptor storage. It exists so that no call site
     /// names a field of [`StatementHandle`]: which allocation a role resolves to
-    /// is this function's business — an application-supplied descriptor for the
+    /// is this function's business: an application-supplied descriptor for the
     /// ARD or APD when one has been set, the implicit one otherwise.
     ///
-    /// Returns only the descriptor. A caller that also needs the statement — the
-    /// IRD's computed view, or `SQL_DESC_COUNT` — wants [`Self::stmt_with_desc`].
+    /// Returns only the descriptor. A caller that also needs the statement, such
+    /// as the IRD's computed view or `SQL_DESC_COUNT`, wants
+    /// [`Self::stmt_with_desc`].
     pub fn desc_of<B: Backend>(
         &mut self,
         stmt_token: *mut c_void,
@@ -394,8 +395,8 @@ impl<'a> HandleScope<'a> {
     /// A descriptor, by its own token.
     ///
     /// Sound as a plain [`Self::get`] because every descriptor is its own
-    /// allocation carrying its own role — see [`Descriptor`]'s doc comment for
-    /// why the earlier refusal of `HasKind` no longer applies.
+    /// allocation carrying its own role; see [`Descriptor`]'s doc comment for
+    /// why that is enough for the registry to check.
     pub fn descriptor(&mut self, token: *mut c_void) -> Result<&mut Descriptor, OdbcError> {
         self.get::<Descriptor>(token)
     }
@@ -405,7 +406,7 @@ impl<'a> HandleScope<'a> {
     ///
     /// Read from `Slot::parent`, which `alloc_descriptor` records. An
     /// application-allocated descriptor is parented to a *connection* instead, so
-    /// this answers `None` for one — which is what the IRD paths use to tell "no
+    /// this answers `None` for one, which is what the IRD paths use to tell "no
     /// column metadata is reachable from here" from "the statement has none yet".
     pub fn descriptor_stmt(&mut self, token: *mut c_void) -> Option<*mut c_void> {
         let held = self.group.as_ref()?;
@@ -450,8 +451,8 @@ impl<'a> HandleScope<'a> {
         // SAFETY: both addresses came from `get`, which validated each token
         // against the registry and confirmed it belongs to the group this scope
         // holds. Neither handle is reachable from the other, so the two `&mut`s
-        // cannot alias — the same argument `stmt_with_parent` makes, and see its
-        // comment for why reborrowing `self` between the two lookups touches
+        // cannot alias, which is the same argument `stmt_with_parent` makes; see
+        // its comment for why reborrowing `self` between the two lookups touches
         // nothing either pointer refers to.
         Ok(unsafe { (&mut *stmt_addr, &mut *desc_addr) })
     }
@@ -488,15 +489,15 @@ impl<'a> HandleScope<'a> {
     /// `SQL_ATTR_ROW_STATUS_PTR` / `SQL_ATTR_ROWS_FETCHED_PTR` on an IRD and
     /// `SQL_ATTR_PARAM_STATUS_PTR` / `SQL_ATTR_PARAMS_PROCESSED_PTR` on an IPD,
     /// and those four deliberately stay in [`StatementHandle::attrs`] rather
-    /// than on a descriptor header — see [`HeaderOwner`]. A snapshot built from
+    /// than on a descriptor header; see [`HeaderOwner`]. A snapshot built from
     /// `Descriptor::attrs` alone therefore drops them, and `SQLCopyDesc` is
     /// explicit that it must not: "All fields of the descriptor, except
     /// SQL_DESC_ALLOC_TYPE ..., are copied, whether or not the field is defined
     /// for the destination descriptor."
     ///
     /// Keyed by the `SQL_DESC_*` field, as [`Descriptor::attrs`] is, so the
-    /// target side routes them by **its own** role rather than by the source's
-    /// — which is what lets an IRD's status pointer land on an APD's header and
+    /// target side routes them by **its own** role rather than by the source's,
+    /// which is what lets an IRD's status pointer land on an APD's header and
     /// an ARD's on an IPD's statement.
     ///
     /// No extra lock: a descriptor and its statement always share one group,
@@ -528,7 +529,7 @@ impl<'a> HandleScope<'a> {
     /// [`Self::snapshot_descriptor`] for an IRD, whose records are computed
     /// rather than stored.
     ///
-    /// Built from `col_attr::get_column_attribute` — the same function
+    /// Built from `col_attr::get_column_attribute`, the same function
     /// `SQLColAttributeW` and `SQLGetDescField`'s IRD path use, so the three
     /// cannot disagree about one column.
     fn snapshot_ird<B: Backend>(
@@ -572,7 +573,7 @@ impl<'a> HandleScope<'a> {
     /// descriptors, or `None` if never set.
     ///
     /// Keyed by the `SQL_DESC_*` field rather than by the statement attribute
-    /// that names it — see [`Descriptor::attrs`] for why.
+    /// that names it; see [`Descriptor::attrs`] for why.
     pub fn header_field_get<B: Backend>(
         &mut self,
         stmt_token: *mut c_void,
@@ -665,7 +666,7 @@ impl<'a> HandleScope<'a> {
     /// # Safety
     ///
     /// The APD's `SQL_DESC_BIND_OFFSET_PTR` must be null or point to a valid
-    /// `SQLULEN` — the application's undertaking when it set
+    /// `SQLULEN`, which is the application's undertaking when it set
     /// `SQL_ATTR_PARAM_BIND_OFFSET_PTR`. This function dereferences it, because
     /// the offset belongs to the call rather than to any one binding and the
     /// spec resolves it once, at execution time (see
@@ -703,7 +704,7 @@ impl<'a> HandleScope<'a> {
         debug_assert_ne!(stmt_addr as usize, conn_addr as usize);
         // SAFETY: every address came from a validated registry lookup in the group
         // this scope holds, and no two of the four handles are reachable from each
-        // other — see this function's doc comment. `self` holds no pointer into
+        // other; see this function's doc comment. `self` holds no pointer into
         // any of them, so the reborrows between the lookups touch nothing they
         // refer to (the argument spelled out in `stmt_with_parent`).
         Ok(unsafe {
@@ -750,7 +751,7 @@ mod tests {
     /// group must be refused, because the scope does not hold that group's
     /// lock. Without this, `scope.get` would validate a token's kind and
     /// liveness but not its group, reaching a handle no lock protects it
-    /// from — the exact unguarded access this type exists to close off.
+    /// from, which is the exact unguarded access this type exists to close off.
     #[test]
     fn a_token_outside_the_locked_group_is_refused() {
         unsafe {
@@ -851,7 +852,7 @@ mod tests {
     }
 
     /// A statement and its parent connection share a group, so both are
-    /// reachable from one acquisition — the seven `ffi/metadata.rs` sites.
+    /// reachable from one acquisition, as the `ffi/metadata.rs` sites need.
     #[test]
     fn a_statement_and_its_parent_come_from_one_acquisition() {
         unsafe {
@@ -885,7 +886,7 @@ mod tests {
 
             // `SQLDisconnect` frees every statement on the connection as part
             // of tearing it down, so `stmt` is already gone (a stale token, not
-            // a double-free — `unregister` returns `None` before any
+            // a double-free, since `unregister` returns `None` before any
             // `Box::from_raw`) by the time `cleanup_env_conn_stmt` reaches it;
             // pass null in its place rather than the now-stale `stmt` value, so
             // this call site does not contradict `cleanup_env_conn_stmt`'s
@@ -910,7 +911,7 @@ mod tests {
     }
 
     /// The other half of the null-handle case: a scope holding no group must
-    /// still refuse a token from a real, live group — `holds` must treat "no
+    /// still refuse a token from a real, live group: `holds` must treat "no
     /// group held" as "nothing is reachable," not as "anything goes."
     #[test]
     fn a_null_handle_scope_still_refuses_a_live_token() {
@@ -968,7 +969,7 @@ mod tests {
                     "the nested scope must be able to reach the child group's own handle"
                 );
                 // The outer scope's own group is still held and usable
-                // afterward — with_child_group must not have released it.
+                // afterward: with_child_group must not have released it.
                 scope.get::<EnvironmentHandle<MockBackend>>(env)?;
                 Ok(SqlReturn::SUCCESS)
             });
@@ -979,7 +980,7 @@ mod tests {
 
     /// `crate::sync::Mutex` is not reentrant, so passing a token from the
     /// group this scope already holds would deadlock the calling thread
-    /// forever, with no diagnostic and no `SqlReturn` — exactly the hazard
+    /// forever, with no diagnostic and no `SqlReturn`, which is the hazard
     /// `with_child_group`'s guard exists to close, and identically in every
     /// build profile: removing the early return here hangs this test rather
     /// than failing it, which is exactly why the guard runs unconditionally

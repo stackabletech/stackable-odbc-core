@@ -3,8 +3,8 @@
 //! `SQLCancel` signals the backend's token; the in-flight call then fails with
 //! whatever its client library reported, which carries no hint that a
 //! cancellation caused it. This module is the one place that asks the token and
-//! relabels such a failure, so the answer cannot drift between the ~23 backend
-//! call sites in `ffi/`.
+//! relabels such a failure, so the answer cannot drift between the backend call
+//! sites in `ffi/`.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -15,7 +15,7 @@ use crate::types::SqlState;
 /// A backend's cancel token, plus core's record of *what* signalled it.
 ///
 /// `Backend::CancelToken` answers "was this cancelled"; it cannot answer "by
-/// whom", because a backend has one `cancel` method and both callers use it —
+/// whom", because a backend has one `cancel` method and both callers use it:
 /// `SQLCancel` on another thread, and the query timer in
 /// [`crate::query_timer`]. The two are different events with different
 /// SQLSTATEs (`HY008` against `HYT00`), so core records the second one here.
@@ -38,10 +38,10 @@ use crate::types::SqlState;
 ///   thread holds none, exactly as `SQLCancel`'s cross-thread branch holds
 ///   none.
 ///
-/// A flag on the statement handle would have failed the second point (the
-/// timer thread must never reach handle state), and a second field on
-/// `Registry::Slot` would have failed the first two only by keeping two things
-/// in step that this keeps in step by construction.
+/// A flag on the statement handle fails the second point, because the timer
+/// thread must never reach handle state. A second field on `Registry::Slot`
+/// satisfies the first two only by keeping in step, by hand, two things that
+/// one allocation keeps in step by construction.
 pub(crate) struct CancelState<T> {
     token: T,
     /// Set by [`crate::query_timer::QueryTimer`]'s thread when a core-enforced
@@ -80,8 +80,8 @@ impl<T> CancelState<T> {
 /// SQL_ERROR and SQLSTATE HY008 (Operation canceled)."
 ///
 /// **Only the error half is examined.** The spec allows a cancelled execution
-/// to complete anyway — "it is possible for the execution to succeed and return
-/// SQL_SUCCESS while the cancel is also successful" — so `Ok` is returned
+/// to complete anyway ("it is possible for the execution to succeed and return
+/// SQL_SUCCESS while the cancel is also successful"), so `Ok` is returned
 /// untouched no matter what the token says. This relabels an error core already
 /// has; it never manufactures one.
 ///
@@ -90,16 +90,16 @@ impl<T> CancelState<T> {
 /// the cause. Its SQLSTATE is what the application would otherwise see, and it
 /// is exactly what the spec says must not be reported here.
 ///
-/// **This function does not consult [`CancelState::timed_out`], and that is
-/// deliberate.** Relabelling a timer-signalled cancellation `HYT00` happens in
+/// **This function does not consult [`CancelState::timed_out`].** Relabelling a
+/// timer-signalled cancellation `HYT00` happens in
 /// [`crate::query_timer::QueryTimer::reclassify`], which only the entry points
 /// that hold a `QueryTimer` reach. The four that reach *this* function with no
 /// timer are `SQLGetData`, `SQLDescribeParam`, `SQLDescribeCol` and
-/// `SQLColAttribute`, and **none of the four has an `HYT00` row** — each has
+/// `SQLColAttribute`, and **none of the four has an `HYT00` row**: each has
 /// `HYT01`, the connection timeout, which is a different state. So a
 /// `SQLGetData` failing on a timed-out cursor keeps `HY008`, which its table
 /// does list; moving the check here would hand all four a SQLSTATE their spec
-/// pages do not allow. That is also why `SQLGetData` is deliberately unarmed.
+/// pages do not allow. That is also why `SQLGetData` carries no timer.
 ///
 /// The rule is *not* "a timer-holding entry point always has an `HYT00` row",
 /// and `SQLParamData` is the exception to check before restating it that way.
@@ -108,7 +108,7 @@ impl<T> CancelState<T> {
 /// by the sentence its page carries after the table: "If **SQLParamData** is
 /// called while sending data for a parameter in a SQL statement, it can return
 /// any SQLSTATE that can be returned by the function called to execute the
-/// statement (**SQLExecute** or **SQLExecDirect**)" — and both of those do list
+/// statement (**SQLExecute** or **SQLExecDirect**)", and both of those do list
 /// `HYT00`. That function's own doc comment documents the whole inherited set
 /// on the same grounds.
 pub(crate) fn reclassify_cancelled<B: Backend, T, E: Into<OdbcError>>(
@@ -133,8 +133,8 @@ pub(crate) fn reclassify_cancelled<B: Backend, T, E: Into<OdbcError>>(
 
 /// [`reclassify_cancelled`] for a caller that may not have a token.
 ///
-/// The cursor-consuming entry points — `SQLFetch`, `SQLGetData` and their
-/// neighbours — read their token from the registry rather than minting one, and
+/// The cursor-consuming entry points, `SQLFetch`, `SQLGetData` and their
+/// neighbours, read their token from the registry rather than minting one, and
 /// `None` there means no backend call has run on this statement yet. Nothing
 /// could have been cancelled in that case, so the error passes through with its
 /// own SQLSTATE.

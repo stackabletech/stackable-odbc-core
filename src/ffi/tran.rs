@@ -18,11 +18,10 @@ use crate::types::{SqlReturn, completion_type_from_raw, handle_type_from_raw};
 ///
 /// Exists so `end_tran_on_an_environment_survives_a_connection_freed_mid_walk`
 /// can assert it actually exercised that arm, rather than passing vacuously
-/// if a scheduling shift ever moved the race so the connection was gone
-/// before the loop's `children_of` snapshot instead of during it — exactly
-/// the failure mode that test's own construction hit on its first attempt,
-/// where neither arm ran and the test passed regardless of whether the fix
-/// was present.
+/// if a scheduling shift moves the race so the connection is gone before the
+/// loop's `children_of` snapshot instead of during it. Without the counter,
+/// neither arm running leaves the test green whether or not the fix is
+/// present.
 #[cfg(test)]
 static FREED_MID_WALK_HITS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
@@ -41,7 +40,7 @@ static FREED_MID_WALK_HITS: std::sync::atomic::AtomicUsize = std::sync::atomic::
 ///   has a `statement` because `SQLPrepare` stores one) back to S1, and
 ///   `SQLNumResultCols` would then fail with `HY010` where the spec allows it.
 ///   Note that `close_cursor` defaults to a no-op, so a backend declaring
-///   `Close` must implement it — see [`Backend::cursor_commit_behavior`].
+///   `Close` must implement it; see [`Backend::cursor_commit_behavior`].
 ///   `StatementHandle::cursor_open` is cleared either way, which is what makes
 ///   the statement legal for a new `SQLExecDirect`, catalog call or
 ///   `SQLSetStmtAttr(SQL_ATTR_CURSOR_TYPE)` afterwards, exactly as S4→S2 and
@@ -63,11 +62,11 @@ static FREED_MID_WALK_HITS: std::sync::atomic::AtomicUsize = std::sync::atomic::
 /// driver-side `HY010` check is added for the need-data states S8-S10: the
 /// transition table marks them `(HY010)`, i.e. Driver-Manager-detected.
 ///
-/// Called from within a scope that already holds `conn_token`'s group --
-/// either `sql_end_tran`'s own scope for the `SQL_HANDLE_DBC` arm, or the
-/// nested child scope `with_child_group` builds for one connection at a time
-/// under the `SQL_HANDLE_ENV` arm — so this borrows through `scope` rather
-/// than acquiring anything of its own.
+/// Called from within a scope that already holds `conn_token`'s group, either
+/// `sql_end_tran`'s own scope for the `SQL_HANDLE_DBC` arm or the nested child
+/// scope `with_child_group` builds for one connection at a time under the
+/// `SQL_HANDLE_ENV` arm. So this borrows through `scope` rather than acquiring
+/// anything of its own.
 fn apply_cursor_behavior<B: Backend>(
     scope: &mut HandleScope<'_>,
     conn_token: *mut c_void,
@@ -144,7 +143,7 @@ fn apply_cursor_behavior<B: Backend>(
 /// Commit or roll back the transaction on one connection, then apply the
 /// resulting cursor behaviour to its statements. Shared by both the
 /// `SQL_HANDLE_ENV` and `SQL_HANDLE_DBC` arms of [`sql_end_tran`], which need
-/// this connection's group already held via `scope` — the `SQL_HANDLE_DBC`
+/// this connection's group already held via `scope`: the `SQL_HANDLE_DBC`
 /// arm's own scope for a direct call, or the nested scope
 /// [`HandleScope::with_child_group`] builds for one connection at a time
 /// under `SQL_HANDLE_ENV`.
@@ -161,7 +160,7 @@ fn apply_cursor_behavior<B: Backend>(
 /// - `SQL_HANDLE_ENV` passes `true`: by the time its per-connection loop sees
 ///   this call's result, `with_child_group` has already released
 ///   `conn_token`'s group, so this is its only chance to satisfy the spec's
-///   "the application can call SQLGetDiagRec for each connection" — the
+///   "the application can call SQLGetDiagRec for each connection", because the
 ///   scope out there belongs to the *environment*, not this connection.
 ///
 /// Neither caller wants a push for "not connected" (`SQL_HANDLE_DBC` still
@@ -175,8 +174,7 @@ fn apply_cursor_behavior<B: Backend>(
 /// Returns [`EndTranOutcome`] rather than `()`: "no open connection" and "the
 /// backend committed or rolled back" both reach the end of this function
 /// without an `Err`, but a caller needs to tell them apart (see the enum's
-/// own doc comment for why collapsing them into one signal is exactly the
-/// bug this type exists to prevent).
+/// own doc comment for what collapsing them into one signal costs).
 fn end_tran_on_connection<B: Backend>(
     scope: &mut HandleScope<'_>,
     conn_token: *mut c_void,
@@ -185,7 +183,7 @@ fn end_tran_on_connection<B: Backend>(
     report_end_tran_failure: bool,
 ) -> Result<EndTranOutcome, OdbcError> {
     let conn = scope.get::<ConnectionHandle<B>>(conn_token)?;
-    // Spec: clear diagnostics at the start of each ODBC call — done per
+    // Spec: clear diagnostics at the start of each ODBC call, done per
     // visited connection, not just the top-level handle; see this function's
     // callers in `sql_end_tran`.
     conn.diagnostics.clear();
@@ -250,10 +248,9 @@ enum EndTranOutcome {
 /// tells it to and "call **SQLGetDiagRec** for each connection" to find out
 /// which ones failed. Every visited connection's queue is cleared before that,
 /// so a record left over from an earlier call cannot be read as this call's
-/// outcome. Note that unixODBC never takes this
-/// path — it loops over connections itself and calls the driver with
-/// `SQL_HANDLE_DBC` — but the Windows Driver Manager does pass the driver's
-/// environment handle straight through.
+/// outcome. unixODBC never takes this path, because it loops over connections
+/// itself and calls the driver with `SQL_HANDLE_DBC`, but the Windows Driver
+/// Manager does pass the driver's environment handle straight through.
 ///
 /// Core does not track autocommit state and calls `B::end_tran`
 /// unconditionally. The spec has the Driver Manager suppress the call while a
@@ -277,7 +274,7 @@ enum EndTranOutcome {
 /// was rolled back, so under those the cursor behaviour arguably applies.
 /// Acting on that would make the outcome depend on a backend classifying its
 /// client library's errors precisely, and the cost of the two mistakes is not
-/// symmetric — applying the behaviour after a transaction that did *not* end
+/// symmetric: applying the behaviour after a transaction that did *not* end
 /// destroys cursor state the application may still need, while skipping it
 /// after one that did leaves stale state that the spec's Suspended State
 /// section expects `SQLDisconnect` to clean up anyway (`sql_disconnect` frees
@@ -297,28 +294,28 @@ enum EndTranOutcome {
 ///
 /// SQLSTATEs from the spec Diagnostics table:
 ///
-/// - **01000** — General warning (SQL_SUCCESS_WITH_INFO). Returned by the backend if it has
+/// - **01000**: General warning (SQL_SUCCESS_WITH_INFO). Returned by the backend if it has
 ///   driver-specific informational messages to report.
 ///   Not currently surfaced. Backends return `Ok(())` with no info diagnostics; returning
 ///   01000 would require a new backend API variant for informational messages. Deferred.
 ///
-/// - **08003** — Connection not open: `(DM)`-marked, and guarded defensively here for
+/// - **08003**: Connection not open: `(DM)`-marked, and guarded defensively here for
 ///   `SQL_HANDLE_DBC`, when the connection is not in a connected state (`conn.connection`
 ///   is `None`). The check is load-bearing beyond the spec: the `SQL_HANDLE_ENV` arm walks
 ///   the environment's connections and uses the same test to skip the ones that were never
 ///   connected, so removing it would make an environment-wide commit fail on the first
 ///   idle connection.
 ///
-/// - **08007** — Connection failure during transaction. Returned by the backend if the
+/// - **08007**: Connection failure during transaction. Returned by the backend if the
 ///   connection fails during COMMIT/ROLLBACK and it is unknown whether the operation
 ///   succeeded. Backends can surface this via `OdbcError`.
 ///
-/// - **25S01** — Transaction state unknown. Not applicable. This is a
+/// - **25S01**: Transaction state unknown. Not applicable. This is a
 ///   *distributed* transaction code: it reports that the driver could not
 ///   guarantee the outcome of a global transaction. The spec is explicit that
-///   no such guarantee is expected across an environment's connections —
-///   "The Driver Manager does not simulate a global transaction across all
-///   connections and therefore does not use two-phase commit protocols" — and
+///   no such guarantee is expected across an environment's connections
+///   ("The Driver Manager does not simulate a global transaction across all
+///   connections and therefore does not use two-phase commit protocols"), and
 ///   core has no distributed-transaction support to originate it from. A
 ///   backend enrolled in a real distributed transaction can surface it via
 ///   `OdbcError`.
@@ -327,78 +324,78 @@ enum EndTranOutcome {
 ///   every connected connection and reports the first failure while recording
 ///   a diagnostic on each failing connection.
 ///
-/// - **25S02** — Transaction is still active. Like 25S01, a distributed
+/// - **25S02**: Transaction is still active. Like 25S01, a distributed
 ///   transaction code. Core never originates it; a backend enrolled in a
 ///   global transaction can surface it via `OdbcError`.
 ///
-/// - **25S03** — Transaction is rolled back. Distributed transaction code; see
+/// - **25S03**: Transaction is rolled back. Distributed transaction code; see
 ///   25S02. Core never originates it. Note that a backend returning this does
 ///   mean the transaction ended, but core still skips the cursor-behaviour
-///   step on any error — see the cursor behaviour section below.
+///   step on any error; see the cursor behaviour section below.
 ///
-/// - **40001** — Serialization failure (deadlock). Transaction was rolled back.
+/// - **40001**: Serialization failure (deadlock). Transaction was rolled back.
 ///   Returned by the backend via `OdbcError` if applicable.
 ///
-/// - **40002** — Integrity constraint violation on COMMIT. Transaction was rolled back.
+/// - **40002**: Integrity constraint violation on COMMIT. Transaction was rolled back.
 ///   Returned by the backend via `OdbcError` if applicable.
 ///
-/// - **HY000** — General error. Returned by the backend for errors without a specific
+/// - **HY000**: General error. Returned by the backend for errors without a specific
 ///   SQLSTATE.
 ///
-/// - **HY001** — Memory allocation error. Returned by the backend if memory cannot be
+/// - **HY001**: Memory allocation error. Returned by the backend if memory cannot be
 ///   allocated.
 ///
 /// - HY008: Operation canceled; not returned here. Cancelling a connection-level call needs
 ///   `SQLCancelHandle` on a connection handle, which this driver does not export, so no cancel
-///   token exists for this call to observe — `SQLCancel` takes a statement handle and cannot
+///   token exists for this call to observe: `SQLCancel` takes a statement handle and cannot
 ///   reach one. The asynchronous clause is likewise inapplicable: core never returns
 ///   `SQL_STILL_EXECUTING`.
 ///
-/// - **HY010** — Function sequence error (async). Every clause of this row is `(DM)`
+/// - **HY010**: Function sequence error (async). Every clause of this row is `(DM)`
 ///   (driver-manager-handled; not returned here). None could arise anyway: the `Backend`
 ///   trait is synchronous and has no async execution path.
 ///
-/// - **HY012** — Invalid transaction operation code. Returned when `completion_type` is
+/// - **HY012**: Invalid transaction operation code. Returned when `completion_type` is
 ///   neither `SQL_COMMIT` nor `SQL_ROLLBACK`. Implemented: the raw value is parsed before
 ///   any handle is touched; an unrecognised value returns `SQL_ERROR`.
 ///   The spec marks this `(DM)`; it is guarded defensively here. `SQL_ERROR` is returned
 ///   without a diagnostic record because the raw value is parsed before the handle
-///   argument has been resolved — the handle is available, but neither its kind nor its
+///   argument has been resolved: the handle is available, but neither its kind nor its
 ///   validity is established, so there is no queue yet known to be the right one to post
 ///   to.
 ///
-/// - **HY013** — Memory management error. Not specifically implemented; covered by
+/// - **HY013**: Memory management error. Not specifically implemented; covered by
 ///   general Rust memory safety.
 ///
-/// - **HY092** — Invalid attribute/option identifier. Not returned by the
+/// - **HY092**: Invalid attribute/option identifier. Not returned by the
 ///   driver: the spec annotates it **(DM)**, so it is the Driver Manager that
 ///   rejects a `HandleType` other than `SQL_HANDLE_ENV` or `SQL_HANDLE_DBC`
 ///   with this SQLSTATE. Should such a value reach the driver anyway, the `_`
 ///   arm returns `SQL_INVALID_HANDLE` (via `OdbcError::InvalidHandle`) with no
-///   SQLSTATE record — the handle cannot be trusted to carry a diagnostic
-///   queue matching the claimed type.
+///   SQLSTATE record, because the handle cannot be trusted to carry a
+///   diagnostic queue matching the claimed type.
 ///
-/// - **HY115** — SQLEndTran not allowed for environment with async connection. `(DM)`
+/// - **HY115**: SQLEndTran not allowed for environment with async connection. `(DM)`
 ///   (driver-manager-handled; not returned here). It could not arise anyway: the `Backend`
 ///   trait has no async connection functions.
 ///
-/// - **HY117** — Connection suspended due to unknown transaction state. `(DM)`
+/// - **HY117**: Connection suspended due to unknown transaction state. `(DM)`
 ///   (driver-manager-handled; not returned here); the Windows 7+ suspended-connection
 ///   state is not tracked here.
 ///
-/// - **HYC00** — Optional feature not implemented. Returned by the backend if ROLLBACK
+/// - **HYC00**: Optional feature not implemented. Returned by the backend if ROLLBACK
 ///   is not supported.
 ///
-/// - **HYT01** — Connection timeout expired. May be returned by the backend.
+/// - **HYT01**: Connection timeout expired. May be returned by the backend.
 ///
-/// - **IM001** — Driver does not support this function
+/// - **IM001**: Driver does not support this function
 ///   (driver-manager-handled; not returned here).
 ///
-/// - **IM017** — Polling disabled; not returned here (the asynchronous notification model
-///   is not supported — not DM-annotated in the spec).
+/// - **IM017**: Polling disabled; not returned here (the asynchronous notification model
+///   is not supported; not DM-annotated in the spec).
 ///
-/// - **IM018** — SQLCompleteAsync not called; not returned here (the asynchronous
-///   notification model is not supported — not DM-annotated in the spec).
+/// - **IM018**: SQLCompleteAsync not called; not returned here (the asynchronous
+///   notification model is not supported; not DM-annotated in the spec).
 ///
 /// # Safety
 ///
@@ -434,7 +431,7 @@ pub unsafe fn sql_end_tran<B: Backend>(
     // for SQL_HANDLE_ENV's per-connection loop, by scope.with_child_group) inside the
     // closure. Every conn_ptr from children_of(handle) is re-validated the same way
     // when it is actually visited, since a concurrent SQLFreeHandle can retire one
-    // between the snapshot and here — this is the crate's only lock-nesting site
+    // between the snapshot and here. This is the crate's only lock-nesting site
     // (environment before connection), so this is the one place that can happen.
     let ret = unsafe {
         panic_safe::<B, _>(handle, |scope| {
@@ -806,7 +803,7 @@ mod tests {
     fn end_tran_close_keeps_a_prepared_but_unexecuted_statement() {
         // ODBC state S2: prepared, never executed, no cursor open. SQLPrepare
         // stores a backend statement, so S2 has `statement == Some`, but
-        // footnote [2] (SQL_CB_CLOSE) leaves S2 unchanged — there is no cursor
+        // footnote [2] (SQL_CB_CLOSE) leaves S2 unchanged, because there is no cursor
         // to close there. Dropping the statement would send it back to S1 and
         // make a subsequent SQLNumResultCols fail with HY010, though the spec
         // says that call is legal in S2.
@@ -920,7 +917,7 @@ mod tests {
 
     #[test]
     fn end_tran_close_lets_a_catalog_function_run_again() {
-        // Same transition, same reasoning, for the catalog functions — they
+        // Same transition, same reasoning, for the catalog functions: they
         // share the "cursor already open" guard with SQLExecDirect.
         unsafe {
             let (env, conn, stmt) = alloc_connected_stmt::<MockTxnCloseBackend>("DRIVER=mock;");
@@ -1432,7 +1429,7 @@ mod tests {
     /// which `SQL_HANDLE_ENV`'s loop must skip without setting `first_err`).
     /// A *backend* reporting that same variant from `B::end_tran` on a
     /// connection core already knows is connected is a real failure and must
-    /// not be mistaken for that skip — `EndTranOutcome` is what keeps them
+    /// not be mistaken for that skip, which is what `EndTranOutcome` keeps
     /// apart.
     #[test]
     fn end_tran_env_reports_a_backend_returned_not_connected_as_an_error() {
@@ -1554,7 +1551,7 @@ mod tests {
             // Connected, not just allocated: an unconnected connection is
             // "not active" and SQL_HANDLE_ENV's per-connection loop skips it
             // silently (see `end_tran_on_connection`), which would make this
-            // test pass for the wrong reason — never actually reaching the
+            // test pass for the wrong reason, never actually reaching the
             // nested group at all. `MockTxnCloseBackend` is used rather than
             // `MockBackend` because the latter's `end_tran` is the default
             // `NotImplemented` (it exists to test paths that never reach the
@@ -1638,13 +1635,14 @@ mod tests {
     }
 
     /// `SQLEndTran(SQL_HANDLE_ENV)` must not misreport a connection that is
-    /// freed concurrently, mid-walk, by another thread. This pins the fix at
-    /// `tran.rs:447`: `with_child_group` can resolve a connection's group and
+    /// freed concurrently, mid-walk, by another thread. This pins the merged
+    /// arm of the `SQL_HANDLE_ENV` branch: `with_child_group` can resolve a
+    /// connection's group and
     /// start waiting for its lock while another thread is inside
     /// `SQLFreeHandle(SQL_HANDLE_DBC)` for that same connection; once both
     /// finish, `end_tran_on_connection`'s own `scope.get` sees the
     /// now-freed connection and returns `Err(InvalidHandle)` *from inside*
-    /// the successfully-acquired child scope — `Ok(Err(InvalidHandle))`, not
+    /// the successfully-acquired child scope, as `Ok(Err(InvalidHandle))` and not
     /// the `with_child_group`-level `Err(_)` a token that never resolved at
     /// all would produce. Both must be treated as "connection gone, skip
     /// it", not folded into `first_err`, or a valid environment handle's
@@ -1655,20 +1653,20 @@ mod tests {
     /// directly (the same lock `with_child_group` will try to take), so once
     /// the worker's call into `sql_end_tran` reaches that lock it
     /// deterministically blocks rather than racing for it. The main thread
-    /// only frees the connection — for real, through the same registry
-    /// primitives `free_connection` uses — once it knows the worker has
+    /// only frees the connection, for real and through the same registry
+    /// primitives `free_connection` uses, once it knows the worker has
     /// started, and only drops its own guard afterward, so the worker can
     /// never observe the connection as live once it wakes up. What is not
     /// fully deterministic is whether the worker has *reached* that lock
-    /// (rather than still being inside its own setup, or — worse for this
-    /// test — not even having taken its `children_of` snapshot yet) by the
+    /// (rather than still being inside its own setup, or, worse for this
+    /// test, not even having taken its `children_of` snapshot yet) by the
     /// time the `mpsc` handshake below returns on the main thread: a single
     /// round trip is not enough headroom, empirically, since spawning and
     /// scheduling a new OS thread costs far more than the handful of registry
     /// lookups `sql_end_tran` performs before reaching the lock. The bounded
-    /// `yield_now` loop buys that headroom without a wall-clock assumption --
-    /// no fixed sleep duration to be too short on a loaded CI runner or too
-    /// long everywhere else — by repeatedly giving the scheduler the chance
+    /// `yield_now` loop buys that headroom without a wall-clock assumption,
+    /// with no fixed sleep duration to be too short on a loaded CI runner or
+    /// too long everywhere else, by repeatedly giving the scheduler the chance
     /// to run the worker until it does.
     #[test]
     fn end_tran_on_an_environment_survives_a_connection_freed_mid_walk() {
@@ -1727,15 +1725,14 @@ mod tests {
             );
             // Anti-vacuity: without this, a scheduling shift that let the
             // connection vanish before `children_of`'s snapshot (rather than
-            // during the loop) would still pass the two assertions above --
+            // during the loop) would still pass the two assertions above,
             // trivially, since the loop would never have seen the connection
-            // at all — while testing nothing about the merged arm this test
-            // exists to cover. This is exactly the failure mode the
-            // construction above hit on its first attempt.
+            // at all, while testing nothing about the merged arm this test
+            // exists to cover.
             let hits_after = FREED_MID_WALK_HITS.load(std::sync::atomic::Ordering::Relaxed);
             assert!(
                 hits_after > hits_before,
-                "the merged Ok(Err(InvalidHandle)) | Err(_) arm never ran — this test passed \
+                "the merged Ok(Err(InvalidHandle)) | Err(_) arm never ran; this test passed \
                  vacuously rather than exercising the freed-mid-walk path"
             );
             with_handle::<MockTxnCloseBackend, EnvironmentHandle<MockTxnCloseBackend>, _>(
@@ -1751,8 +1748,8 @@ mod tests {
 
             // The connection is already gone; only the statement and
             // environment remain to be torn down. `B::disconnect` is
-            // deliberately skipped for the same reason `free_connection` was
-            // bypassed above — this test stands in for an application that
+            // skipped for the same reason `free_connection` was
+            // bypassed above: this test stands in for an application that
             // dropped the connection out from under a concurrent call, not
             // an orderly shutdown.
             let _ = crate::handles::free_statement_allocation::<MockTxnCloseBackend>(stmt);

@@ -24,13 +24,13 @@ pub(crate) use loom::sync::{Arc, Mutex, MutexGuard, RwLock};
 #[cfg(not(all(loom, test)))]
 pub(crate) use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 
-// `Condvar` is deliberately absent, and that is the first of the crate's two
-// exceptions to "every lock comes from here". `query_timer.rs` uses `std::sync::Condvar`
+// `Condvar` is absent, and that is the first of the crate's two exceptions to
+// "every lock comes from here". `query_timer.rs` uses `std::sync::Condvar`
 // directly, for two reasons its own comment records in full: loom's `Condvar`
 // has no `wait_timeout_while` and its `wait_timeout` ignores the duration
 // outright (loom 0.7.2: "TODO: implement timing out"), so an instrumented
-// query timer could not model a timeout at all — and no loom model reaches
-// that code, the models being of `Registry` and `GroupLock`.
+// query timer could not model a timeout at all. No loom model reaches that code
+// either, the models being of `Registry` and `GroupLock`.
 //
 // The second exception is in `logging.rs`, which hands
 // `std::sync::Mutex::new(file)` to `tracing_subscriber` as its writer. That one

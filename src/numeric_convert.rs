@@ -1,7 +1,7 @@
 //! Conversion of numeric parameter data to the SQL type the application
 //! declared at `SQLBindParameter`.
 //!
-//! This module is the [C to SQL: Numeric] table, transcribed — the third
+//! This module is the [C to SQL: Numeric] table, transcribed, and the third
 //! sibling of [`crate::param_convert`] (Character) and
 //! [`crate::binary_convert`] (Binary). It exists for the reason they do:
 //! [`crate::backend::Backend::execute`] receives only `&[ColumnValue]`, so the
@@ -27,7 +27,7 @@
 //!
 //! Row 4's test is "data is within the range of the data type to which the
 //! number is being converted", and an IEEE-754 `f32`/`f64` represents NaN and
-//! both infinities — so a float target accepts them. An integer, `SQL_BIT`,
+//! both infinities, so a float target accepts them. An integer, `SQL_BIT`,
 //! `DECIMAL` or interval target cannot hold either, so those are `22003`. NaN
 //! needs an explicit test wherever it is rejected: it compares false against
 //! every bound, so `value < MIN || value > MAX` would let it through.
@@ -91,7 +91,7 @@ pub(crate) enum NumericParam {
 ///
 /// The warning is the table's footnote [b]: "a driver may optionally return
 /// SQL_SUCCESS_WITH_INFO and 01S07 when there is a fractional truncation". The
-/// value is still sent — that is what makes it a warning rather than an error,
+/// value is still sent, which is what makes it a warning rather than an error,
 /// and why it cannot simply be an `Err`.
 pub(crate) struct Converted {
     /// The value to hand the backend.
@@ -246,11 +246,11 @@ pub(crate) fn numeric_to_sql_type(
             return Err(out_of_range(&text, sql_type));
         }
 
-        // Fractional truncation is this row's "n/a" case, not an error — the
-        // difference from the character table, which refuses it. The value is
-        // converted to the declared scale so that what is sent matches what the
-        // warning describes, rather than leaving the data source to apply a
-        // rounding policy core just claimed was a truncation.
+        // Fractional truncation is this row's "n/a" case, not an error, which
+        // is the difference from the character table, which refuses it. The
+        // value is converted to the declared scale so that what is sent matches
+        // what the warning describes, rather than leaving the data source to
+        // apply a rounding policy core just claimed was a truncation.
         if literal.required_scale() > scale {
             let truncated = literal.truncated_to_scale(scale);
             return Ok(Converted {
@@ -283,8 +283,8 @@ pub(crate) fn numeric_to_sql_type(
     // "data is within the range of the data type to which the number is being
     // converted", and an IEEE-754 float represents NaN and both infinities.
     // Only a value that is finite *and* outside the target's range fails, so
-    // the `is_finite` guard is what keeps NaN — which compares false against
-    // every bound — from being read as out of range.
+    // the `is_finite` guard is what keeps NaN from being read as out of range,
+    // NaN comparing false against every bound.
     if sql_type == SqlDataType::REAL {
         let v = value.as_f64();
         if v.is_finite() && (v > f64::from(f32::MAX) || v < f64::from(f32::MIN)) {
@@ -295,7 +295,7 @@ pub(crate) fn numeric_to_sql_type(
     if sql_type == SqlDataType::FLOAT || sql_type == SqlDataType::DOUBLE {
         // Every `f64` is within `f64`'s range, so the only way to leave it is
         // an exact literal too large to parse back, which `as_f64` reports as
-        // an infinity — and an infinity is representable here.
+        // an infinity, and an infinity is representable here.
         return Ok(Converted::clean(ColumnValue::F64(value.as_f64())));
     }
 
@@ -349,8 +349,8 @@ fn interval_from_exact(
     let text = literal.to_decimal_string();
 
     // An interval field is a whole number, so a fraction is data the conversion
-    // would drop — this row's "data truncated". Unlike row 3, there is no
-    // footnote permitting a warning instead.
+    // would drop, which is this row's "data truncated". Unlike row 3, there is
+    // no footnote permitting a warning instead.
     if !literal.fraction_is_zero() {
         return Err(interval_overflow(&text, sql_type));
     }
@@ -432,7 +432,7 @@ fn interval_overflow(text: &str, sql_type: SqlDataType) -> OdbcError {
 /// The `SQL_IS_*` subcode of a single-field interval SQL type, or `None`.
 ///
 /// The concise SQL type is `100 + SQL_CODE_*`, so the subcode is recovered by
-/// subtracting 100 and converting — which is why `interval_from_raw` earns its
+/// subtracting 100 and converting. That is why `interval_from_raw` earns its
 /// keep here rather than six `==` comparisons against the constants: the match
 /// below is over a typed enum, as this crate's boundary rule asks.
 fn single_field_interval_code(sql_type: SqlDataType) -> Option<Interval> {
@@ -573,10 +573,10 @@ impl NumericParam {
     /// rather than a pair of bound comparisons, because NaN compares false
     /// against every bound and would otherwise pass.
     ///
-    /// **That arm is deliberately redundant**, which a mutation check proved:
-    /// deleting it leaves every test passing, because
-    /// [`parse_numeric_literal`] rejects `inf` and `NaN` too — neither is a
-    /// *numeric-literal* — so the fallback below answers `22003` regardless. It
+    /// **That arm is redundant**, and a mutation check confirms it: deleting it
+    /// leaves every test passing, because
+    /// [`parse_numeric_literal`] rejects `inf` and `NaN` too, neither being a
+    /// *numeric-literal*, so the fallback below answers `22003` regardless. It
     /// is kept because the two rejections are for different reasons and only
     /// one of them is this table's: a non-finite value is out of the target's
     /// range, which is what the spec row says, rather than a string that failed
@@ -627,7 +627,7 @@ mod tests {
             .to_owned()
     }
 
-    // -- row 1: narrow character targets ------------------------------------
+    // row 1: narrow character targets ------------------------------------
 
     #[test]
     fn a_number_that_fits_a_varchar_is_rendered_as_a_string() {
@@ -668,7 +668,7 @@ mod tests {
         );
     }
 
-    // -- row 2: wide character targets --------------------------------------
+    // row 2: wide character targets --------------------------------------
 
     #[test]
     fn a_wide_character_target_counts_utf16_code_units() {
@@ -684,7 +684,7 @@ mod tests {
         );
     }
 
-    // -- rendering: the source's own precision ------------------------------
+    // rendering: the source's own precision ------------------------------
 
     /// A `SQL_C_FLOAT` widened to `f64` prints as 1.1499999761581421. Rendering
     /// at the source's precision is what keeps a `VARCHAR(4)` bind working.
@@ -723,7 +723,7 @@ mod tests {
         );
     }
 
-    // -- row 3: exact numeric targets ---------------------------------------
+    // row 3: exact numeric targets ---------------------------------------
 
     #[test]
     fn an_integer_that_fits_the_target_converts() {
@@ -812,7 +812,7 @@ mod tests {
         );
     }
 
-    // -- row 3, the decimal half --------------------------------------------
+    // row 3, the decimal half --------------------------------------------
 
     #[test]
     fn a_decimal_target_uses_the_declared_precision_and_scale() {
@@ -855,7 +855,7 @@ mod tests {
         assert!(numeric_to_sql_type(exact("123456789.123"), SqlDataType::DECIMAL, 0, 0, 0).is_ok());
     }
 
-    // -- non-finite sources against exact targets ---------------------------
+    // non-finite sources against exact targets ---------------------------
 
     #[test]
     fn a_non_finite_value_cannot_reach_an_exact_target() {
@@ -883,7 +883,7 @@ mod tests {
         }
     }
 
-    // -- row 4: approximate numeric targets ---------------------------------
+    // row 4: approximate numeric targets ---------------------------------
 
     #[test]
     fn a_value_within_the_float_range_converts() {
@@ -958,7 +958,7 @@ mod tests {
         assert!(matches!(out.value, ColumnValue::F64(v) if v.is_nan()));
     }
 
-    // -- row 5: SQL_BIT -----------------------------------------------------
+    // row 5: SQL_BIT -----------------------------------------------------
 
     #[test]
     fn zero_and_one_reach_a_bit_target() {
@@ -976,7 +976,7 @@ mod tests {
         );
     }
 
-    /// "Data is greater than 0, less than 2, and not equal to 1" — 22001, which
+    /// "Data is greater than 0, less than 2, and not equal to 1" is 22001, which
     /// is this row's own answer and not the truncation state it resembles.
     #[test]
     fn a_fraction_between_zero_and_two_is_22001_for_a_bit() {
@@ -1027,7 +1027,7 @@ mod tests {
         }
     }
 
-    // -- row 6: intervals ---------------------------------------------------
+    // row 6: intervals ---------------------------------------------------
 
     /// A year-month interval reuses the variant a backend already returns, so
     /// nothing downstream has to learn a new shape. `INTERVAL '5' YEAR` and
@@ -1124,7 +1124,7 @@ mod tests {
     }
 
     /// An interval field is a whole number, so a fraction is data the
-    /// conversion would drop — this row's "data truncated".
+    /// conversion would drop, which is this row's "data truncated".
     #[test]
     fn a_fractional_value_cannot_be_an_interval_field() {
         assert_eq!(
@@ -1153,7 +1153,7 @@ mod tests {
         );
     }
 
-    // -- the pairing gate ---------------------------------------------------
+    // the pairing gate ---------------------------------------------------
 
     #[test]
     fn an_approximate_source_cannot_reach_any_interval() {
@@ -1249,7 +1249,7 @@ mod tests {
         assert!(!is_numeric_c_type(CDataType::Binary));
     }
 
-    // -- targets this table does not convert to -----------------------------
+    // targets this table does not convert to -----------------------------
 
     #[test]
     fn a_target_this_table_does_not_convert_to_is_07006() {

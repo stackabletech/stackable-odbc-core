@@ -8,7 +8,7 @@
 //! # Why handles are not pointers
 //!
 //! A handle arrives from the C boundary as an untrusted `*mut c_void`. The
-//! obvious validation — store a magic tag in the allocation and compare it —
+//! obvious validation, storing a magic tag in the allocation and comparing it,
 //! cannot work, because reading that tag *is* a dereference of the untrusted
 //! value. It catches a live handle of the wrong type and nothing else: a freed
 //! handle is a use-after-free read, and a value that was never a pointer is an
@@ -16,7 +16,7 @@
 //!
 //! So a handle is not an address. It is an opaque token pairing a slot index
 //! with a generation counter, and validation is a bounds check plus two integer
-//! comparisons against a table this crate owns — with no access to
+//! comparisons against a table this crate owns, with no access to
 //! application-supplied memory at all. Nothing in ODBC requires otherwise: a
 //! `SQLHANDLE` is `void*` to the application, and the Driver Manager only ever
 //! hands it back.
@@ -65,9 +65,9 @@ const SQL_NOSCAN_ON: usize = 1;
 /// `SQLCopyDesc` never copies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AllocType {
-    /// `SQL_DESC_ALLOC_AUTO` — one of the four allocated with a statement.
+    /// `SQL_DESC_ALLOC_AUTO`: one of the four allocated with a statement.
     Auto,
-    /// `SQL_DESC_ALLOC_USER` — allocated by `SQLAllocHandle(SQL_HANDLE_DESC)`.
+    /// `SQL_DESC_ALLOC_USER`: allocated by `SQLAllocHandle(SQL_HANDLE_DESC)`.
     User,
 }
 
@@ -83,7 +83,7 @@ impl AllocType {
 
 /// One ODBC descriptor (`SQL_HANDLE_DESC`).
 ///
-/// A statement has four of these — the ARD, APD, IRD and IPD — and the ODBC
+/// A statement has four of these, the ARD, APD, IRD and IPD, and the ODBC
 /// spec makes them the *definition* of a binding rather than a copy of one:
 /// "when `SQLBindCol` is called, the driver sets fields in the ARD". So a bound
 /// column is a record in the statement's ARD, and a bound parameter is a record
@@ -95,9 +95,8 @@ impl AllocType {
 /// `SQLSetDescField` accepts any field identifier against any descriptor and
 /// decides validity from the role. Core stores no records for the IRD; reads
 /// there are computed from `ColumnDescriptor`, which is how `SQLColAttributeW`
-/// and `SQLGetDescField` stay one answer rather than two — inventing a second
-/// source of truth for column metadata is the exact failure this type exists to
-/// prevent.
+/// and `SQLGetDescField` stay one answer rather than two. A second source of
+/// truth for column metadata is the exact failure this type exists to prevent.
 ///
 /// The Windows Driver Manager queries `SQLGetStmtAttrW` for descriptor handle
 /// attributes (10010–10013) immediately after allocating a statement. If the
@@ -105,28 +104,26 @@ impl AllocType {
 /// NULL and all subsequent application-facing calls crash. These handles
 /// satisfy that requirement.
 ///
-/// # Why there *is* a `HasKind` impl
+/// # Why there is a `HasKind` impl
 ///
-/// It deliberately did not, and both facts that refusal depended on are now
-/// false. The argument was
-/// that [`HandleScope::get`] dispatches on [`HandleKind`] alone, and all four of
-/// a statement's descriptors register as `HandleKind::Desc` — so
-/// `get::<Descriptor>` would resolve any one of the four as any other and pass
-/// every check the registry can make. That held only while the four were `Box`
-/// fields of one allocation: a token then named the *statement*, and which field
-/// it meant had to come from somewhere else.
+/// [`HandleScope::get`] dispatches on [`HandleKind`] alone, and all four of a
+/// statement's descriptors register as `HandleKind::Desc`. That would be a
+/// problem if a token named a statement and the role had to come from
+/// somewhere else, because `get::<Descriptor>` would then resolve any one of
+/// the four as any other and pass every check the registry can make.
 ///
-/// Each descriptor is now its own `Box::into_raw` with its own registry slot and
-/// its own [`Self::role`] field. A token therefore names exactly one descriptor,
-/// and the struct at that address says which of the four it is — so `get` needs
-/// nothing the registry cannot check, and the role needs no owner to supply it.
+/// Each descriptor is its own `Box::into_raw` with its own registry slot and
+/// its own [`Self::role`] field. A token therefore names exactly one
+/// descriptor, and the struct at that address says which of the four it is, so
+/// `get` needs nothing the registry cannot check and the role needs no owner
+/// to supply it.
 ///
-/// The same change is what makes [`HandleScope::stmt_with_desc`] sound: a
-/// descriptor is no longer reachable through [`StatementHandle`]'s `&mut`, which
-/// is the one thing that would have made that combinator alias.
+/// The same property is what makes [`HandleScope::stmt_with_desc`] sound: a
+/// descriptor is not reachable through [`StatementHandle`]'s `&mut`, which is
+/// the one thing that would make that combinator alias.
 ///
-/// The rule that remains is that a `Descriptor` is never reached by casting an
-/// address — only through the registry, as every other handle kind is.
+/// A `Descriptor` is never reached by casting an address, only through the
+/// registry, as every other handle kind is.
 ///
 /// [`HandleScope::get`]: crate::handles::scope::HandleScope::get
 /// [`HandleScope::stmt_with_desc`]:
@@ -143,7 +140,7 @@ pub struct Descriptor {
     /// about it.
     pub diagnostics: DiagnosticQueue,
     /// The descriptor's records, keyed by the 1-based column or parameter
-    /// number — record 0, the bookmark record, is not supported.
+    /// number. Record 0, the bookmark record, is not supported.
     ///
     /// `SQL_DESC_COUNT` is derived from this map rather than stored beside it,
     /// so the two cannot disagree.
@@ -161,8 +158,8 @@ pub struct Descriptor {
     /// the mapping is not one-to-one: `SQL_DESC_ARRAY_SIZE` is
     /// `SQL_ATTR_ROW_ARRAY_SIZE` on an ARD and `SQL_ATTR_PARAMSET_SIZE` on an
     /// APD, and one descriptor may be the ARD of one statement and the APD of
-    /// another. Two keys for one field would be two values for one field —
-    /// exactly the disagreement single storage exists to prevent. `Desc` has no
+    /// another. Two keys for one field would be two values for one field,
+    /// which is the disagreement single storage exists to prevent. `Desc` has no
     /// `Hash` impl in `odbc-sys`, so the discriminant is the key.
     pub attrs: std::collections::HashMap<u16, usize>,
     /// Which of the four this descriptor is.
@@ -173,7 +170,7 @@ pub struct Descriptor {
     pub role: DescriptorRole,
     /// Whether the application allocated this descriptor or a statement did.
     ///
-    /// `SQL_DESC_ALLOC_TYPE` reads it. It is deliberately *not* what routes
+    /// `SQL_DESC_ALLOC_TYPE` reads it. It is *not* what routes
     /// `SQLFreeHandle`: that decides from the registry's parentage, so a wrong
     /// value here cannot make the two disagree about which descriptors this
     /// function allocated.
@@ -213,8 +210,8 @@ impl Descriptor {
     /// that name it: `SQL_ATTR_ROW_BIND_OFFSET_PTR` on the ARD, which `SQLFetch`
     /// applies to its column bindings, and `SQL_ATTR_PARAM_BIND_OFFSET_PTR` on
     /// the APD, which an execution applies to its parameter bindings. One field,
-    /// one reader — two copies of the lookup would be two chances to key it
-    /// wrongly or to skip the null check in [`BindOffset::apply`].
+    /// one reader, because two copies of the lookup would be two chances to key
+    /// it wrongly or to skip the null check in [`BindOffset::apply`].
     ///
     /// # Safety
     ///
@@ -230,7 +227,7 @@ impl Descriptor {
 ///
 /// `parent` is the statement for one of the four implicit descriptors and the
 /// connection for an explicit one; `group` is the connection's in both cases,
-/// which every statement on that connection already shares — so a descriptor
+/// which every statement on that connection already shares, so a descriptor
 /// adds no lock and no ordering rule.
 ///
 /// Returns `None` if the registry is exhausted, having freed the allocation
@@ -318,7 +315,7 @@ pub trait HasKind {
 ///
 /// Must be `#[repr(C)]`: validation never reads this struct's memory at all
 /// (the registry validates a token by slot index and generation, not by
-/// dereferencing it — see the module's top-level docs), so no field's offset
+/// dereferencing it; see the module's top-level docs), so no field's offset
 /// is load-bearing for that. `#[repr(C)]` is kept anyway for a defined,
 /// non-reordered layout on a type that is heap-allocated via `Box::into_raw`
 /// and later reclaimed via `Box::from_raw` at that same raw address.
@@ -352,7 +349,7 @@ impl<B: Backend> HasKind for EnvironmentHandle<B> {
 ///
 /// Must be `#[repr(C)]`: validation never reads this struct's memory at all
 /// (the registry validates a token by slot index and generation, not by
-/// dereferencing it — see the module's top-level docs), so no field's offset
+/// dereferencing it; see the module's top-level docs), so no field's offset
 /// is load-bearing for that. `#[repr(C)]` is kept anyway for a defined,
 /// non-reordered layout on a type that is heap-allocated via `Box::into_raw`
 /// and later reclaimed via `Box::from_raw` at that same raw address.
@@ -371,11 +368,11 @@ pub struct ConnectionHandle<B: Backend> {
     /// `SQLBrowseConnectW` calls. Reset on successful connect or `SQLDisconnect`.
     pub browse_request: Option<ConnectParams>,
     /// Whether work has been done on this connection under manual commit since
-    /// the last `SQLEndTran` — that is, whether a transaction is open.
+    /// the last `SQLEndTran`, that is, whether a transaction is open.
     ///
     /// Backs the spec's `HY011` row for `SQLSetConnectAttr`: "The *Attribute*
     /// argument was SQL_ATTR_TXN_ISOLATION, and a transaction was open." The
-    /// attribute table says the same thing twice over — "an application must
+    /// attribute table says the same thing twice over: "an application must
     /// call `SQLEndTran` to commit or roll back all open transactions on a
     /// connection, before calling `SQLSetConnectAttr` with this option", and
     /// footnote [3], "SQL_ATTR_TXN_ISOLATION can be set only if there are no
@@ -388,7 +385,7 @@ pub struct ConnectionHandle<B: Backend> {
     /// and a rolled-back transaction may have no cursor, so the two conditions
     /// cannot substitute for each other.
     ///
-    /// Deliberately conservative: set *before* the backend call rather than
+    /// Conservative on purpose: set *before* the backend call rather than
     /// after it succeeds, because a call that fails partway may still have
     /// opened a transaction, and the spec's requirement is to refuse an
     /// isolation change while one might be open.
@@ -402,8 +399,8 @@ impl<B: Backend> HasKind for ConnectionHandle<B> {
 impl<B: Backend> ConnectionHandle<B> {
     /// Whether this connection is in manual-commit mode.
     ///
-    /// `SQL_ATTR_AUTOCOMMIT` defaults to `SQL_AUTOCOMMIT_ON` — the spec's "this
-    /// is the default" — so an attribute that was never set means autocommit,
+    /// `SQL_ATTR_AUTOCOMMIT` defaults to `SQL_AUTOCOMMIT_ON`, the spec's "this
+    /// is the default", so an attribute that was never set means autocommit,
     /// and only an explicit `SQL_AUTOCOMMIT_OFF` puts the connection into the
     /// mode where work opens a transaction.
     pub fn in_manual_commit(&self) -> bool {
@@ -439,7 +436,7 @@ impl<B: Backend> StatementBackend for StatementData<B> {
     /// `OdbcError`, because this is the point where two different error types
     /// meet: the backend arm carries `<B::Statement as StatementBackend>::Error`
     /// and the synthetic arm carries `OdbcError`. Normalising here is what lets
-    /// core hold either kind of statement behind one handle, and costs nothing —
+    /// core hold either kind of statement behind one handle. It costs nothing:
     /// the backend's error converts through the `Into<OdbcError>` bound its own
     /// associated type already carries.
     type Error = OdbcError;
@@ -515,11 +512,11 @@ impl<B: Backend> StatementBackend for StatementData<B> {
 ///
 /// - The **APD** half carries `SQL_DESC_CONCISE_TYPE` read as a C type, plus
 ///   `SQL_DESC_DATA_PTR`, `SQL_DESC_OCTET_LENGTH` and
-///   `SQL_DESC_INDICATOR_PTR` — what `SQLBindParameter`'s page maps onto
+///   `SQL_DESC_INDICATOR_PTR`, which is what `SQLBindParameter`'s page maps onto
 ///   application parameter descriptor fields. It describes the *buffer* the
 ///   application supplied and says nothing about the parameter's type at the
 ///   data source.
-/// - The **IPD** half carries `SQL_DESC_CONCISE_TYPE` read as a SQL type —
+/// - The **IPD** half carries `SQL_DESC_CONCISE_TYPE` read as a SQL type:
 ///   `SQLBindParameter`'s `ParameterType`, the type the value is converted to
 ///   before it reaches the backend. For every C type but the two character ones
 ///   that conversion is a no-op, because the APD's C type already fixes the
@@ -535,7 +532,7 @@ pub(crate) struct ParamRecord<'a> {
     /// `SQL_DESC_INDICATOR_PTR`, as `SQLBindParameter` stored them. Read them
     /// through [`Self::data_ptr`] and [`Self::indicator_ptr`], which apply
     /// `SQL_ATTR_PARAM_BIND_OFFSET_PTR`; the field is public only because the
-    /// other half of it — the C type, the buffer length — carries no offset.
+    /// other half of it, the C type and the buffer length, carries no offset.
     pub apd: &'a DescriptorRecord,
     /// The IPD half: what the value is declared to be.
     pub ipd: &'a DescriptorRecord,
@@ -543,10 +540,10 @@ pub(crate) struct ParamRecord<'a> {
     ///
     /// Carried on the record rather than passed beside it so that a reader
     /// cannot hold a binding without also holding the offset that binding is
-    /// to be read at. The bug this closes was the absence of exactly that: the
-    /// attribute was stored, readable and never applied.
+    /// to be read at, which is what stops the attribute being stored, readable
+    /// and never applied.
     ///
-    /// Never applied by hand — [`Self::data_ptr`] and [`Self::indicator_ptr`]
+    /// Never applied by hand: [`Self::data_ptr`] and [`Self::indicator_ptr`]
     /// are the readers, so the null rule is in one place.
     pub bind_offset: BindOffset,
 }
@@ -555,8 +552,8 @@ impl ParamRecord<'_> {
     /// Where this parameter's value is, with
     /// `SQL_ATTR_PARAM_BIND_OFFSET_PTR` applied.
     ///
-    /// Null when the application bound none — the offset never resurrects a
-    /// null pointer. See [`BindOffset::apply`].
+    /// Null when the application bound none, because the offset never
+    /// resurrects a null pointer. See [`BindOffset::apply`].
     pub(crate) fn data_ptr(&self) -> *mut c_void {
         self.bind_offset.apply(self.apd.data_ptr)
     }
@@ -570,9 +567,8 @@ impl ParamRecord<'_> {
 
 /// The two parameter descriptors' record maps, borrowed together.
 ///
-/// The free functions in [`crate::ffi::params`] took one `HashMap` before the
-/// split and take this after, so they still borrow one field-path of the
-/// statement rather than the whole handle.
+/// The free functions in [`crate::ffi::params`] take this rather than the whole
+/// statement handle, so they borrow one field-path of it and no more.
 #[derive(Clone, Copy)]
 pub(crate) struct ParamRecords<'a> {
     /// The APD's records.
@@ -601,34 +597,35 @@ impl<'a> ParamRecords<'a> {
     /// to be careful of here. `SQLBindParameter`'s *ParameterValuePtr* section:
     /// "An application can set the *ParameterValuePtr* argument to a null
     /// pointer, as long as *StrLen_or_IndPtr is SQL_NULL_DATA or
-    /// SQL_DATA_AT_EXEC." The Driver Manager agrees — its `HY009` fires only
-    /// when *both* pointers are null — and so does `sql_bind_parameter`, which
+    /// SQL_DATA_AT_EXEC." The Driver Manager agrees, its `HY009` firing only
+    /// when *both* pointers are null, and so does `sql_bind_parameter`, which
     /// removes a binding on that same pair. Every client binds a NULL this
     /// way: pyodbc sends `value_ptr=NULL, *ind=SQL_NULL_DATA` for `None`.
     ///
-    /// Testing the data pointer alone therefore reported `07002` — "the number
+    /// Testing the data pointer alone would report `07002` ("the number
     /// of parameters specified in SQLBindParameter was less than the number of
-    /// parameters in the SQL statement" — for a parameter the application had
+    /// parameters in the SQL statement") for a parameter the application had
     /// bound, making `WHERE col = ?` with a NULL inexpressible.
     ///
     /// This is a parameter-side rule, and [`DescriptorRecord::is_bound`] is
-    /// deliberately left alone: it answers "is there a data buffer", which is
-    /// still exactly what a writer of column data needs to know. `SQLBindCol`
-    /// draws the same distinction on the column side — a null `TargetValuePtr`
-    /// unbinds the *data buffer* and keeps a live `StrLen_or_IndPtr` bound — so
-    /// both sides ask two questions of a record rather than one.
+    /// left alone: it answers "is there a data buffer", which is
+    /// exactly what a writer of column data needs to know. `SQLBindCol`
+    /// draws the same distinction on the column side, where a null
+    /// `TargetValuePtr` unbinds the *data buffer* and keeps a live
+    /// `StrLen_or_IndPtr` bound, so both sides ask two questions of a record
+    /// rather than one.
     ///
     /// `Err` is reserved for the one case that is neither: a parameter present
     /// in one descriptor and absent from the other. `SQLBindParameter` writes
-    /// and removes both under the same key, so that state is unreachable — but
-    /// it is unreachable by construction rather than by type, and the
+    /// and removes both under the same key, so that state is unreachable. It is
+    /// unreachable by construction rather than by type, though, and the
     /// alternative to reporting it is an `unwrap` on a path that marshals
     /// application pointers.
     pub(crate) fn get(&self, number: u16) -> Result<Option<ParamRecord<'a>>, OdbcError> {
         match (self.apd.get(&number), self.ipd.get(&number)) {
             // A record carrying neither pointer exists but is not a binding.
             // `SQLSetDescField` can create one by setting any single field, so
-            // presence in the map stopped answering this question.
+            // presence in the map does not answer this question.
             (Some(apd), Some(_)) if !apd.is_bound() && apd.indicator_ptr.is_null() => Ok(None),
             (Some(apd), Some(ipd)) => Ok(Some(ParamRecord {
                 apd,
@@ -657,7 +654,7 @@ pub struct GetDataCursor {
     /// The 1-based column this position refers to. A call for any other column
     /// discards this cursor and starts that column from zero.
     pub column: u16,
-    /// Units already delivered — UTF-16 code units for `SQL_C_WCHAR`, bytes for
+    /// Units already delivered: UTF-16 code units for `SQL_C_WCHAR`, bytes for
     /// `SQL_C_CHAR` and `SQL_C_BINARY`.
     ///
     /// The unit follows the C type the application asked for, and an
@@ -673,7 +670,7 @@ pub struct GetDataCursor {
     /// The converted value being drained, and the C type it was converted for,
     /// materialised on the first call for this column.
     ///
-    /// This is what stops a chunked read costing O(N²/K) — see
+    /// This is what stops a chunked read costing O(N²/K); see
     /// [`crate::column_value::CachedChunkSource`]. `None` means every call
     /// re-asks the backend, which is still the path for a target the cache does
     /// not cover (a fixed-width one, or a value that has to be *rendered* rather
@@ -694,7 +691,7 @@ pub struct GetDataCursor {
 /// Three states rather than a `bool`, because three separate rules read it and
 /// no two of them ask the same question: `SQLPutData` needs "has a NULL already
 /// been sent" for its `HY020`, `SQLParamData` needs "was `SQLPutData` called at
-/// all" for its `HY010`, and the finaliser needs "NULL, or a value" — an empty
+/// all" for its `HY010`, and the finaliser needs "NULL, or a value". An empty
 /// buffer is a zero-length value when data was put and nothing at all when it
 /// was not, and those are two different parameters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -742,15 +739,15 @@ pub struct DataAtExecState {
     pub warnings: Vec<crate::errors::OdbcError>,
 }
 
-// SAFETY: DataAtExecState contains no raw pointers — all data is owned.
+// SAFETY: DataAtExecState contains no raw pointers; all data is owned.
 unsafe impl Send for DataAtExecState {}
 unsafe impl Sync for DataAtExecState {}
 
 /// ODBC statement handle (`SQL_HANDLE_STMT`).
 ///
 /// Models the statement state machine: allocated → executed → cursor open → fetching.
-/// `statement` is `None` until the backend produces one — `SQLPrepareW` already
-/// stores one, `SQLExecDirectW` and the catalog functions replace it — and then
+/// `statement` is `None` until the backend produces one, `SQLPrepareW` storing
+/// one and `SQLExecDirectW` and the catalog functions replacing it, and then
 /// `Some(StatementData)`, which implements [`StatementBackend`] for row iteration.
 ///
 /// `statement` answers "is there a backend statement to operate on?", never "is
@@ -767,7 +764,7 @@ unsafe impl Sync for DataAtExecState {}
 ///
 /// Must be `#[repr(C)]`: validation never reads this struct's memory at all
 /// (the registry validates a token by slot index and generation, not by
-/// dereferencing it — see the module's top-level docs), so no field's offset
+/// dereferencing it; see the module's top-level docs), so no field's offset
 /// is load-bearing for that. `#[repr(C)]` is kept anyway for a defined,
 /// non-reordered layout on a type that is heap-allocated via `Box::into_raw`
 /// and later reclaimed via `Box::from_raw` at that same raw address.
@@ -793,7 +790,7 @@ pub struct StatementHandle<B: Backend> {
     ///
     /// A third fact, because neither of the other two answers the question.
     /// `statement.is_some()` is true from `SQLPrepare` onwards, and
-    /// `cursor_open` is false for an `UPDATE` that executed perfectly well —
+    /// `cursor_open` is false for an `UPDATE` that executed perfectly well,
     /// so a check written against either one gets state S4 wrong in one
     /// direction or the other. Appendix B separates `S2-S3 Prepared` from
     /// `S4 Executed` in almost every row, and `SQLSetCursorName`'s is the row
@@ -812,7 +809,7 @@ pub struct StatementHandle<B: Backend> {
     ///
     /// One slot, not one per column, because that is exactly what the spec
     /// mandates: "Successive calls to `SQLGetData` will retrieve data from the
-    /// last column requested; prior offsets become invalid" — so
+    /// last column requested; prior offsets become invalid", so
     /// `SQLGetData(n)`, `SQLGetData(m)`, `SQLGetData(n)` restarts column `n`
     /// from the beginning. Keeping a position per column would *preserve* an
     /// offset the spec says is invalid.
@@ -827,7 +824,7 @@ pub struct StatementHandle<B: Backend> {
     /// Seconds of `SQL_ATTR_QUERY_TIMEOUT` that **core** must enforce, if any.
     ///
     /// Set only when [`Backend::set_query_timeout`] answered
-    /// [`QueryTimeout::CoreCancels`], so it is deliberately narrower than the
+    /// [`QueryTimeout::CoreCancels`], so it is narrower than the
     /// attribute in `attrs`: a timeout the *data source* enforces is stored
     /// there and absent here, because core arming a second timer for it would
     /// cancel a statement the server was already managing.
@@ -841,7 +838,7 @@ pub struct StatementHandle<B: Backend> {
     /// Tokens rather than `Box` fields because a descriptor may be shared: one
     /// explicit descriptor can stand in for the ARD of several statements, which
     /// no owned field can express. It is also what makes
-    /// [`HandleScope::stmt_with_desc`] sound — a descriptor is no longer
+    /// [`HandleScope::stmt_with_desc`] sound: a descriptor is not
     /// reachable through this struct's `&mut`.
     ///
     /// The IRD's descriptor stores no records: reads there are computed from the
@@ -876,7 +873,7 @@ impl<B: Backend> HasKind for StatementHandle<B> {
 /// is also a statement attribute is set by a call to **SQLSetDescField**, the
 /// corresponding statement attribute is set." Two copies of the value is how
 /// those two views come to disagree, so the descriptor's header is the only
-/// copy and [`StatementHandle::attrs`] no longer holds these keys at all.
+/// copy, and [`StatementHandle::attrs`] does not hold these keys at all.
 ///
 /// | Statement attribute | Header field | Descriptor |
 /// |---|---|---|
@@ -889,7 +886,7 @@ impl<B: Backend> HasKind for StatementHandle<B> {
 /// | `SQL_ATTR_PARAM_BIND_OFFSET_PTR` | `SQL_DESC_BIND_OFFSET_PTR` | APD |
 /// | `SQL_ATTR_PARAM_OPERATION_PTR` | `SQL_DESC_ARRAY_STATUS_PTR` | APD |
 ///
-/// The IRD- and IPD-side pairs are absent deliberately, not by oversight:
+/// The IRD- and IPD-side pairs are absent for a reason:
 /// `SQL_ATTR_ROW_STATUS_PTR` and `SQL_ATTR_ROWS_FETCHED_PTR` are
 /// `SQL_DESC_ARRAY_STATUS_PTR` and `SQL_DESC_ROWS_PROCESSED_PTR` on the **IRD**,
 /// which [`Descriptor`] does not back, and `SQL_ATTR_PARAM_STATUS_PTR` and
@@ -898,7 +895,7 @@ impl<B: Backend> HasKind for StatementHandle<B> {
 ///
 /// Note the third column of that table is *not* one-to-one with the second:
 /// `SQL_DESC_ARRAY_SIZE` appears twice. So [`Self::of`] answers with the
-/// descriptor **and** the field, and the field is what keys the storage — one
+/// descriptor **and** the field, and the field is what keys the storage: one
 /// explicit descriptor may be the ARD of one statement and the APD of another,
 /// and keyed by attribute that one field would become two values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -919,7 +916,7 @@ impl HeaderOwner {
     /// for one field is two values for one field.
     ///
     /// `SQL_ATTR_PARAM_OPERATION_PTR` is spelled
-    /// `StatementAttribute::ParamOpterationPtr` in `odbc-sys` — transposed
+    /// `StatementAttribute::ParamOpterationPtr` in `odbc-sys`, with transposed
     /// letters, upstream. A grep for the correct spelling finds nothing here
     /// and reads as "core does not implement it", which is false.
     pub(crate) fn of(attr: Option<odbc_sys::StatementAttribute>) -> Option<(Self, Desc)> {
@@ -943,11 +940,10 @@ impl<B: Backend> StatementHandle<B> {
     ///
     /// The four IRD- and IPD-side pairs (`SQL_ATTR_ROW_STATUS_PTR`,
     /// `SQL_ATTR_ROWS_FETCHED_PTR`, `SQL_ATTR_PARAM_STATUS_PTR`,
-    /// `SQL_ATTR_PARAMS_PROCESSED_PTR`) live here with the ordinary attributes,
-    /// as they did before the header fields were re-keyed.
+    /// `SQL_ATTR_PARAMS_PROCESSED_PTR`) live here with the ordinary attributes.
     ///
     /// A header-field attribute is on a descriptor, which is not a field of this
-    /// struct — [`HandleScope::attr_get`] is the door that reaches either.
+    /// struct, and [`HandleScope::attr_get`] is the door that reaches either.
     ///
     /// [`HandleScope::attr_get`]: crate::handles::scope::HandleScope::attr_get
     pub(crate) fn plain_attr_get(&self, attribute: i32) -> Option<usize> {
@@ -973,7 +969,7 @@ impl<B: Backend> StatementHandle<B> {
             // `App` is what an *explicit* descriptor answers for itself, so no
             // statement has one under that role. A caller asking for it wants
             // whichever application descriptor is in use, and the ARD is the
-            // arbitrary half of a question that should not have been asked —
+            // arbitrary half of a question that should not have been asked,
             // so say so rather than answer it.
             DescriptorRole::App => {
                 tracing::error!(
@@ -1039,7 +1035,7 @@ impl<B: Backend> StatementHandle<B> {
     /// Store the result of an execution and open a cursor over it if it has
     /// columns.
     ///
-    /// A statement that produced no result set — an `UPDATE`, say — reports
+    /// A statement that produced no result set, an `UPDATE` say, reports
     /// zero columns and leaves the cursor closed, which is exactly the ODBC
     /// distinction between state S4 (executed, no cursor) and S5 (cursor open).
     /// The backend must therefore report [`StatementBackend::column_count`]
@@ -1076,9 +1072,9 @@ impl<B: Backend> StatementHandle<B> {
     ///
     /// `SQLExecute` and the `SQLParamData` that completes a data-at-execution
     /// execution both land here: `SQLPrepare` already stored the backend
-    /// statement, so there is nothing to store — only the S2/S3 -> S4/S5
-    /// transition to record. Both used to assign `cursor_open` inline, which
-    /// left `executed` behind the moment it existed.
+    /// statement, so there is nothing to store, only the S2/S3 -> S4/S5
+    /// transition to record. Assigning `cursor_open` inline at each site instead
+    /// would leave `executed` behind.
     pub fn note_executed(&mut self) {
         self.executed = true;
         self.cursor_open = self
@@ -1115,7 +1111,7 @@ impl<B: Backend> StatementHandle<B> {
 pub(crate) enum AllocFailure {
     /// The parent token did not name a live handle of the required kind.
     InvalidHandle,
-    /// The registry has no slot left — `SQLAllocHandle`'s `HY014`.
+    /// The registry has no slot left, which is `SQLAllocHandle`'s `HY014`.
     RegistryExhausted,
 }
 
@@ -1199,16 +1195,16 @@ pub unsafe fn alloc_connection<B: Backend>(
 ///
 /// `inherited_metadata_id` is the parent connection's `SQL_ATTR_METADATA_ID`,
 /// or `None` if it was never set there. `SQLSetStmtAttr`'s Comments make this
-/// attribute one of exactly two that may be set at the connection level —
+/// attribute one of exactly two that may be set at the connection level:
 /// "ODBC 3.x statement attributes cannot be set at the connection level, with
 /// the exception of the SQL_ATTR_METADATA_ID and SQL_ATTR_ASYNC_ENABLE
-/// attributes" — and the connection-level value is the default for statements
+/// attributes". The connection-level value is the default for statements
 /// allocated afterwards. It is seeded here, at the one site that decides a
 /// statement's initial state, rather than in the caller, so a future
 /// allocation path cannot forget it. A later `SQLSetStmtAttr` overwrites the
 /// seeded entry like any other.
 ///
-/// The other of the two, `SQL_ATTR_ASYNC_ENABLE`, is deliberately not
+/// The other of the two, `SQL_ATTR_ASYNC_ENABLE`, is not
 /// inherited: core reports `SQL_AM_NONE` for `SQL_ASYNC_MODE`, so the only
 /// value a connection can hold is `SQL_ASYNC_ENABLE_OFF`, which is already the
 /// statement default.
@@ -1236,7 +1232,7 @@ pub unsafe fn alloc_statement<B: Backend>(
     // Each descriptor is its own allocation with its own registry slot:
     // `SQLGetStmtAttrW` hands these out to the application, so they need tokens
     // of their own or the application would receive a raw address it could not be
-    // validated from — and a descriptor may be shared with another statement,
+    // validated from, and a descriptor may be shared with another statement,
     // which no owned field can express.
     //
     // **Not** freed by `Drop`. `free_statement_allocation` frees them, and it is
@@ -1331,8 +1327,8 @@ pub unsafe fn alloc_statement<B: Backend>(
 /// (see that method's doc comment): a statement can be allocated on a
 /// connection that is not yet open, and there is no `&B::Connection` to hand
 /// it until one exists. Instead, core calls this from the first
-/// statement-producing call that has a connection in hand — `exec_direct`,
-/// `prepare`, `tables`, and the rest of the ten callers all check
+/// statement-producing call that has a connection in hand. `exec_direct`,
+/// `prepare`, `tables` and every other caller check
 /// `conn.connection.is_some()` and return HY010 before reaching here, so
 /// `connection` is always real by the time this runs.
 ///
@@ -1340,19 +1336,17 @@ pub unsafe fn alloc_statement<B: Backend>(
 /// exactly one execution plus the cursor it opened, which is the unit an
 /// application means by "cancel this".
 ///
-/// This replaced an earlier create-once-never-replace rule, whose stated
-/// reasoning was that a `SQLCancel` holding a token from a finished execution
-/// would "silently cancel nothing". The spec makes that outcome *required*, not
-/// a bug: "In ODBC 3.5, a call to SQLCancel when no processing is being done on
-/// the statement ... has is [sic] no effect at all." Doing nothing to a run
-/// that already completed is correct; reaching into the unrelated run that
-/// replaced it is not.
+/// Creating the token once and never replacing it would break two spec rules.
+/// A `SQLCancel` holding a token from a finished execution cancels nothing,
+/// which the spec makes *required*: "In ODBC 3.5, a call to SQLCancel when no
+/// processing is being done on the statement ... has is [sic] no effect at
+/// all." Doing nothing to a run that already completed is correct; reaching
+/// into the unrelated run that replaced it is not.
 ///
-/// Create-once also broke a second spec rule outright. `Backend::cancel` marks
-/// the token, so a reused token stays marked and every later call on that
-/// statement observes a cancellation that is not its own — while the spec says
-/// "After the statement has been canceled, the application can call SQLExecute
-/// or SQLExecDirect again."
+/// And `Backend::cancel` marks the token, so a reused token stays marked and
+/// every later call on that statement observes a cancellation that is not its
+/// own, while the spec says "After the statement has been canceled, the
+/// application can call SQLExecute or SQLExecDirect again."
 ///
 /// `Backend::cancel_token` still runs eagerly, with a real `&B::Connection` in
 /// hand; its ODBC-401 rationale is about *laziness*, not identity, so minting
@@ -1360,7 +1354,7 @@ pub unsafe fn alloc_statement<B: Backend>(
 ///
 /// # Locking
 ///
-/// The caller must already hold `stmt_token`'s connection group lock — every
+/// The caller must already hold `stmt_token`'s connection group lock, and every
 /// statement-producing FFI entry point does, via `panic_safe`/`HandleScope`,
 /// for the whole duration of the backend call this feeds. That is what makes
 /// the check-then-set below race-free with no synchronisation of its own: two
@@ -1371,8 +1365,8 @@ pub unsafe fn alloc_statement<B: Backend>(
 /// only through `HandleScope::get`/`stmt_with_parent`, both of which require
 /// `&mut HandleScope`, and a `HandleScope` is only ever constructed while its
 /// group lock is held (`HandleScope::new` is `pub(crate)` with exactly four
-/// production callers — `panic_safe`, `HandleScope::with_child_group_in`,
-/// `HandleScope::with_group` and `sql_cancel` — all four of which lock first).
+/// production callers, `panic_safe`, `HandleScope::with_child_group_in`,
+/// `HandleScope::with_group` and `sql_cancel`, all four of which lock first).
 /// This function is never reached through `sql_cancel`'s own scope: that scope
 /// only ever calls `scope.get::<StatementHandle<B>>`, never obtains a
 /// `&B::Connection`, so it is irrelevant to the argument here beyond being one
@@ -1400,7 +1394,7 @@ pub(crate) fn mint_cancel_token<B: Backend>(
 
 /// Read the current execution's cancel token without minting one.
 ///
-/// For calls that consume a cursor some earlier call produced — `SQLFetch`,
+/// For calls that consume a cursor some earlier call produced: `SQLFetch`,
 /// `SQLGetData`, `SQLDescribeCol` and their neighbours. They belong to the
 /// execution that opened the cursor and must observe *its* token, not a fresh
 /// one that nothing has ever signalled.
@@ -1437,14 +1431,13 @@ pub(crate) fn cancel_as<B: Backend>(
 ///
 /// Three callers. [`cancel_as`] above, which throws the record away; and the
 /// two in [`crate::query_timer`] that need to know *why* the token was
-/// signalled rather than only that it was — `QueryTimer::timed_out`, whose
+/// signalled rather than only that it was: `QueryTimer::timed_out`, whose
 /// timeout pass reads [`CancelState::timed_out`], and the timer thread, which
 /// sets it.
 ///
-/// Those two spelled the `downcast_ref` out by hand until review caught it.
 /// The type named in a `downcast` is not checked against the type
-/// `mint_cancel_token` stores — a mismatch compiles and then silently misses
-/// at run time — so every site that names it is a site that can drift. This
+/// `mint_cancel_token` stores, so a mismatch compiles and then silently misses
+/// at run time, and every site that names it is a site that can drift. This
 /// function is where it is named once.
 pub(crate) fn cancel_state_as<B: Backend>(
     token: &StdArc<dyn Any + Send + Sync>,
@@ -1463,7 +1456,7 @@ pub(crate) fn cancel_state_as<B: Backend>(
 /// still active connections.
 ///
 /// `scope` must hold `handle`'s own lock group, obtained by the caller passing
-/// `handle` itself to [`crate::panic::panic_safe`] — freeing an environment
+/// `handle` itself to [`crate::panic::panic_safe`]: freeing an environment
 /// reaches its diagnostics and, on the HY010 path, pushes to them, so this
 /// goes through the scope like every other handle mutation rather than
 /// resolving the token off to one side of it.
@@ -1505,8 +1498,8 @@ pub unsafe fn free_environment<B: Backend>(
 ///
 /// Fails with `SqlReturn::ERROR` if:
 /// - The connection is still open (HY010: SQLDisconnect must be called first)
-/// - There are still handles allocated under it — statements or explicitly
-///   allocated descriptors (HY010)
+/// - There are still handles allocated under it, whether statements or
+///   explicitly allocated descriptors (HY010)
 ///
 /// `scope` must hold `handle`'s own lock group, for the same reason as
 /// [`free_environment`].
@@ -1533,7 +1526,7 @@ pub unsafe fn free_connection<B: Backend>(
     }
     // Spec HY010: all statements must be freed first. Reading this from the
     // registry rather than a field of this handle means freeing a connection
-    // never needs to reach its parent environment at all — the only place
+    // never needs to reach its parent environment at all. The only place
     // in the crate allowed to acquire both an environment's lock and a
     // connection's is `SQLEndTran(SQL_HANDLE_ENV)`, and only environment
     // before connection.
@@ -1583,7 +1576,7 @@ pub(crate) unsafe fn free_statement_allocation<B: Backend>(token: *mut c_void) -
     // `alloc_statement` and retired the slot.
     let stmt = unsafe { Box::from_raw(addr as *mut StatementHandle<B>) };
     // Not `Drop`'s job any more: the four are separate allocations, so this is
-    // the only thing that reclaims them. An override is *not* freed here — an
+    // the only thing that reclaims them. An override is *not* freed here: an
     // explicit descriptor outlives every statement that referenced it, until
     // `SQLFreeHandle` or `SQLDisconnect` takes it.
     for role in [
@@ -1618,10 +1611,10 @@ pub(crate) unsafe fn free_statement_allocation<B: Backend>(token: *mut c_void) -
 /// handles to which the freed descriptor applied automatically revert to the
 /// descriptors implicitly allocated for them."
 ///
-/// Called *before* the descriptor is freed. Afterwards would work equally well —
-/// nothing here reads the descriptor — but the token is what identifies it, and
-/// comparing against a token whose slot has been retired invites the next reader
-/// to wonder whether it still resolves.
+/// Called *before* the descriptor is freed. Afterwards would work equally well,
+/// since nothing here reads the descriptor, but the token is what identifies it,
+/// and comparing against a token whose slot has been retired invites the next
+/// reader to wonder whether it still resolves.
 ///
 /// # Safety
 ///
@@ -1634,7 +1627,7 @@ pub(crate) unsafe fn revert_statements_using<B: Backend>(
 ) {
     for stmt_token in registry().children_of(conn_token) {
         let Ok(stmt) = scope.get::<StatementHandle<B>>(stmt_token) else {
-            // Not a statement — a sibling descriptor on the same connection.
+            // Not a statement, but a sibling descriptor on the same connection.
             continue;
         };
         for role in [DescriptorRole::Ard, DescriptorRole::Apd] {
@@ -1654,8 +1647,8 @@ pub(crate) unsafe fn revert_statements_using<B: Backend>(
 ///
 /// `SQLDisconnect` "drops any statements or descriptors open on the connection".
 /// Called alongside [`free_connection_statements`]; a descriptor whose parent is
-/// the connection is explicit by construction — an implicit one is parented to
-/// its statement — so no alloc type is inspected here either.
+/// the connection is explicit by construction, an implicit one being parented
+/// to its statement, so no alloc type is inspected here either.
 ///
 /// No statement is reverted first: `SQLDisconnect` frees the connection's
 /// statements too, so there is nothing left holding an override.
@@ -1668,7 +1661,7 @@ pub(crate) unsafe fn free_connection_descriptors(conn_token: *mut c_void) {
     for token in registry().children_of(conn_token) {
         // `parent_of` rather than `group_of_kind`: the only question here is
         // whether this child is a descriptor, and the caller already holds the
-        // group — asking for it again would clone an `Arc` to drop it, and would
+        // group. Asking for it again would clone an `Arc` to drop it, and would
         // read as a lock-acquisition site to the guard test that counts them.
         if registry().parent_of(token, HandleKind::Desc).is_some() {
             free_descriptor(token);
@@ -1746,8 +1739,8 @@ mod tests {
         // `assert_eq!`, not `debug_assert_eq!`: this is test code, and a
         // `debug_assert` is compiled out of a `--release` test build, which is
         // precisely the build where a `panic_safe` returning non-`SUCCESS` for
-        // some reason other than the closure — a caught panic — would otherwise
-        // pass unnoticed and leave `error` silently `None`.
+        // some reason other than the closure, such as a caught panic, would
+        // otherwise pass unnoticed and leave `error` silently `None`.
         assert_eq!(
             ret,
             SqlReturn::SUCCESS,
@@ -1760,8 +1753,8 @@ mod tests {
     // Handle validation
     //
     // A handle arrives from the C boundary as an untrusted value. Deciding
-    // whether it is valid by *dereferencing* it — which is what reading a tag
-    // out of its header does — can only ever catch a wrong-typed pointer that
+    // whether it is valid by *dereferencing* it, which is what reading a tag
+    // out of its header does, can only ever catch a wrong-typed pointer that
     // is still live. It cannot catch a freed one, and on a value that was never
     // a pointer at all it is an immediate segfault.
     //
@@ -1859,7 +1852,7 @@ mod tests {
             let mut env_ptr: *mut c_void = std::ptr::null_mut();
             let _ = alloc_environment::<MockBackend>(&mut env_ptr as *mut _);
 
-            // A real, live handle — but asked for as the wrong type.
+            // A real, live handle, but asked for as the wrong type.
             assert!(!resolves_as::<ConnectionHandle<MockBackend>>(env_ptr));
             assert!(!resolves_as::<StatementHandle<MockBackend>>(env_ptr));
             assert!(resolves_as::<EnvironmentHandle<MockBackend>>(env_ptr));
@@ -1934,7 +1927,7 @@ mod tests {
 
     /// A statement's parent must be a connection. Passing a live handle of
     /// any other kind must be rejected, or the new statement joins the wrong
-    /// lock group — exactly the "a connection and its statements share one
+    /// lock group, breaking the "a connection and its statements share one
     /// lock" invariant the rest of the lock discipline depends on.
     #[test]
     fn alloc_statement_rejects_an_environment_as_parent() {
@@ -1965,10 +1958,9 @@ mod tests {
     /// statement-producing FFI entry points on the same statement must each
     /// get their **own** `Arc`.
     ///
-    /// This asserted the opposite once. See `mint_cancel_token`'s doc
-    /// comment for the two spec sentences that overturned it — in short, a
-    /// reused token stays signalled after `SQLCancel`, and the spec requires
-    /// the next `SQLExecute` on that statement to work.
+    /// See `mint_cancel_token`'s doc comment for the two spec sentences behind
+    /// this: a reused token stays signalled after `SQLCancel`, and the spec
+    /// requires the next `SQLExecute` on that statement to work.
     #[test]
     fn mint_cancel_token_replaces_the_previous_token() {
         unsafe {
@@ -2075,7 +2067,7 @@ mod tests {
     }
 
     /// A statement and its four descriptors share the connection's lock group
-    /// so that one acquisition covers a call touching either — but a
+    /// so that one acquisition covers a call touching either. A
     /// connection must not share its environment's group, since
     /// `SQLEndTran(SQL_HANDLE_ENV)` is the only place lock nesting is allowed
     /// to happen at all.
@@ -2221,8 +2213,8 @@ mod tests {
     }
 
     /// A snapshot already taken from `children_of` is unaffected by a later
-    /// free — trivially true of any by-value `Vec` return, not a guard
-    /// against a `push` that reallocates or a `retain` that shifts, since
+    /// free. That is trivially true of any by-value `Vec` return, and not a
+    /// guard against a `push` that reallocates or a `retain` that shifts, since
     /// neither exists once the list is not a field to begin with. What can
     /// still be gotten wrong is the *next* snapshot: this also checks that
     /// freeing a statement removes it from a subsequent `children_of` call,
@@ -2255,8 +2247,8 @@ mod tests {
     /// A statement's descriptors are separate allocations, reclaimed when the
     /// statement is freed.
     ///
-    /// `Drop` used to cover this because they were `Box` fields. It does not any
-    /// more, so a missed `free_descriptor` here is a leak Miri reports and
+    /// `Drop` does not cover them, since they are not `Box` fields of the
+    /// statement, so a missed `free_descriptor` here is a leak Miri reports and
     /// nothing else does.
     #[test]
     fn freeing_a_statement_retires_its_four_descriptor_slots() {
@@ -2282,7 +2274,7 @@ mod tests {
         }
     }
 
-    /// One header field, one storage — whichever statement attribute names it.
+    /// One header field, one storage, whichever statement attribute names it.
     ///
     /// `SQL_DESC_ARRAY_SIZE` is `SQL_ATTR_ROW_ARRAY_SIZE` on an ARD and
     /// `SQL_ATTR_PARAMSET_SIZE` on an APD. One explicit descriptor can be both at

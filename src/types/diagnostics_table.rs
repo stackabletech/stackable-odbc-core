@@ -2,8 +2,8 @@
 //!
 //! Every function page under
 //! <https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/> carries a
-//! "Diagnostics" table: one row per SQLSTATE, with some rows — or some
-//! *clauses* of a row — annotated `(DM)` to mean the Driver Manager returns
+//! "Diagnostics" table: one row per SQLSTATE, with some rows (or some
+//! *clauses* of a row) annotated `(DM)` to mean the Driver Manager returns
 //! it, not the driver. `CLAUDE.md` makes reproducing that table in each FFI
 //! function's doc comment non-negotiable. This module is the machine-checkable
 //! half of that rule, in the same spirit as [`crate::types::info_type_shape`]:
@@ -12,27 +12,21 @@
 //!
 //! # Why this exists
 //!
-//! An audit of all sixty exported functions found roughly forty doc-comment
-//! defects sharing one root cause: the `(DM)` annotations were never checked
-//! against the spec's own table. They ran in both directions.
+//! A `(DM)` annotation is easy to get wrong in both directions, and prose
+//! cannot be trusted to stay right across dozens of hand edits.
 //!
-//! - Rows with **no** `(DM)` marker were written off as
-//!   "(driver-manager-handled; not returned here)" — `01000`, `HY001`,
-//!   `HY013` and `HYT01` across the binding and parameter functions, `IM017`
-//!   and `IM018` across five metadata functions. Each is a real question about
-//!   this driver that the annotation declined to answer.
-//! - Rows the spec **does** mark `(DM)` were presented as ordinary driver
-//!   rows, so a reader could not tell a spec-required check from a defensive
-//!   one — `SQLFreeHandle`'s `HY010`, `SQLNumResultCols`' `HY010`,
-//!   `SQLEndTran`'s `08003`, and six more.
-//! - One row, `HY090` in the twelve catalog functions, carries `(DM)` on its
-//!   first sentence and not on its second. Twelve doc comments read the row as
-//!   wholly the Driver Manager's and gave the wrong reason for a correct
-//!   conclusion.
+//! - **A row with no `(DM)` marker, written off as driver-manager business.**
+//!   The phrase "(driver-manager-handled; not returned here)" then declines to
+//!   answer a real question about this driver.
+//! - **A `(DM)`-marked row presented as an ordinary driver row.** A reader
+//!   cannot then tell a spec-required check from a defensive one.
+//! - **A row marked on one clause and not the next.** `HY090` in the catalog
+//!   functions is the case to watch, since reading it as wholly the Driver
+//!   Manager's gives the wrong reason for a correct conclusion.
 //!
-//! Prose cannot be trusted to stay right through forty hand edits, so the
-//! `(DM)` attribution and the row set are pinned by
-//! [`every_doc_comment_matches_the_spec_diagnostics_table`] instead.
+//! The `(DM)` attribution and the row set are therefore pinned by
+//! [`every_doc_comment_matches_the_spec_diagnostics_table`] rather than by
+//! review.
 //!
 //! # What the guard does and does not prove
 //!
@@ -40,8 +34,8 @@
 //!
 //! 1. Every row in the spec's table appears in the doc comment.
 //! 2. Every SQLSTATE the doc comment names is in the spec's table, unless the
-//!    bullet says `absent from this function's diagnostics table` — the house
-//!    phrase, already used for `08S01` in `sql_describe_col_w` and `3D000` in
+//!    bullet says `absent from this function's diagnostics table`. That is the
+//!    house phrase, used for `08S01` in `sql_describe_col_w` and `3D000` in
 //!    `sql_connect_w`.
 //! 3. A bullet attributing a row to the Driver Manager names a row the spec
 //!    really did mark `(DM)`, and a `(DM)`-marked row is never presented as an
@@ -55,16 +49,16 @@
 //! # The blind spot those three properties leave
 //!
 //! All three start from the doc comment, so a SQLSTATE the code returns and the
-//! doc comment never mentions satisfies every one of them — there is no bullet
-//! to check. `SQLBindParameter` sat in that gap, answering `HY024` for an
-//! unrecognised `InputOutputType` while its own page lists `HY105` for exactly
-//! that condition and no `HY024` at all.
+//! doc comment never mentions satisfies every one of them, because there is no
+//! bullet to check. `SQLBindParameter` is the shape of the gap: answering
+//! `HY024` for an unrecognised `InputOutputType` while its own page lists
+//! `HY105` for exactly that condition and no `HY024` at all.
 //!
 //! [`every_sqlstate_a_function_body_returns_is_in_its_table_or_declared_off_table`]
 //! closes it from the other end: it scans each function's *body* for
 //! `SqlState::` factory calls and requires each state to be in the transcribed
 //! table or declared with the off-table phrase. It is an under-approximation by
-//! construction — see its own docs for what it cannot see — which is why the
+//! construction (see its own docs for what it cannot see), which is why the
 //! prose reasons still matter.
 //!
 //! # The four verdict phrasings
@@ -79,11 +73,11 @@
 //! | Row is not `(DM)`, core does not return it | a plain reason, with **no** `(DM)` and no "driver-manager" anywhere in the bullet |
 //! | Row is not in the table at all | `**absent from this function's diagnostics table**`, then why it is returned anyway |
 //!
-//! A `(DM)` row core checks anyway is not a spec violation: `SQLAllocHandle`'s
-//! `HY009` and `HY092` have been guarded that way since the beginning, because
-//! core is also linked directly — by its own tests, and by an embedder with no
-//! Driver Manager in front of it — and because several of those checks are
-//! load-bearing for memory safety rather than for the spec.
+//! A `(DM)` row core checks anyway is not a spec violation. `SQLAllocHandle`'s
+//! `HY009` and `HY092` are guarded that way, because core is also linked
+//! directly (by its own tests, and by an embedder with no Driver Manager in
+//! front of it) and because several of those checks are load-bearing for memory
+//! safety rather than for the spec.
 
 /// One row of a spec Diagnostics table.
 struct DiagnosticsRow {
@@ -97,17 +91,17 @@ struct DiagnosticsRow {
 /// How a Diagnostics row is annotated for the Driver Manager.
 ///
 /// Three variants rather than a `bool`, because the split case is real and is
-/// where the audit found the subtlest errors: `SQLTables`' `HY090` reads
+/// where the subtlest errors live. `SQLTables`' `HY090` reads
 /// "(DM) The value of one of the name length arguments was less than 0 but not
 /// equal to SQL_NTS. The value of one of the name length arguments exceeded the
-/// maximum length value for the corresponding name." — one marker, two
+/// maximum length value for the corresponding name.": one marker, two
 /// sentences, and only the first is covered.
 enum DmMarking {
     /// No clause of this row carries `(DM)`. A doc comment calling it the
     /// Driver Manager's is wrong.
     None,
     /// Every clause carries `(DM)`. A doc comment presenting it as an ordinary
-    /// driver row is wrong, even when core does implement the check — say it is
+    /// driver row is wrong, even when core does implement the check. Say it is
     /// guarded defensively instead.
     All,
     /// Some clauses carry `(DM)` and some do not. The payload is a distinctive
@@ -188,7 +182,7 @@ const NO_SPEC_DIAGNOSTICS_TABLE: &[&str] = &[
     "config_dsn_w",
     // The two diagnostic-retrieval functions have a "Diagnostics" heading with
     // no SQLSTATE table under it. Both pages open that section with the same
-    // sentence — "does not post diagnostic records for itself" — and then list
+    // sentence, "does not post diagnostic records for itself", and then list
     // return codes instead, because a function that reads the diagnostic queue
     // cannot report through it.
     "sql_get_diag_rec_w",
@@ -231,10 +225,10 @@ struct Bullet {
 
 /// The SQLSTATE bullets of a doc comment's `# Spec compliance` section.
 ///
-/// Bullets that do not open with a SQLSTATE — `sql_alloc_handle`'s
-/// "Handle-specific rules", `sql_free_handle`'s `SQL_INVALID_HANDLE` note —
-/// are skipped along with their continuation lines, so their prose cannot be
-/// misread as part of a neighbouring row's verdict.
+/// A bullet that does not open with a SQLSTATE is skipped along with its
+/// continuation lines, so its prose cannot be misread as part of a neighbouring
+/// row's verdict. `sql_alloc_handle`'s "Handle-specific rules" and
+/// `sql_free_handle`'s `SQL_INVALID_HANDLE` note are the two of that shape.
 fn spec_compliance_bullets(doc: &[&str]) -> Vec<Bullet> {
     let Some(start) = doc.iter().position(|l| l.trim() == "# Spec compliance") else {
         return Vec::new();
@@ -281,17 +275,21 @@ fn spec_compliance_bullets(doc: &[&str]) -> Vec<Bullet> {
 
 /// The SQLSTATE(s) a bullet opens with, if any.
 ///
-/// Four bullet shapes are in use across `ffi/`, all of them accepted rather
-/// than normalised — rewriting sixty doc comments into one shape is churn this
-/// sweep does not need:
+/// Several bullet shapes are in use across `ffi/`, all accepted rather than
+/// normalised, because rewriting every doc comment into one shape buys nothing
+/// the parser needs:
 ///
 /// ```text
 /// - 01000: General warning …
-/// - `01000` General warning — …
+/// - `01000` General warning …
 /// - 01000 (general warning): …
 /// - **01000** — General warning …
-/// - IM001–IM018: All Driver Manager internal codes — …
+/// - IM001–IM018: All Driver Manager internal codes …
 /// ```
+///
+/// The fourth shape is why `—` is one of the terminators below. Replace one in
+/// that position with a colon rather than with nothing, so the state stays the
+/// first whitespace-delimited word of the head.
 fn leading_states(bullet: &str) -> Option<Vec<String>> {
     let head: String = bullet
         .chars()
@@ -345,10 +343,10 @@ const DM_ATTRIBUTIONS: &[&str] = &[
 
 /// Phrases that **deny** a `(DM)` marker, stripped before the attribution scan.
 ///
-/// This is not a nicety. The corrections this guard exists to enforce say "the
-/// row carries no `(DM)` marker" in as many words — that sentence is the whole
-/// point of the sweep — and a naive `contains("(dm)")` would read the denial as
-/// a claim and fail every bullet the sweep just got right.
+/// This is not a nicety. A bullet that says "the row carries no `(DM)` marker"
+/// in as many words is making the point the guard exists to enforce, and a
+/// naive `contains("(dm)")` would read that denial as a claim and fail the
+/// bullet for being right.
 const DM_DENIALS: &[&str] = &[
     "no (dm) marker",
     "no (dm)-marked clause",
@@ -376,9 +374,9 @@ const SQL_STATE_RS: &str = include_str!("sql_state.rs");
 ///
 /// Two passes over that file: `pub const NAME: &str = "XXXXX";` gives the
 /// constants, and `pub fn factory() -> Self { Self::new(NAME) }` gives the
-/// factory that returns each. Deriving it is the point — a hand-written second
-/// copy of fifty state names is exactly the thing this module exists to stop
-/// existing.
+/// factory that returns each. Deriving it is the point, because a hand-written
+/// second copy of the state names is exactly what this module exists to
+/// prevent.
 fn sql_state_factories() -> Vec<(String, &'static str)> {
     let mut constants: Vec<(&str, &str)> = Vec::new();
     for line in SQL_STATE_RS.lines() {
@@ -419,11 +417,11 @@ fn sql_state_factories() -> Vec<(String, &'static str)> {
 /// The body text of `func`, from its signature to the closing brace in column
 /// zero.
 ///
-/// Deliberately textual, like [`doc_lines`]: the alternative is a parser, and
-/// what this needs is "which `SqlState::` factories appear between these two
+/// Textual, like [`doc_lines`], because the alternative is a parser and all
+/// this needs is "which `SqlState::` factories appear between these two
 /// points". Stopping at a column-zero `}` works because every function here is
-/// a top-level item, and it is what keeps the test module — which names plenty
-/// of SQLSTATEs — out of the scan.
+/// a top-level item, and it keeps the test module, which names plenty of
+/// SQLSTATEs, out of the scan.
 fn body_of<'a>(source: &'a str, func: &str) -> &'a str {
     let needle = format!("\npub unsafe fn {func}");
     let at = match source.find(&needle) {
@@ -784,8 +782,8 @@ FunctionDiagnostics {
         DiagnosticsRow { sqlstate: "HY003", dm: DmMarking::All },
         DiagnosticsRow { sqlstate: "HY008", dm: DmMarking::None },
         DiagnosticsRow { sqlstate: "HY009", dm: DmMarking::All },
-        // Five of the six clauses are `(DM)`-marked; the last is not — a
-        // SQL_PARAM_DATA_AVAILABLE result read with SQLGetData instead of
+        // Five of the six clauses are `(DM)`-marked; the last is not. That one
+        // is a SQL_PARAM_DATA_AVAILABLE result read with SQLGetData instead of
         // SQLParamData.
         DiagnosticsRow { sqlstate: "HY010", dm: DmMarking::Split("SQL_PARAM_DATA_AVAILABLE") },
         DiagnosticsRow { sqlstate: "HY013", dm: DmMarking::None },
@@ -2141,15 +2139,14 @@ fn the_transcription_is_well_formed() {
 
 /// The guard. Compares each FFI function's `# Spec compliance` list against the
 /// spec's own Diagnostics table, transcribed above. See the module docs for the
-/// three properties it proves and the one it deliberately does not.
+/// three properties it proves and the one it does not.
 ///
 /// Skipped under Miri, on the same grounds as
 /// `escape::tests::pathological_nesting_returns_an_error_rather_than_killing_the_process`:
 /// the cost is algorithmic rather than memory-safety-related. This module holds
-/// no `unsafe` at all — it scans the 1.86 MB of `include_str!`'d FFI source
-/// above as `&'static str` — so Miri has nothing here to check, and interpreting
-/// that byte by byte cost **553 seconds** against 0.018 seconds native. It and
-/// its neighbour below were together 68% of the entire Miri run.
+/// no `unsafe` at all, and it scans the `include_str!`'d FFI source above as
+/// `&'static str`, so Miri has nothing here to check. Interpreting that scan
+/// byte by byte dominates a Miri run instead.
 #[cfg_attr(
     miri,
     ignore = "1.86 MB string scan; no unsafe in this module for Miri to check"
@@ -2204,7 +2201,7 @@ fn every_doc_comment_matches_the_spec_diagnostics_table() {
                          row carries no `(DM)` marker. Give the driver-side reason it \
                          is not returned instead."
                     )),
-                    // Property 3b: fully (DM), so say so — even when core checks
+                    // Property 3b: fully (DM), so say so, even when core checks
                     // it anyway, which is what "guarded defensively" is for.
                     DmMarking::All if !claims_dm => problems.push(format!(
                         "{where_}: every clause of {state} carries `(DM)`, and the doc \
@@ -2220,11 +2217,11 @@ fn every_doc_comment_matches_the_spec_diagnostics_table() {
                                  comment does not acknowledge."
                             ));
                         }
-                        // Both sides lowercased. Comparing a raw needle against a
-                        // lowercased haystack silently never matches for a needle
-                        // carrying a capital, which every `Split` string happened
-                        // not to until `SQL_PARAM_DATA_AVAILABLE` — the guard
-                        // would have reported a defect no edit could clear.
+                        // Both sides lowercased. A raw needle against a
+                        // lowercased haystack silently never matches when the
+                        // needle carries a capital, as `SQL_PARAM_DATA_AVAILABLE`
+                        // does, and the guard would then report a defect no edit
+                        // could clear.
                         if !bullet
                             .text
                             .to_lowercase()
@@ -2252,9 +2249,8 @@ fn every_doc_comment_matches_the_spec_diagnostics_table() {
 }
 
 /// Skipped under Miri for the same reason as the guard above: it scans the same
-/// `include_str!`'d source for `pub unsafe fn` lines, cost 136 seconds under
-/// Miri against 0.003 seconds native, and there is no `unsafe` in this module
-/// for Miri to check.
+/// `include_str!`'d source for `pub unsafe fn` lines, which is expensive to
+/// interpret, and there is no `unsafe` in this module for Miri to check.
 #[cfg_attr(
     miri,
     ignore = "1.86 MB string scan; no unsafe in this module for Miri to check"
@@ -2293,21 +2289,21 @@ fn every_exported_ffi_function_has_a_transcribed_diagnostics_table() {
 /// [`every_doc_comment_matches_the_spec_diagnostics_table`] reads the doc comment
 /// and asks whether the spec agrees. That leaves a blind spot it cannot see: a
 /// state the code returns and the doc comment never mentions passes both of its
-/// first two properties, because there is no bullet to check. The audit found
-/// `SQLBindParameter` answering `HY024` for an unrecognised `InputOutputType`
-/// while its own table lists `HY105` and no `HY024` at all, undocumented either
-/// way.
+/// first two properties, because there is no bullet to check. The shape to
+/// catch is `SQLBindParameter` answering `HY024` for an unrecognised
+/// `InputOutputType` while its own table lists `HY105` and no `HY024` at all,
+/// undocumented either way.
 ///
 /// # What it can and cannot see
 ///
 /// It scans for literal `SqlState::factory()` calls between a function's
-/// signature and its closing brace, so it is an **under**-approximation, and
-/// deliberately: it misses a state produced inside a helper the function calls,
-/// one carried by an [`crate::errors::OdbcError`] variant such as
+/// signature and its closing brace, so it is an **under**-approximation by
+/// design. It misses a state produced inside a helper the function calls, one
+/// carried by an [`crate::errors::OdbcError`] variant such as
 /// `FractionalTruncation`, and one propagated from a backend. Those are why the
 /// doc comments carry prose reasons a test cannot check. What it does catch is
-/// the case that actually went wrong — a factory called at the entry point
-/// itself, naming a state nobody reconciled against the page.
+/// a factory called at the entry point itself, naming a state nobody reconciled
+/// against the page.
 ///
 /// Skipped under Miri for the same reason as its two neighbours: it scans the
 /// same `include_str!`'d source and this module holds no `unsafe`.

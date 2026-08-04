@@ -13,197 +13,197 @@
 #[non_exhaustive]
 pub enum FunctionId {
     // Core API (sql.h, ODBC 2.x legacy IDs)
-    /// `SQL_API_SQLALLOCCONNECT` (1) — identifies `SQLAllocConnect`.
+    /// `SQL_API_SQLALLOCCONNECT` (1) identifies `SQLAllocConnect`.
     ///
     /// Deprecated.
     AllocConnect = 1,
-    /// `SQL_API_SQLALLOCENV` (2) — identifies `SQLAllocEnv`.
+    /// `SQL_API_SQLALLOCENV` (2) identifies `SQLAllocEnv`.
     ///
     /// Deprecated.
     AllocEnv = 2,
-    /// `SQL_API_SQLALLOCSTMT` (3) — identifies `SQLAllocStmt`.
+    /// `SQL_API_SQLALLOCSTMT` (3) identifies `SQLAllocStmt`.
     ///
     /// Deprecated.
     AllocStmt = 3,
-    /// `SQL_API_SQLBINDCOL` (4) — identifies `SQLBindCol`.
+    /// `SQL_API_SQLBINDCOL` (4) identifies `SQLBindCol`.
     BindCol = 4,
-    /// `SQL_API_SQLCANCEL` (5) — identifies `SQLCancel`.
+    /// `SQL_API_SQLCANCEL` (5) identifies `SQLCancel`.
     Cancel = 5,
-    /// `SQL_API_SQLCOLATTRIBUTE` (6) — identifies `SQLColAttribute`.
+    /// `SQL_API_SQLCOLATTRIBUTE` (6) identifies `SQLColAttribute`.
     ColAttribute = 6,
-    /// `SQL_API_SQLCONNECT` (7) — identifies `SQLConnect`.
+    /// `SQL_API_SQLCONNECT` (7) identifies `SQLConnect`.
     Connect = 7,
-    /// `SQL_API_SQLDESCRIBECOL` (8) — identifies `SQLDescribeCol`.
+    /// `SQL_API_SQLDESCRIBECOL` (8) identifies `SQLDescribeCol`.
     DescribeCol = 8,
-    /// `SQL_API_SQLDISCONNECT` (9) — identifies `SQLDisconnect`.
+    /// `SQL_API_SQLDISCONNECT` (9) identifies `SQLDisconnect`.
     Disconnect = 9,
-    /// `SQL_API_SQLERROR` (10) — identifies `SQLError`.
+    /// `SQL_API_SQLERROR` (10) identifies `SQLError`.
     ///
     /// Deprecated, superseded by SQLGetDiagRec.
     Error = 10,
-    /// `SQL_API_SQLEXECDIRECT` (11) — identifies `SQLExecDirect`.
+    /// `SQL_API_SQLEXECDIRECT` (11) identifies `SQLExecDirect`.
     ExecDirect = 11,
-    /// `SQL_API_SQLEXECUTE` (12) — identifies `SQLExecute`.
+    /// `SQL_API_SQLEXECUTE` (12) identifies `SQLExecute`.
     Execute = 12,
-    /// `SQL_API_SQLFETCH` (13) — identifies `SQLFetch`.
+    /// `SQL_API_SQLFETCH` (13) identifies `SQLFetch`.
     Fetch = 13,
-    /// `SQL_API_SQLFREECONNECT` (14) — identifies `SQLFreeConnect`.
+    /// `SQL_API_SQLFREECONNECT` (14) identifies `SQLFreeConnect`.
     ///
     /// Deprecated, superseded by SQLFreeHandle.
     FreeConnect = 14,
-    /// `SQL_API_SQLFREEENV` (15) — identifies `SQLFreeEnv`.
+    /// `SQL_API_SQLFREEENV` (15) identifies `SQLFreeEnv`.
     ///
     /// Deprecated, superseded by SQLFreeHandle.
     FreeEnv = 15,
-    /// `SQL_API_SQLFREESTMT` (16) — identifies `SQLFreeStmt`.
+    /// `SQL_API_SQLFREESTMT` (16) identifies `SQLFreeStmt`.
     FreeStmt = 16,
-    /// `SQL_API_SQLGETCURSORNAME` (17) — identifies `SQLGetCursorName`.
+    /// `SQL_API_SQLGETCURSORNAME` (17) identifies `SQLGetCursorName`.
     GetCursorName = 17,
-    /// `SQL_API_SQLNUMRESULTCOLS` (18) — identifies `SQLNumResultCols`.
+    /// `SQL_API_SQLNUMRESULTCOLS` (18) identifies `SQLNumResultCols`.
     NumResultCols = 18,
-    /// `SQL_API_SQLPREPARE` (19) — identifies `SQLPrepare`.
+    /// `SQL_API_SQLPREPARE` (19) identifies `SQLPrepare`.
     Prepare = 19,
-    /// `SQL_API_SQLROWCOUNT` (20) — identifies `SQLRowCount`.
+    /// `SQL_API_SQLROWCOUNT` (20) identifies `SQLRowCount`.
     RowCount = 20,
-    /// `SQL_API_SQLSETCURSORNAME` (21) — identifies `SQLSetCursorName`.
+    /// `SQL_API_SQLSETCURSORNAME` (21) identifies `SQLSetCursorName`.
     SetCursorName = 21,
-    /// `SQL_API_SQLSETPARAM` (22) — identifies `SQLSetParam`.
+    /// `SQL_API_SQLSETPARAM` (22) identifies `SQLSetParam`.
     ///
     /// Deprecated, superseded by SQLBindParameter.
     SetParam = 22,
-    /// `SQL_API_SQLTRANSACT` (23) — identifies `SQLTransact`.
+    /// `SQL_API_SQLTRANSACT` (23) identifies `SQLTransact`.
     ///
     /// Deprecated, superseded by SQLEndTran.
     Transact = 23,
 
     // Extended API (sqlext.h)
-    /// `SQL_API_SQLBULKOPERATIONS` (24) — identifies `SQLBulkOperations`.
+    /// `SQL_API_SQLBULKOPERATIONS` (24) identifies `SQLBulkOperations`.
     BulkOperations = 24,
-    /// `SQL_API_SQLCOLUMNS` (40) — identifies `SQLColumns`.
+    /// `SQL_API_SQLCOLUMNS` (40) identifies `SQLColumns`.
     Columns = 40,
-    /// `SQL_API_SQLDRIVERCONNECT` (41) — identifies `SQLDriverConnect`.
+    /// `SQL_API_SQLDRIVERCONNECT` (41) identifies `SQLDriverConnect`.
     DriverConnect = 41,
-    /// `SQL_API_SQLGETCONNECTOPTION` (42) — identifies `SQLGetConnectOption`.
+    /// `SQL_API_SQLGETCONNECTOPTION` (42) identifies `SQLGetConnectOption`.
     ///
     /// Deprecated, superseded by SQLGetConnectAttr.
     GetConnectOption = 42,
-    /// `SQL_API_SQLGETDATA` (43) — identifies `SQLGetData`.
+    /// `SQL_API_SQLGETDATA` (43) identifies `SQLGetData`.
     GetData = 43,
-    /// `SQL_API_SQLGETFUNCTIONS` (44) — identifies `SQLGetFunctions`.
+    /// `SQL_API_SQLGETFUNCTIONS` (44) identifies `SQLGetFunctions`.
     GetFunctions = 44,
-    /// `SQL_API_SQLGETINFO` (45) — identifies `SQLGetInfo`.
+    /// `SQL_API_SQLGETINFO` (45) identifies `SQLGetInfo`.
     GetInfo = 45,
-    /// `SQL_API_SQLGETSTMTOPTION` (46) — identifies `SQLGetStmtOption`.
+    /// `SQL_API_SQLGETSTMTOPTION` (46) identifies `SQLGetStmtOption`.
     ///
     /// Deprecated, superseded by SQLGetStmtAttr.
     GetStmtOption = 46,
-    /// `SQL_API_SQLGETTYPEINFO` (47) — identifies `SQLGetTypeInfo`.
+    /// `SQL_API_SQLGETTYPEINFO` (47) identifies `SQLGetTypeInfo`.
     GetTypeInfo = 47,
-    /// `SQL_API_SQLPARAMDATA` (48) — identifies `SQLParamData`.
+    /// `SQL_API_SQLPARAMDATA` (48) identifies `SQLParamData`.
     ParamData = 48,
-    /// `SQL_API_SQLPUTDATA` (49) — identifies `SQLPutData`.
+    /// `SQL_API_SQLPUTDATA` (49) identifies `SQLPutData`.
     PutData = 49,
-    /// `SQL_API_SQLSETCONNECTOPTION` (50) — identifies `SQLSetConnectOption`.
+    /// `SQL_API_SQLSETCONNECTOPTION` (50) identifies `SQLSetConnectOption`.
     ///
     /// Deprecated, superseded by SQLSetConnectAttr.
     SetConnectOption = 50,
-    /// `SQL_API_SQLSETSTMTOPTION` (51) — identifies `SQLSetStmtOption`.
+    /// `SQL_API_SQLSETSTMTOPTION` (51) identifies `SQLSetStmtOption`.
     ///
     /// Deprecated, superseded by SQLSetStmtAttr.
     SetStmtOption = 51,
-    /// `SQL_API_SQLSPECIALCOLUMNS` (52) — identifies `SQLSpecialColumns`.
+    /// `SQL_API_SQLSPECIALCOLUMNS` (52) identifies `SQLSpecialColumns`.
     SpecialColumns = 52,
-    /// `SQL_API_SQLSTATISTICS` (53) — identifies `SQLStatistics`.
+    /// `SQL_API_SQLSTATISTICS` (53) identifies `SQLStatistics`.
     Statistics = 53,
-    /// `SQL_API_SQLTABLES` (54) — identifies `SQLTables`.
+    /// `SQL_API_SQLTABLES` (54) identifies `SQLTables`.
     Tables = 54,
-    /// `SQL_API_SQLBROWSECONNECT` (55) — identifies `SQLBrowseConnect`.
+    /// `SQL_API_SQLBROWSECONNECT` (55) identifies `SQLBrowseConnect`.
     BrowseConnect = 55,
-    /// `SQL_API_SQLCOLUMNPRIVILEGES` (56) — identifies `SQLColumnPrivileges`.
+    /// `SQL_API_SQLCOLUMNPRIVILEGES` (56) identifies `SQLColumnPrivileges`.
     ColumnPrivileges = 56,
-    /// `SQL_API_SQLDATASOURCES` (57) — identifies `SQLDataSources`.
+    /// `SQL_API_SQLDATASOURCES` (57) identifies `SQLDataSources`.
     DataSources = 57,
-    /// `SQL_API_SQLDESCRIBEPARAM` (58) — identifies `SQLDescribeParam`.
+    /// `SQL_API_SQLDESCRIBEPARAM` (58) identifies `SQLDescribeParam`.
     DescribeParam = 58,
-    /// `SQL_API_SQLEXTENDEDFETCH` (59) — identifies `SQLExtendedFetch`.
+    /// `SQL_API_SQLEXTENDEDFETCH` (59) identifies `SQLExtendedFetch`.
     ///
     /// Deprecated, superseded by SQLFetchScroll.
     ExtendedFetch = 59,
-    /// `SQL_API_SQLFOREIGNKEYS` (60) — identifies `SQLForeignKeys`.
+    /// `SQL_API_SQLFOREIGNKEYS` (60) identifies `SQLForeignKeys`.
     ForeignKeys = 60,
-    /// `SQL_API_SQLMORERESULTS` (61) — identifies `SQLMoreResults`.
+    /// `SQL_API_SQLMORERESULTS` (61) identifies `SQLMoreResults`.
     MoreResults = 61,
-    /// `SQL_API_SQLNATIVESQL` (62) — identifies `SQLNativeSql`.
+    /// `SQL_API_SQLNATIVESQL` (62) identifies `SQLNativeSql`.
     NativeSql = 62,
-    /// `SQL_API_SQLNUMPARAMS` (63) — identifies `SQLNumParams`.
+    /// `SQL_API_SQLNUMPARAMS` (63) identifies `SQLNumParams`.
     NumParams = 63,
-    /// `SQL_API_SQLPARAMOPTIONS` (64) — identifies `SQLParamOptions`.
+    /// `SQL_API_SQLPARAMOPTIONS` (64) identifies `SQLParamOptions`.
     ///
     /// Deprecated, superseded by SQLSetStmtAttr.
     ParamOptions = 64,
-    /// `SQL_API_SQLPRIMARYKEYS` (65) — identifies `SQLPrimaryKeys`.
+    /// `SQL_API_SQLPRIMARYKEYS` (65) identifies `SQLPrimaryKeys`.
     PrimaryKeys = 65,
-    /// `SQL_API_SQLPROCEDURECOLUMNS` (66) — identifies `SQLProcedureColumns`.
+    /// `SQL_API_SQLPROCEDURECOLUMNS` (66) identifies `SQLProcedureColumns`.
     ProcedureColumns = 66,
-    /// `SQL_API_SQLPROCEDURES` (67) — identifies `SQLProcedures`.
+    /// `SQL_API_SQLPROCEDURES` (67) identifies `SQLProcedures`.
     Procedures = 67,
-    /// `SQL_API_SQLSETPOS` (68) — identifies `SQLSetPos`.
+    /// `SQL_API_SQLSETPOS` (68) identifies `SQLSetPos`.
     SetPos = 68,
-    /// `SQL_API_SQLSETSCROLLOPTIONS` (69) — identifies `SQLSetScrollOptions`.
+    /// `SQL_API_SQLSETSCROLLOPTIONS` (69) identifies `SQLSetScrollOptions`.
     ///
     /// Deprecated, superseded by SQLSetStmtAttr.
     SetScrollOptions = 69,
-    /// `SQL_API_SQLTABLEPRIVILEGES` (70) — identifies `SQLTablePrivileges`.
+    /// `SQL_API_SQLTABLEPRIVILEGES` (70) identifies `SQLTablePrivileges`.
     TablePrivileges = 70,
-    /// `SQL_API_SQLDRIVERS` (71) — identifies `SQLDrivers`.
+    /// `SQL_API_SQLDRIVERS` (71) identifies `SQLDrivers`.
     Drivers = 71,
-    /// `SQL_API_SQLBINDPARAMETER` (72) — identifies `SQLBindParameter`.
+    /// `SQL_API_SQLBINDPARAMETER` (72) identifies `SQLBindParameter`.
     ///
     /// Deprecated ODBC 2.x functions. Present so the `SQL_API_ALL_FUNCTIONS`.
     BindParameter = 72,
-    /// `SQL_API_SQLALLOCHANDLESTD` (73) — identifies `SQLAllocHandleStd`.
+    /// `SQL_API_SQLALLOCHANDLESTD` (73) identifies `SQLAllocHandleStd`.
     AllocHandleStd = 73,
 
     // ODBC 3.x API (sql.h, IDs >= 1000)
-    /// `SQL_API_SQLALLOCHANDLE` (1001) — identifies `SQLAllocHandle`.
+    /// `SQL_API_SQLALLOCHANDLE` (1001) identifies `SQLAllocHandle`.
     AllocHandle = 1001,
-    /// `SQL_API_SQLBINDPARAM` (1002) — identifies `SQLBindParam`.
+    /// `SQL_API_SQLBINDPARAM` (1002) identifies `SQLBindParam`.
     BindParam = 1002,
-    /// `SQL_API_SQLCLOSECURSOR` (1003) — identifies `SQLCloseCursor`.
+    /// `SQL_API_SQLCLOSECURSOR` (1003) identifies `SQLCloseCursor`.
     CloseCursor = 1003,
-    /// `SQL_API_SQLCOPYDESC` (1004) — identifies `SQLCopyDesc`.
+    /// `SQL_API_SQLCOPYDESC` (1004) identifies `SQLCopyDesc`.
     CopyDesc = 1004,
-    /// `SQL_API_SQLENDTRAN` (1005) — identifies `SQLEndTran`.
+    /// `SQL_API_SQLENDTRAN` (1005) identifies `SQLEndTran`.
     EndTran = 1005,
-    /// `SQL_API_SQLFREEHANDLE` (1006) — identifies `SQLFreeHandle`.
+    /// `SQL_API_SQLFREEHANDLE` (1006) identifies `SQLFreeHandle`.
     FreeHandle = 1006,
-    /// `SQL_API_SQLGETCONNECTATTR` (1007) — identifies `SQLGetConnectAttr`.
+    /// `SQL_API_SQLGETCONNECTATTR` (1007) identifies `SQLGetConnectAttr`.
     GetConnectAttr = 1007,
-    /// `SQL_API_SQLGETDESCFIELD` (1008) — identifies `SQLGetDescField`.
+    /// `SQL_API_SQLGETDESCFIELD` (1008) identifies `SQLGetDescField`.
     GetDescField = 1008,
-    /// `SQL_API_SQLGETDESCREC` (1009) — identifies `SQLGetDescRec`.
+    /// `SQL_API_SQLGETDESCREC` (1009) identifies `SQLGetDescRec`.
     GetDescRec = 1009,
-    /// `SQL_API_SQLGETDIAGFIELD` (1010) — identifies `SQLGetDiagField`.
+    /// `SQL_API_SQLGETDIAGFIELD` (1010) identifies `SQLGetDiagField`.
     GetDiagField = 1010,
-    /// `SQL_API_SQLGETDIAGREC` (1011) — identifies `SQLGetDiagRec`.
+    /// `SQL_API_SQLGETDIAGREC` (1011) identifies `SQLGetDiagRec`.
     GetDiagRec = 1011,
-    /// `SQL_API_SQLGETENVATTR` (1012) — identifies `SQLGetEnvAttr`.
+    /// `SQL_API_SQLGETENVATTR` (1012) identifies `SQLGetEnvAttr`.
     GetEnvAttr = 1012,
-    /// `SQL_API_SQLGETSTMTATTR` (1014) — identifies `SQLGetStmtAttr`.
+    /// `SQL_API_SQLGETSTMTATTR` (1014) identifies `SQLGetStmtAttr`.
     GetStmtAttr = 1014,
-    /// `SQL_API_SQLSETCONNECTATTR` (1016) — identifies `SQLSetConnectAttr`.
+    /// `SQL_API_SQLSETCONNECTATTR` (1016) identifies `SQLSetConnectAttr`.
     SetConnectAttr = 1016,
-    /// `SQL_API_SQLSETDESCFIELD` (1017) — identifies `SQLSetDescField`.
+    /// `SQL_API_SQLSETDESCFIELD` (1017) identifies `SQLSetDescField`.
     SetDescField = 1017,
-    /// `SQL_API_SQLSETDESCREC` (1018) — identifies `SQLSetDescRec`.
+    /// `SQL_API_SQLSETDESCREC` (1018) identifies `SQLSetDescRec`.
     SetDescRec = 1018,
-    /// `SQL_API_SQLSETENVATTR` (1019) — identifies `SQLSetEnvAttr`.
+    /// `SQL_API_SQLSETENVATTR` (1019) identifies `SQLSetEnvAttr`.
     SetEnvAttr = 1019,
-    /// `SQL_API_SQLSETSTMTATTR` (1020) — identifies `SQLSetStmtAttr`.
+    /// `SQL_API_SQLSETSTMTATTR` (1020) identifies `SQLSetStmtAttr`.
     SetStmtAttr = 1020,
-    /// `SQL_API_SQLFETCHSCROLL` (1021) — identifies `SQLFetchScroll`.
+    /// `SQL_API_SQLFETCHSCROLL` (1021) identifies `SQLFetchScroll`.
     FetchScroll = 1021,
-    /// `SQL_API_SQLCANCELHANDLE` (1022) — identifies `SQLCancelHandle`.
+    /// `SQL_API_SQLCANCELHANDLE` (1022) identifies `SQLCancelHandle`.
     CancelHandle = 1022,
 }
 
@@ -318,14 +318,14 @@ pub const CORE_UNEXPORTED_FUNCTIONS: &[(FunctionId, &str)] = &[
     // The rest of Appendix G's deprecated set. The appendix is explicit that a
     // 3.x driver "does not have to implement the ODBC 2.x functions", and that
     // the mapping "is triggered when the driver is an ODBC 3.x driver and the
-    // driver does not support the function that is being mapped" — so an export
-    // here does not add a capability, it *removes* the Driver Manager's, which is
-    // the better-informed of the two. psqlODBC comments out every one of these in
-    // its .def for the same reason.
+    // driver does not support the function that is being mapped". An export here
+    // therefore does not add a capability, it *removes* the Driver Manager's,
+    // which is the better-informed of the two. psqlODBC comments out every one
+    // of these in its .def for the same reason.
     //
     // Note this is the ODBC *3.x* answer only. `SQLGetFunctions`' 2.x array still
     // reports them supported, because that array answers "can a 2.x application
-    // call this" — and it can, through the mapping. psqlODBC ships exactly that
+    // call this", and it can, through the mapping. psqlODBC ships exactly that
     // combination: `pfExists[SQL_API_SQLERROR] = TRUE` beside a `;;SQLError` in
     // the .def.
     (
@@ -366,7 +366,7 @@ pub const CORE_UNEXPORTED_FUNCTIONS: &[(FunctionId, &str)] = &[
     (
         FunctionId::SetConnectOption,
         "mapped by the Driver Manager onto SQLSetConnectAttr, with SQL_NTS for a \
-         string-valued attribute — a length an export cannot infer from the 2.x ABI",
+         string-valued attribute, a length an export cannot infer from the 2.x ABI",
     ),
     (
         FunctionId::GetStmtOption,
@@ -478,11 +478,10 @@ mod tests {
     /// `/usr/include/sqlext.h`.
     ///
     /// This exists because a hand-copied ID is invisible when wrong: it is a
-    /// plausible number in a valid range. `SQLGetConnectOption` was recorded as
-    /// `30` rather than `42` in `sql_get_info`'s `SQL_API_ALL_FUNCTIONS` array,
-    /// so the Windows Driver Manager — which dispatches from that array — was
-    /// told the driver did not support a function it exports, while an
-    /// unassigned slot was marked present.
+    /// plausible number in a valid range. A wrong entry in `sql_get_info`'s
+    /// `SQL_API_ALL_FUNCTIONS` array tells the Windows Driver Manager, which
+    /// dispatches from that array, that the driver does not support a function
+    /// it exports, while marking an unassigned slot present.
     const SPEC_IDS: &[(u16, FunctionId)] = &[
         (1, FunctionId::AllocConnect),
         (2, FunctionId::AllocEnv),
@@ -632,7 +631,7 @@ mod tests {
     fn function_id_from_raw_rejects_unassigned_values() {
         // 30 sits in the middle of the assigned 2.x range without being
         // assigned itself, so it is the kind of value a mistranscribed function
-        // id lands on — `SQL_API_SQLGETCONNECTOPTION` is 42, not 30.
+        // id lands on. `SQL_API_SQLGETCONNECTOPTION` is 42, not 30.
         for value in [0u16, 25, 30, 39, 74, 1000, 1013, 1015, 1023, 9999] {
             assert_eq!(
                 function_id_from_raw(value),

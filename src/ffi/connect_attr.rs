@@ -56,7 +56,7 @@ pub(crate) fn apply_pending_connect_attrs<B: Backend>(
 ///
 /// `SQL_ATTR_LOGIN_TIMEOUT` and `SQL_ATTR_CONNECTION_TIMEOUT` are set through
 /// `SQLSetConnectAttr`, not through the connection string, so without this a
-/// backend has no way to see them — `connect` receives only `ConnectParams`.
+/// backend has no way to see them: `connect` receives only `ConnectParams`.
 /// The login timeout in particular is useless anywhere else: the spec lists it
 /// as settable "Before" only, because it bounds the very call that establishes
 /// the connection.
@@ -166,9 +166,9 @@ fn apply_pending_txn_isolation<B: Backend>(
 
 /// Reject a `SQL_ATTR_TXN_ISOLATION` value the data source cannot run at.
 ///
-/// Two things make a value invalid. It must name exactly one level — the
-/// attribute selects *a* level, so a value with several `SQL_TXN_*` bits set
-/// is meaningless even when each bit is individually supported — and that
+/// Two things make a value invalid. It must name exactly one level, because
+/// the attribute selects *a* level and a value with several `SQL_TXN_*` bits
+/// set is meaningless even when each bit is individually supported. And that
 /// level must appear in [`Backend::txn_isolation_options`], which is what
 /// `SQLGetInfo(SQL_TXN_ISOLATION_OPTION)` reports to the application as the
 /// menu to choose from.
@@ -210,9 +210,9 @@ fn validate_txn_isolation<B: Backend>(
 /// row carries no `(DM)` marker, so it is the driver's to return, and a pending
 /// result set is exactly an open cursor on one of the connection's statements.
 ///
-/// **This is not transaction state.** The neighbouring `HY011` row —
-/// "the *Attribute* argument was SQL_ATTR_TXN_ISOLATION, and a transaction was
-/// open" — is a different condition over different state. Answering either with
+/// **This is not transaction state.** The neighbouring `HY011` row ("the
+/// *Attribute* argument was SQL_ATTR_TXN_ISOLATION, and a transaction was
+/// open") is a different condition over different state. Answering either with
 /// the other's fact makes both wrong: a `SELECT` under autocommit leaves a
 /// cursor open with no transaction, and a committed-but-uncleared transaction
 /// has no cursor.
@@ -267,7 +267,7 @@ fn connection_has_result_set_pending<B: Backend>(
 /// - 08S01 Communication link failure: not applicable; this function does not
 ///   communicate with the data source.
 /// - 24000 Invalid cursor state: returned for `SQL_ATTR_CURRENT_CATALOG` when
-///   any statement on the connection has an open cursor — the spec's row is
+///   any statement on the connection has an open cursor. The spec's row is
 ///   "the *Attribute* argument was SQL_ATTR_CURRENT_CATALOG, and a result set
 ///   was pending", and it carries no `(DM)` marker, so the driver owes it. See
 ///   `connection_has_result_set_pending`; note in particular that this is a
@@ -277,9 +277,9 @@ fn connection_has_result_set_pending<B: Backend>(
 ///   `SQL_ATTR_ENLIST_IN_DTC` reports HYC00 before a transaction can be
 ///   enlisted in one.
 /// - 3D000 Invalid catalog name: **returned by this driver**, propagated
-///   unchanged from [`Backend::set_current_catalog`]. The row — "the *Attribute*
+///   unchanged from [`Backend::set_current_catalog`]. The row ("the *Attribute*
 ///   argument was SQL_CURRENT_CATALOG, and the specified catalog name was
-///   invalid" — carries no `(DM)` marker, so it is the driver's to return, and
+///   invalid") carries no `(DM)` marker, so it is the driver's to return, and
 ///   core cannot produce it: only the data source knows which catalogs exist,
 ///   and the attribute's own description has the driver send something to it
 ///   ("the driver sends a **USE** *database* statement"). Core asks the hook and
@@ -291,22 +291,22 @@ fn connection_has_result_set_pending<B: Backend>(
 ///   failure, which is caught by `panic_safe` and converted to `SQL_ERROR`/HY000.
 /// - HY008: Operation canceled; not returned here. Cancelling a connection-level call needs
 ///   `SQLCancelHandle` on a connection handle, which this driver does not export, so no cancel
-///   token exists for this call to observe — `SQLCancel` takes a statement handle and cannot
+///   token exists for this call to observe: `SQLCancel` takes a statement handle and cannot
 ///   reach one. The asynchronous clause is likewise inapplicable: core never returns
 ///   `SQL_STILL_EXECUTING`.
 /// - HY009 Invalid use of null pointer: returned when the *Attribute* argument
-///   is `SQL_ATTR_CURRENT_CATALOG` — the one string-valued attribute this
-///   function handles — and *ValuePtr* is null. The row carries no `(DM)`
+///   is `SQL_ATTR_CURRENT_CATALOG` (the one string-valued attribute this
+///   function handles) and *ValuePtr* is null. The row carries no `(DM)`
 ///   marker, so the check is the driver's. A null is not "clear the catalog":
 ///   the spec defines no such operation, and the session's catalog is not
 ///   something the driver can unset by forgetting a string.
 /// - HY010 Function sequence error: (driver-manager-handled; not returned here).
 /// - HY011 Attribute cannot be set now: returned for `SQL_ATTR_PACKET_SIZE`
-///   once the connection is open, which the spec states directly — "if the
+///   once the connection is open, which the spec states directly: "if the
 ///   application sets packet size after a connection has already been made,
 ///   the driver will return SQLSTATE HY011". Also returned for
 ///   `SQL_ATTR_TXN_ISOLATION` when a transaction is open, which the spec's own
-///   HY011 row names — tracked as `ConnectionHandle::txn_dirty`, set when a
+///   HY011 row names. That is tracked as `ConnectionHandle::txn_dirty`, set when a
 ///   statement-producing call runs under manual commit and cleared by
 ///   `SQLEndTran` or by switching autocommit back on. Note this is *not* the
 ///   cursor condition 24000 describes.
@@ -328,12 +328,12 @@ fn connection_has_result_set_pending<B: Backend>(
 ///   condition **is** answered by core when no Driver Manager caught it first.
 ///
 ///   **Also returned here**, for a condition the row does not state:
-///   `SQL_ATTR_CURRENT_CATALOG` — the one attribute of this function whose value
-///   is a string, and so the whole set — passed with `StringLength` of `SQL_NTS`
+///   `SQL_ATTR_CURRENT_CATALOG` (the one attribute of this function whose value
+///   is a string, and so the whole set) passed with `StringLength` of `SQL_NTS`
 ///   and no null terminator within `MAX_NTS_SCAN` (1 048 576) code units. That is a
-///   length the driver cannot determine; the scanned prefix used to be stored and
-///   sent to `Backend::set_current_catalog` as though it were the whole name, which
-///   selects a *different catalog* rather than failing. See
+///   length the driver cannot determine, and storing the scanned prefix would hand
+///   `Backend::set_current_catalog` a truncated name, which selects a *different
+///   catalog* rather than failing. See
 ///   `set_current_catalog_refuses_an_nts_value_that_runs_to_the_scan_cap`.
 /// - HY092 Invalid attribute/option identifier: (driver-manager-handled; not
 ///   returned here). Unknown attributes are accepted silently.
@@ -350,23 +350,23 @@ fn connection_has_result_set_pending<B: Backend>(
 ///   transaction. An *unrecognized* attribute is still accepted silently for
 ///   DM/tool compatibility (a warning is logged instead). Note the distinction
 ///   this row draws between an unsupported *attribute* and an unsupported
-///   *value* — an isolation level the data source cannot run at is HY024
+///   *value*: an isolation level the data source cannot run at is HY024
 ///   above, not HYC00. A backend may also produce this from
 ///   [`Backend::set_current_catalog`] or [`Backend::set_access_mode`]; note
 ///   that the latter defaults to accepting, because the spec makes read-only a
 ///   hint the driver "is not required to" enforce.
 /// - HYT01 Connection timeout expired: not returned by core, but a backend hook
-///   this function calls — `set_autocommit`, `set_txn_isolation`,
-///   `set_access_mode` or `set_current_catalog` — may reach the data source and
+///   this function calls (`set_autocommit`, `set_txn_isolation`,
+///   `set_access_mode` or `set_current_catalog`) may reach the data source and
 ///   report it.
 /// - IM001 Driver does not support this function: (driver-manager-handled; not
 ///   returned here).
 /// - IM009 Unable to load translation DLL: not applicable; translation DLLs are
 ///   not supported (`SQL_ATTR_TRANSLATE_LIB` is accepted silently).
 /// - IM017 Polling is disabled in asynchronous notification mode: not returned here
-///   (the asynchronous notification model is not supported — not DM-annotated in the spec).
+///   (the asynchronous notification model is not supported; not DM-annotated in the spec).
 /// - IM018 SQLCompleteAsync has not been called: not returned here (the asynchronous
-///   notification model is not supported — not DM-annotated in the spec).
+///   notification model is not supported; not DM-annotated in the spec).
 /// - S1118 Driver does not support asynchronous notification: not applicable;
 ///   asynchronous notification is not supported.
 ///
@@ -464,8 +464,8 @@ pub unsafe fn sql_set_connect_attr_w<B: Backend>(
                     // SQL_AUTOCOMMIT_ON to change from manual-commit mode to
                     // autocommit mode." That commit ends the transaction, so
                     // SQL_ATTR_TXN_ISOLATION becomes settable again. Only after
-                    // `set_autocommit` succeeded — a backend that refused the
-                    // switch committed nothing.
+                    // `set_autocommit` succeeded, because a backend that refused
+                    // the switch committed nothing.
                     if val == SQL_AUTOCOMMIT_ON {
                         conn.txn_dirty = false;
                     }
@@ -512,10 +512,10 @@ pub unsafe fn sql_set_connect_attr_w<B: Backend>(
                     // Spec HY011, verbatim: "The Attribute argument was
                     // SQL_ATTR_TXN_ISOLATION, and a transaction was open." The
                     // attribute's own description says the same thing from the
-                    // application's side — "an application must call SQLEndTran
+                    // application's side: "an application must call SQLEndTran
                     // to commit or roll back all open transactions on a
                     // connection, before calling SQLSetConnectAttr with this
-                    // option" — and footnote [3] a third time.
+                    // option". Footnote [3] says it a third time.
                     //
                     // Checked before the value itself: an open transaction
                     // makes the call illegal whatever level was asked for, so
@@ -587,7 +587,7 @@ pub unsafe fn sql_set_connect_attr_w<B: Backend>(
                     Ok(SqlReturn::SUCCESS)
                 }
 
-                // String-valued: SQL_ATTR_CURRENT_CATALOG — decode UTF-16, then
+                // String-valued: SQL_ATTR_CURRENT_CATALOG. Decode UTF-16, then
                 // ask the backend to switch. Storing without switching would
                 // tell an application its unqualified names now resolve
                 // somewhere they do not; a backend that cannot switch reports
@@ -597,9 +597,9 @@ pub unsafe fn sql_set_connect_attr_w<B: Backend>(
                     // Spec HY009, on a row with no (DM) marker: "The Attribute
                     // argument identified a connection attribute that required a
                     // string value, and the ValuePtr argument was a null
-                    // pointer." A null used to remove the stored override and
-                    // report success, which is an operation the spec does not
-                    // define: the session's catalog was untouched while the
+                    // pointer." Removing the stored override and reporting
+                    // success is an operation the spec does not define: the
+                    // session's catalog would be untouched while the
                     // application was told it had been cleared. Neither
                     // psqlODBC (which ignores SQL_CURRENT_QUALIFIER on set) nor
                     // MySQL Connector/ODBC (which measures the value with
@@ -725,7 +725,7 @@ const DEFINED_CONNECTION_ATTRIBUTES: &[ConnectionAttribute] = &[
 /// - 08003 Connection not open: (driver-manager-handled; not returned here).
 /// - 08S01 Communication link failure: not applicable; this function does not
 ///   communicate with the data source. `SQL_ATTR_CONNECTION_DEAD` is not an
-///   exception — [`Backend::connection_dead`] is documented to answer from state
+///   exception: [`Backend::connection_dead`] is documented to answer from state
 ///   the backend already holds rather than by probing the link, because a
 ///   connection pool may read it on every checkout.
 /// - HY000 General error: returned for unexpected internal errors.
@@ -742,7 +742,7 @@ const DEFINED_CONNECTION_ATTRIBUTES: &[ConnectionAttribute] = &[
 ///   shared string writer's `SQLSMALLINT` can express is clamped rather than
 ///   refused.
 /// - HY092 Invalid attribute/option identifier: returned for an identifier that
-///   is not an ODBC connection attribute at all — see
+///   is not an ODBC connection attribute at all; see
 ///   `DEFINED_CONNECTION_ATTRIBUTES`, which is the whole of the spec's list.
 ///   The spec's own wording for this row is "not valid for the version of ODBC
 ///   supported by the driver", which is a different claim from the HYC00 row
@@ -752,7 +752,7 @@ const DEFINED_CONNECTION_ATTRIBUTES: &[ConnectionAttribute] = &[
 /// - HY117 Connection is suspended due to unknown transaction state:
 ///   (driver-manager-handled; not returned here).
 /// - HYC00 Optional feature not implemented: returned for an attribute that is
-///   on the spec's list but that this function has no answer for —
+///   on the spec's list but that this function has no answer for:
 ///   `SQL_ATTR_QUIET_MODE`, `SQL_ATTR_TRACEFILE`, `SQL_ATTR_TRANSLATE_LIB`,
 ///   `SQL_ATTR_ENLIST_IN_DTC`, `SQL_ATTR_ASYNC_DBC_FUNCTIONS_ENABLE` and the
 ///   rest. The spec's wording is "a valid ODBC connection attribute for the
@@ -810,7 +810,7 @@ pub unsafe fn sql_get_connect_attr_w<B: Backend>(
             // Driver Manager uses the ODBC cursor library"). Every other
             // integer-valued connection attribute really is `SQLUINTEGER`, so
             // this is a two-attribute exception rather than the blanket rule
-            // that applies to statement attributes — where *no* non-pointer
+            // that applies to statement attributes, where *no* non-pointer
             // attribute is `SQLUINTEGER`.
             //
             // SAFETY: as `write_u32` above, but the buffer is SQLULEN-wide.
@@ -932,8 +932,8 @@ pub unsafe fn sql_get_connect_attr_w<B: Backend>(
                 // SQL_ATTR_CONNECTION_DEAD: whatever the backend knows about
                 // its own liveness.
                 //
-                // A handle with no connection is not a *lost* connection — it
-                // never had one, or `SQLDisconnect` closed it deliberately —
+                // A handle with no connection is not a *lost* connection: it
+                // never had one, or `SQLDisconnect` closed it on request,
                 // and SQL_CD_TRUE asserts the first. The Driver Manager's 08003
                 // covers the not-connected case for the attributes that require
                 // one, so core has nothing to add here beyond declining to call
@@ -947,7 +947,7 @@ pub unsafe fn sql_get_connect_attr_w<B: Backend>(
 
                 // SQL_ATTR_CURRENT_CATALOG: what the application set, else what
                 // the session is actually using. Without the second half this
-                // attribute is write-only — it answers "" while
+                // attribute is write-only: it answers "" while
                 // `SQLGetInfo(SQL_DATABASE_NAME)`, which the spec makes the same
                 // value, answers the real catalog.
                 _ if attr == ConnectionAttribute::CURRENT_CATALOG => {
@@ -1039,8 +1039,8 @@ mod tests {
     /// caller's value and so has no way to know which backend allocated the
     /// handle. Allocating as one backend and calling as another therefore
     /// passes that compare and then reads memory laid out for a different
-    /// type — undefined behaviour that Miri catches and a plain `cargo test`
-    /// does not.
+    /// type, which is undefined behaviour that Miri catches and a plain
+    /// `cargo test` does not.
     unsafe fn alloc_env_conn_for<B: Backend>() -> (*mut c_void, *mut c_void) {
         let mut env: *mut c_void = std::ptr::null_mut();
         let _ = unsafe {
@@ -1083,7 +1083,7 @@ mod tests {
             );
             assert_eq!(ret, SqlReturn::SUCCESS);
 
-            // Get autocommit — should be 0
+            // Get autocommit, which should be 0
             let mut val: u32 = 99;
             let ret = sql_get_connect_attr_w::<MockBackend>(
                 conn,
@@ -1489,7 +1489,7 @@ mod tests {
     ///
     /// Driven through a real `SQLExecDirect` rather than by poking
     /// `cursor_open`, so it also pins that an ordinary execution is what makes a
-    /// result set "pending" — `MockCancelAwareBackend` reports one column, and
+    /// result set "pending": `MockCancelAwareBackend` reports one column, and
     /// core opens a cursor for any execution that has columns.
     #[test]
     fn setting_current_catalog_while_a_result_set_is_pending_is_24000() {
@@ -1548,7 +1548,7 @@ mod tests {
     /// the check rejected SQL_ATTR_CURRENT_CATALOG unconditionally.
     ///
     /// The backend leaves `set_current_catalog` defaulted, so the expected
-    /// answer is that HYC00 — the point is that it is *not* 24000, i.e. the
+    /// answer is that HYC00. The point is that it is *not* 24000, i.e. the
     /// request got past the cursor check and reached the backend.
     #[test]
     fn setting_current_catalog_with_no_cursor_open_is_not_24000() {
@@ -1664,7 +1664,7 @@ mod tests {
     fn set_unknown_attr_returns_success() {
         unsafe {
             let (env, conn) = alloc_env_conn();
-            // Driver-specific attribute — must not fail
+            // Driver-specific attribute, must not fail
             let ret = sql_set_connect_attr_w::<MockBackend>(conn, 9999, std::ptr::null_mut(), 0);
             assert_eq!(ret, SqlReturn::SUCCESS);
             cleanup(env, conn);
@@ -1782,7 +1782,7 @@ mod tests {
     /// `SQL_ATTR_CURRENT_CATALOG` and `SQL_DATABASE_NAME` are one value under
     /// two names, so they must read the same two sources in the same order:
     /// what the application set, else what the session is actually using. With
-    /// only the first, the attribute is write-only — it answers `""` while the
+    /// only the first, the attribute is write-only: it answers `""` while the
     /// info type answers the real catalog.
     #[test]
     fn current_catalog_falls_back_to_the_session_catalog() {
@@ -1827,10 +1827,10 @@ mod tests {
     /// identified a connection attribute that required a string value, and the
     /// *ValuePtr* argument was a null pointer." So the check is the driver's.
     ///
-    /// A null used to remove the stored override and report success, which told
-    /// the application it had cleared a catalog the session was still using —
-    /// and the spec defines no operation that unsets one. Neither psqlODBC nor
-    /// MySQL Connector/ODBC implements null-as-clear either.
+    /// Treating a null as "remove the stored override and report success" would
+    /// tell the application it had cleared a catalog the session was still
+    /// using, and the spec defines no operation that unsets one. Neither
+    /// psqlODBC nor MySQL Connector/ODBC implements null-as-clear either.
     #[test]
     fn a_null_value_ptr_for_current_catalog_is_hy009() {
         unsafe {
@@ -1862,9 +1862,9 @@ mod tests {
 
     /// `SQLGetConnectAttr`'s *BufferLength* is `SQLINTEGER`, so 64 KB is an
     /// ordinary thing for an application to offer for a catalog name and the
-    /// spec defines no error for it — the argument is described only as "the
-    /// length of \**ValuePtr*". It used to fail with `HY000`, because the value
-    /// was narrowed to the `SQLSMALLINT` the shared string writer takes.
+    /// spec defines no error for it: the argument is described only as "the
+    /// length of \**ValuePtr*". Narrowing it to the `SQLSMALLINT` the shared
+    /// string writer takes is what would turn it into an `HY000`.
     #[test]
     fn a_buffer_larger_than_i16_max_still_returns_the_catalog() {
         unsafe {
@@ -1895,7 +1895,7 @@ mod tests {
     }
 
     /// `SQL_ATTR_ASYNC_ENABLE` and `SQL_ATTR_ODBC_CURSORS` are the two
-    /// connection attributes the spec declares `SQLULEN` — "A SQLULEN value
+    /// connection attributes the spec declares `SQLULEN`: "A SQLULEN value
     /// that specifies whether a function called with a statement on the
     /// specified connection is executed asynchronously" and "An SQLULEN value
     /// specifying how the Driver Manager uses the ODBC cursor library". Every
@@ -2454,9 +2454,9 @@ mod tests {
         }
     }
 
-    /// C2: an unset `SQL_ATTR_TXN_ISOLATION` must report the level the backend
-    /// declares, not a constant. Answering one unconditionally — say
-    /// `SQL_TXN_READ_COMMITTED` — makes a backend that reports
+    /// An unset `SQL_ATTR_TXN_ISOLATION` must report the level the backend
+    /// declares, not a constant. Answering one unconditionally (say
+    /// `SQL_TXN_READ_COMMITTED`) makes a backend that reports
     /// `SQL_TXN_SERIALIZABLE` for `SQL_DEFAULT_TXN_ISOLATION` contradict itself
     /// on the same connection.
     ///
@@ -2489,7 +2489,7 @@ mod tests {
         }
     }
 
-    /// C3: the spec's HY024 row makes validating this the driver's job --
+    /// The spec's HY024 row makes validating this the driver's job:
     /// "For all other connection and statement attributes, the driver must
     /// verify the value specified in ValuePtr". A level outside
     /// `SQL_TXN_ISOLATION_OPTION` is not one the data source can run at.
@@ -2562,7 +2562,7 @@ mod tests {
         }
     }
 
-    /// C3's worse half: the stored value has to *reach the data source*. An
+    /// The stored value also has to *reach the data source*. An
     /// application that sets REPEATABLE READ, gets SQL_SUCCESS and reads its
     /// own value back must not be talking to a connection still running at
     /// whatever it always ran at.
@@ -2594,7 +2594,7 @@ mod tests {
 
     /// The spec lists SQL_ATTR_TXN_ISOLATION as settable "Either" side of the
     /// connection, so a level set before connecting must still be applied once
-    /// the connection exists — the same contract as SQL_ATTR_AUTOCOMMIT.
+    /// the connection exists, the same contract as SQL_ATTR_AUTOCOMMIT.
     #[test]
     fn txn_isolation_set_before_connect_is_applied_on_connect() {
         unsafe {
@@ -2625,7 +2625,7 @@ mod tests {
 
     /// A backend declaring more than one level but not implementing
     /// `set_txn_isolation` must fail loudly rather than accept a level it
-    /// cannot apply — the exact silent lie C3 is about.
+    /// cannot apply, rather than lie about the level in force.
     #[test]
     fn multi_level_backend_without_the_hook_cannot_switch_levels() {
         unsafe {
@@ -2712,12 +2712,11 @@ mod tests {
         }
     }
 
-    /// `3D000` was recorded as "not returned; the catalog string is stored
-    /// verbatim without validation", which was never true of the code: core
-    /// calls `Backend::set_current_catalog` and stores the value only if that
-    /// succeeds. The spec's row carries no `(DM)` marker, so the state is the
-    /// driver's, and core has no way to produce it — only the data source knows
-    /// which catalogs exist. This pins the propagation the contract relies on.
+    /// Core calls `Backend::set_current_catalog` and stores the value only if
+    /// that succeeds, so the catalog string is never stored unvalidated. The
+    /// spec's row carries no `(DM)` marker, so the state is the driver's, and
+    /// core has no way to produce it: only the data source knows which catalogs
+    /// exist. This pins the propagation the contract relies on.
     #[test]
     fn set_current_catalog_propagates_the_backends_3d000() {
         unsafe {

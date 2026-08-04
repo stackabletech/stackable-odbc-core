@@ -86,21 +86,21 @@ impl From<Scope> for i16 {
 ///
 /// # Why this exists
 ///
-/// Core raises `01S07` when *it* drops precision — a non-zero
+/// Core raises `01S07` when *it* drops precision, such as a non-zero
 /// [`ColumnValue::Time`] fraction written to `SQL_C_TYPE_TIME`, or a fraction
-/// lost converting to an exact-integer C type. But a backend that loses
-/// precision in its *own* type conversion does so before a [`ColumnValue`]
-/// exists, so core never sees it and the application got `SQL_SUCCESS` with no
-/// diagnostic at all. A driver reporting `decimal_digits = 12` for a
-/// `timestamp(12)` column and delivering nine had no way to say so.
+/// lost converting to an exact-integer C type. A backend that loses precision
+/// in its *own* type conversion does so before a [`ColumnValue`] exists, so
+/// core never sees it. Without this channel, a driver reporting
+/// `decimal_digits = 12` for a `timestamp(12)` column and delivering nine has
+/// no way to say so, and the application sees `SQL_SUCCESS` with no diagnostic.
 ///
-/// This is the first mechanism by which a backend attaches a diagnostic to a
-/// value it produced *successfully*: everything else is either a hard error or
-/// a condition core detects itself. Returning a warning does not make the call
-/// fail — a condition that should fail belongs in the `Err` arm of `get_data`.
+/// This is how a backend attaches a diagnostic to a value it produced
+/// *successfully*: everything else is either a hard error or a condition core
+/// detects itself. Returning a warning does not make the call fail, because a
+/// condition that should fail belongs in the `Err` arm of `get_data`.
 ///
-/// `#[non_exhaustive]`: `01S07` is the case today, and the mechanism
-/// generalises to any warning that belongs to a value rather than to a failure.
+/// `#[non_exhaustive]`, so a warning that belongs to a value rather than to a
+/// failure can be added without a major break.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValueWarning {
@@ -113,10 +113,9 @@ pub enum ValueWarning {
 /// [`crate::backend::StatementBackend`] and surfaced to the application as
 /// `SQL_SUCCESS` or `SQL_NO_DATA` from `SQLFetch`.
 ///
-/// `#[non_exhaustive]`: adding a variant here must not be a major break —
-/// block cursors will need one, and a driver that matches exhaustively should
-/// get a compiler nudge rather than force a version bump on every other
-/// driver.
+/// `#[non_exhaustive]`, so adding a variant is not a major break. Block cursors
+/// will need one, and a driver that matches exhaustively should get a compiler
+/// nudge rather than force a version bump on every other driver.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FetchResult {
@@ -242,7 +241,7 @@ pub enum ColumnValue {
         /// Fractional seconds in nanoseconds, matching `Timestamp::fraction`'s unit.
         ///
         /// `SQL_TIME_STRUCT` (`odbc_sys::Time`) has no fraction field, so this
-        /// value can never reach a `SQL_C_TYPE_TIME` target — writing it there
+        /// value can never reach a `SQL_C_TYPE_TIME` target: writing it there
         /// truncates the fraction and reports SQLSTATE 01S07. It survives
         /// intact, however, when the value is rendered as a string for
         /// `SQL_C_CHAR` / `SQL_C_WCHAR` targets.
@@ -269,7 +268,7 @@ pub enum ColumnValue {
     Bytes(Vec<u8>),
     /// A 16-byte globally unique identifier (`GUID`).
     Guid([u8; 16]),
-    /// DECIMAL(p,s) — stored as a string to preserve exact precision.
+    /// DECIMAL(p,s), stored as a string to preserve exact precision.
     Decimal(String),
     /// TIMESTAMP WITH TIME ZONE
     TimestampTz {
@@ -291,13 +290,13 @@ pub enum ColumnValue {
         /// hours because several zones are offset by 30 or 45.
         timezone_offset_minutes: i16,
     },
-    /// JSON — raw JSON text
+    /// JSON, as raw JSON text.
     Json(String),
-    /// ARRAY — ordered sequence of values
+    /// ARRAY, an ordered sequence of values.
     Array(Vec<ColumnValue>),
-    /// MAP — key/value pairs
+    /// MAP, a set of key/value pairs.
     Map(Vec<(ColumnValue, ColumnValue)>),
-    /// ROW / struct — ordered fields
+    /// ROW or struct, a set of ordered fields.
     Row(Vec<ColumnValue>),
     /// INTERVAL YEAR TO MONTH
     IntervalYearMonth {
@@ -360,7 +359,7 @@ pub struct TypeInfoRow {
 /// Adding an accessor is a source-compatible change, so this set covers every
 /// field rather than only the ones a driver happens to need today.
 impl TypeInfoRow {
-    /// `TYPE_NAME` — column 1 of the `SQLGetTypeInfo` result set.
+    /// `TYPE_NAME`: column 1 of the `SQLGetTypeInfo` result set.
     ///
     /// The data-source-specific type name, as it appears in DDL. Owned, since
     /// a backend that derives its type list from a runtime server-version
@@ -370,7 +369,7 @@ impl TypeInfoRow {
         self.type_name.as_ref()
     }
 
-    /// `DATA_TYPE` — column 2 of the `SQLGetTypeInfo` result set.
+    /// `DATA_TYPE`: column 2 of the `SQLGetTypeInfo` result set.
     ///
     /// The ODBC SQL type this maps to.
     #[must_use]
@@ -378,7 +377,7 @@ impl TypeInfoRow {
         self.data_type
     }
 
-    /// `COLUMN_SIZE` — column 3 of the `SQLGetTypeInfo` result set.
+    /// `COLUMN_SIZE`: column 3 of the `SQLGetTypeInfo` result set.
     ///
     /// Maximum size, in the units the spec defines for the type.
     #[must_use]
@@ -386,7 +385,7 @@ impl TypeInfoRow {
         self.column_size
     }
 
-    /// `LITERAL_PREFIX` — column 4 of the `SQLGetTypeInfo` result set.
+    /// `LITERAL_PREFIX`: column 4 of the `SQLGetTypeInfo` result set.
     ///
     /// Characters that open a literal of this type, or `None` if it has no literal form.
     #[must_use]
@@ -394,7 +393,7 @@ impl TypeInfoRow {
         self.literal_prefix.as_deref()
     }
 
-    /// `LITERAL_SUFFIX` — column 5 of the `SQLGetTypeInfo` result set.
+    /// `LITERAL_SUFFIX`: column 5 of the `SQLGetTypeInfo` result set.
     ///
     /// The closing counterpart of `literal_prefix`.
     #[must_use]
@@ -402,7 +401,7 @@ impl TypeInfoRow {
         self.literal_suffix.as_deref()
     }
 
-    /// `CREATE_PARAMS` — column 6 of the `SQLGetTypeInfo` result set.
+    /// `CREATE_PARAMS`: column 6 of the `SQLGetTypeInfo` result set.
     ///
     /// Comma-separated names of the parameters a `CREATE TABLE` spelling takes, e.g. `"precision,scale"`.
     #[must_use]
@@ -410,7 +409,7 @@ impl TypeInfoRow {
         self.create_params.as_deref()
     }
 
-    /// `NULLABLE` — column 7 of the `SQLGetTypeInfo` result set.
+    /// `NULLABLE`: column 7 of the `SQLGetTypeInfo` result set.
     ///
     /// Whether the data source accepts `NULL` for this type.
     #[must_use]
@@ -418,7 +417,7 @@ impl TypeInfoRow {
         self.nullable
     }
 
-    /// `CASE_SENSITIVE` — column 8 of the `SQLGetTypeInfo` result set.
+    /// `CASE_SENSITIVE`: column 8 of the `SQLGetTypeInfo` result set.
     ///
     /// Whether the type is a character type with case-sensitive collation.
     #[must_use]
@@ -426,7 +425,7 @@ impl TypeInfoRow {
         self.case_sensitive
     }
 
-    /// `SEARCHABLE` — column 9 of the `SQLGetTypeInfo` result set.
+    /// `SEARCHABLE`: column 9 of the `SQLGetTypeInfo` result set.
     ///
     /// How the type may be used in a `WHERE` clause, as a `SQL_PRED_*` value.
     #[must_use]
@@ -434,7 +433,7 @@ impl TypeInfoRow {
         self.searchable
     }
 
-    /// `UNSIGNED_ATTRIBUTE` — column 10 of the `SQLGetTypeInfo` result set.
+    /// `UNSIGNED_ATTRIBUTE`: column 10 of the `SQLGetTypeInfo` result set.
     ///
     /// Whether the type is unsigned; `None` for non-numeric types.
     #[must_use]
@@ -442,7 +441,7 @@ impl TypeInfoRow {
         self.unsigned
     }
 
-    /// `FIXED_PREC_SCALE` — column 11 of the `SQLGetTypeInfo` result set.
+    /// `FIXED_PREC_SCALE`: column 11 of the `SQLGetTypeInfo` result set.
     ///
     /// Whether the type has fixed precision and scale, i.e. is a money type.
     #[must_use]
@@ -450,7 +449,7 @@ impl TypeInfoRow {
         self.fixed_prec_scale
     }
 
-    /// `AUTO_UNIQUE_VALUE` — column 12 of the `SQLGetTypeInfo` result set.
+    /// `AUTO_UNIQUE_VALUE`: column 12 of the `SQLGetTypeInfo` result set.
     ///
     /// Whether the type auto-increments; `None` when not applicable.
     #[must_use]
@@ -458,7 +457,7 @@ impl TypeInfoRow {
         self.auto_unique_value
     }
 
-    /// `LOCAL_TYPE_NAME` — column 13 of the `SQLGetTypeInfo` result set.
+    /// `LOCAL_TYPE_NAME`: column 13 of the `SQLGetTypeInfo` result set.
     ///
     /// The localised name for display, which is not usable in SQL.
     #[must_use]
@@ -466,7 +465,7 @@ impl TypeInfoRow {
         self.local_type_name.as_deref()
     }
 
-    /// `MINIMUM_SCALE` — column 14 of the `SQLGetTypeInfo` result set.
+    /// `MINIMUM_SCALE`: column 14 of the `SQLGetTypeInfo` result set.
     ///
     /// Least scale the type accepts; `None` when scale does not apply.
     #[must_use]
@@ -474,7 +473,7 @@ impl TypeInfoRow {
         self.minimum_scale
     }
 
-    /// `MAXIMUM_SCALE` — column 15 of the `SQLGetTypeInfo` result set.
+    /// `MAXIMUM_SCALE`: column 15 of the `SQLGetTypeInfo` result set.
     ///
     /// Greatest scale the type accepts; `None` when scale does not apply.
     #[must_use]
@@ -482,7 +481,7 @@ impl TypeInfoRow {
         self.maximum_scale
     }
 
-    /// `SQL_DATA_TYPE` — column 16 of the `SQLGetTypeInfo` result set.
+    /// `SQL_DATA_TYPE`: column 16 of the `SQLGetTypeInfo` result set.
     ///
     /// The verbose type, which differs from `data_type` for datetimes and intervals.
     #[must_use]
@@ -490,7 +489,7 @@ impl TypeInfoRow {
         self.sql_data_type
     }
 
-    /// `SQL_DATETIME_SUB` — column 17 of the `SQLGetTypeInfo` result set.
+    /// `SQL_DATETIME_SUB`: column 17 of the `SQLGetTypeInfo` result set.
     ///
     /// The datetime or interval subcode, when `sql_data_type` is one of those.
     #[must_use]
@@ -498,7 +497,7 @@ impl TypeInfoRow {
         self.sql_datetime_sub
     }
 
-    /// `NUM_PREC_RADIX` — column 18 of the `SQLGetTypeInfo` result set.
+    /// `NUM_PREC_RADIX`: column 18 of the `SQLGetTypeInfo` result set.
     ///
     /// Whether `column_size` counts bits or decimal digits: 2 or 10.
     #[must_use]
@@ -519,17 +518,17 @@ impl TypeInfoRow {
     /// searchable, no literal form and no localised name.
     ///
     /// `sql_data_type` defaults to `data_type`, which is correct for every type
-    /// except the datetime and interval families — those set it with
+    /// except the datetime and interval families. Those set it with
     /// [`TypeInfoRow::with_verbose_type`].
     ///
     /// Takes `impl Into<Cow<'static, str>>` so a driver with a fixed type list
     /// can still pass a `&'static str` literal, while a driver that computes
     /// its type name at runtime (from a server-version probe, say) can pass an
-    /// owned `String`. That conversion is not `const`, so — unlike the
-    /// remaining builders below, which touch no string field and stay `const`
-    /// — this constructor cannot be used to build a `static` array; a driver
-    /// needing one now assembles its list from a function (an `OnceLock` if
-    /// it is expensive to rebuild) instead.
+    /// owned `String`. That conversion is not `const`, so this constructor
+    /// cannot build a `static` array, unlike the remaining builders below,
+    /// which touch no string field and stay `const`. A driver needing one
+    /// assembles its list from a function instead, behind an `OnceLock` if it
+    /// is expensive to rebuild.
     pub fn new(
         type_name: impl Into<std::borrow::Cow<'static, str>>,
         data_type: SqlDataType,
@@ -814,7 +813,7 @@ impl ColumnDescriptor {
         self.type_name.as_str()
     }
 
-    /// The ODBC SQL type of the column — `SQL_DESC_CONCISE_TYPE`.
+    /// The ODBC SQL type of the column, reported as `SQL_DESC_CONCISE_TYPE`.
     ///
     /// `SQL_DESC_TYPE` reports the *verbose* type derived from this, which
     /// differs for the datetime and interval families.
@@ -830,14 +829,14 @@ impl ColumnDescriptor {
         self.precision
     }
 
-    /// The column's declared scale — digits right of the decimal point.
+    /// The column's declared scale, in digits right of the decimal point.
     /// Signed, because the spec permits a negative scale.
     #[must_use]
     pub fn scale(&self) -> i16 {
         self.scale
     }
 
-    /// Whether the column accepts `NULL` — `SQL_DESC_NULLABLE`.
+    /// Whether the column accepts `NULL`, reported as `SQL_DESC_NULLABLE`.
     ///
     /// A [`Nullable`], not a `bool`, because the spec defines *three* values and
     /// the third is not expressible as a boolean: `SQL_NULLABLE_UNKNOWN` is what
@@ -849,7 +848,7 @@ impl ColumnDescriptor {
         self.nullable
     }
 
-    /// `SQL_DESC_SEARCHABLE` — one of [`SQL_PRED_NONE`], [`SQL_PRED_CHAR`],
+    /// `SQL_DESC_SEARCHABLE`: one of [`SQL_PRED_NONE`], [`SQL_PRED_CHAR`],
     /// [`SQL_PRED_BASIC`] or [`SQL_SEARCHABLE`].
     ///
     /// [`SQL_PRED_NONE`]: crate::types::SQL_PRED_NONE
@@ -861,7 +860,7 @@ impl ColumnDescriptor {
         self.searchable
     }
 
-    /// `SQL_DESC_LITERAL_PREFIX` — the character(s) that open a literal of this
+    /// `SQL_DESC_LITERAL_PREFIX`: the character(s) that open a literal of this
     /// type, e.g. `'` for a character type or `0x` for binary. Empty when the
     /// type has no literal form.
     #[must_use]
@@ -869,21 +868,21 @@ impl ColumnDescriptor {
         self.literal_prefix.as_str()
     }
 
-    /// `SQL_DESC_LITERAL_SUFFIX` — the closing counterpart of
+    /// `SQL_DESC_LITERAL_SUFFIX`: the closing counterpart of
     /// `literal_prefix`.
     #[must_use]
     pub fn literal_suffix(&self) -> &str {
         self.literal_suffix.as_str()
     }
 
-    /// `SQL_DESC_TABLE_NAME` — the table this column came from, empty when the
+    /// `SQL_DESC_TABLE_NAME`: the table this column came from, empty when the
     /// backend does not track it or the column is computed.
     #[must_use]
     pub fn table_name(&self) -> &str {
         self.table_name.as_str()
     }
 
-    /// `SQL_DESC_SCHEMA_NAME` — empty when the data source has no schemas or
+    /// `SQL_DESC_SCHEMA_NAME`, empty when the data source has no schemas or
     /// the backend does not track them.
     #[must_use]
     pub fn schema_name(&self) -> &str {
@@ -1077,10 +1076,10 @@ impl ParamDescriptor {
 mod tests {
     use super::*;
 
-    /// A backend that computes its type list at runtime — from a server
-    /// version probe, say — must be able to build a row from an owned
-    /// `String`. While the fields were `&'static str` it could not, whatever
-    /// the method signature said.
+    /// A backend that computes its type list at runtime, from a server version
+    /// probe say, must be able to build a row from an owned `String`. That
+    /// needs the fields to be `Cow`, not `&'static str`, whatever the method
+    /// signature says.
     #[test]
     fn a_type_info_row_can_be_built_from_owned_strings() {
         let type_name = String::from("VARCHAR");
@@ -1103,8 +1102,8 @@ mod tests {
     ///
     /// The fields are crate-private, so a driver reaches them only this way; an
     /// accessor wired to the wrong field, or a builder that writes one field and
-    /// is read through another, is invisible from inside the crate — core can
-    /// still touch the fields directly. This is the test that would catch it.
+    /// is read through another, is invisible from inside the crate, because core
+    /// can still touch the fields directly. This is the test that catches it.
     #[test]
     fn every_type_info_row_builder_round_trips_through_its_accessor() {
         let row = TypeInfoRow::new("DECIMAL", SqlDataType::DECIMAL)

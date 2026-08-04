@@ -72,12 +72,12 @@ fn metadata_id_enabled<B: Backend>(stmt: &StatementHandle<B>) -> bool {
 ///
 /// All three conjuncts matter. A data source with no catalogs has nothing for
 /// a catalog identifier to name, so a null pointer is the only sensible thing
-/// an application can pass there — which is why the check is conditional on
+/// an application can pass there. The check is therefore conditional on
 /// [`Backend::supports_catalogs`], the same fact core already answers
 /// `SQL_CATALOG_NAME` from.
 ///
 /// The neighbouring `SchemaName`/`TableName` clauses of the same `HY009` row
-/// *are* `(DM)`-marked, and are deliberately not checked here.
+/// *are* `(DM)`-marked, so they are not checked here.
 fn check_metadata_id_null_catalog<B: Backend>(
     connection: &B::Connection,
     catalog_name: *const u16,
@@ -96,13 +96,13 @@ fn check_metadata_id_null_catalog<B: Backend>(
     Ok(())
 }
 
-/// Spec `HY009`, "The TableName argument was a null pointer" — for
+/// Spec `HY009`, "The TableName argument was a null pointer", for
 /// `SQLStatistics`, `SQLSpecialColumns` and `SQLColumnPrivileges` **only**.
 ///
 /// Those three are the only catalog functions whose diagnostics table states
 /// that sentence without a `(DM)` marker. `SQLPrimaryKeys`, `SQLForeignKeys`
 /// and `SQLTablePrivileges` carry the same sentence *with* the marker, so the
-/// Driver Manager returns it and the driver must not — do not extend this to
+/// Driver Manager returns it and the driver must not. Do not extend this to
 /// them. `SQLProcedures` and `SQLProcedureColumns` state no such sentence about
 /// their `ProcName` at all.
 fn check_null_table_name(table_name: *const u16, function: &str) -> Result<(), OdbcError> {
@@ -121,7 +121,7 @@ fn check_null_table_name(table_name: *const u16, function: &str) -> Result<(), O
 /// Returns the value unchanged when `METADATA_ID` is `SQL_FALSE`: the spec then
 /// classifies these as ordinary or pattern-value arguments, which are passed
 /// through literally. Under `SQL_TRUE` they become identifiers, and core turns
-/// each into a pattern matching exactly the one name it denotes — so a backend
+/// each into a pattern matching exactly the one name it denotes, so a backend
 /// needs no code for the feature at all.
 ///
 /// Call it on exactly the arguments the spec's "Arguments in Catalog Functions"
@@ -136,7 +136,7 @@ fn normalise_catalog_arg<B: Backend>(
         return value;
     }
     // `escape_dialect` returns an owned `EscapeDialect`, so it is bound before
-    // its quotes are borrowed — borrowing from the temporary would not compile.
+    // its quotes are borrowed; borrowing from the temporary would not compile.
     let dialect = B::escape_dialect(connection);
     let escape = B::search_pattern_escape(connection);
     value.map(|v| {
@@ -149,18 +149,18 @@ fn normalise_catalog_arg<B: Backend>(
     })
 }
 
-/// `SQLTables`' spec sort order — "ordered by TABLE_TYPE, TABLE_CAT,
+/// `SQLTables`' spec sort order, "ordered by TABLE_TYPE, TABLE_CAT,
 /// TABLE_SCHEM, and TABLE_NAME", as zero-based column indices.
 const TABLES_SORT_KEYS: [usize; 4] = [3, 0, 1, 2];
 
 /// Which `SQLTables` enumeration an argument combination selects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TableEnumeration {
-    /// `SQL_ALL_CATALOGS` — the list of catalogs.
+    /// `SQL_ALL_CATALOGS`: the list of catalogs.
     Catalogs,
-    /// `SQL_ALL_SCHEMAS` — the list of schemas.
+    /// `SQL_ALL_SCHEMAS`: the list of schemas.
     Schemas,
-    /// `SQL_ALL_TABLE_TYPES` — the list of table types.
+    /// `SQL_ALL_TABLE_TYPES`: the list of table types.
     TableTypes,
 }
 
@@ -169,7 +169,7 @@ enum TableEnumeration {
 ///
 /// All three `SQL_ALL_*` sentinels are the same string, `"%"`, so an
 /// enumeration is identified by which argument carries it **while the others
-/// are empty strings** — never by the `"%"` on its own. `SQLTables("%", "%",
+/// are empty strings**, never by the `"%"` on its own. `SQLTables("%", "%",
 /// "%")` is an ordinary match-everything query, and a detector keyed on `"%"`
 /// alone would answer it with a catalog list.
 ///
@@ -204,7 +204,7 @@ fn table_enumeration(
 /// Queries the backend for table metadata and stores the result set in the
 /// statement handle.
 ///
-/// Three argument combinations are *enumerations* rather than queries — a
+/// Three argument combinations are *enumerations* rather than queries: a
 /// `"%"` in `catalog_name`, `schema_name` or `table_type` while every other
 /// name argument is the empty string. Core serves those itself from
 /// [`Backend::catalogs`], [`Backend::schemas`] and [`Backend::table_types`],
@@ -225,15 +225,15 @@ fn table_enumeration(
 /// - 01000: General warning (driver-specific informational message); not returned here.
 /// - 08S01: Communication link failure; propagated from the backend when its
 ///   client library reports the link to the data source failed.
-/// - 24000: Invalid cursor state — returned if a cursor is already open on this statement.
-/// - 40001: Serialization failure — propagated from the backend unchanged, as `08S01` is.
+/// - 24000: Invalid cursor state. Returned if a cursor is already open on this statement.
+/// - 40001: Serialization failure. Propagated from the backend unchanged, as `08S01` is.
 ///   Core degrades nothing to `HY000`; that state appears only when the backend's own error
 ///   mapping produced no more specific one.
-/// - 40003: Statement completion unknown — propagated from the backend unchanged.
+/// - 40003: Statement completion unknown. Propagated from the backend unchanged.
 /// - HY000: General error; returned for any unexpected backend error.
 /// - HY001: Memory allocation error; returned if allocation fails.
-/// - HY008: Operation canceled. The row's first clause — asynchronous processing, then the
-///   function called again — is not applicable: core implements no asynchronous execution and
+/// - HY008: Operation canceled. The row's first clause (asynchronous processing, then the
+///   function called again) is not applicable: core implements no asynchronous execution and
 ///   never returns `SQL_STILL_EXECUTING`. The second clause, `SQLCancel` called on the
 ///   statement "from a different thread in a multithread application", **is returned by this
 ///   driver**: the row carries no `(DM)` marker, and when a backend call fails with
@@ -244,18 +244,18 @@ fn table_enumeration(
 ///   `SQL_TRUE`, `CatalogName` was a null pointer, and `SQL_CATALOG_NAME` reports that
 ///   catalog names are supported. The `SchemaName`/`TableName` clause beside it *is*
 ///   `(DM)`-marked and is deliberately not checked here.
-/// - HY010: Function sequence error — the spec annotates this `(DM)`, on **every** clause:
+/// - HY010: Function sequence error. The spec annotates this `(DM)`, on **every** clause:
 ///   the row enumerates asynchronous execution, `SQL_PARAM_DATA_AVAILABLE` and
 ///   `SQL_NEED_DATA`, none of which core implements, so none of its clauses is returned
-///   here. Core does return `HY010` for a condition the row does not describe — the
-///   statement's connection is not open — which is core's own reading rather than a clause
+///   here. Core does return `HY010` for a condition the row does not describe, namely that
+///   the statement's connection is not open. That is core's own reading rather than a clause
 ///   of the table, and the state the ODBC state table gives a catalog function called
 ///   before a connection exists.
 /// - HY013: Memory management error; returned if underlying allocation fails.
-/// - HY090: Invalid string or buffer length — the row has two sentences and only the first
+/// - HY090: Invalid string or buffer length. The row has two sentences and only the first
 ///   carries `(DM)`: a name length argument less than 0 but not equal to `SQL_NTS`. The
-///   second is the driver's — a name length exceeding "the maximum length value for the
-///   corresponding name" — and it cannot arise here, because core declares no maximum name
+///   second is the driver's, a name length exceeding "the maximum length value for the
+///   corresponding name", and it cannot arise here, because core declares no maximum name
 ///   lengths. `SQL_MAX_CATALOG_NAME_LEN`, `SQL_MAX_SCHEMA_NAME_LEN`,
 ///   `SQL_MAX_TABLE_NAME_LEN` and `SQL_MAX_COLUMN_NAME_LEN` all answer `0`, which the
 ///   `SQLGetInfo` page defines as "no specified limit or the limit is unknown". A driver
@@ -266,25 +266,25 @@ fn table_enumeration(
 ///   `MAX_NTS_SCAN` (1 048 576) code units. Every one of them is resolved by the same helper
 ///   (`parse_filter_param`), so the limit applies to all of them alike and the diagnostic
 ///   names which one overran. It is a length the driver cannot determine, which is what
-///   `HY090` names; `utf16_to_string` used to hand back a cap-length prefix
-///   instead, so the call filtered on a truncated pattern and returned a result set that
-///   was wrong rather than absent. An **explicitly measured** length is not limited by this, at any
+///   `HY090` names. Handing back a cap-length prefix instead would filter on a truncated
+///   pattern and return a result set that was wrong rather than absent. An **explicitly
+///   measured** length is not limited by this, at any
 ///   size. See `tables_refuses_an_nts_filter_that_runs_to_the_scan_cap` and
 ///   `foreign_keys_names_the_argument_whose_nts_scan_overran`.
 /// - HY117: Connection suspended (DM) (driver-manager-handled; not returned here).
 /// - HYC00: Optional feature not implemented; propagated from backend if catalogs/schemas are
 ///   unsupported.
-/// - HYT00: Timeout expired — **returned by this driver**, not merely propagated. A backend
+/// - HYT00: Timeout expired. **Returned by this driver**, not merely propagated. A backend
 ///   that answered `QueryTimeout::CoreCancels` gets core's own timer (`crate::query_timer`),
 ///   armed over this call, and `QueryTimer::reclassify` relabels the failing call `HYT00`
 ///   when the deadline fired. A backend enforcing its own timeout has its `HYT00` propagated
 ///   unchanged.
-/// - HYT01: Connection timeout expired — propagated from the backend unchanged.
+/// - HYT01: Connection timeout expired. Propagated from the backend unchanged.
 /// - IM001: Driver does not support this function (DM) (driver-manager-handled; not returned here).
 /// - IM017: Polling disabled; not returned here (the asynchronous notification model is not
-///   supported — not DM-annotated in the spec).
+///   supported, and not DM-annotated in the spec).
 /// - IM018: SQLCompleteAsync not called; not returned here (the asynchronous notification model
-///   is not supported — not DM-annotated in the spec).
+///   is not supported, and not DM-annotated in the spec).
 ///
 /// # Safety
 ///
@@ -492,15 +492,15 @@ pub unsafe fn sql_tables_w<B: Backend>(
 /// - 01000: General warning (driver-specific informational message); not returned here.
 /// - 08S01: Communication link failure; propagated from the backend when its
 ///   client library reports the link to the data source failed.
-/// - 24000: Invalid cursor state — returned if a cursor is already open on this statement.
-/// - 40001: Serialization failure — propagated from the backend unchanged, as `08S01` is.
+/// - 24000: Invalid cursor state. Returned if a cursor is already open on this statement.
+/// - 40001: Serialization failure. Propagated from the backend unchanged, as `08S01` is.
 ///   Core degrades nothing to `HY000`; that state appears only when the backend's own error
 ///   mapping produced no more specific one.
-/// - 40003: Statement completion unknown — propagated from the backend unchanged.
+/// - 40003: Statement completion unknown. Propagated from the backend unchanged.
 /// - HY000: General error; returned for any unexpected backend error.
 /// - HY001: Memory allocation error; returned if allocation fails.
-/// - HY008: Operation canceled. The row's first clause — asynchronous processing, then the
-///   function called again — is not applicable: core implements no asynchronous execution and
+/// - HY008: Operation canceled. The row's first clause (asynchronous processing, then the
+///   function called again) is not applicable: core implements no asynchronous execution and
 ///   never returns `SQL_STILL_EXECUTING`. The second clause, `SQLCancel` called on the
 ///   statement "from a different thread in a multithread application", **is returned by this
 ///   driver**: the row carries no `(DM)` marker, and when a backend call fails with
@@ -511,18 +511,18 @@ pub unsafe fn sql_tables_w<B: Backend>(
 ///   `SQL_TRUE`, `CatalogName` was a null pointer, and `SQL_CATALOG_NAME` reports that
 ///   catalog names are supported. The `SchemaName`/`TableName` clause beside it *is*
 ///   `(DM)`-marked and is deliberately not checked here.
-/// - HY010: Function sequence error — the spec annotates this `(DM)`, on **every** clause:
+/// - HY010: Function sequence error. The spec annotates this `(DM)`, on **every** clause:
 ///   the row enumerates asynchronous execution, `SQL_PARAM_DATA_AVAILABLE` and
 ///   `SQL_NEED_DATA`, none of which core implements, so none of its clauses is returned
-///   here. Core does return `HY010` for a condition the row does not describe — the
-///   statement's connection is not open — which is core's own reading rather than a clause
+///   here. Core does return `HY010` for a condition the row does not describe, namely that
+///   the statement's connection is not open. That is core's own reading rather than a clause
 ///   of the table, and the state the ODBC state table gives a catalog function called
 ///   before a connection exists.
 /// - HY013: Memory management error; returned if underlying allocation fails.
-/// - HY090: Invalid string or buffer length — the row has two clauses and only the
+/// - HY090: Invalid string or buffer length. The row has two clauses and only the
 ///   first carries `(DM)`: a name length argument less than 0 but not equal to
-///   `SQL_NTS`. The second is the driver's — a name length exceeding "the maximum
-///   length value for the corresponding catalog or name" — and it cannot arise here, because
+///   `SQL_NTS`. The second is the driver's, a name length exceeding "the maximum
+///   length value for the corresponding catalog or name", and it cannot arise here, because
 ///   core declares no maximum name lengths: `SQL_MAX_CATALOG_NAME_LEN`,
 ///   `SQL_MAX_SCHEMA_NAME_LEN`, `SQL_MAX_TABLE_NAME_LEN` and
 ///   `SQL_MAX_COLUMN_NAME_LEN` all answer `0`, which the `SQLGetInfo` page defines as
@@ -534,25 +534,25 @@ pub unsafe fn sql_tables_w<B: Backend>(
 ///   `MAX_NTS_SCAN` (1 048 576) code units. Every one of them is resolved by the same helper
 ///   (`parse_filter_param`), so the limit applies to all of them alike and the diagnostic
 ///   names which one overran. It is a length the driver cannot determine, which is what
-///   `HY090` names; `utf16_to_string` used to hand back a cap-length prefix
-///   instead, so the call filtered on a truncated pattern and returned a result set that
-///   was wrong rather than absent. An **explicitly measured** length is not limited by this, at any
+///   `HY090` names. Handing back a cap-length prefix instead would filter on a truncated
+///   pattern and return a result set that was wrong rather than absent. An **explicitly
+///   measured** length is not limited by this, at any
 ///   size. See `tables_refuses_an_nts_filter_that_runs_to_the_scan_cap` and
 ///   `foreign_keys_names_the_argument_whose_nts_scan_overran`.
 /// - HY117: Connection suspended (DM) (driver-manager-handled; not returned here).
 /// - HYC00: Optional feature not implemented; propagated from backend if catalogs/schemas are
 ///   unsupported.
-/// - HYT00: Timeout expired — **returned by this driver**, not merely propagated. A backend
+/// - HYT00: Timeout expired. **Returned by this driver**, not merely propagated. A backend
 ///   that answered `QueryTimeout::CoreCancels` gets core's own timer (`crate::query_timer`),
 ///   armed over this call, and `QueryTimer::reclassify` relabels the failing call `HYT00`
 ///   when the deadline fired. A backend enforcing its own timeout has its `HYT00` propagated
 ///   unchanged.
-/// - HYT01: Connection timeout expired — propagated from the backend unchanged.
+/// - HYT01: Connection timeout expired. Propagated from the backend unchanged.
 /// - IM001: Driver does not support this function (DM) (driver-manager-handled; not returned here).
 /// - IM017: Polling disabled; not returned here (the asynchronous notification model is not
-///   supported — not DM-annotated in the spec).
+///   supported, and not DM-annotated in the spec).
 /// - IM018: SQLCompleteAsync not called; not returned here (the asynchronous notification model
-///   is not supported — not DM-annotated in the spec).
+///   is not supported, and not DM-annotated in the spec).
 ///
 /// # Safety
 ///
@@ -633,7 +633,7 @@ pub unsafe fn sql_columns_w<B: Backend>(
                 "SQLColumnsW",
             )?;
 
-            // All four are identifiers under METADATA_ID — `ColumnName`
+            // All four are identifiers under METADATA_ID, `ColumnName`
             // included, which no other catalog function has.
             let catalog = normalise_catalog_arg::<B>(connection, catalog, metadata_id);
             let schema = normalise_catalog_arg::<B>(connection, schema, metadata_id);
@@ -651,7 +651,7 @@ pub unsafe fn sql_columns_w<B: Backend>(
             let mut values: Vec<Vec<ColumnValue>> =
                 rows.into_iter().map(ColumnRow::into_values).collect();
             // Spec: ordered by TABLE_CAT, TABLE_SCHEM, TABLE_NAME,
-            // ORDINAL_POSITION — zero-based column indices 0, 1, 2, 16.
+            // ORDINAL_POSITION, as zero-based column indices 0, 1, 2, 16.
             crate::catalog_sort::sort_rows(
                 &mut values,
                 &[0, 1, 2, 16],
@@ -686,20 +686,20 @@ pub unsafe fn sql_columns_w<B: Backend>(
 /// - 01000: General warning (driver-specific informational message); not returned here.
 /// - 08S01: Communication link failure; propagated from the backend when its
 ///   client library reports the link to the data source failed.
-/// - 24000: Invalid cursor state — **returned by this driver** if a cursor is already open on
+/// - 24000: Invalid cursor state. **Returned by this driver** if a cursor is already open on
 ///   this statement. Alone among the twelve catalog functions, this row is `(DM)`-marked, and
 ///   only on its first sentence: a cursor open where `SQLFetch` or `SQLFetchScroll` had been
-///   called. The second carries no marker and is the driver's — a cursor open but where
-///   `SQLFetch` or `SQLFetchScroll` had not been called — and it is the one core enforces.
+///   called. The second carries no marker and is the driver's, a cursor open but where
+///   `SQLFetch` or `SQLFetchScroll` had not been called, and it is the one core enforces.
 ///   Note: the spec marks this (DM) for some subcases; the driver also returns it directly.
-/// - 40001: Serialization failure — propagated from the backend unchanged, as `08S01` is.
+/// - 40001: Serialization failure. Propagated from the backend unchanged, as `08S01` is.
 ///   Core degrades nothing to `HY000`; that state appears only when the backend's own error
 ///   mapping produced no more specific one.
-/// - 40003: Statement completion unknown — propagated from the backend unchanged.
+/// - 40003: Statement completion unknown. Propagated from the backend unchanged.
 /// - HY000: General error; returned for any unexpected backend error.
 /// - HY001: Memory allocation error; returned if allocation fails.
-/// - HY008: Operation canceled. The row's first clause — asynchronous processing, then the
-///   function called again — is not applicable: core implements no asynchronous execution and
+/// - HY008: Operation canceled. The row's first clause (asynchronous processing, then the
+///   function called again) is not applicable: core implements no asynchronous execution and
 ///   never returns `SQL_STILL_EXECUTING`. The second clause, `SQLCancel` called on the
 ///   statement "from a different thread in a multithread application", **is returned by this
 ///   driver**: the row carries no `(DM)` marker, and when a backend call fails with
@@ -714,21 +714,21 @@ pub unsafe fn sql_columns_w<B: Backend>(
 ///   The spec's other `HY009` sentence here, "(DM) The `TableName` argument was a null
 ///   pointer", **is** `(DM)`-marked, so the Driver Manager returns it and this driver
 ///   deliberately does **not**. `SQLStatistics` and `SQLSpecialColumns` carry that same
-///   sentence *without* the marker and do check it — the difference between the three
+///   sentence *without* the marker and do check it. The difference between the three
 ///   functions is intentional, not an omission here. See
 ///   `primary_keys_does_not_check_null_table_name`.
-/// - HY010: Function sequence error — the spec annotates this `(DM)`, on **every** clause:
+/// - HY010: Function sequence error. The spec annotates this `(DM)`, on **every** clause:
 ///   the row enumerates asynchronous execution, `SQL_PARAM_DATA_AVAILABLE` and
 ///   `SQL_NEED_DATA`, none of which core implements, so none of its clauses is returned
-///   here. Core does return `HY010` for a condition the row does not describe — the
-///   statement's connection is not open — which is core's own reading rather than a clause
+///   here. Core does return `HY010` for a condition the row does not describe, namely that
+///   the statement's connection is not open. That is core's own reading rather than a clause
 ///   of the table, and the state the ODBC state table gives a catalog function called
 ///   before a connection exists.
 /// - HY013: Memory management error; returned if underlying allocation fails.
-/// - HY090: Invalid string or buffer length — the row has two sentences and only the first
+/// - HY090: Invalid string or buffer length. The row has two sentences and only the first
 ///   carries `(DM)`: a name length argument less than 0 but not equal to `SQL_NTS`. The
-///   second is the driver's — a name length exceeding "the maximum length value for the
-///   corresponding name" — and it cannot arise here, because core declares no maximum name
+///   second is the driver's, a name length exceeding "the maximum length value for the
+///   corresponding name", and it cannot arise here, because core declares no maximum name
 ///   lengths. `SQL_MAX_CATALOG_NAME_LEN`, `SQL_MAX_SCHEMA_NAME_LEN`,
 ///   `SQL_MAX_TABLE_NAME_LEN` and `SQL_MAX_COLUMN_NAME_LEN` all answer `0`, which the
 ///   `SQLGetInfo` page defines as "no specified limit or the limit is unknown". A driver
@@ -739,25 +739,25 @@ pub unsafe fn sql_columns_w<B: Backend>(
 ///   `MAX_NTS_SCAN` (1 048 576) code units. Every one of them is resolved by the same helper
 ///   (`parse_filter_param`), so the limit applies to all of them alike and the diagnostic
 ///   names which one overran. It is a length the driver cannot determine, which is what
-///   `HY090` names; `utf16_to_string` used to hand back a cap-length prefix
-///   instead, so the call filtered on a truncated pattern and returned a result set that
-///   was wrong rather than absent. An **explicitly measured** length is not limited by this, at any
+///   `HY090` names. Handing back a cap-length prefix instead would filter on a truncated
+///   pattern and return a result set that was wrong rather than absent. An **explicitly
+///   measured** length is not limited by this, at any
 ///   size. See `tables_refuses_an_nts_filter_that_runs_to_the_scan_cap` and
 ///   `foreign_keys_names_the_argument_whose_nts_scan_overran`.
 /// - HY117: Connection suspended (DM) (driver-manager-handled; not returned here).
 /// - HYC00: Optional feature not implemented; propagated from backend if catalogs/schemas are
 ///   unsupported.
-/// - HYT00: Timeout expired — **returned by this driver**, not merely propagated. A backend
+/// - HYT00: Timeout expired. **Returned by this driver**, not merely propagated. A backend
 ///   that answered `QueryTimeout::CoreCancels` gets core's own timer (`crate::query_timer`),
 ///   armed over this call, and `QueryTimer::reclassify` relabels the failing call `HYT00`
 ///   when the deadline fired. A backend enforcing its own timeout has its `HYT00` propagated
 ///   unchanged.
-/// - HYT01: Connection timeout expired — propagated from the backend unchanged.
+/// - HYT01: Connection timeout expired. Propagated from the backend unchanged.
 /// - IM001: Driver does not support this function (DM) (driver-manager-handled; not returned here).
 /// - IM017: Polling disabled; not returned here (the asynchronous notification model is not
-///   supported — not DM-annotated in the spec).
+///   supported, and not DM-annotated in the spec).
 /// - IM018: SQLCompleteAsync not called; not returned here (the asynchronous notification model
-///   is not supported — not DM-annotated in the spec).
+///   is not supported, and not DM-annotated in the spec).
 ///
 /// # Safety
 ///
@@ -823,8 +823,8 @@ pub unsafe fn sql_primary_keys_w<B: Backend>(
 
             // Spec HY009 (not (DM)): METADATA_ID plus a null CatalogName on a
             // data source that has catalogs. The neighbouring "TableName was a
-            // null pointer" clause *is* (DM)-marked here — see the doc comment
-            // — so there is deliberately no check for it.
+            // null pointer" clause *is* (DM)-marked here (see the doc comment),
+            // so there is no check for it.
             let metadata_id = metadata_id_enabled(stmt);
             check_metadata_id_null_catalog::<B>(
                 connection,
@@ -846,8 +846,8 @@ pub unsafe fn sql_primary_keys_w<B: Backend>(
 
             let mut values: Vec<Vec<ColumnValue>> =
                 rows.into_iter().map(PrimaryKeyRow::into_values).collect();
-            // Spec: ordered by TABLE_CAT, TABLE_SCHEM, TABLE_NAME, KEY_SEQ
-            // — zero-based column indices 0, 1, 2, 4.
+            // Spec: ordered by TABLE_CAT, TABLE_SCHEM, TABLE_NAME, KEY_SEQ,
+            // as zero-based column indices 0, 1, 2, 4.
             crate::catalog_sort::sort_rows(
                 &mut values,
                 &[0, 1, 2, 4],
@@ -893,15 +893,15 @@ pub unsafe fn sql_primary_keys_w<B: Backend>(
 /// - 01000: General warning (driver-specific informational message); not returned here.
 /// - 08S01: Communication link failure; propagated from the backend when its
 ///   client library reports the link to the data source failed.
-/// - 24000: Invalid cursor state — returned if a cursor is already open on this statement.
-/// - 40001: Serialization failure — propagated from the backend unchanged, as `08S01` is.
+/// - 24000: Invalid cursor state. Returned if a cursor is already open on this statement.
+/// - 40001: Serialization failure. Propagated from the backend unchanged, as `08S01` is.
 ///   Core degrades nothing to `HY000`; that state appears only when the backend's own error
 ///   mapping produced no more specific one.
-/// - 40003: Statement completion unknown — propagated from the backend unchanged.
+/// - 40003: Statement completion unknown. Propagated from the backend unchanged.
 /// - HY000: General error; returned for any unexpected backend error.
 /// - HY001: Memory allocation error; returned if allocation fails.
-/// - HY008: Operation canceled. The row's first clause — asynchronous processing, then the
-///   function called again — is not applicable: core implements no asynchronous execution and
+/// - HY008: Operation canceled. The row's first clause (asynchronous processing, then the
+///   function called again) is not applicable: core implements no asynchronous execution and
 ///   never returns `SQL_STILL_EXECUTING`. The second clause, `SQLCancel` called on the
 ///   statement "from a different thread in a multithread application", **is returned by this
 ///   driver**: the row carries no `(DM)` marker, and when a backend call fails with
@@ -910,27 +910,27 @@ pub unsafe fn sql_primary_keys_w<B: Backend>(
 /// - HY009: Invalid use of null pointer. **Returned by this driver** for the one clause the
 ///   spec's diagnostics table states *without* a `(DM)` marker: `SQL_ATTR_METADATA_ID` was
 ///   `SQL_TRUE`, a catalog argument was a null pointer, and `SQL_CATALOG_NAME` reports that
-///   catalog names are supported — checked for `PKCatalogName` and `FKCatalogName` alike. The
+///   catalog names are supported, checked for `PKCatalogName` and `FKCatalogName` alike. The
 ///   `SchemaName`/`TableName` clause beside it *is* `(DM)`-marked and is deliberately not
 ///   checked here.
 ///
 ///   The spec's other `HY009` sentence here, "(DM) The `PKTableName` and `FKTableName`
 ///   arguments were both null pointers", **is** `(DM)`-marked, so the Driver Manager returns
-///   it and this driver deliberately does **not** — unlike `SQLStatistics` and
+///   it and this driver deliberately does **not**, unlike `SQLStatistics` and
 ///   `SQLSpecialColumns`, whose equivalent sentence is unmarked. See
 ///   `foreign_keys_does_not_check_null_table_names`.
-/// - HY010: Function sequence error — the spec annotates this `(DM)`, on **every** clause:
+/// - HY010: Function sequence error. The spec annotates this `(DM)`, on **every** clause:
 ///   the row enumerates asynchronous execution, `SQL_PARAM_DATA_AVAILABLE` and
 ///   `SQL_NEED_DATA`, none of which core implements, so none of its clauses is returned
-///   here. Core does return `HY010` for a condition the row does not describe — the
-///   statement's connection is not open — which is core's own reading rather than a clause
+///   here. Core does return `HY010` for a condition the row does not describe, namely that
+///   the statement's connection is not open. That is core's own reading rather than a clause
 ///   of the table, and the state the ODBC state table gives a catalog function called
 ///   before a connection exists.
 /// - HY013: Memory management error; returned if underlying allocation fails.
-/// - HY090: Invalid string or buffer length — the row has two clauses and only the
+/// - HY090: Invalid string or buffer length. The row has two clauses and only the
 ///   first carries `(DM)`: a name length argument less than 0 but not equal to
-///   `SQL_NTS`. The second is the driver's — a name length exceeding "the maximum
-///   length value for the corresponding name" — and it cannot arise here, because
+///   `SQL_NTS`. The second is the driver's, a name length exceeding "the maximum
+///   length value for the corresponding name", and it cannot arise here, because
 ///   core declares no maximum name lengths: `SQL_MAX_CATALOG_NAME_LEN`,
 ///   `SQL_MAX_SCHEMA_NAME_LEN`, `SQL_MAX_TABLE_NAME_LEN` and
 ///   `SQL_MAX_COLUMN_NAME_LEN` all answer `0`, which the `SQLGetInfo` page defines as
@@ -942,25 +942,25 @@ pub unsafe fn sql_primary_keys_w<B: Backend>(
 ///   `MAX_NTS_SCAN` (1 048 576) code units. Every one of them is resolved by the same helper
 ///   (`parse_filter_param`), so the limit applies to all of them alike and the diagnostic
 ///   names which one overran. It is a length the driver cannot determine, which is what
-///   `HY090` names; `utf16_to_string` used to hand back a cap-length prefix
-///   instead, so the call filtered on a truncated pattern and returned a result set that
-///   was wrong rather than absent. An **explicitly measured** length is not limited by this, at any
+///   `HY090` names. Handing back a cap-length prefix instead would filter on a truncated
+///   pattern and return a result set that was wrong rather than absent. An **explicitly
+///   measured** length is not limited by this, at any
 ///   size. See `tables_refuses_an_nts_filter_that_runs_to_the_scan_cap` and
 ///   `foreign_keys_names_the_argument_whose_nts_scan_overran`.
 /// - HY117: Connection suspended (DM) (driver-manager-handled; not returned here).
 /// - HYC00: Optional feature not implemented; propagated from backend if catalogs/schemas are
 ///   unsupported.
-/// - HYT00: Timeout expired — **returned by this driver**, not merely propagated. A backend
+/// - HYT00: Timeout expired. **Returned by this driver**, not merely propagated. A backend
 ///   that answered `QueryTimeout::CoreCancels` gets core's own timer (`crate::query_timer`),
 ///   armed over this call, and `QueryTimer::reclassify` relabels the failing call `HYT00`
 ///   when the deadline fired. A backend enforcing its own timeout has its `HYT00` propagated
 ///   unchanged.
-/// - HYT01: Connection timeout expired — propagated from the backend unchanged.
+/// - HYT01: Connection timeout expired. Propagated from the backend unchanged.
 /// - IM001: Driver does not support this function (DM) (driver-manager-handled; not returned here).
 /// - IM017: Polling disabled; not returned here (the asynchronous notification model is not
-///   supported — not DM-annotated in the spec).
+///   supported, and not DM-annotated in the spec).
 /// - IM018: SQLCompleteAsync not called; not returned here (the asynchronous notification model
-///   is not supported — not DM-annotated in the spec).
+///   is not supported, and not DM-annotated in the spec).
 ///
 /// # Safety
 ///
@@ -1039,10 +1039,10 @@ pub unsafe fn sql_foreign_keys_w<B: Backend>(
                 crate::query_timer::QueryTimer::arm::<B>(stmt.core_query_timeout, &cancel_token);
 
             // Spec HY009 (not (DM)): METADATA_ID plus a null catalog argument
-            // on a data source that has catalogs — and this function has two
+            // on a data source that has catalogs. This function has two
             // catalog arguments, so both are checked. The "PKTableName and
-            // FKTableName were both null pointers" clause *is* (DM)-marked —
-            // see the doc comment — so there is deliberately no check for it.
+            // FKTableName were both null pointers" clause *is* (DM)-marked
+            // (see the doc comment), so there is no check for it.
             let metadata_id = metadata_id_enabled(stmt);
             check_metadata_id_null_catalog::<B>(
                 connection,
@@ -1121,7 +1121,7 @@ pub unsafe fn sql_foreign_keys_w<B: Backend>(
 /// - `schema_name` / `name_length2`: Schema name (NULL = no filter; no search patterns).
 /// - `table_name` / `name_length3`: Table name (NULL = no filter; no search patterns).
 /// - `unique`: `SQL_INDEX_UNIQUE` or `SQL_INDEX_ALL`.
-/// - `_reserved`: `SQL_ENSURE` or `SQL_QUICK` (ignored — this driver always performs the
+/// - `_reserved`: `SQL_ENSURE` or `SQL_QUICK` (ignored, because this driver always performs the
 ///   equivalent of `SQL_QUICK` behavior).
 ///
 /// # Spec compliance
@@ -1129,38 +1129,38 @@ pub unsafe fn sql_foreign_keys_w<B: Backend>(
 /// - 01000: General warning (driver-specific informational message); not returned here.
 /// - 08S01: Communication link failure; propagated from the backend when its
 ///   client library reports the link to the data source failed.
-/// - 24000: Invalid cursor state — returned if a cursor is already open on this statement.
-/// - 40001: Serialization failure — propagated from the backend unchanged, as `08S01` is.
+/// - 24000: Invalid cursor state. Returned if a cursor is already open on this statement.
+/// - 40001: Serialization failure. Propagated from the backend unchanged, as `08S01` is.
 ///   Core degrades nothing to `HY000`; that state appears only when the backend's own error
 ///   mapping produced no more specific one.
-/// - 40003: Statement completion unknown — propagated from the backend unchanged.
+/// - 40003: Statement completion unknown. Propagated from the backend unchanged.
 /// - HY000: General error; returned for any unexpected backend error.
 /// - HY001: Memory allocation error; returned if allocation fails.
-/// - HY008: Operation canceled. The row's first clause — asynchronous processing, then the
-///   function called again — is not applicable: core implements no asynchronous execution and
+/// - HY008: Operation canceled. The row's first clause (asynchronous processing, then the
+///   function called again) is not applicable: core implements no asynchronous execution and
 ///   never returns `SQL_STILL_EXECUTING`. The second clause, `SQLCancel` called on the
 ///   statement "from a different thread in a multithread application", **is returned by this
 ///   driver**: the row carries no `(DM)` marker, and when a backend call fails with
 ///   `Backend::is_cancelled` reporting its token signalled, core reports `HY008` in place of
 ///   the backend's own SQLSTATE.
 /// - HY009: Invalid use of null pointer. **Both** of the spec's clauses are unmarked here, so
-///   both are returned by this driver: (1) the `TableName` argument was a null pointer —
-///   note that `SQLPrimaryKeys` and `SQLForeignKeys` carry this same sentence *with* a `(DM)`
+///   both are returned by this driver: (1) the `TableName` argument was a null pointer,
+///   noting that `SQLPrimaryKeys` and `SQLForeignKeys` carry this same sentence *with* a `(DM)`
 ///   marker and therefore must not check it; and (2) `SQL_ATTR_METADATA_ID` was `SQL_TRUE`,
 ///   `CatalogName` was a null pointer, and `SQL_CATALOG_NAME` reports that catalog names are
 ///   supported. The `SchemaName` half of clause (2) *is* `(DM)`-marked and is not checked.
-/// - HY010: Function sequence error — the spec annotates this `(DM)`, on **every** clause:
+/// - HY010: Function sequence error. The spec annotates this `(DM)`, on **every** clause:
 ///   the row enumerates asynchronous execution, `SQL_PARAM_DATA_AVAILABLE` and
 ///   `SQL_NEED_DATA`, none of which core implements, so none of its clauses is returned
-///   here. Core does return `HY010` for a condition the row does not describe — the
-///   statement's connection is not open — which is core's own reading rather than a clause
+///   here. Core does return `HY010` for a condition the row does not describe, namely that
+///   the statement's connection is not open. That is core's own reading rather than a clause
 ///   of the table, and the state the ODBC state table gives a catalog function called
 ///   before a connection exists.
 /// - HY013: Memory management error; returned if underlying allocation fails.
-/// - HY090: Invalid string or buffer length — the row has two sentences and only the first
+/// - HY090: Invalid string or buffer length. The row has two sentences and only the first
 ///   carries `(DM)`: a name length argument less than 0 but not equal to `SQL_NTS`. The
-///   second is the driver's — a name length exceeding "the maximum length value for the
-///   corresponding name" — and it cannot arise here, because core declares no maximum name
+///   second is the driver's, a name length exceeding "the maximum length value for the
+///   corresponding name", and it cannot arise here, because core declares no maximum name
 ///   lengths. `SQL_MAX_CATALOG_NAME_LEN`, `SQL_MAX_SCHEMA_NAME_LEN`,
 ///   `SQL_MAX_TABLE_NAME_LEN` and `SQL_MAX_COLUMN_NAME_LEN` all answer `0`, which the
 ///   `SQLGetInfo` page defines as "no specified limit or the limit is unknown". A driver
@@ -1171,9 +1171,9 @@ pub unsafe fn sql_foreign_keys_w<B: Backend>(
 ///   `MAX_NTS_SCAN` (1 048 576) code units. Every one of them is resolved by the same helper
 ///   (`parse_filter_param`), so the limit applies to all of them alike and the diagnostic
 ///   names which one overran. It is a length the driver cannot determine, which is what
-///   `HY090` names; `utf16_to_string` used to hand back a cap-length prefix
-///   instead, so the call filtered on a truncated pattern and returned a result set that
-///   was wrong rather than absent. An **explicitly measured** length is not limited by this, at any
+///   `HY090` names. Handing back a cap-length prefix instead would filter on a truncated
+///   pattern and return a result set that was wrong rather than absent. An **explicitly
+///   measured** length is not limited by this, at any
 ///   size. See `tables_refuses_an_nts_filter_that_runs_to_the_scan_cap` and
 ///   `foreign_keys_names_the_argument_whose_nts_scan_overran`.
 /// - HY100: Uniqueness option type out of range (DM) (driver-manager-handled; not returned here).
@@ -1182,17 +1182,17 @@ pub unsafe fn sql_foreign_keys_w<B: Backend>(
 /// - HYC00: Optional feature not implemented; propagated from backend if index statistics are
 ///   unsupported for some reason other than the `NotImplemented` fallback (which instead yields
 ///   an empty result set).
-/// - HYT00: Timeout expired — **returned by this driver**, not merely propagated. A backend
+/// - HYT00: Timeout expired. **Returned by this driver**, not merely propagated. A backend
 ///   that answered `QueryTimeout::CoreCancels` gets core's own timer (`crate::query_timer`),
 ///   armed over this call, and `QueryTimer::reclassify` relabels the failing call `HYT00`
 ///   when the deadline fired. A backend enforcing its own timeout has its `HYT00` propagated
 ///   unchanged.
-/// - HYT01: Connection timeout expired — propagated from the backend unchanged.
+/// - HYT01: Connection timeout expired. Propagated from the backend unchanged.
 /// - IM001: Driver does not support this function (DM) (driver-manager-handled; not returned here).
 /// - IM017: Polling disabled; not returned here (the asynchronous notification model is not
-///   supported — not DM-annotated in the spec).
+///   supported, and not DM-annotated in the spec).
 /// - IM018: SQLCompleteAsync not called; not returned here (the asynchronous notification model
-///   is not supported — not DM-annotated in the spec).
+///   is not supported, and not DM-annotated in the spec).
 ///
 /// # Safety
 ///
@@ -1245,7 +1245,7 @@ pub unsafe fn sql_statistics_w<B: Backend>(
 
             // Spec HY009, both clauses driver-side here: `SQLStatistics` is one
             // of only three catalog functions whose "TableName argument was a
-            // null pointer" sentence carries no (DM) marker — the others being
+            // null pointer" sentence carries no (DM) marker, the others being
             // `SQLSpecialColumns` and `SQLColumnPrivileges`.
             check_null_table_name(table_name, "SQLStatisticsW")?;
             let metadata_id = metadata_id_enabled(stmt);
@@ -1296,7 +1296,7 @@ pub unsafe fn sql_statistics_w<B: Backend>(
                     let mut values: Vec<Vec<ColumnValue>> =
                         rows.into_iter().map(StatisticsRow::into_values).collect();
                     // Spec: ordered by NON_UNIQUE, TYPE, INDEX_QUALIFIER,
-                    // INDEX_NAME, ORDINAL_POSITION — zero-based column
+                    // INDEX_NAME, ORDINAL_POSITION, as zero-based column
                     // indices 3, 6, 4, 5, 7.
                     crate::catalog_sort::sort_rows(
                         &mut values,
@@ -1317,7 +1317,7 @@ pub unsafe fn sql_statistics_w<B: Backend>(
                     Ok(SqlReturn::SUCCESS)
                 }
                 // Only this arm is reclassified. The `NotImplemented` arm above is
-                // not a failure at all — it is how a backend says it exposes no such
+                // not a failure at all: it is how a backend says it exposes no such
                 // metadata, and the spec's answer to that is an empty result set,
                 // not `HY008`.
                 Err(e) => timer.check::<B, _, _>(Err(e), cancel),
@@ -1354,38 +1354,38 @@ pub unsafe fn sql_statistics_w<B: Backend>(
 /// - 01000: General warning (driver-specific informational message); not returned here.
 /// - 08S01: Communication link failure; propagated from the backend when its
 ///   client library reports the link to the data source failed.
-/// - 24000: Invalid cursor state — returned if a cursor is already open on this statement.
-/// - 40001: Serialization failure — propagated from the backend unchanged, as `08S01` is.
+/// - 24000: Invalid cursor state. Returned if a cursor is already open on this statement.
+/// - 40001: Serialization failure. Propagated from the backend unchanged, as `08S01` is.
 ///   Core degrades nothing to `HY000`; that state appears only when the backend's own error
 ///   mapping produced no more specific one.
-/// - 40003: Statement completion unknown — propagated from the backend unchanged.
+/// - 40003: Statement completion unknown. Propagated from the backend unchanged.
 /// - HY000: General error; returned for any unexpected backend error.
 /// - HY001: Memory allocation error; returned if allocation fails.
-/// - HY008: Operation canceled. The row's first clause — asynchronous processing, then the
-///   function called again — is not applicable: core implements no asynchronous execution and
+/// - HY008: Operation canceled. The row's first clause (asynchronous processing, then the
+///   function called again) is not applicable: core implements no asynchronous execution and
 ///   never returns `SQL_STILL_EXECUTING`. The second clause, `SQLCancel` called on the
 ///   statement "from a different thread in a multithread application", **is returned by this
 ///   driver**: the row carries no `(DM)` marker, and when a backend call fails with
 ///   `Backend::is_cancelled` reporting its token signalled, core reports `HY008` in place of
 ///   the backend's own SQLSTATE.
 /// - HY009: Invalid use of null pointer. **Both** of the spec's clauses are unmarked here, so
-///   both are returned by this driver: (1) the `TableName` argument was a null pointer —
-///   note that `SQLPrimaryKeys` and `SQLForeignKeys` carry this same sentence *with* a `(DM)`
+///   both are returned by this driver: (1) the `TableName` argument was a null pointer,
+///   noting that `SQLPrimaryKeys` and `SQLForeignKeys` carry this same sentence *with* a `(DM)`
 ///   marker and therefore must not check it; and (2) `SQL_ATTR_METADATA_ID` was `SQL_TRUE`,
 ///   `CatalogName` was a null pointer, and `SQL_CATALOG_NAME` reports that catalog names are
 ///   supported. The `SchemaName` half of clause (2) *is* `(DM)`-marked and is not checked.
-/// - HY010: Function sequence error — the spec annotates this `(DM)`, on **every** clause:
+/// - HY010: Function sequence error. The spec annotates this `(DM)`, on **every** clause:
 ///   the row enumerates asynchronous execution, `SQL_PARAM_DATA_AVAILABLE` and
 ///   `SQL_NEED_DATA`, none of which core implements, so none of its clauses is returned
-///   here. Core does return `HY010` for a condition the row does not describe — the
-///   statement's connection is not open — which is core's own reading rather than a clause
+///   here. Core does return `HY010` for a condition the row does not describe, namely that
+///   the statement's connection is not open. That is core's own reading rather than a clause
 ///   of the table, and the state the ODBC state table gives a catalog function called
 ///   before a connection exists.
 /// - HY013: Memory management error; returned if underlying allocation fails.
-/// - HY090: Invalid string or buffer length — the row has two sentences and only the first
+/// - HY090: Invalid string or buffer length. The row has two sentences and only the first
 ///   carries `(DM)`: a name length argument less than 0 but not equal to `SQL_NTS`. The
-///   second is the driver's — a name length exceeding "the maximum length value for the
-///   corresponding name" — and it cannot arise here, because core declares no maximum name
+///   second is the driver's, a name length exceeding "the maximum length value for the
+///   corresponding name", and it cannot arise here, because core declares no maximum name
 ///   lengths. `SQL_MAX_CATALOG_NAME_LEN`, `SQL_MAX_SCHEMA_NAME_LEN`,
 ///   `SQL_MAX_TABLE_NAME_LEN` and `SQL_MAX_COLUMN_NAME_LEN` all answer `0`, which the
 ///   `SQLGetInfo` page defines as "no specified limit or the limit is unknown". A driver
@@ -1396,9 +1396,9 @@ pub unsafe fn sql_statistics_w<B: Backend>(
 ///   `MAX_NTS_SCAN` (1 048 576) code units. Every one of them is resolved by the same helper
 ///   (`parse_filter_param`), so the limit applies to all of them alike and the diagnostic
 ///   names which one overran. It is a length the driver cannot determine, which is what
-///   `HY090` names; `utf16_to_string` used to hand back a cap-length prefix
-///   instead, so the call filtered on a truncated pattern and returned a result set that
-///   was wrong rather than absent. An **explicitly measured** length is not limited by this, at any
+///   `HY090` names. Handing back a cap-length prefix instead would filter on a truncated
+///   pattern and return a result set that was wrong rather than absent. An **explicitly
+///   measured** length is not limited by this, at any
 ///   size. See `tables_refuses_an_nts_filter_that_runs_to_the_scan_cap` and
 ///   `foreign_keys_names_the_argument_whose_nts_scan_overran`.
 /// - HY097: Column type out of range (DM) (driver-manager-handled; not returned here). Should
@@ -1413,17 +1413,17 @@ pub unsafe fn sql_statistics_w<B: Backend>(
 /// - HYC00: Optional feature not implemented; propagated from backend if this characteristic is
 ///   unsupported for some reason other than the `NotImplemented` fallback (which instead yields
 ///   an empty result set).
-/// - HYT00: Timeout expired — **returned by this driver**, not merely propagated. A backend
+/// - HYT00: Timeout expired. **Returned by this driver**, not merely propagated. A backend
 ///   that answered `QueryTimeout::CoreCancels` gets core's own timer (`crate::query_timer`),
 ///   armed over this call, and `QueryTimer::reclassify` relabels the failing call `HYT00`
 ///   when the deadline fired. A backend enforcing its own timeout has its `HYT00` propagated
 ///   unchanged.
-/// - HYT01: Connection timeout expired — propagated from the backend unchanged.
+/// - HYT01: Connection timeout expired. Propagated from the backend unchanged.
 /// - IM001: Driver does not support this function (DM) (driver-manager-handled; not returned here).
 /// - IM017: Polling disabled; not returned here (the asynchronous notification model is not
-///   supported — not DM-annotated in the spec).
+///   supported, and not DM-annotated in the spec).
 /// - IM018: SQLCompleteAsync not called; not returned here (the asynchronous notification model
-///   is not supported — not DM-annotated in the spec).
+///   is not supported, and not DM-annotated in the spec).
 ///
 /// # Safety
 ///
@@ -1477,7 +1477,7 @@ pub unsafe fn sql_special_columns_w<B: Backend>(
 
             // Spec HY009, both clauses driver-side here: `SQLSpecialColumns` is
             // one of three catalog functions whose "TableName argument was a
-            // null pointer" sentence carries no (DM) marker — the others being
+            // null pointer" sentence carries no (DM) marker, the others being
             // `SQLStatistics` and `SQLColumnPrivileges`. Checked before the
             // IdentifierType/Scope/Nullable arm below, so a null TableName is a
             // diagnosed error rather than being masked by the empty result set
@@ -1561,7 +1561,7 @@ pub unsafe fn sql_special_columns_w<B: Backend>(
                         .into_iter()
                         .map(SpecialColumnRow::into_values)
                         .collect();
-                    // Spec: ordered by SCOPE — zero-based column index 0.
+                    // Spec: ordered by SCOPE, as zero-based column index 0.
                     crate::catalog_sort::sort_rows(
                         &mut values,
                         &[0],
@@ -1575,7 +1575,7 @@ pub unsafe fn sql_special_columns_w<B: Backend>(
                 }
                 Err(OdbcError::NotImplemented { .. }) => empty(stmt),
                 // Only this arm is reclassified. The `NotImplemented` arm above is
-                // not a failure at all — it is how a backend says it exposes no such
+                // not a failure at all: it is how a backend says it exposes no such
                 // metadata, and the spec's answer to that is an empty result set,
                 // not `HY008`.
                 Err(e) => timer.check::<B, _, _>(Err(e), cancel),
@@ -1591,21 +1591,18 @@ pub unsafe fn sql_special_columns_w<B: Backend>(
 /// `column_number` against, saturating up rather than down when it does not
 /// fit.
 ///
-/// `StatementBackend::column_count` returns `i16` — the `SQLNumResultCols`
-/// ABI type — so a *positive* count always fits `u16`: its max, 32 767, is
+/// `StatementBackend::column_count` returns `i16`, the `SQLNumResultCols`
+/// ABI type, so a *positive* count always fits `u16`: its max, 32 767, is
 /// below `u16::MAX`. The only way `u16::try_from` fails here is a **negative**
-/// count from a backend, not an oversized one — the shape a naive
-/// `unwrap_or(0)` invites is unreachable for "too many columns" given this
-/// signature, but a misbehaving `StatementBackend` impl can still return a
-/// negative value nothing here validates against.
+/// count from a backend, never an oversized one. A misbehaving
+/// `StatementBackend` impl can still return a negative value nothing here
+/// validates against.
 ///
-/// `unwrap_or(0)` used to collapse that case to 0, and the `column_number > 0`
-/// comparison that follows then rejected every column as 07009, including
-/// column 1 — the reported count could not be trusted, and the driver
-/// answered by trusting it least. Saturating up to `u16::MAX` instead makes
-/// the comparison permissive whenever the count can't be represented,
-/// deferring to `describe_col`'s own answer rather than manufacturing a
-/// range-check failure the backend never reported.
+/// Collapsing that case to 0 would make the `column_number > 0` comparison
+/// that follows reject every column as 07009, including column 1. Saturating
+/// up to `u16::MAX` instead makes the comparison permissive whenever the count
+/// cannot be represented, deferring to `describe_col`'s own answer rather than
+/// manufacturing a range-check failure the backend never reported.
 ///
 /// Covered by
 /// `tests::describe_col_succeeds_when_backend_column_count_is_negative` and
@@ -1644,29 +1641,30 @@ fn column_count_upper_bound(column_count: i16) -> u16 {
 /// # Spec compliance
 ///
 /// - 01000: General warning (driver-specific informational message); not returned here.
-/// - 01004: String data right truncated — returned via `write_utf16` if `column_name` buffer is
+/// - 01004: String data right truncated. Returned via `write_utf16` if `column_name` buffer is
 ///   too small (returns `SQL_SUCCESS_WITH_INFO`).
-/// - 07005: Prepared statement not a cursor-specification — returned if no result set is open.
-/// - 07009: Invalid descriptor index — returned if `column_number` is 0 (bookmarks not
+/// - 07005: Prepared statement not a cursor-specification. Returned if no result set is open.
+/// - 07009: Invalid descriptor index. Returned if `column_number` is 0 (bookmarks not
 ///   supported) or greater than the number of columns. The spec puts `(DM)` on the bookmark
 ///   clause only, leaving the out-of-range clause to the driver, and core checks it itself
 ///   against `StatementBackend::column_count` **before** calling `describe_col`. That ordering
-///   is what lets every other SQLSTATE below be real: this state is now returned only for the
+///   is what lets every other SQLSTATE below be real: this state is returned only for the
 ///   case its message describes.
 /// - 08S01: Communication link failure; **returned by this driver**, propagated unchanged when
 ///   `StatementBackend::describe_col` fails and the driver's error mapping classified it that
-///   way. Until core owned the range check, every such failure was overwritten with `07009`.
+///   way. Core owning the range check is what keeps such a failure from being overwritten
+///   with `07009`.
 /// - HY000: General error; returned for any unexpected internal error, and propagated from
 ///   `describe_col` when the backend's mapping produced no more specific state.
 /// - HY001: Memory allocation error; returned if allocation fails.
-/// - HY008: Operation canceled. The asynchronous clause is inapplicable — core never returns
-///   `SQL_STILL_EXECUTING` — but the second clause, `SQLCancel` called on the statement "from a
+/// - HY008: Operation canceled. The asynchronous clause is inapplicable, since core never
+///   returns `SQL_STILL_EXECUTING`. The second clause, `SQLCancel` called on the statement "from a
 ///   different thread in a multithread application", **is returned by this driver**: the row
 ///   carries no `(DM)` marker, and a `describe_col` failure whose token reports signalled is
 ///   reclassified `HY008` in place of the backend's own SQLSTATE.
 /// - HY010: Function sequence error (DM) (driver-manager-handled; not returned here).
 /// - HY013: Memory management error; returned if underlying allocation fails.
-/// - HY090: Invalid string or buffer length — every clause of this row is `(DM)`
+/// - HY090: Invalid string or buffer length. Every clause of this row is `(DM)`
 ///   (driver-manager-handled; not returned here). Unlike several of its siblings' rows,
 ///   this one has only the name-length-below-zero sentence and no maximum-length
 ///   sentence, so nothing in it is the driver's.
@@ -1674,9 +1672,9 @@ fn column_count_upper_bound(column_count: i16) -> u16 {
 /// - HYT01: Connection timeout expired; not applicable.
 /// - IM001: Driver does not support this function (DM) (driver-manager-handled; not returned here).
 /// - IM017: Polling disabled; not returned here (the asynchronous notification model is not
-///   supported — not DM-annotated in the spec).
+///   supported, and not DM-annotated in the spec).
 /// - IM018: SQLCompleteAsync not called; not returned here (the asynchronous notification model
-///   is not supported — not DM-annotated in the spec).
+///   is not supported, and not DM-annotated in the spec).
 ///
 /// # Safety
 ///
@@ -1740,11 +1738,11 @@ pub unsafe fn sql_describe_col_w<B: Backend>(
             // bookmark clause, leaving "greater than the number of columns in
             // the result set" to the driver, and core already knows the count.
             //
-            // Doing it here is what lets the backend's error survive below. The
-            // previous shape was `describe_col(...).map_err(|_| 07009)`, which
-            // discarded the backend's error entirely and told the application
-            // its column number was wrong whatever had actually failed — a
-            // communication failure, a cancellation, anything.
+            // Doing it here is what lets the backend's error survive below.
+            // Folding the range check into `describe_col(...).map_err(|_| 07009)`
+            // would discard the backend's error and tell the application its
+            // column number was wrong whatever had actually failed, whether a
+            // communication failure or a cancellation.
             let column_count = statement_data.column_count();
             if column_number > column_count_upper_bound(column_count) {
                 return Err(OdbcError::general(
@@ -1756,7 +1754,7 @@ pub unsafe fn sql_describe_col_w<B: Backend>(
             }
 
             // Anything from here is a real failure, reported as the backend's
-            // central error mapping classified it — `08S01` for a link failure,
+            // central error mapping classified it: `08S01` for a link failure,
             // `HY000` otherwise, both of which this function's diagnostics table
             // lists. `HY008` wins over either when the token says the statement
             // was cancelled; `_opt` because this reads a cursor an earlier
@@ -1798,11 +1796,11 @@ pub unsafe fn sql_describe_col_w<B: Backend>(
 
             // Write nullable_ptr if pointer is non-null.
             if !nullable_ptr.is_null() {
-                // Written through as-is. While the descriptor carried a
-                // `bool`, `SQL_NULLABLE_UNKNOWN` could not be reported at all
-                // and a column whose nullability the backend could not
-                // determine was announced as `SQL_NO_NULLS` — telling the
-                // application it could skip a NULL check it actually needs.
+                // Written through as-is. A descriptor carrying a `bool` could
+                // not report `SQL_NULLABLE_UNKNOWN` at all, and would announce
+                // a column whose nullability the backend could not determine as
+                // `SQL_NO_NULLS`, telling the application it could skip a NULL
+                // check it actually needs.
                 std::ptr::write_unaligned(nullable_ptr, desc.nullable as i16);
             }
 
@@ -1839,65 +1837,65 @@ pub unsafe fn sql_describe_col_w<B: Backend>(
 ///   `character_attribute_ptr` is NULL, `string_length_ptr` still returns the available length
 ///   in bytes.
 /// - `numeric_attribute_ptr`: Output for numeric attributes. May be NULL. Applications should
-///   initialize to 0 before calling — some drivers only write the low 32 bits.
+///   initialize to 0 before calling, because some drivers only write the low 32 bits.
 ///
 /// # Spec compliance
 ///
 /// - 01000: General warning (driver-specific informational message); not returned here.
-/// - 01004: String data right truncated — returned via `write_utf16` if the character attribute
+/// - 01004: String data right truncated. Returned via `write_utf16` if the character attribute
 ///   buffer is too small (returns `SQL_SUCCESS_WITH_INFO`).
-/// - 07005: Prepared statement not a cursor-specification — returned if no result set is open
+/// - 07005: Prepared statement not a cursor-specification. Returned if no result set is open
 ///   and `field_identifier` is not `SQL_DESC_COUNT`.
-/// - 07009: Invalid descriptor index — spec marks the `column_number == 0` sub-case (DM); this
+/// - 07009: Invalid descriptor index. Spec marks the `column_number == 0` sub-case (DM); this
 ///   driver also checks it defensively since bookmarks are not supported. Returned by the driver
 ///   when `column_number` is greater than the number of columns in the result set, which the
 ///   row states without a marker,
 ///   which core checks against `StatementBackend::column_count` **before** calling
 ///   `describe_col`, so this state is returned only for the case its message describes.
-/// - 08S01: Communication link failure — **absent from this function's diagnostics table**, yet
+/// - 08S01: Communication link failure. **Absent from this function's diagnostics table**, yet
 ///   reachable and not filtered out. The page states that when called after `SQLPrepare` and
 ///   before `SQLExecute` this function "can return any SQLSTATE that can be returned by
 ///   SQLPrepare or SQLExecute", both of which list `08S01`. A `describe_col` failure the
-///   driver's error mapping classified that way is therefore propagated unchanged, which is far
-///   more use to an application than the `07009` it used to be overwritten with.
+///   driver's error mapping classified that way is therefore propagated unchanged, which is
+///   far more use to an application than an `07009` naming the wrong argument.
 /// - HY000: General error; returned for any unexpected internal error, and propagated from
 ///   `describe_col` when the backend's mapping produced no more specific state.
 /// - HY001: Memory allocation error; returned if allocation fails.
-/// - HY008: Operation canceled. The asynchronous clause is inapplicable — core never returns
-///   `SQL_STILL_EXECUTING` — but the second clause, `SQLCancel` called on the statement "from a
+/// - HY008: Operation canceled. The asynchronous clause is inapplicable, since core never
+///   returns `SQL_STILL_EXECUTING`. The second clause, `SQLCancel` called on the statement "from a
 ///   different thread in a multithread application", **is returned by this driver**: the row
 ///   carries no `(DM)` marker, and a `describe_col` failure whose token reports signalled is
 ///   reclassified `HY008` in place of the backend's own SQLSTATE.
 /// - HY010: Function sequence error (DM) (driver-manager-handled; not returned here).
 /// - HY013: Memory management error; returned if underlying allocation fails.
-/// - HY090: Invalid string or buffer length — every clause of this row is `(DM)`
+/// - HY090: Invalid string or buffer length. Every clause of this row is `(DM)`
 ///   (driver-manager-handled; not returned here). Unlike several of its siblings' rows,
 ///   this one has only the name-length-below-zero sentence and no maximum-length
 ///   sentence, so nothing in it is the driver's.
-/// - HY091: Invalid descriptor field identifier — **returned by this driver**, for a
+/// - HY091: Invalid descriptor field identifier. **Returned by this driver**, for a
 ///   `field_identifier` that is not a defined `SQL_DESC_*`/`SQL_COLUMN_*` value. The row's own
 ///   text is the whole test: "was not one of the defined values and was not
 ///   an implementation-defined value". Core defines no implementation-defined fields, so
 ///   anything `desc_from_raw` rejects and that is not one of the three ODBC 2.x spellings below
-///   lands here. This used to answer `HYC00`, which conflated a garbage identifier with a valid
+///   lands here. Answering `HYC00` instead would conflate a garbage identifier with a valid
 ///   extension core has not implemented.
 /// - HY117: Connection suspended (DM) (driver-manager-handled; not returned here).
-/// - HYC00: Driver not capable — **returned by this driver**, for a `field_identifier` that
+/// - HYC00: Driver not capable. **Returned by this driver**, for a `field_identifier` that
 ///   *is* a defined value core does not support. The row's text is "was not supported by the
 ///   driver", which is a different claim from `HY091`'s. Today that is exactly
 ///   `SQL_COLUMN_LENGTH` (3), `SQL_COLUMN_PRECISION` (4) and `SQL_COLUMN_SCALE` (5), the ODBC
 ///   2.x spellings of three fields. The spec's Backward Compatibility section says a 3.x driver
-///   should support all three — "An ODBC 3.x driver must support both 'SQL_COLUMN' and
-///   'SQL_DESC' values for these three FieldIdentifiers" — and core does not yet, because their
+///   should support all three ("An ODBC 3.x driver must support both 'SQL_COLUMN' and
+///   'SQL_DESC' values for these three FieldIdentifiers") and core does not yet, because their
 ///   ODBC 2.x semantics differ from their 3.x counterparts (Appendix D, "Column Size, Decimal
 ///   Digits, Transfer Octet Length, and Display Size"). `HYC00` is the honest answer until it
 ///   does.
 /// - HYT01: Connection timeout expired; not applicable.
 /// - IM001: Driver does not support this function (DM) (driver-manager-handled; not returned here).
 /// - IM017: Polling disabled; not returned here (the asynchronous notification model is not
-///   supported — not DM-annotated in the spec).
+///   supported, and not DM-annotated in the spec).
 /// - IM018: SQLCompleteAsync not called; not returned here (the asynchronous notification model
-///   is not supported — not DM-annotated in the spec).
+///   is not supported, and not DM-annotated in the spec).
 ///
 /// # Safety
 ///
@@ -1949,19 +1947,19 @@ pub unsafe fn sql_col_attribute_w<B: Backend>(
             // `HY091` and `HYC00` are different questions, and both rows are
             // un-`(DM)` so both are core's to answer:
             //
-            // - `HY091` — "was not one of the defined values and was not an
+            // - `HY091`: "was not one of the defined values and was not an
             //   implementation-defined value".
-            // - `HYC00` — "was not supported by the driver".
+            // - `HYC00`: "was not supported by the driver".
             //
             // So a value `desc_from_raw` does not recognise is `HY091`: it is
             // not a defined field, and core defines no implementation-defined
-            // ones. A blanket `HYC00` left an application unable to tell a
-            // garbage identifier from a valid extension core has not
-            // implemented. `SQLGetDescField`/`SQLSetDescField` already drew the
-            // line here (`ffi::desc::field_from_raw`); this was the outlier.
+            // ones. A blanket `HYC00` would leave an application unable to tell
+            // a garbage identifier from a valid extension core has not
+            // implemented. `SQLGetDescField`/`SQLSetDescField` draw the line in
+            // the same place (`ffi::desc::field_from_raw`).
             //
-            // The three ODBC 2.x spellings are the exception that proves it.
-            // They *are* defined identifiers, so they take `HYC00` — and the
+            // The three ODBC 2.x spellings are the exception. They *are*
+            // defined identifiers, so they take `HYC00`, and the
             // spec's Backward Compatibility section says a 3.x driver should
             // support them outright ("An ODBC 3.x driver must support both
             // 'SQL_COLUMN' and 'SQL_DESC' values for these three
@@ -2025,7 +2023,7 @@ pub unsafe fn sql_col_attribute_w<B: Backend>(
                 ));
             }
 
-            // Spec 07009, core's own check — see `sql_describe_col_w`, which
+            // Spec 07009, core's own check. See `sql_describe_col_w`, which
             // carries the same pair of comments and the reasoning behind them.
             if column_number > column_count_upper_bound(column_count) {
                 return Err(OdbcError::general(
@@ -2040,7 +2038,7 @@ pub unsafe fn sql_col_attribute_w<B: Backend>(
             // was cancelled. This function's diagnostics table has no `08S01`
             // row, but its page states it "can return any SQLSTATE that can be
             // returned by SQLPrepare or SQLExecute" when called between the two,
-            // so a link failure passing through is legal — and far more use to
+            // so a link failure passing through is legal, and far more use to
             // an application than "column number out of range".
             let desc = reclassify_cancelled_opt::<B, _, _>(
                 statement_data.describe_col(column_number),
@@ -2110,7 +2108,7 @@ pub unsafe fn sql_col_attribute_w<B: Backend>(
 /// `SQLProcedures`' spec sort order, as zero-based column indices.
 ///
 /// The page reads "ordered by PROCEDURE_CAT, PROCEDURE_SCHEMA, and
-/// PROCEDURE_NAME", but no `PROCEDURE_SCHEMA` column exists — the same page's
+/// PROCEDURE_NAME", but no `PROCEDURE_SCHEMA` column exists: the same page's
 /// result-column table names column 2 `PROCEDURE_SCHEM`. The sentence has a
 /// typo; column 2 is the key. Do not "correct" this into a lookup for a column
 /// that does not exist.
@@ -2150,15 +2148,15 @@ pub(crate) fn procedures_columns(widths: &CatalogResultColumnWidths) -> Vec<Colu
 /// - 01000: General warning (driver-specific informational message); not returned here.
 /// - 08S01: Communication link failure; propagated from the backend when its
 ///   client library reports the link to the data source failed.
-/// - 24000: Invalid cursor state — returned if a cursor is already open on this statement.
-/// - 40001: Serialization failure — propagated from the backend unchanged, as `08S01` is.
+/// - 24000: Invalid cursor state. Returned if a cursor is already open on this statement.
+/// - 40001: Serialization failure. Propagated from the backend unchanged, as `08S01` is.
 ///   Core degrades nothing to `HY000`; that state appears only when the backend's own error
 ///   mapping produced no more specific one.
-/// - 40003: Statement completion unknown — propagated from the backend unchanged.
+/// - 40003: Statement completion unknown. Propagated from the backend unchanged.
 /// - HY000: General error; returned for any unexpected backend error.
 /// - HY001: Memory allocation error; returned if allocation fails.
-/// - HY008: Operation canceled. The row's first clause — asynchronous processing, then the
-///   function called again — is not applicable: core implements no asynchronous execution and
+/// - HY008: Operation canceled. The row's first clause (asynchronous processing, then the
+///   function called again) is not applicable: core implements no asynchronous execution and
 ///   never returns `SQL_STILL_EXECUTING`. The second clause, `SQLCancel` called on the
 ///   statement "from a different thread in a multithread application", **is returned by this
 ///   driver**: the row carries no `(DM)` marker, and when a backend call fails with
@@ -2171,21 +2169,21 @@ pub(crate) fn procedures_columns(widths: &CatalogResultColumnWidths) -> Vec<Colu
 ///   `(DM)`-marked and is deliberately not checked here.
 ///
 ///   This page states **no** unconditional null-argument clause, so a null `ProcName` is
-///   accepted — unlike `SQLColumnPrivileges`, whose `TableName` sentence carries no marker
+///   accepted, unlike `SQLColumnPrivileges`, whose `TableName` sentence carries no marker
 ///   and no `METADATA_ID` condition and *is* checked. See
 ///   `the_procedure_functions_do_not_check_null_name_arguments`.
-/// - HY010: Function sequence error — the spec annotates this `(DM)`, on **every** clause:
+/// - HY010: Function sequence error. The spec annotates this `(DM)`, on **every** clause:
 ///   the row enumerates asynchronous execution, `SQL_PARAM_DATA_AVAILABLE` and
 ///   `SQL_NEED_DATA`, none of which core implements, so none of its clauses is returned
-///   here. Core does return `HY010` for a condition the row does not describe — the
-///   statement's connection is not open — which is core's own reading rather than a clause
+///   here. Core does return `HY010` for a condition the row does not describe, namely that
+///   the statement's connection is not open. That is core's own reading rather than a clause
 ///   of the table, and the state the ODBC state table gives a catalog function called
 ///   before a connection exists.
 /// - HY013: Memory management error; returned if underlying allocation fails.
-/// - HY090: Invalid string or buffer length — the row has two sentences and only the first
+/// - HY090: Invalid string or buffer length. The row has two sentences and only the first
 ///   carries `(DM)`: a name length argument less than 0 but not equal to `SQL_NTS`. The
-///   second is the driver's — a name length exceeding "the maximum length value for the
-///   corresponding name" — and it cannot arise here, because core declares no maximum name
+///   second is the driver's, a name length exceeding "the maximum length value for the
+///   corresponding name", and it cannot arise here, because core declares no maximum name
 ///   lengths. `SQL_MAX_CATALOG_NAME_LEN`, `SQL_MAX_SCHEMA_NAME_LEN`,
 ///   `SQL_MAX_TABLE_NAME_LEN` and `SQL_MAX_COLUMN_NAME_LEN` all answer `0`, which the
 ///   `SQLGetInfo` page defines as "no specified limit or the limit is unknown". A driver
@@ -2196,25 +2194,25 @@ pub(crate) fn procedures_columns(widths: &CatalogResultColumnWidths) -> Vec<Colu
 ///   `MAX_NTS_SCAN` (1 048 576) code units. Every one of them is resolved by the same helper
 ///   (`parse_filter_param`), so the limit applies to all of them alike and the diagnostic
 ///   names which one overran. It is a length the driver cannot determine, which is what
-///   `HY090` names; `utf16_to_string` used to hand back a cap-length prefix
-///   instead, so the call filtered on a truncated pattern and returned a result set that
-///   was wrong rather than absent. An **explicitly measured** length is not limited by this, at any
+///   `HY090` names. Handing back a cap-length prefix instead would filter on a truncated
+///   pattern and return a result set that was wrong rather than absent. An **explicitly
+///   measured** length is not limited by this, at any
 ///   size. See `tables_refuses_an_nts_filter_that_runs_to_the_scan_cap` and
 ///   `foreign_keys_names_the_argument_whose_nts_scan_overran`.
 /// - HY117: Connection suspended (DM) (driver-manager-handled; not returned here).
 /// - HYC00: Optional feature not implemented; propagated from backend if catalogs/schemas or
 ///   search patterns are unsupported.
-/// - HYT00: Timeout expired — **returned by this driver**, not merely propagated. A backend
+/// - HYT00: Timeout expired. **Returned by this driver**, not merely propagated. A backend
 ///   that answered `QueryTimeout::CoreCancels` gets core's own timer (`crate::query_timer`),
 ///   armed over this call, and `QueryTimer::reclassify` relabels the failing call `HYT00`
 ///   when the deadline fired. A backend enforcing its own timeout has its `HYT00` propagated
 ///   unchanged.
-/// - HYT01: Connection timeout expired — propagated from the backend unchanged.
+/// - HYT01: Connection timeout expired. Propagated from the backend unchanged.
 /// - IM001: Driver does not support this function (DM) (driver-manager-handled; not returned here).
 /// - IM017: Polling disabled; not returned here (the asynchronous notification model is not
-///   supported — not DM-annotated in the spec).
+///   supported, and not DM-annotated in the spec).
 /// - IM018: SQLCompleteAsync not called; not returned here (the asynchronous notification model
-///   is not supported — not DM-annotated in the spec).
+///   is not supported, and not DM-annotated in the spec).
 ///
 /// # Safety
 ///
@@ -2270,7 +2268,7 @@ pub unsafe fn sql_procedures_w<B: Backend>(
             // Spec HY009 (not (DM)): METADATA_ID plus a null CatalogName on a
             // data source that has catalogs. The neighbouring
             // SchemaName/ProcName clause *is* (DM)-marked, and this page states
-            // no unconditional null-argument clause — see the doc comment.
+            // no unconditional null-argument clause (see the doc comment).
             let metadata_id = metadata_id_enabled(stmt);
             check_metadata_id_null_catalog::<B>(
                 connection,
@@ -2328,7 +2326,7 @@ pub unsafe fn sql_procedures_w<B: Backend>(
 /// "not NULL" per the spec's column table: `PROCEDURE_NAME` (3),
 /// `COLUMN_NAME` (4), `COLUMN_TYPE` (5), `DATA_TYPE` (6), `TYPE_NAME` (7),
 /// `NULLABLE` (12), `SQL_DATA_TYPE` (15) and `ORDINAL_POSITION` (18).
-/// `SQLProcedureColumns`' spec sort order — "ordered by PROCEDURE_CAT,
+/// `SQLProcedureColumns`' spec sort order, "ordered by PROCEDURE_CAT,
 /// PROCEDURE_SCHEM, PROCEDURE_NAME, and COLUMN_TYPE", as zero-based column
 /// indices.
 const PROCEDURE_COLUMNS_SORT_KEYS: [usize; 4] = [0, 1, 2, 4];
@@ -2385,15 +2383,15 @@ pub(crate) fn procedure_columns_columns(
 /// - 01000: General warning (driver-specific informational message); not returned here.
 /// - 08S01: Communication link failure; propagated from the backend when its
 ///   client library reports the link to the data source failed.
-/// - 24000: Invalid cursor state — returned if a cursor is already open on this statement.
-/// - 40001: Serialization failure — propagated from the backend unchanged, as `08S01` is.
+/// - 24000: Invalid cursor state. Returned if a cursor is already open on this statement.
+/// - 40001: Serialization failure. Propagated from the backend unchanged, as `08S01` is.
 ///   Core degrades nothing to `HY000`; that state appears only when the backend's own error
 ///   mapping produced no more specific one.
-/// - 40003: Statement completion unknown — propagated from the backend unchanged.
+/// - 40003: Statement completion unknown. Propagated from the backend unchanged.
 /// - HY000: General error; returned for any unexpected backend error.
 /// - HY001: Memory allocation error; returned if allocation fails.
-/// - HY008: Operation canceled. The row's first clause — asynchronous processing, then the
-///   function called again — is not applicable: core implements no asynchronous execution and
+/// - HY008: Operation canceled. The row's first clause (asynchronous processing, then the
+///   function called again) is not applicable: core implements no asynchronous execution and
 ///   never returns `SQL_STILL_EXECUTING`. The second clause, `SQLCancel` called on the
 ///   statement "from a different thread in a multithread application", **is returned by this
 ///   driver**: the row carries no `(DM)` marker, and when a backend call fails with
@@ -2406,23 +2404,23 @@ pub(crate) fn procedure_columns_columns(
 ///   *is* `(DM)`-marked and is deliberately not checked here.
 ///
 ///   This page states **no** unconditional null-argument clause, so a null `ProcName` or
-///   `ColumnName` is accepted — unlike `SQLColumnPrivileges`, whose `TableName` sentence
+///   `ColumnName` is accepted, unlike `SQLColumnPrivileges`, whose `TableName` sentence
 ///   carries no marker and no `METADATA_ID` condition and *is* checked. See
 ///   `the_procedure_functions_do_not_check_null_name_arguments`.
-/// - HY010: Function sequence error — the spec annotates this `(DM)`, on **every** clause:
+/// - HY010: Function sequence error. The spec annotates this `(DM)`, on **every** clause:
 ///   the row enumerates asynchronous execution, `SQL_PARAM_DATA_AVAILABLE` and
 ///   `SQL_NEED_DATA`, none of which core implements, so none of its clauses is returned
-///   here. Core does return `HY010` for a condition the row does not describe — the
-///   statement's connection is not open — which is core's own reading rather than a clause
+///   here. Core does return `HY010` for a condition the row does not describe, namely that
+///   the statement's connection is not open. That is core's own reading rather than a clause
 ///   of the table, and the state the ODBC state table gives a catalog function called
 ///   before a connection exists.
-/// - HY013: Memory management error — **absent from this function's diagnostics table**,
+/// - HY013: Memory management error. **Absent from this function's diagnostics table**,
 ///   which is the one difference from its eleven siblings' tables. Core would report it the
 ///   same way regardless, if an underlying allocation failed.
-/// - HY090: Invalid string or buffer length — the row has two sentences and only the first
+/// - HY090: Invalid string or buffer length. The row has two sentences and only the first
 ///   carries `(DM)`: a name length argument less than 0 but not equal to `SQL_NTS`. The
-///   second is the driver's — a name length exceeding "the maximum length value for the
-///   corresponding name" — and it cannot arise here, because core declares no maximum name
+///   second is the driver's, a name length exceeding "the maximum length value for the
+///   corresponding name", and it cannot arise here, because core declares no maximum name
 ///   lengths. `SQL_MAX_CATALOG_NAME_LEN`, `SQL_MAX_SCHEMA_NAME_LEN`,
 ///   `SQL_MAX_TABLE_NAME_LEN` and `SQL_MAX_COLUMN_NAME_LEN` all answer `0`, which the
 ///   `SQLGetInfo` page defines as "no specified limit or the limit is unknown". A driver
@@ -2433,25 +2431,25 @@ pub(crate) fn procedure_columns_columns(
 ///   `MAX_NTS_SCAN` (1 048 576) code units. Every one of them is resolved by the same helper
 ///   (`parse_filter_param`), so the limit applies to all of them alike and the diagnostic
 ///   names which one overran. It is a length the driver cannot determine, which is what
-///   `HY090` names; `utf16_to_string` used to hand back a cap-length prefix
-///   instead, so the call filtered on a truncated pattern and returned a result set that
-///   was wrong rather than absent. An **explicitly measured** length is not limited by this, at any
+///   `HY090` names. Handing back a cap-length prefix instead would filter on a truncated
+///   pattern and return a result set that was wrong rather than absent. An **explicitly
+///   measured** length is not limited by this, at any
 ///   size. See `tables_refuses_an_nts_filter_that_runs_to_the_scan_cap` and
 ///   `foreign_keys_names_the_argument_whose_nts_scan_overran`.
 /// - HY117: Connection suspended (DM) (driver-manager-handled; not returned here).
 /// - HYC00: Optional feature not implemented; propagated from backend if catalogs/schemas or
 ///   search patterns are unsupported.
-/// - HYT00: Timeout expired — **returned by this driver**, not merely propagated. A backend
+/// - HYT00: Timeout expired. **Returned by this driver**, not merely propagated. A backend
 ///   that answered `QueryTimeout::CoreCancels` gets core's own timer (`crate::query_timer`),
 ///   armed over this call, and `QueryTimer::reclassify` relabels the failing call `HYT00`
 ///   when the deadline fired. A backend enforcing its own timeout has its `HYT00` propagated
 ///   unchanged.
-/// - HYT01: Connection timeout expired — propagated from the backend unchanged.
+/// - HYT01: Connection timeout expired. Propagated from the backend unchanged.
 /// - IM001: Driver does not support this function (DM) (driver-manager-handled; not returned here).
 /// - IM017: Polling disabled; not returned here (the asynchronous notification model is not
-///   supported — not DM-annotated in the spec).
+///   supported, and not DM-annotated in the spec).
 /// - IM018: SQLCompleteAsync not called; not returned here (the asynchronous notification model
-///   is not supported — not DM-annotated in the spec).
+///   is not supported, and not DM-annotated in the spec).
 ///
 /// # Safety
 ///
@@ -2513,8 +2511,8 @@ pub unsafe fn sql_procedure_columns_w<B: Backend>(
             // Spec HY009 (not (DM)): METADATA_ID plus a null CatalogName on a
             // data source that has catalogs. The neighbouring
             // SchemaName/ProcName/ColumnName clause *is* (DM)-marked, and this
-            // page states no unconditional null-argument clause — see the doc
-            // comment.
+            // page states no unconditional null-argument clause (see the doc
+            // comment).
             let metadata_id = metadata_id_enabled(stmt);
             check_metadata_id_null_catalog::<B>(
                 connection,
@@ -2571,7 +2569,7 @@ pub unsafe fn sql_procedure_columns_w<B: Backend>(
 ///
 /// "not NULL" per the spec's column table: `TABLE_NAME` (3), `COLUMN_NAME`
 /// (4), `GRANTEE` (6) and `PRIVILEGE` (7).
-/// `SQLColumnPrivileges`' spec sort order — "ordered by TABLE_CAT,
+/// `SQLColumnPrivileges`' spec sort order, "ordered by TABLE_CAT,
 /// TABLE_SCHEM, TABLE_NAME, COLUMN_NAME, and PRIVILEGE", as zero-based column
 /// indices.
 const COLUMN_PRIVILEGES_SORT_KEYS: [usize; 5] = [0, 1, 2, 3, 6];
@@ -2612,47 +2610,47 @@ pub(crate) fn column_privileges_columns(
 /// - 01000: General warning (driver-specific informational message); not returned here.
 /// - 08S01: Communication link failure; propagated from the backend when its
 ///   client library reports the link to the data source failed.
-/// - 24000: Invalid cursor state — returned if a cursor is already open on this statement.
-/// - 40001: Serialization failure — propagated from the backend unchanged, as `08S01` is.
+/// - 24000: Invalid cursor state. Returned if a cursor is already open on this statement.
+/// - 40001: Serialization failure. Propagated from the backend unchanged, as `08S01` is.
 ///   Core degrades nothing to `HY000`; that state appears only when the backend's own error
 ///   mapping produced no more specific one.
-/// - 40003: Statement completion unknown — propagated from the backend unchanged.
+/// - 40003: Statement completion unknown. Propagated from the backend unchanged.
 /// - HY000: General error; returned for any unexpected backend error.
 /// - HY001: Memory allocation error; returned if allocation fails.
-/// - HY008: Operation canceled. The row's first clause — asynchronous processing, then the
-///   function called again — is not applicable: core implements no asynchronous execution and
+/// - HY008: Operation canceled. The row's first clause (asynchronous processing, then the
+///   function called again) is not applicable: core implements no asynchronous execution and
 ///   never returns `SQL_STILL_EXECUTING`. The second clause, `SQLCancel` called on the
 ///   statement "from a different thread in a multithread application", **is returned by this
 ///   driver**: the row carries no `(DM)` marker, and when a backend call fails with
 ///   `Backend::is_cancelled` reporting its token signalled, core reports `HY008` in place of
 ///   the backend's own SQLSTATE.
 /// - HY009: Invalid use of null pointer. **Returned by this driver** for *both* clauses the
-///   spec's diagnostics table states without a `(DM)` marker — this is the only one of the
+///   spec's diagnostics table states without a `(DM)` marker. This is the only one of the
 ///   four functions in this family with two:
 ///
 ///   1. "The `TableName` argument was a null pointer", **unconditionally**. The sentence
 ///      carries no marker and no `METADATA_ID` condition, and the page's argument
 ///      description agrees that `TableName` "cannot be a null pointer".
 ///      `SQLTablePrivileges`, `SQLProcedures` and `SQLProcedureColumns` state no such
-///      unmarked sentence and deliberately do not check it — see
+///      unmarked sentence and deliberately do not check it. See
 ///      `table_privileges_does_not_check_null_table_name` and
 ///      `the_procedure_functions_do_not_check_null_name_arguments`.
 ///   2. `SQL_ATTR_METADATA_ID` was `SQL_TRUE`, `CatalogName` was a null pointer, and
 ///      `SQL_CATALOG_NAME` reports that catalog names are supported.
 ///
 ///   The `SchemaName`/`ColumnName` clause beside them *is* `(DM)`-marked and is not checked.
-/// - HY010: Function sequence error — the spec annotates this `(DM)`, on **every** clause:
+/// - HY010: Function sequence error. The spec annotates this `(DM)`, on **every** clause:
 ///   the row enumerates asynchronous execution, `SQL_PARAM_DATA_AVAILABLE` and
 ///   `SQL_NEED_DATA`, none of which core implements, so none of its clauses is returned
-///   here. Core does return `HY010` for a condition the row does not describe — the
-///   statement's connection is not open — which is core's own reading rather than a clause
+///   here. Core does return `HY010` for a condition the row does not describe, namely that
+///   the statement's connection is not open. That is core's own reading rather than a clause
 ///   of the table, and the state the ODBC state table gives a catalog function called
 ///   before a connection exists.
 /// - HY013: Memory management error; returned if underlying allocation fails.
-/// - HY090: Invalid string or buffer length — the row has two clauses and only the
+/// - HY090: Invalid string or buffer length. The row has two clauses and only the
 ///   first carries `(DM)`: a name length argument less than 0 but not equal to
-///   `SQL_NTS`. The second is the driver's — a name length exceeding "the maximum
-///   length value for the corresponding name" — and it cannot arise here, because
+///   `SQL_NTS`. The second is the driver's, a name length exceeding "the maximum
+///   length value for the corresponding name", and it cannot arise here, because
 ///   core declares no maximum name lengths: `SQL_MAX_CATALOG_NAME_LEN`,
 ///   `SQL_MAX_SCHEMA_NAME_LEN`, `SQL_MAX_TABLE_NAME_LEN` and
 ///   `SQL_MAX_COLUMN_NAME_LEN` all answer `0`, which the `SQLGetInfo` page defines as
@@ -2664,25 +2662,25 @@ pub(crate) fn column_privileges_columns(
 ///   `MAX_NTS_SCAN` (1 048 576) code units. Every one of them is resolved by the same helper
 ///   (`parse_filter_param`), so the limit applies to all of them alike and the diagnostic
 ///   names which one overran. It is a length the driver cannot determine, which is what
-///   `HY090` names; `utf16_to_string` used to hand back a cap-length prefix
-///   instead, so the call filtered on a truncated pattern and returned a result set that
-///   was wrong rather than absent. An **explicitly measured** length is not limited by this, at any
+///   `HY090` names. Handing back a cap-length prefix instead would filter on a truncated
+///   pattern and return a result set that was wrong rather than absent. An **explicitly
+///   measured** length is not limited by this, at any
 ///   size. See `tables_refuses_an_nts_filter_that_runs_to_the_scan_cap` and
 ///   `foreign_keys_names_the_argument_whose_nts_scan_overran`.
 /// - HY117: Connection suspended (DM) (driver-manager-handled; not returned here).
 /// - HYC00: Optional feature not implemented; propagated from backend if catalogs/schemas or
 ///   search patterns are unsupported.
-/// - HYT00: Timeout expired — **returned by this driver**, not merely propagated. A backend
+/// - HYT00: Timeout expired. **Returned by this driver**, not merely propagated. A backend
 ///   that answered `QueryTimeout::CoreCancels` gets core's own timer (`crate::query_timer`),
 ///   armed over this call, and `QueryTimer::reclassify` relabels the failing call `HYT00`
 ///   when the deadline fired. A backend enforcing its own timeout has its `HYT00` propagated
 ///   unchanged.
-/// - HYT01: Connection timeout expired — propagated from the backend unchanged.
+/// - HYT01: Connection timeout expired. Propagated from the backend unchanged.
 /// - IM001: Driver does not support this function (DM) (driver-manager-handled; not returned here).
 /// - IM017: Polling disabled; not returned here (the asynchronous notification model is not
-///   supported — not DM-annotated in the spec).
+///   supported, and not DM-annotated in the spec).
 /// - IM018: SQLCompleteAsync not called; not returned here (the asynchronous notification model
-///   is not supported — not DM-annotated in the spec).
+///   is not supported, and not DM-annotated in the spec).
 ///
 /// # Safety
 ///
@@ -2727,7 +2725,7 @@ pub unsafe fn sql_column_privileges_w<B: Backend>(
                 ));
             };
 
-            // Spec HY009 (not (DM), and not conditional on METADATA_ID) — the
+            // Spec HY009 (not (DM), and not conditional on METADATA_ID): the
             // clause only this one of the four states. Checked before the
             // arguments are parsed, because a null pointer is exactly what
             // parsing would turn into a `None` and lose. See the doc comment.
@@ -2806,7 +2804,7 @@ pub unsafe fn sql_column_privileges_w<B: Backend>(
 ///
 /// "not NULL" per the spec's column table: `TABLE_NAME` (3), `GRANTEE` (5)
 /// and `PRIVILEGE` (6).
-/// `SQLTablePrivileges`' spec sort order — "ordered by TABLE_CAT,
+/// `SQLTablePrivileges`' spec sort order, "ordered by TABLE_CAT,
 /// TABLE_SCHEM, TABLE_NAME, PRIVILEGE, and GRANTEE", as zero-based column
 /// indices.
 ///
@@ -2850,15 +2848,15 @@ pub(crate) fn table_privileges_columns(
 /// - 01000: General warning (driver-specific informational message); not returned here.
 /// - 08S01: Communication link failure; propagated from the backend when its
 ///   client library reports the link to the data source failed.
-/// - 24000: Invalid cursor state — returned if a cursor is already open on this statement.
-/// - 40001: Serialization failure — propagated from the backend unchanged, as `08S01` is.
+/// - 24000: Invalid cursor state. Returned if a cursor is already open on this statement.
+/// - 40001: Serialization failure. Propagated from the backend unchanged, as `08S01` is.
 ///   Core degrades nothing to `HY000`; that state appears only when the backend's own error
 ///   mapping produced no more specific one.
-/// - 40003: Statement completion unknown — propagated from the backend unchanged.
+/// - 40003: Statement completion unknown. Propagated from the backend unchanged.
 /// - HY000: General error; returned for any unexpected backend error.
 /// - HY001: Memory allocation error; returned if allocation fails.
-/// - HY008: Operation canceled. The row's first clause — asynchronous processing, then the
-///   function called again — is not applicable: core implements no asynchronous execution and
+/// - HY008: Operation canceled. The row's first clause (asynchronous processing, then the
+///   function called again) is not applicable: core implements no asynchronous execution and
 ///   never returns `SQL_STILL_EXECUTING`. The second clause, `SQLCancel` called on the
 ///   statement "from a different thread in a multithread application", **is returned by this
 ///   driver**: the row carries no `(DM)` marker, and when a backend call fails with
@@ -2870,23 +2868,23 @@ pub(crate) fn table_privileges_columns(
 ///   catalog names are supported.
 ///
 ///   The `SchemaName`/`TableName` clause beside it *is* `(DM)`-marked, so the Driver Manager
-///   returns it and this driver deliberately does **not** — including for a null `TableName`,
+///   returns it and this driver deliberately does **not**, including for a null `TableName`,
 ///   which this page states only under that marked, `METADATA_ID`-conditional sentence.
 ///   `SQLColumnPrivileges` carries an *unmarked and unconditional* null-`TableName` sentence
 ///   and does check it; the difference between the two is intentional, not an omission here.
 ///   See `table_privileges_does_not_check_null_table_name`.
-/// - HY010: Function sequence error — the spec annotates this `(DM)`, on **every** clause:
+/// - HY010: Function sequence error. The spec annotates this `(DM)`, on **every** clause:
 ///   the row enumerates asynchronous execution, `SQL_PARAM_DATA_AVAILABLE` and
 ///   `SQL_NEED_DATA`, none of which core implements, so none of its clauses is returned
-///   here. Core does return `HY010` for a condition the row does not describe — the
-///   statement's connection is not open — which is core's own reading rather than a clause
+///   here. Core does return `HY010` for a condition the row does not describe, namely that
+///   the statement's connection is not open. That is core's own reading rather than a clause
 ///   of the table, and the state the ODBC state table gives a catalog function called
 ///   before a connection exists.
 /// - HY013: Memory management error; returned if underlying allocation fails.
-/// - HY090: Invalid string or buffer length — the row has two sentences and only the first
+/// - HY090: Invalid string or buffer length. The row has two sentences and only the first
 ///   carries `(DM)`: a name length argument less than 0 but not equal to `SQL_NTS`. The
-///   second is the driver's — a name length exceeding "the maximum length value for the
-///   corresponding name" — and it cannot arise here, because core declares no maximum name
+///   second is the driver's, a name length exceeding "the maximum length value for the
+///   corresponding name", and it cannot arise here, because core declares no maximum name
 ///   lengths. `SQL_MAX_CATALOG_NAME_LEN`, `SQL_MAX_SCHEMA_NAME_LEN`,
 ///   `SQL_MAX_TABLE_NAME_LEN` and `SQL_MAX_COLUMN_NAME_LEN` all answer `0`, which the
 ///   `SQLGetInfo` page defines as "no specified limit or the limit is unknown". A driver
@@ -2897,25 +2895,25 @@ pub(crate) fn table_privileges_columns(
 ///   `MAX_NTS_SCAN` (1 048 576) code units. Every one of them is resolved by the same helper
 ///   (`parse_filter_param`), so the limit applies to all of them alike and the diagnostic
 ///   names which one overran. It is a length the driver cannot determine, which is what
-///   `HY090` names; `utf16_to_string` used to hand back a cap-length prefix
-///   instead, so the call filtered on a truncated pattern and returned a result set that
-///   was wrong rather than absent. An **explicitly measured** length is not limited by this, at any
+///   `HY090` names. Handing back a cap-length prefix instead would filter on a truncated
+///   pattern and return a result set that was wrong rather than absent. An **explicitly
+///   measured** length is not limited by this, at any
 ///   size. See `tables_refuses_an_nts_filter_that_runs_to_the_scan_cap` and
 ///   `foreign_keys_names_the_argument_whose_nts_scan_overran`.
 /// - HY117: Connection suspended (DM) (driver-manager-handled; not returned here).
 /// - HYC00: Optional feature not implemented; propagated from backend if catalogs/schemas or
 ///   search patterns are unsupported.
-/// - HYT00: Timeout expired — **returned by this driver**, not merely propagated. A backend
+/// - HYT00: Timeout expired. **Returned by this driver**, not merely propagated. A backend
 ///   that answered `QueryTimeout::CoreCancels` gets core's own timer (`crate::query_timer`),
 ///   armed over this call, and `QueryTimer::reclassify` relabels the failing call `HYT00`
 ///   when the deadline fired. A backend enforcing its own timeout has its `HYT00` propagated
 ///   unchanged.
-/// - HYT01: Connection timeout expired — propagated from the backend unchanged.
+/// - HYT01: Connection timeout expired. Propagated from the backend unchanged.
 /// - IM001: Driver does not support this function (DM) (driver-manager-handled; not returned here).
 /// - IM017: Polling disabled; not returned here (the asynchronous notification model is not
-///   supported — not DM-annotated in the spec).
+///   supported, and not DM-annotated in the spec).
 /// - IM018: SQLCompleteAsync not called; not returned here (the asynchronous notification model
-///   is not supported — not DM-annotated in the spec).
+///   is not supported, and not DM-annotated in the spec).
 ///
 /// # Safety
 ///
@@ -2971,8 +2969,8 @@ pub unsafe fn sql_table_privileges_w<B: Backend>(
             // Spec HY009 (not (DM)): METADATA_ID plus a null CatalogName on a
             // data source that has catalogs. This page's null-`TableName`
             // clause *is* (DM)-marked, unlike `SQLColumnPrivileges`', so there
-            // is deliberately no unconditional check here — see the doc comment
-            // and `table_privileges_does_not_check_null_table_name`.
+            // is deliberately no unconditional check here (see the doc comment
+            // and `table_privileges_does_not_check_null_table_name`).
             let metadata_id = metadata_id_enabled(stmt);
             check_metadata_id_null_catalog::<B>(
                 connection,
@@ -3041,7 +3039,7 @@ mod tests {
 
     /// Every catalog result set the driver can produce, named for assertion
     /// messages. This is the list that must grow when a new catalog function
-    /// gains a result set — the tests below iterate it, so a result set added
+    /// gains a result set: the tests below iterate it, so a result set added
     /// outside `CatalogResultColumnWidths` fails here.
     fn every_catalog_result_set(
         widths: &CatalogResultColumnWidths,
@@ -3125,7 +3123,7 @@ mod tests {
             }
             assert!(
                 seen > 0,
-                "{result_set} has no identifier column — the name list in \
+                "{result_set} has no identifier column; the name list in \
                  is_identifier_column is probably stale"
             );
         }
@@ -3297,7 +3295,7 @@ mod tests {
     ///
     /// One pass over the cursor, unlike `fetch_column_as_strings`: the cursor
     /// is forward-only, so a test needing two columns cannot simply call that
-    /// helper twice — the second call would see `SQL_NO_DATA` immediately and
+    /// helper twice: the second call would see `SQL_NO_DATA` immediately and
     /// assert over an empty vector.
     unsafe fn fetch_columns_with_indicators<B: Backend>(
         stmt: *mut c_void,
@@ -3335,10 +3333,9 @@ mod tests {
     }
 
     /// Drain a `SQLTables` enumeration result set: assert that every column
-    /// except `populated` is genuinely NULL — the spec says those columns
-    /// "contain NULLs", and an empty string would pass a string comparison
-    /// while being wrong — and return the populated column's values in row
-    /// order.
+    /// except `populated` is genuinely NULL, then return the populated column's
+    /// values in row order. The spec says those columns "contain NULLs", and an
+    /// empty string would pass a string comparison while being wrong.
     unsafe fn enumeration_values<B: Backend>(stmt: *mut c_void, populated: u16) -> Vec<String> {
         let rows = unsafe { fetch_columns_with_indicators::<B>(stmt, &ALL_TABLES_COLUMNS) };
         for row in &rows {
@@ -3477,7 +3474,7 @@ mod tests {
 
     /// `supports_catalogs` is a required capability method, so core answers an
     /// `SQL_ALL_CATALOGS` enumeration with an empty result set for a backend
-    /// that has no catalogs, without calling the backend at all —
+    /// that has no catalogs, without calling the backend at all.
     /// `MockNoCatalogBackend::tables` returns an error, so reaching the
     /// ordinary path would surface as `SQL_ERROR`.
     #[test]
@@ -3566,7 +3563,7 @@ mod tests {
 
     /// Spec: "SQLColumns returns the results as a standard result set, ordered
     /// by TABLE_CAT, TABLE_SCHEM, TABLE_NAME, and ORDINAL_POSITION." The
-    /// ordinals within `t_one` are 10, 2, 1 — compared as text they would sort
+    /// ordinals within `t_one` are 10, 2, 1, which compared as text would sort
     /// 1, 10, 2.
     #[test]
     fn columns_result_is_sorted_by_spec_keys() {
@@ -3865,7 +3862,7 @@ mod tests {
     /// Spec: "SQLTablePrivileges returns the results as a standard result set,
     /// ordered by TABLE_CAT, TABLE_SCHEM, TABLE_NAME, PRIVILEGE, and GRANTEE."
     /// PRIVILEGE comes *before* GRANTEE, so the sort keys are not in ascending
-    /// column order — that is the spec, not a transcription slip.
+    /// column order. That is the spec, not a transcription slip.
     #[test]
     fn table_privileges_result_is_sorted_by_spec_keys() {
         unsafe {
@@ -3894,7 +3891,7 @@ mod tests {
     }
 
     /// Spec, `SQLColumnPrivileges` `HY009`: "The TableName argument was a null
-    /// pointer." No `(DM)` marker, and not conditional on `METADATA_ID` —
+    /// pointer." No `(DM)` marker, and not conditional on `METADATA_ID`,
     /// unlike the `SchemaName`/`ColumnName` sentence beside it, which is
     /// `(DM)`. The page's argument description agrees: `TableName` "cannot be a
     /// null pointer". This is the only one of the four functions in this family
@@ -3990,7 +3987,7 @@ mod tests {
     /// SQL_TRUE, the CatalogName argument was a null pointer, and the
     /// SQL_CATALOG_NAME InfoType returns that catalog names are supported."
     /// That sentence carries no `(DM)` marker on any of these four pages, so
-    /// all four check it — the half that *is* uniform across the family.
+    /// all four check it, which is the half that *is* uniform across the family.
     #[test]
     fn all_four_check_metadata_id_with_a_null_catalog() {
         unsafe {
@@ -4071,8 +4068,8 @@ mod tests {
     }
 
     /// Spec, "Arguments in Catalog Functions": under `METADATA_ID = SQL_TRUE`
-    /// **every** string argument of all four becomes an identifier — there is
-    /// no `TableType`-style exemption anywhere in this family. Core folds and
+    /// **every** string argument of all four becomes an identifier, with no
+    /// `TableType`-style exemption anywhere in this family. Core folds and
     /// escapes each one before the backend sees it.
     #[test]
     fn metadata_id_normalises_every_argument_of_the_four() {
@@ -4215,8 +4212,8 @@ mod tests {
     /// error *before* matching, so a `NotImplemented` can be recognised and
     /// turned into the spec's empty result set.
     ///
-    /// `NotImplemented` there means "this backend exposes no index metadata" —
-    /// a legitimate empty answer, not a failure — so it must survive even when
+    /// `NotImplemented` there means "this backend exposes no index metadata",
+    /// a legitimate empty answer rather than a failure, so it must survive even when
     /// the token happens to be signalled. Reclassifying the whole `Result`
     /// rather than only its genuine-error arm would turn a spec-mandated empty
     /// result set into `HY008`.
@@ -4269,8 +4266,8 @@ mod tests {
     }
 
     /// Spec, `SQLTables` `TableName`: under `SQL_ATTR_METADATA_ID = SQL_TRUE`
-    /// the argument "is treated as an identifier argument" — its case is not
-    /// significant, and it is not a pattern. Core normalises it before the
+    /// the argument "is treated as an identifier argument", so its case is not
+    /// significant and it is not a pattern. Core normalises it before the
     /// backend sees it, so the backend receives a pattern matching exactly one
     /// name: folded per `SQL_IDENTIFIER_CASE` and with `_` escaped per
     /// `SQL_SEARCH_PATTERN_ESCAPE`.
@@ -4554,7 +4551,7 @@ mod tests {
             assert_eq!(
                 args.table_types,
                 vec!["base_table".to_string(), "view".to_string()],
-                "TableType is a value list, so only the list syntax is stripped — \
+                "TableType is a value list, so only the list syntax is stripped: \
                  no case folding and no pattern escaping"
             );
             cleanup_for::<MockCatalogArgsBackend>(env, conn, stmt);
@@ -4622,7 +4619,7 @@ mod tests {
     }
 
     /// Spec, "Arguments in Catalog Functions": under `METADATA_ID = SQL_TRUE`
-    /// all four of `SQLColumns`' string arguments are identifiers —
+    /// all four of `SQLColumns`' string arguments are identifiers,
     /// `ColumnName` included, which is the one an implementation is most
     /// likely to forget because it is the only argument no other catalog
     /// function has.
@@ -4731,8 +4728,8 @@ mod tests {
 
     /// The ordering constraint between this task and the `SQL_ALL_*`
     /// enumerations: all three sentinels are the literal `"%"`, which
-    /// normalisation would escape to `"\%"` — no longer the sentinel, so the
-    /// enumeration would silently become an ordinary `Backend::tables` query.
+    /// normalisation would escape to `"\%"`. That is no longer the sentinel, so
+    /// the enumeration would silently become an ordinary `Backend::tables` query.
     /// Enumeration detection therefore has to run on the raw arguments.
     #[test]
     fn an_enumeration_still_works_with_metadata_id_set() {
@@ -4766,8 +4763,8 @@ mod tests {
     /// Spec, `SQLTables` `HY009`: "The SQL_ATTR_METADATA_ID statement attribute
     /// was set to SQL_TRUE, the CatalogName argument was a null pointer, and
     /// the SQL_CATALOG_NAME InfoType returns that catalog names are supported."
-    /// That sentence carries no `(DM)` marker, so it is the driver's to return
-    /// — unlike the `SchemaName`/`TableName` sentence beside it, which is
+    /// That sentence carries no `(DM)` marker, so it is the driver's to return,
+    /// unlike the `SchemaName`/`TableName` sentence beside it, which is
     /// `(DM)`.
     #[test]
     fn metadata_id_with_null_catalog_returns_hy009() {
@@ -4831,7 +4828,7 @@ mod tests {
 
     /// Spec, `SQLPrimaryKeys` `HY009`: "(DM) The TableName argument was a null
     /// pointer." That marker means the Driver Manager returns it, so the driver
-    /// must not — `SQLStatistics` and `SQLSpecialColumns` carry the same
+    /// must not. `SQLStatistics` and `SQLSpecialColumns` carry the same
     /// sentence *without* the marker, and only those two get a driver-side
     /// check.
     #[test]
@@ -4844,7 +4841,7 @@ mod tests {
                 0,
                 std::ptr::null(),
                 0,
-                std::ptr::null(), // null TableName — the DM's job, not ours
+                std::ptr::null(), // null TableName: the DM's job, not ours
                 0,
             );
             assert_ne!(
@@ -4900,7 +4897,7 @@ mod tests {
                 0,
                 std::ptr::null(),
                 0,
-                std::ptr::null(), // null TableName — the driver's job here
+                std::ptr::null(), // null TableName: the driver's job here
                 0,
                 SQL_INDEX_ALL,
                 SQL_QUICK,
@@ -4927,7 +4924,7 @@ mod tests {
                 0,
                 std::ptr::null(),
                 0,
-                std::ptr::null(), // null TableName — the driver's job here
+                std::ptr::null(), // null TableName: the driver's job here
                 0,
                 SQL_SCOPE_CURROW,
                 Nullable::SqlNullable as u16,
@@ -4961,7 +4958,7 @@ mod tests {
     }
 
     /// Install a result set with one column whose length the backend could not
-    /// determine — the shape a `DESCRIBE`/`SHOW`/`EXPLAIN` result has, where
+    /// determine, the shape a `DESCRIBE`/`SHOW`/`EXPLAIN` result has, where
     /// every column is an unbounded VARCHAR with no catalog entry to read a
     /// declared length from.
     unsafe fn stmt_with_undeterminable_column(stmt: *mut c_void) {
@@ -5442,7 +5439,7 @@ mod tests {
                 0,
                 std::ptr::null(), // schema_name
                 0,
-                std::ptr::null(), // table_name — null is valid ("all tables")
+                std::ptr::null(), // table_name: null is valid ("all tables")
                 0,
                 std::ptr::null(), // column_name
                 0,
@@ -5477,8 +5474,8 @@ mod tests {
     /// the one of the four huge-ordinal cases that answers the state the spec
     /// gives. The other three are `SQLGetData` (delegated, so the backend's
     /// `HY000`), `SQLBindCol` (accepted, a documented deferral) and
-    /// `SQLBindParameter` (accepted, and correctly — its `07009` row has only the
-    /// `(DM)` lower-bound clause).
+    /// `SQLBindParameter` (accepted, and correctly, since its `07009` row has only
+    /// the `(DM)` lower-bound clause).
     #[test]
     fn col_attribute_with_a_huge_ordinal_returns_07009() {
         unsafe {
@@ -5508,7 +5505,7 @@ mod tests {
     }
 
     /// Column 0 (the bookmark column) with a result set open is `07009`, whose
-    /// second clause — "greater than the number of columns in the result set" —
+    /// second clause ("greater than the number of columns in the result set")
     /// carries no `(DM)` marker and is therefore core's to return. Its
     /// column-0 clause *is* `(DM)`-marked, so this is a defensive guard, kept
     /// because core is also linked without a Driver Manager.
@@ -5545,12 +5542,11 @@ mod tests {
     }
 
     /// Without a result set, the no-result-set check runs **first**, so the
-    /// answer is `07005` — "the statement ... did not return a result set. There
-    /// were no columns to describe" — whatever column number was asked for.
+    /// answer is `07005` ("the statement ... did not return a result set. There
+    /// were no columns to describe") whatever column number was asked for.
     ///
-    /// This test used to be named for `07009` while constructing exactly this
-    /// situation, and asserted only the return code, so the mismatch was
-    /// invisible. Both orderings are spec-legal; this one is what core does.
+    /// Both orderings are spec-legal; this one is what core does, and the test
+    /// asserts the SQLSTATE rather than only the return code.
     #[test]
     fn describe_col_without_a_result_set_is_07005_even_for_column_zero() {
         unsafe {
@@ -5801,7 +5797,7 @@ mod tests {
     /// with no diagnostic to say why.
     ///
     /// `SQLTables` stands for the family here; `SQLForeignKeys` below covers
-    /// the part a shared helper cannot — telling six name arguments apart.
+    /// the part a shared helper cannot: telling six name arguments apart.
     ///
     /// The buffer is exactly the cap, so an over-read is a heap overflow Miri
     /// sees rather than a longer filter.
@@ -5836,7 +5832,7 @@ mod tests {
 
     /// The diagnostic names *which* argument overran. `SQLForeignKeys` takes
     /// six name arguments, and "a string argument was too long" would identify
-    /// none of them — which is why `parse_filter_param` carries the spec's own
+    /// none of them, which is why `parse_filter_param` carries the spec's own
     /// argument name rather than letting the shared helper phrase it.
     #[test]
     fn foreign_keys_names_the_argument_whose_nts_scan_overran() {
@@ -5907,11 +5903,12 @@ mod tests {
         }
     }
 
-    /// The defect: `map_err(|_| ...)` threw the backend's error away and told
-    /// the application the column number was out of range, whatever had
-    /// actually gone wrong — a link failure, a cancellation, anything.
+    /// A `map_err(|_| ...)` around `describe_col` would throw the backend's
+    /// error away and tell the application the column number was out of range,
+    /// whatever had actually gone wrong, whether a link failure or a
+    /// cancellation.
     ///
-    /// Column 1 of a two-column result set, so the range check core now does
+    /// Column 1 of a two-column result set, so the range check core does
     /// first cannot be what produced the answer.
     #[test]
     fn describe_col_reports_the_backends_error_not_07009() {
@@ -5981,9 +5978,9 @@ mod tests {
         }
     }
 
-    /// `HY008` reaching `SQLDescribeColW` at all is what a blanket `map_err` here
-    /// used to prevent: it overwrote the SQLSTATE unconditionally, so
-    /// reclassifying a cancelled call was a no-op. `SQLCancel` from this thread
+    /// `HY008` has to reach `SQLDescribeColW` at all, which a blanket `map_err`
+    /// here would prevent: it overwrites the SQLSTATE unconditionally, making
+    /// the reclassification of a cancelled call a no-op. `SQLCancel` from this thread
     /// signals the execution's token; the failing describe then reports the
     /// cancellation rather than the link failure that was its symptom.
     #[test]
@@ -6024,12 +6021,12 @@ mod tests {
         }
     }
 
-    /// `SQLColAttributeW` carries the identical defect at its own call site.
+    /// `SQLColAttributeW` has to answer the same way at its own call site.
     ///
     /// Its diagnostics table has no `08S01` row, but its page states that after
     /// `SQLPrepare` and before `SQLExecute` it "can return any SQLSTATE that can
     /// be returned by SQLPrepare or SQLExecute", so a backend's `08S01` passing
-    /// through is legal — and far more useful than `07009`.
+    /// through is legal, and far more useful than `07009`.
     #[test]
     fn col_attribute_reports_the_backends_error_not_07009() {
         unsafe {
@@ -6094,10 +6091,10 @@ mod tests {
     /// `HY091` and `HYC00` are different questions, and both rows are un-`(DM)`
     /// so both are core's to answer. The spec:
     ///
-    /// - `HY091` — "The value specified for the argument *FieldIdentifier* was
+    /// - `HY091`: "The value specified for the argument *FieldIdentifier* was
     ///   not one of the defined values and was not an implementation-defined
     ///   value."
-    /// - `HYC00` — "The value specified for the argument *FieldIdentifier* was
+    /// - `HYC00`: "The value specified for the argument *FieldIdentifier* was
     ///   not supported by the driver."
     ///
     /// `desc_from_raw` returning `None` is precisely the first condition, and
@@ -6138,15 +6135,15 @@ mod tests {
 
     /// The guard against over-reach on the test above. `SQL_COLUMN_LENGTH`,
     /// `SQL_COLUMN_PRECISION` and `SQL_COLUMN_SCALE` are the ODBC 2.x spellings
-    /// of three fields, and they *are* defined values — so they take `HYC00`
+    /// of three fields, and they *are* defined values, so they take `HYC00`
     /// ("not supported by the driver"), never `HY091` ("not one of the defined
     /// values"). Reaching them through the `None` branch would report the wrong
     /// one of the two.
     ///
     /// Core does not implement them yet. `SQLColAttribute`'s Backward
-    /// Compatibility section says it should — "An ODBC 3.x driver must support
+    /// Compatibility section says it should ("An ODBC 3.x driver must support
     /// both 'SQL_COLUMN' and 'SQL_DESC' values for these three
-    /// *FieldIdentifiers*" — and that is tracked separately, because the three
+    /// *FieldIdentifiers*"), and that is tracked separately, because the three
     /// carry ODBC 2.x semantics that differ from their 3.x counterparts
     /// (see Appendix D, "Column Size, Decimal Digits, Transfer Octet Length,
     /// and Display Size"). This test pins the SQLSTATE, not the support.
@@ -6256,12 +6253,12 @@ mod tests {
         );
     }
 
-    /// Task 2.10's defect: `u16::try_from(column_count).unwrap_or(0)` collapses
-    /// an unrepresentable count to 0, and the `column_number > 0` check that
-    /// follows then rejects every column, including valid ones. A backend
+    /// `u16::try_from(column_count).unwrap_or(0)` would collapse an
+    /// unrepresentable count to 0, and the `column_number > 0` check that
+    /// follows would then reject every column, including valid ones. A backend
     /// cannot report *more* than `u16::MAX` columns through
-    /// `StatementBackend::column_count` — it returns `i16`, whose max already
-    /// fits — so the only way to hit the failed conversion is a *negative*
+    /// `StatementBackend::column_count`, which returns `i16` whose max already
+    /// fits, so the only way to hit the failed conversion is a *negative*
     /// count, which `MockNegativeColumnCountBackend` reports.
     ///
     /// Column 1 must still reach `describe_col` and succeed: saturating the
@@ -6296,7 +6293,7 @@ mod tests {
         }
     }
 
-    /// The `SQLColAttributeW` half of the same claim — it carries an
+    /// The `SQLColAttributeW` half of the same claim, since it carries an
     /// identical range check at its own call site.
     #[test]
     fn col_attribute_succeeds_when_backend_column_count_is_negative() {

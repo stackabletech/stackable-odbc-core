@@ -1,7 +1,7 @@
 //! ODBC escape-sequence translation (`{fn}`, `{d/t/ts}`, `{oj}`, `{escape}`).
 //!
 //! A single pure scanner shared by every backend. It rewrites escapes only in
-//! real SQL text — string literals, quoted identifiers, and comments are copied
+//! real SQL text; string literals, quoted identifiers, and comments are copied
 //! verbatim. Backends supply an [`EscapeDialect`] for the parts that differ.
 
 use crate::errors::OdbcError;
@@ -54,18 +54,18 @@ impl EscapeDialect {
     /// Rewrite a whole `{fn NAME(args)}` escape.
     ///
     /// `args` is the text between the outer parentheses, **already
-    /// escape-translated** — a nested `{fn}`, `{ts}` or `{d}` inside the
+    /// escape-translated**: a nested `{fn}`, `{ts}` or `{d}` inside the
     /// argument list is resolved before the dialect sees it, so a dialect
     /// never has to re-implement escape parsing. It is handed over with
     /// string literals, quoted identifiers, comments and nested parentheses
     /// intact: splitting it into arguments is the dialect's job, because only
-    /// the dialect knows how many arguments each function takes. Core
-    /// deliberately does not split on commas, which would corrupt
+    /// the dialect knows how many arguments each function takes. Core does
+    /// not split on commas, because that would corrupt
     /// `{fn LOCATE(',', x)}`.
     ///
     /// Return `None` to fall back to [`EscapeDialect::remap_scalar_fn`] plus
     /// verbatim arguments. Returning `Some` replaces the entire escape, so a
-    /// zero-argument call can emit a bare keyword with no trailing `()` —
+    /// zero-argument call can emit a bare keyword with no trailing `()`,
     /// which is what `{fn CURDATE()}` → `current_date` requires and what
     /// `remap_scalar_fn` alone cannot express.
     ///
@@ -170,7 +170,7 @@ fn ansi_timestamp(x: &str) -> String {
 ///
 /// [`translate_slice`] and [`translate_escape`] are mutually recursive, one
 /// level per nested escape, over SQL the application supplies. Without a bound,
-/// input like `{oj {oj {oj …}}}` recurses until the stack is exhausted — and a
+/// input like `{oj {oj {oj …}}}` recurses until the stack is exhausted, and a
 /// stack overflow is a guard-page abort, not a panic, so
 /// [`panic_safe`](crate::panic::panic_safe) cannot contain it and the host
 /// application dies. Measured at roughly 330 bytes per level, which is about
@@ -188,7 +188,7 @@ pub fn translate_escapes(sql: &str, dialect: &EscapeDialect) -> Result<String, O
     // No brace, no escape sequence: every form this module translates opens with
     // `{`. Checked before anything is allocated, because this runs on every
     // `SQLExecDirect` and `SQLPrepare` and the overwhelming majority of
-    // statements contain no escape at all — and the scan below allocates a
+    // statements contain no escape at all. The scan below allocates a
     // `Vec<char>` as wide as the statement before it looks at a single
     // character.
     if !sql.contains('{') {
@@ -204,8 +204,8 @@ fn translate_slice(
     depth: usize,
 ) -> Result<String, OdbcError> {
     // Checked here rather than in `translate_escape` because every recursive
-    // path — the `{oj}` body, the `{fn}` argument list and the tail after a
-    // rewritten call — re-enters through this function.
+    // path re-enters through this function: the `{oj}` body, the `{fn}`
+    // argument list and the tail after a rewritten call.
     if depth > MAX_ESCAPE_DEPTH {
         return Err(OdbcError::general(
             format!("Escape sequences nested deeper than {MAX_ESCAPE_DEPTH} levels"),
@@ -218,13 +218,13 @@ fn translate_slice(
         let c = chars[i];
         if c == '\'' {
             // An unterminated top-level string literal (no closing quote) is
-            // copied verbatim by design — only escapes must be well-formed.
+            // copied verbatim by design; only escapes must be well-formed.
             copy_string(chars, &mut i, &mut out);
         } else if let Some(close) = dialect.ident_close(c) {
             copy_quoted_ident(chars, &mut i, &mut out, c, close);
         } else if c == '-' && chars.get(i + 1) == Some(&'-') {
             // An unterminated top-level line comment (no trailing '\n') is
-            // copied verbatim by design — only escapes must be well-formed.
+            // copied verbatim by design; only escapes must be well-formed.
             copy_line_comment(chars, &mut i, &mut out);
         } else if c == '/' && chars.get(i + 1) == Some(&'*') {
             // Likewise for an unterminated block comment (no closing `*/`).
@@ -254,7 +254,7 @@ pub(crate) fn skip_string(chars: &[char], i: &mut usize) {
         *i += 1;
         if c == '\'' {
             if chars.get(*i) == Some(&'\'') {
-                *i += 1; // doubled quote — stays inside the string
+                *i += 1; // doubled quote: stays inside the string
             } else {
                 break; // closing quote
             }
@@ -271,7 +271,7 @@ pub(crate) fn skip_quoted_ident(chars: &[char], i: &mut usize, open: char, close
         if c == close {
             // A doubled close-quote escapes it, but only for symmetric quote
             // styles (`"..."`, `` `...` ``). Bracket identifiers (`[...]`) have
-            // no doubling — a `]` always closes them.
+            // no doubling, because a `]` always closes them.
             if open == close && chars.get(*i) == Some(&close) {
                 *i += 1;
             } else {
@@ -381,7 +381,7 @@ fn find_matching_brace(
 }
 
 /// Find the index of the `)` matching the `(` at `open`, skipping strings,
-/// quoted identifiers, comments and nested parentheses — the same
+/// quoted identifiers, comments and nested parentheses, with the same
 /// literal-awareness [`find_matching_brace`] has, so that a `)` inside
 /// `'a)b'`, `"a)b"` or `-- a)b` does not close the call.
 ///
@@ -452,7 +452,7 @@ fn translate_escape(
         .iter()
         .collect::<String>()
         .to_ascii_lowercase();
-    // `{?= call ...}` — the return-value stored-procedure form.
+    // `{?= call ...}`: the return-value stored-procedure form.
     let is_return_call = keyword.is_empty() && chars.get(kw_start) == Some(&'?');
 
     let close = find_matching_brace(chars, open, dialect)?;
@@ -472,7 +472,7 @@ fn translate_escape(
             }
             let name: String = chars[name_start..n].iter().collect();
             if name.is_empty() {
-                // malformed {fn} — copy verbatim
+                // malformed {fn}: copy verbatim
                 out.extend(chars[open..=close].iter().copied());
             } else {
                 match translate_call(chars, &name, n, close, dialect, depth)? {
@@ -521,7 +521,7 @@ fn translate_escape(
             ));
         }
         _ => {
-            // Unrecognized escape keyword — leave the whole {...} intact.
+            // Unrecognized escape keyword: leave the whole {...} intact.
             out.extend(chars[open..=close].iter().copied());
         }
     }
@@ -534,8 +534,8 @@ enum FnCall {
     /// The dialect rewrote the call. The string is the finished replacement.
     Rewritten(String),
     /// The dialect declined. The string is the already-translated remainder of
-    /// the escape — the parenthesized argument list and anything between the
-    /// closing paren and the `}` — so the caller can assemble the
+    /// the escape, meaning the parenthesized argument list and anything between
+    /// the closing paren and the `}`, so the caller can assemble the
     /// `remap_scalar_fn` form without translating that span a second time.
     Declined(String),
     /// Not a call: no balanced parenthesis pair follows the name. Nothing has
@@ -546,7 +546,7 @@ enum FnCall {
 /// Offer a `{fn NAME(args)}` call to [`EscapeDialect::rewrite_scalar_fn`].
 ///
 /// `name_end` is the index just past the function name, `close` the index of
-/// the escape's `}`. Errors propagate from translating the argument text — a
+/// the escape's `}`. Errors propagate from translating the argument text: a
 /// `{call ...}` nested inside an argument list must still fail with `HYC00`,
 /// not be silently swallowed.
 ///
@@ -558,7 +558,7 @@ enum FnCall {
 /// bounds the recursion but not the work, so it would set the exponent rather
 /// than cap it, and a few hundred bytes of nested `{fn}` would never finish.
 /// [`EscapeDialect::ansi_default`] declines every call, so that is the path a
-/// driver takes unless it implements `rewrite_scalar_fn` — and one that does is
+/// driver takes unless it implements `rewrite_scalar_fn`, and one that does is
 /// still on it for every name it declines.
 fn translate_call(
     chars: &[char],
@@ -653,7 +653,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // rewrite_scalar_fn — argument-aware scalar function rewriting
+    // rewrite_scalar_fn: argument-aware scalar function rewriting
     // ------------------------------------------------------------------
 
     /// A dialect that rewrites the shapes `remap_scalar_fn` cannot express:
@@ -726,7 +726,7 @@ mod tests {
 
     #[test]
     fn rewrite_scalar_fn_can_emit_a_bare_keyword_for_a_zero_argument_call() {
-        // No trailing "()" — the whole point: `current_date()` is a syntax
+        // No trailing "()", which is the point: `current_date()` is a syntax
         // error in the dialects that need this.
         assert_eq!(rtr("SELECT {fn CURDATE()}"), "SELECT current_date");
         assert_eq!(rtr("SELECT {fn USERNAME()}"), "SELECT current_user");
@@ -864,7 +864,7 @@ mod tests {
 
     // Skipped under Miri: 50 000 levels over a 250 KB input costs more than 16
     // minutes of interpreted execution, against a 30-minute budget for the whole
-    // `miri` CI job. Nothing is lost by skipping it — `escape.rs` contains no
+    // `miri` CI job. Nothing is lost by skipping it: `escape.rs` contains no
     // `unsafe` at all, so Miri has no undefined behaviour to find here, and the
     // three tests above already exercise the depth limit on both recursion paths
     // at `MAX_ESCAPE_DEPTH ± 1`. Same rationale as `--skip proptest`: the check
@@ -1014,7 +1014,7 @@ mod proptests {
 
     proptest! {
         // The escape scanner must never panic on any input, however malformed
-        // the escapes — a panic would cross the FFI boundary.
+        // the escapes, because a panic would cross the FFI boundary.
         #[test]
         fn translate_escapes_never_panics(s in ".*") {
             let _ = translate_escapes(&s, &EscapeDialect::ansi_default());

@@ -2,50 +2,50 @@
 //! code.
 //!
 //! Spec: <https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlgetinfo-function?view=sql-server-ver17>,
-//! "Information Type Descriptions" section — the alphabetical table listing
+//! "Information Type Descriptions" section, the alphabetical table listing
 //! every `InfoType`, the ODBC version it was introduced in, and its
 //! description. Every description opens by naming the value's shape: "A
 //! character string...", "An SQLUSMALLINT value...", or "An SQLUINTEGER
 //! value/bitmask/flag...". This module transcribes exactly that first
-//! sentence for every `InfoType` variant `odbc-sys` 0.31 compiles, nothing
-//! more — same spirit as [`crate::types::column_size`]'s appendix
+//! sentence for every `InfoType` variant `odbc-sys` compiles, nothing more,
+//! in the same spirit as [`crate::types::column_size`]'s appendix
 //! transcription.
 //!
 //! # Why this exists
 //!
-//! Three real, shipped bugs shared one shape: `SQLGetInfoW`'s
-//! backend-does-not-implement-this-type fallback
-//! (`info_type_default_response`, not exported from this module but the
-//! caller of [`expected_kind`]) returned a value for *every*
-//! unhandled info type without checking what shape that particular info type
-//! actually declares:
+//! `SQLGetInfoW`'s backend-does-not-implement-this-type fallback
+//! (`info_type_default_response`, not exported from this module but the caller
+//! of [`expected_kind`]) has to answer for *every* unhandled info type. Without
+//! the spec's own shape to consult, an answer is accidental rather than
+//! declared, and three shapes of mistake follow:
 //!
-//! - `SQL_CONVERT_GUID` (173) fell outside the numeric "all conversions
-//!   supported" range and got `U32(0)` — the exact value that makes the
-//!   Windows Driver Manager block `SQLGetData` with `HYC00`.
-//! - `SQL_ODBC_SQL_OPT_IEF`/`SQL_INTEGRITY` (73) is a `Y`/`N` *character
-//!   string*, but sat inside a numeric range and could receive
-//!   `U32(0xFFFFFFFF)` — an integer where an application expects a string.
-//! - `SQL_NUMERIC_FUNCTIONS`/`SQL_STRING_FUNCTIONS`/`SQL_SYSTEM_FUNCTIONS`/
+//! - **A numeric range that swallows a type outside it.** `SQL_CONVERT_GUID`
+//!   (173) falls outside the "all conversions supported" range, and `U32(0)` is
+//!   the value that makes the Windows Driver Manager block `SQLGetData` with
+//!   `HYC00`.
+//! - **A string-shaped type inside a numeric range.**
+//!   `SQL_ODBC_SQL_OPT_IEF`/`SQL_INTEGRITY` (73) is a `Y`/`N` *character
+//!   string*, so `U32(0xFFFFFFFF)` puts an integer where an application expects
+//!   a string.
+//! - **A bitmap read as the wrong bitmap.**
+//!   `SQL_NUMERIC_FUNCTIONS`/`SQL_STRING_FUNCTIONS`/`SQL_SYSTEM_FUNCTIONS`/
 //!   `SQL_TIMEDATE_FUNCTIONS` (49-52) are scalar-function bitmaps, not
-//!   conversion maps, and were claiming every scalar function was supported.
+//!   conversion maps, so an "all supported" answer claims scalar functions the
+//!   backend may not have.
 //!
-//! Nothing enumerated the spec, so the shape of the *default* answer for any
-//! given info type was accidental rather than declared. This table is what
-//! lets [`expected_kind`] be an **exhaustive** match over `InfoType` — adding
-//! a new `odbc-sys` variant without adding its shape here is a compile error,
-//! not a silently-missing test case.
+//! This table is what lets [`expected_kind`] be an **exhaustive** match over
+//! `InfoType`, so adding a new `odbc-sys` variant without adding its shape here
+//! is a compile error rather than a silently-missing test case.
 //!
 //! # Deriving the type list, not hand-copying it
 //!
 //! This module only supplies the *shape* half of the mapping. The *list* of
-//! `InfoType` values to check a shape for is deliberately not duplicated here
-//! as a second hand-maintained list — every caller derives it by scanning
-//! `0..=u16::MAX` through [`crate::types::info_type_from_raw`] and collecting
-//! the `Some` results (see `stackable-odbc-core`'s own `conformance` module and each
+//! `InfoType` values to check a shape for is not duplicated here as a second
+//! hand-maintained list. Every caller derives it by scanning `0..=u16::MAX`
+//! through [`crate::types::info_type_from_raw`] and collecting the `Some`
+//! results (see `stackable-odbc-core`'s own `conformance` module and each
 //! driver's FFI integration tests). A hand-maintained list of "info types
-//! someone thought to check" is the exact failure mode this table exists to
-//! close.
+//! someone thought to check" is the failure mode this table exists to close.
 
 use odbc_sys::InfoType;
 

@@ -25,18 +25,17 @@ use crate::utf16::{utf16_to_string, utf16_to_string_named, write_utf16};
 /// # The echo is verbatim, including credentials
 ///
 /// *OutConnectionString* carries whatever the application passed in, with any
-/// keywords resolved from a DSN merged in — so a `PWD=` or a driver-specific
-/// credential keyword comes back in cleartext. This is deliberate, and the
-/// reason is what the argument is *for*: the spec's own description is a
-/// "completed connection string", and applications persist it to reconnect
-/// without prompting again. Redacting it would hand back a string that no
-/// longer connects, which is a silent failure at the next startup rather than a
-/// visible one now.
+/// keywords resolved from a DSN merged in, so a `PWD=` or a driver-specific
+/// credential keyword comes back in cleartext. That is what the argument is
+/// *for*: the spec's own description is a "completed connection string", and
+/// applications persist it to reconnect without prompting again. Redacting it
+/// would hand back a string that no longer connects, which is a silent failure
+/// at the next startup rather than a visible one now.
 ///
 /// [`Backend::sensitive_connect_keywords`]
-/// does **not** govern this. It drives `Debug` redaction — see
-/// [`Redacted`](crate::types::Redacted) — which is a different threat: a log file is
-/// written to a path the application did not choose, is often collected
+/// does **not** govern this. It drives `Debug` redaction through
+/// [`Redacted`](crate::types::Redacted), which answers a different threat: a log
+/// file is written to a path the application did not choose, is often collected
 /// centrally, and is read by people who never had the credential. The echo goes
 /// back to the caller that supplied the string in the first place, so it
 /// discloses nothing that caller did not already hold.
@@ -44,7 +43,7 @@ use crate::utf16::{utf16_to_string, utf16_to_string_named, write_utf16};
 /// What follows from that split, for a driver author: a credential must be
 /// declared in `sensitive_connect_keywords` so it stays out of logs, and it
 /// will still appear in the echo. An application that persists
-/// *OutConnectionString* inherits responsibility for storing it as a secret —
+/// *OutConnectionString* inherits responsibility for storing it as a secret,
 /// the same responsibility it already had for the string it passed in.
 ///
 /// # Parameters
@@ -64,103 +63,104 @@ use crate::utf16::{utf16_to_string, utf16_to_string_named, write_utf16};
 ///
 /// # Spec compliance
 ///
-/// - 01000: General warning — not returned here (no driver-specific info messages produced).
-/// - 01004: String data, right-truncated — NOT returned here. When the echoed output connection
+/// - 01000: General warning. Not returned here (no driver-specific info messages produced).
+/// - 01004: String data, right-truncated. NOT returned here. When the echoed output connection
 ///   string does not fit the caller's buffer, this function still returns plain `SUCCESS` rather
 ///   than `SUCCESS_WITH_INFO`, because signalling truncation here drives a Windows Driver Manager
 ///   crash path; see inline comment.
-/// - 01S00: Invalid connection string attribute but driver connected anyway — not returned here
+/// - 01S00: Invalid connection string attribute but driver connected anyway. Not returned here
 ///   (unknown attributes are silently ignored by `ConnectParams::parse`).
-/// - 01S02: Option value changed — not returned here (no connection attribute substitution is
+/// - 01S02: Option value changed. Not returned here (no connection attribute substitution is
 ///   performed during connect).
-/// - 01S08: Error saving file DSN — not returned here, and the row carries no `(DM)`
+/// - 01S08: Error saving file DSN. Not returned here, and the row carries no `(DM)`
 ///   marker. The Comments section assigns the writing to the Driver Manager: a `SAVEFILE`
 ///   keyword makes the DM create the file DSN from the connection string this function
 ///   returns, so core never opens it and has no write to fail.
-/// - 01S09: Invalid keyword (SAVEFILE without DRIVER/FILEDSN) — (driver-manager-handled; not returned here).
-/// - 08001: Client unable to establish connection — returned by the backend via `B::connect`.
-/// - 08002: Connection name in use — the spec annotates this `(DM)`; it is guarded
+/// - 01S09: Invalid keyword, SAVEFILE without DRIVER/FILEDSN (driver-manager-handled; not returned here).
+/// - 08001: Client unable to establish connection. Returned by the backend via `B::connect`.
+/// - 08002: Connection name in use. The spec annotates this `(DM)`; it is guarded
 ///   defensively here. The check is `handle.connection.is_some()`, kept because core is
 ///   also linked without a Driver Manager in front of it, and because connecting twice
 ///   through one handle would leak the first connection.
-/// - 08004: Server rejected the connection — may be returned by the backend via `B::connect`.
-/// - 08S01: Communication link failure — not returned here; a failure while
+/// - 08004: Server rejected the connection. May be returned by the backend via `B::connect`.
+/// - 08S01: Communication link failure. Not returned here; a failure while
 ///   establishing the connection is 08001. 08S01 applies once the connection
 ///   exists (see AGENTS.md, "08001 versus 08S01").
-/// - 28000: Invalid authorization specification — may be returned by the backend via `B::connect`.
-/// - 3D000: Invalid catalog name — **absent from this function's diagnostics table**, yet
+/// - 28000: Invalid authorization specification. May be returned by the backend via `B::connect`.
+/// - 3D000: Invalid catalog name, **absent from this function's diagnostics table**, yet
 ///   returned by this driver. A `SQL_ATTR_CURRENT_CATALOG` set before connecting is applied here,
 ///   and [`crate::backend::Backend::set_current_catalog`] owes `3D000` for a catalog the data
 ///   source does not have. The state is propagated rather than degraded: telling the application
 ///   its connection failed for an unrelated reason would be worse than naming a state this table
 ///   omits. The spec notes interoperable applications set this attribute *before* connecting, so
 ///   this is the path that matters most.
-/// - HY000: General error — **returned by this driver** for any backend error with no
+/// - HY000: General error, **returned by this driver** for any backend error with no
 ///   specific SQLSTATE, which is the clause this row states without a `(DM)` marker. The
 ///   page prints two further `HY000` rows that *are* marked, both about a `FILEDSN`
 ///   keyword naming a `.dsn` file the Driver Manager could not find or read; core never
 ///   opens one.
-/// - HY001: Memory allocation failure — not returned here (Rust panics on alloc failure).
+/// - HY001: Memory allocation failure. Not returned here (Rust panics on alloc failure).
 /// - HY008: Operation canceled; not returned here. Cancelling a connection-level call needs
 ///   `SQLCancelHandle` on a connection handle, which this driver does not export, so no cancel
-///   token exists for this call to observe — `SQLCancel` takes a statement handle and cannot
+///   token exists for this call to observe. `SQLCancel` takes a statement handle and cannot
 ///   reach one. The asynchronous clause is likewise inapplicable: core never returns
 ///   `SQL_STILL_EXECUTING`.
-/// - HY009: Invalid use of null pointer — **absent from this function's diagnostics table**,
+/// - HY009: Invalid use of null pointer, **absent from this function's diagnostics table**,
 ///   yet returned by this driver when `in_connection_string` is null. A null string
 ///   argument reaches `utf16_to_string`, which reports `HY009` rather than reading through
 ///   it. The check is a soundness guard, not a spec check, and is kept for the reason
 ///   `SQLAllocHandle`'s `(DM)` guards are kept: core is also linked directly, with no
 ///   Driver Manager in front of it.
-/// - HY010: Function sequence error (async in progress) — (driver-manager-handled; not returned here).
-/// - HY013: Memory management error — not returned here (Rust panics on alloc failure).
-/// - HY090: Invalid string or buffer length — returned when `string_length1 < 0 && != SQL_NTS`,
+/// - HY010: Function sequence error, async in progress (driver-manager-handled; not returned here).
+/// - HY013: Memory management error. Not returned here (Rust panics on alloc failure).
+/// - HY090: Invalid string or buffer length, returned when `string_length1 < 0 && != SQL_NTS`,
 ///   or when `buffer_length < 0`. Note: spec marks the row's own clauses as `(DM)`, but they
 ///   are checked here as a defence-in-depth guard when called outside a full Driver Manager
 ///   stack. **Also returned** for a condition the row does not state: `InConnectionString`
 ///   passed as `SQL_NTS` with no null terminator within `MAX_NTS_SCAN` (1 048 576) code units,
 ///   which is a length the driver cannot determine. It is this function's only `SQL_NTS`
 ///   argument, so that is the whole set. A truncated connection string is quieter than a
-///   truncated statement — `ConnectParams` parses whatever it is handed — so the connect
-///   proceeded against a *different data source* than the application named. See
+///   truncated statement, since `ConnectParams` parses whatever it is handed, so the connect
+///   would proceed against a *different data source* than the application named. See
 ///   `driver_connect_refuses_an_nts_connection_string_that_runs_to_the_scan_cap`.
-/// - HY092: Invalid attribute/option identifier — (driver-manager-handled; not returned here).
-/// - HY110: Invalid driver completion — (driver-manager-handled; not returned here). Both
+/// - HY092: Invalid attribute/option identifier (driver-manager-handled; not returned here).
+/// - HY110: Invalid driver completion (driver-manager-handled; not returned here). Both
 ///   clauses of this row carry `(DM)`, so an unrecognised *DriverCompletion* is accepted
 ///   here and treated as permitting a prompt rather than rejected; see `prompter_for`.
-/// - IM007: No data source or driver specified, dialog prohibited — not returned here. Core
+/// - IM007: No data source or driver specified, dialog prohibited. Not returned here. Core
 ///   puts up no dialog of its own, and a backend that cannot connect without one reports its
 ///   own failure through `B::connect`.
-/// - IM008: Dialog failed — not returned here. Core never calls
+/// - IM008: Dialog failed. Not returned here. Core never calls
 ///   [`Prompter::present_url`](crate::prompt::Prompter::present_url); a driver whose prompt
 ///   fails maps that itself, inside `B::connect`.
-/// - HYC00: Optional feature not implemented — **returned by this driver**, but only from a
+/// - HYC00: Optional feature not implemented, **returned by this driver**, but only from a
 ///   connection attribute set before the connect. Core applies those here (see
-///   `apply_pending_connect_attrs`), and an unimplemented hook — most often the defaulted
-///   [`crate::backend::Backend::set_current_catalog`] — reports `HYC00`, which fails the connect
-///   and tears it down. Nothing in the connect path itself produces it.
-/// - HYT00: Login timeout expired — not returned here (login timeout not enforced).
-/// - HYT01: Connection timeout expired — not returned here (connection timeout not enforced).
-/// - S1118: Driver does not support asynchronous notification — not returned here, and the
+///   `apply_pending_connect_attrs`), and an unimplemented hook reports `HYC00`, which fails
+///   the connect and tears it down. The usual one is the defaulted
+///   [`crate::backend::Backend::set_current_catalog`]. Nothing in the connect path itself
+///   produces it.
+/// - HYT00: Login timeout expired. Not returned here (login timeout not enforced).
+/// - HYT01: Connection timeout expired. Not returned here (connection timeout not enforced).
+/// - S1118: Driver does not support asynchronous notification. Not returned here, and the
 ///   row carries no `(DM)` marker. Core implements no connection-level asynchronous
 ///   notification, so an application has no way to ask for it and nothing to be refused.
-/// - IM001–IM006: Driver Manager internal codes — (driver-manager-handled; not returned
+/// - IM001–IM006: Driver Manager internal codes (driver-manager-handled; not returned
 ///   here). Core resolves a DSN through `merge_dsn_params` and never loads, translates or
 ///   negotiates with another driver, so none of the block's conditions can arise in it.
-/// - IM009: Unable to load translation DLL — not returned here, and the row carries no
+/// - IM009: Unable to load translation DLL. Not returned here, and the row carries no
 ///   `(DM)` marker. Core loads no translation DLL: it implements no
 ///   `SQL_ATTR_TRANSLATE_LIB`, so there is nothing to fail to load.
-/// - IM010–IM012: Driver Manager internal codes — (driver-manager-handled; not returned
+/// - IM010–IM012: Driver Manager internal codes (driver-manager-handled; not returned
 ///   here).
-/// - IM014: Invalid name of File DSN — (driver-manager-handled; not returned here).
-/// - IM015: Driver's SQLDriverConnect on SQL_HANDLE_DBC_INFO_TOKEN failed — not returned
+/// - IM014: Invalid name of File DSN (driver-manager-handled; not returned here).
+/// - IM015: Driver's SQLDriverConnect on SQL_HANDLE_DBC_INFO_TOKEN failed. Not returned
 ///   here, and the row carries no `(DM)` marker. Core exports no
 ///   `SQL_HANDLE_DBC_INFO_TOKEN` entry point, so the call this row describes cannot be
 ///   made against it.
 /// - IM017: Polling disabled; not returned here (the asynchronous notification model is not
-///   supported — not DM-annotated in the spec).
+///   supported, not DM-annotated in the spec).
 /// - IM018: SQLCompleteAsync not called; not returned here (the asynchronous notification
-///   model is not supported — not DM-annotated in the spec).
+///   model is not supported, not DM-annotated in the spec).
 ///
 /// # Safety
 ///
@@ -258,9 +258,8 @@ pub unsafe fn sql_driver_connect_w<B: Backend>(
                     // told the connect failed, and this teardown error would
                     // replace the actual reason. It is worth a line because a
                     // failed teardown here can leak a session on the server that
-                    // no SQLDisconnect will ever reclaim — the application never
-                    // got a live connection to disconnect. Loggable at all only
-                    // because `Backend::Error` is now bounded by `std::error::Error`.
+                    // no SQLDisconnect will ever reclaim, since the application
+                    // never got a live connection to disconnect.
                     if let Err(teardown) = B::disconnect(&mut c) {
                         tracing::warn!(
                             "disconnect failed while unwinding a half-open connection; \
@@ -274,8 +273,8 @@ pub unsafe fn sql_driver_connect_w<B: Backend>(
             // An abandoned browse leaves accumulated attributes on the handle,
             // and `SQLBrowseConnectW` merges them into whatever the next browse
             // supplies. Connecting by any route ends that sequence, so the state
-            // goes with it — `SQLBrowseConnectW` does the same on its own
-            // success path.
+            // goes with it. `SQLBrowseConnectW` does the same on its own success
+            // path.
             handle.browse_request = None;
 
             if !out_connection_string.is_null() {
@@ -318,74 +317,74 @@ pub unsafe fn sql_driver_connect_w<B: Backend>(
 ///
 /// # Spec compliance
 ///
-/// - 01000: General warning — not returned here (no driver-specific info messages produced).
-/// - 01S02: Option value changed — not returned here (no connection attribute substitution is
+/// - 01000: General warning. Not returned here (no driver-specific info messages produced).
+/// - 01S02: Option value changed. Not returned here (no connection attribute substitution is
 ///   performed during connect).
-/// - 08001: Client unable to establish connection — returned by the backend via `B::connect`.
-/// - 08002: Connection name in use — the spec annotates this `(DM)`; it is guarded
+/// - 08001: Client unable to establish connection. Returned by the backend via `B::connect`.
+/// - 08002: Connection name in use. The spec annotates this `(DM)`; it is guarded
 ///   defensively here. The check is `handle.connection.is_some()`, kept because core is
 ///   also linked without a Driver Manager in front of it, and because connecting twice
 ///   through one handle would leak the first connection.
-/// - 08004: Server rejected the connection — may be returned by the backend via `B::connect`.
-/// - 08S01: Communication link failure — not returned here; a failure while
+/// - 08004: Server rejected the connection. May be returned by the backend via `B::connect`.
+/// - 08S01: Communication link failure. Not returned here; a failure while
 ///   establishing the connection is 08001. 08S01 applies once the connection
 ///   exists (see AGENTS.md, "08001 versus 08S01").
-/// - 28000: Invalid authorization specification — may be returned by the backend via `B::connect`.
-/// - 3D000: Invalid catalog name — **absent from this function's diagnostics table**, yet
+/// - 28000: Invalid authorization specification. May be returned by the backend via `B::connect`.
+/// - 3D000: Invalid catalog name, **absent from this function's diagnostics table**, yet
 ///   returned by this driver. A `SQL_ATTR_CURRENT_CATALOG` set before connecting is applied here,
 ///   and [`crate::backend::Backend::set_current_catalog`] owes `3D000` for a catalog the data
 ///   source does not have. The state is propagated rather than degraded: telling the application
 ///   its connection failed for an unrelated reason would be worse than naming a state this table
 ///   omits. The spec notes interoperable applications set this attribute *before* connecting, so
 ///   this is the path that matters most.
-/// - HY000: General error — returned for any backend error with no specific SQLSTATE.
-/// - HY001: Memory allocation failure — (driver-manager-handled; not returned here).
+/// - HY000: General error. Returned for any backend error with no specific SQLSTATE.
+/// - HY001: Memory allocation failure (driver-manager-handled; not returned here).
 /// - HY008: Operation canceled; not returned here. Cancelling a connection-level call needs
 ///   `SQLCancelHandle` on a connection handle, which this driver does not export, so no cancel
-///   token exists for this call to observe — `SQLCancel` takes a statement handle and cannot
+///   token exists for this call to observe. `SQLCancel` takes a statement handle and cannot
 ///   reach one. The asynchronous clause is likewise inapplicable: core never returns
 ///   `SQL_STILL_EXECUTING`.
-/// - HY010: Function sequence error (async in progress) — (driver-manager-handled; not returned here).
-/// - HY013: Memory management error — not returned here (Rust panics on alloc failure).
-/// - HY090: Invalid string or buffer length — both clauses of this row are `(DM)`-marked;
+/// - HY010: Function sequence error, async in progress (driver-manager-handled; not returned here).
+/// - HY013: Memory management error. Not returned here (Rust panics on alloc failure).
+/// - HY090: Invalid string or buffer length. Both clauses of this row are `(DM)`-marked;
 ///   the first is guarded defensively here, returning `HY090` when `name_length1`,
 ///   `name_length2` or `name_length3` is negative and not equal to `SQL_NTS` (-3). The
 ///   second, a data source name over the maximum length, is not: core declares no maximum.
 ///
 ///   **Also returned here**, for a condition neither clause states: any of `ServerName`,
-///   `UserName` or `Authentication` — all three, and no other argument — passed as
+///   `UserName` or `Authentication`, all three and no other argument, passed as
 ///   `SQL_NTS` with no null terminator within `MAX_NTS_SCAN` (1 048 576) code units, which is a
 ///   length the driver cannot determine. The diagnostic names which of the three it was. The
-///   two credential arguments were read inside `if let Ok(..)` and so *discarded* the error:
-///   a swallowed overrun connected with whatever credentials the DSN supplied, under a
+///   two credential arguments propagate that error rather than discarding it, because a
+///   swallowed overrun would connect with whatever credentials the DSN supplied, under a
 ///   *UserName* the application believed it had passed. See
 ///   `connect_refuses_an_nts_credential_that_runs_to_the_scan_cap`.
-/// - HYT00: Login timeout expired — not returned here (login timeout not enforced).
-/// - HY114: Driver does not support connection-level async — (driver-manager-handled; not returned here).
-/// - HYT01: Connection timeout expired — not returned here (connection timeout not enforced).
-/// - S1118: Driver does not support asynchronous notification — not returned here, and the
+/// - HYT00: Login timeout expired. Not returned here (login timeout not enforced).
+/// - HY114: Driver does not support connection-level async (driver-manager-handled; not returned here).
+/// - HYT01: Connection timeout expired. Not returned here (connection timeout not enforced).
+/// - S1118: Driver does not support asynchronous notification. Not returned here, and the
 ///   row carries no `(DM)` marker. Core implements no connection-level asynchronous
 ///   notification, so an application has no way to ask for it and nothing to be refused.
-/// - IM001–IM005: Driver Manager internal codes — (driver-manager-handled; not returned
+/// - IM001–IM005: Driver Manager internal codes (driver-manager-handled; not returned
 ///   here). Core resolves a DSN through `merge_dsn_params` and never loads, translates or
 ///   negotiates with another driver, so none of the block's conditions can arise in it.
-/// - IM006: Driver's SQLSetConnectAttr failed — not returned here, and the row carries no
+/// - IM006: Driver's SQLSetConnectAttr failed. Not returned here, and the row carries no
 ///   `(DM)` marker. Core calls no other driver's `SQLSetConnectAttr`; a connection
 ///   attribute set before connecting is applied through a `Backend` hook, whose failure is
 ///   propagated with the hook's own state.
-/// - IM009: Unable to load translation DLL — not returned here, and the row carries no
+/// - IM009: Unable to load translation DLL. Not returned here, and the row carries no
 ///   `(DM)` marker. Core loads no translation DLL: it implements no
 ///   `SQL_ATTR_TRANSLATE_LIB`, so there is nothing to fail to load.
-/// - IM010: Data source name too long — (driver-manager-handled; not returned here).
-/// - IM014: Invalid name of File DSN — (driver-manager-handled; not returned here).
-/// - IM015: Driver's SQLDriverConnect on SQL_HANDLE_DBC_INFO_TOKEN failed — not returned
+/// - IM010: Data source name too long (driver-manager-handled; not returned here).
+/// - IM014: Invalid name of File DSN (driver-manager-handled; not returned here).
+/// - IM015: Driver's SQLDriverConnect on SQL_HANDLE_DBC_INFO_TOKEN failed. Not returned
 ///   here, and the row carries no `(DM)` marker. Core exports no
 ///   `SQL_HANDLE_DBC_INFO_TOKEN` entry point, so the call this row describes cannot be
 ///   made against it.
 /// - IM017: Polling disabled; not returned here (the asynchronous notification model is not
-///   supported — not DM-annotated in the spec).
+///   supported, not DM-annotated in the spec).
 /// - IM018: SQLCompleteAsync not called; not returned here (the asynchronous notification
-///   model is not supported — not DM-annotated in the spec).
+///   model is not supported, not DM-annotated in the spec).
 ///
 /// # Safety
 ///
@@ -456,12 +455,12 @@ pub unsafe fn sql_connect_w<B: Backend>(
             let mut params: ConnectParams = dsn_keys.into_iter().collect();
             // The DSN *name* is not among the DSN's keys. `read_dsn_keys`
             // enumerates the odbc.ini section, and a section lists the keywords
-            // inside it, never its own heading — so without this the one
-            // parameter this entry point is named for was the one a backend
-            // could not see, and `ConnectParams::dsn()` answered `None` on the
-            // exact path where the spec makes the value load-bearing:
+            // inside it, never its own heading, so it has to be inserted here.
+            // Without it a backend cannot see the one parameter this entry
+            // point is named for, and `ConnectParams::dsn()` answers `None` on
+            // the exact path where the spec makes the value load-bearing:
             // `SQL_DATA_SOURCE_NAME` "is the value of the *ServerName* argument
-            // in SQLConnect". `SQLDriverConnectW` has always had it, because
+            // in SQLConnect". `SQLDriverConnectW` needs no such insert, because
             // `merge_dsn_params` merges the file's keys *under* a connection
             // string that already carried `DSN=`.
             //
@@ -519,9 +518,8 @@ pub unsafe fn sql_connect_w<B: Backend>(
                     // told the connect failed, and this teardown error would
                     // replace the actual reason. It is worth a line because a
                     // failed teardown here can leak a session on the server that
-                    // no SQLDisconnect will ever reclaim — the application never
-                    // got a live connection to disconnect. Loggable at all only
-                    // because `Backend::Error` is now bounded by `std::error::Error`.
+                    // no SQLDisconnect will ever reclaim, since the application
+                    // never got a live connection to disconnect.
                     if let Err(teardown) = B::disconnect(&mut c) {
                         tracing::warn!(
                             "disconnect failed while unwinding a half-open connection; \
@@ -535,8 +533,8 @@ pub unsafe fn sql_connect_w<B: Backend>(
             // An abandoned browse leaves accumulated attributes on the handle,
             // and `SQLBrowseConnectW` merges them into whatever the next browse
             // supplies. Connecting by any route ends that sequence, so the state
-            // goes with it — `SQLBrowseConnectW` does the same on its own
-            // success path.
+            // goes with it. `SQLBrowseConnectW` does the same on its own success
+            // path.
             handle.browse_request = None;
 
             Ok(SqlReturn::SUCCESS)
@@ -571,78 +569,79 @@ pub unsafe fn sql_connect_w<B: Backend>(
 ///
 /// # Spec compliance
 ///
-/// - 01000: General warning — not returned here (no driver-specific info messages produced).
-/// - 01004: String data, right truncated — not returned here; output truncation is silently
+/// - 01000: General warning. Not returned here (no driver-specific info messages produced).
+/// - 01004: String data, right truncated. Not returned here; output truncation is silently
 ///   accepted (same rationale as `SQLDriverConnectW`: avoiding a Windows DM crash path).
-/// - 01S00: Invalid connection string attribute — not returned here (unknown attributes are
+/// - 01S00: Invalid connection string attribute. Not returned here (unknown attributes are
 ///   silently ignored by `ConnectParams::parse`).
-/// - 01S02: Option value changed — not returned here (no attribute substitution at connect time).
-/// - 08001: Client unable to establish connection — returned by the backend via `B::connect`.
-/// - 08002: Connection name in use — the spec annotates this `(DM)`; it is guarded
+/// - 01S02: Option value changed. Not returned here (no attribute substitution at connect time).
+/// - 08001: Client unable to establish connection. Returned by the backend via `B::connect`.
+/// - 08002: Connection name in use. The spec annotates this `(DM)`; it is guarded
 ///   defensively here. The check is `handle.connection.is_some()`, kept because core is
 ///   also linked without a Driver Manager in front of it, and because connecting twice
 ///   through one handle would leak the first connection.
-/// - 08004: Server rejected the connection — may be returned by the backend via `B::connect`.
-/// - 08S01: Communication link failure — not returned here; a failure while
+/// - 08004: Server rejected the connection. May be returned by the backend via `B::connect`.
+/// - 08S01: Communication link failure. Not returned here; a failure while
 ///   establishing the connection is 08001. 08S01 applies once the connection
 ///   exists (see AGENTS.md, "08001 versus 08S01").
-/// - 28000: Invalid authorization specification — may be returned by the backend via `B::connect`.
-/// - 3D000: Invalid catalog name — **absent from this function's diagnostics table**, yet
+/// - 28000: Invalid authorization specification. May be returned by the backend via `B::connect`.
+/// - 3D000: Invalid catalog name, **absent from this function's diagnostics table**, yet
 ///   returned by this driver. A `SQL_ATTR_CURRENT_CATALOG` set before connecting is applied here,
 ///   and [`crate::backend::Backend::set_current_catalog`] owes `3D000` for a catalog the data
 ///   source does not have. The state is propagated rather than degraded: telling the application
 ///   its connection failed for an unrelated reason would be worse than naming a state this table
 ///   omits. The spec notes interoperable applications set this attribute *before* connecting, so
 ///   this is the path that matters most.
-/// - HY000: General error — returned for any backend error with no specific SQLSTATE.
-/// - HY001: Memory allocation failure — every clause of this row is `(DM)`
+/// - HY000: General error. Returned for any backend error with no specific SQLSTATE.
+/// - HY001: Memory allocation failure. Every clause of this row is `(DM)`
 ///   (driver-manager-handled; not returned here). It could not arise anyway: Rust's
 ///   allocator aborts on OOM rather than returning an error.
 /// - HY008: Operation canceled; not returned here. Cancelling a connection-level call needs
 ///   `SQLCancelHandle` on a connection handle, which this driver does not export, so no cancel
-///   token exists for this call to observe — `SQLCancel` takes a statement handle and cannot
+///   token exists for this call to observe. `SQLCancel` takes a statement handle and cannot
 ///   reach one. The asynchronous clause is likewise inapplicable: core never returns
 ///   `SQL_STILL_EXECUTING`.
-/// - HY009: Invalid use of null pointer — **absent from this function's diagnostics table**,
+/// - HY009: Invalid use of null pointer, **absent from this function's diagnostics table**,
 ///   yet returned by this driver when `in_connection_string` is null, for the reason
 ///   `SQLDriverConnectW`'s identical guard gives.
-/// - HY010: Function sequence error (async in progress) — (driver-manager-handled; not returned here).
-/// - HY013: Memory management error — not returned here (Rust panics on alloc failure).
-/// - HY090: Invalid string or buffer length — returned when `string_length1 < 0 && != SQL_NTS`,
+/// - HY010: Function sequence error, async in progress (driver-manager-handled; not returned here).
+/// - HY013: Memory management error. Not returned here (Rust panics on alloc failure).
+/// - HY090: Invalid string or buffer length, returned when `string_length1 < 0 && != SQL_NTS`,
 ///   or when `buffer_length < 0`. Note: spec marks these as `(DM)`, but checked here as
 ///   defence-in-depth when called outside a full Driver Manager stack. **Also returned** for
 ///   a condition the row does not state: `InConnectionString` passed as `SQL_NTS` with no
 ///   null terminator within `MAX_NTS_SCAN` (1 048 576) code units, which is a length the driver
 ///   cannot determine. It is this function's only `SQL_NTS` argument, so that is the whole
-///   set. The scanned prefix used to be browsed with instead, so the browse round-tripped
-///   against a *different data source* than the application named. See
+///   set. Browsing with the scanned prefix instead would round-trip against a *different
+///   data source* than the application named. See
 ///   `browse_connect_refuses_an_nts_connection_string_that_runs_to_the_scan_cap`.
-/// - HYC00: Optional feature not implemented — **absent from this function's diagnostics
+/// - HYC00: Optional feature not implemented, **absent from this function's diagnostics
 ///   table**, yet returned by this driver, but only from a
 ///   connection attribute set before the connect. Core applies those here (see
-///   `apply_pending_connect_attrs`), and an unimplemented hook — most often the defaulted
-///   [`crate::backend::Backend::set_current_catalog`] — reports `HYC00`, which fails the connect
-///   and tears it down. Nothing in the connect path itself produces it.
-/// - HYT00: Login timeout expired — not returned here (login timeout not enforced).
-/// - HYT01: Connection timeout expired — not returned here (connection timeout not enforced).
-/// - HY114: Driver does not support connection-level asynchronous function execution —
+///   `apply_pending_connect_attrs`), and an unimplemented hook reports `HYC00`, which fails
+///   the connect and tears it down. The usual one is the defaulted
+///   [`crate::backend::Backend::set_current_catalog`]. Nothing in the connect path itself
+///   produces it.
+/// - HYT00: Login timeout expired. Not returned here (login timeout not enforced).
+/// - HYT01: Connection timeout expired. Not returned here (connection timeout not enforced).
+/// - HY114: Driver does not support connection-level asynchronous function execution
 ///   (driver-manager-handled; not returned here).
-/// - S1118: Driver does not support asynchronous notification — not returned here, and the
+/// - S1118: Driver does not support asynchronous notification. Not returned here, and the
 ///   row carries no `(DM)` marker. Core implements no connection-level asynchronous
 ///   notification, so an application has no way to ask for it and nothing to be refused.
-/// - IM001–IM006: Driver Manager internal codes — (driver-manager-handled; not returned
+/// - IM001–IM006: Driver Manager internal codes (driver-manager-handled; not returned
 ///   here). Core resolves a DSN through `merge_dsn_params` and never loads, translates or
 ///   negotiates with another driver, so none of the block's conditions can arise in it.
-/// - IM009: Unable to load translation DLL — not returned here, and the row carries no
+/// - IM009: Unable to load translation DLL. Not returned here, and the row carries no
 ///   `(DM)` marker. Core loads no translation DLL: it implements no
 ///   `SQL_ATTR_TRANSLATE_LIB`, so there is nothing to fail to load.
-/// - IM010–IM012: Driver Manager internal codes — (driver-manager-handled; not returned
+/// - IM010–IM012: Driver Manager internal codes (driver-manager-handled; not returned
 ///   here).
-/// - IM014: Invalid name of File DSN — (driver-manager-handled; not returned here).
+/// - IM014: Invalid name of File DSN (driver-manager-handled; not returned here).
 /// - IM017: Polling disabled; not returned here (the asynchronous notification model is not
-///   supported — not DM-annotated in the spec).
+///   supported, not DM-annotated in the spec).
 /// - IM018: SQLCompleteAsync not called; not returned here (the asynchronous notification
-///   model is not supported — not DM-annotated in the spec).
+///   model is not supported, not DM-annotated in the spec).
 ///
 /// # Safety
 ///
@@ -773,9 +772,8 @@ pub unsafe fn sql_browse_connect_w<B: Backend>(
                     // told the connect failed, and this teardown error would
                     // replace the actual reason. It is worth a line because a
                     // failed teardown here can leak a session on the server that
-                    // no SQLDisconnect will ever reclaim — the application never
-                    // got a live connection to disconnect. Loggable at all only
-                    // because `Backend::Error` is now bounded by `std::error::Error`.
+                    // no SQLDisconnect will ever reclaim, since the application
+                    // never got a live connection to disconnect.
                     if let Err(teardown) = B::disconnect(&mut c) {
                         tracing::warn!(
                             "disconnect failed while unwinding a half-open connection; \
@@ -789,7 +787,7 @@ pub unsafe fn sql_browse_connect_w<B: Backend>(
 
             // Write the complete connection string to the output buffer.
             //
-            // Truncation is deliberately not reported, for the reason given in
+            // Truncation is not reported, for the reason given in
             // `sql_driver_connect_w`: returning SQL_SUCCESS_WITH_INFO for a
             // truncated output connection string sends the Windows Driver
             // Manager down a diagnostic-retrieval path that crashes. The
@@ -822,8 +820,8 @@ pub unsafe fn sql_browse_connect_w<B: Backend>(
 /// they would come to disagree.
 ///
 /// `completion` is `None` when the entry point has no *DriverCompletion*
-/// argument — `SQLConnect` and `SQLBrowseConnect` — or when the value did not
-/// name a flag. Both are read as permitting a prompt:
+/// argument, which is the case for `SQLConnect` and `SQLBrowseConnect`, or when
+/// the value did not name a flag. Both are read as permitting a prompt:
 ///
 /// - `SQLConnect` is the DSN path, which is how `isql` and Excel connect, so
 ///   they are the likeliest interactive callers of the whole driver. Reading
@@ -837,9 +835,9 @@ pub unsafe fn sql_browse_connect_w<B: Backend>(
 ///   error the spec assigns elsewhere.
 ///
 /// Only `SQL_DRIVER_NOPROMPT` forbids prompting. `SQL_DRIVER_COMPLETE`,
-/// `SQL_DRIVER_PROMPT` and `SQL_DRIVER_COMPLETE_REQUIRED` all permit it — the
-/// spec's Driver Guidelines describe the driver putting up a dialog under each
-/// of the three.
+/// `SQL_DRIVER_PROMPT` and `SQL_DRIVER_COMPLETE_REQUIRED` all permit it, because
+/// the spec's Driver Guidelines describe the driver putting up a dialog under
+/// each of the three.
 fn prompter_for<B: Backend>(
     completion: Option<DriverConnectOption>,
 ) -> Option<Arc<dyn crate::prompt::Prompter>> {
@@ -976,35 +974,35 @@ fn read_dsn_keys(dsn: &str) -> Vec<(String, String)> {
 ///
 /// # Spec compliance
 ///
-/// - 01000: General warning — not returned here (no driver-specific info messages).
-/// - 01002: Disconnect error (warning: error during disconnect but disconnect succeeded) — not
+/// - 01000: General warning. Not returned here (no driver-specific info messages).
+/// - 01002: Disconnect error (warning: error during disconnect but disconnect succeeded). Not
 ///   returned here; the backend `disconnect` API is all-or-nothing (either succeeds or returns
 ///   an error). Returning 01002 would require a two-phase disconnect API. Deferred.
-/// - 08003: Connection not open — returned when the handle holds neither a
+/// - 08003: Connection not open. Returned when the handle holds neither a
 ///   connection nor an in-progress browse. Note: spec marks this as `(DM)`, but
-///   it is also checked here as a defence-in-depth guard. It is deliberately
-///   **not** returned during a browse: the spec's Comments section requires this
-///   function to cancel the browse and return the connection to an unconnected
-///   state, and `SQLBrowseConnect` names it as the only way to do so.
-/// - 25000: Invalid transaction state — not returned here.
+///   it is also checked here as a defence-in-depth guard. It is **not** returned
+///   during a browse: the spec's Comments section requires this function to
+///   cancel the browse and return the connection to an unconnected state, and
+///   `SQLBrowseConnect` names it as the only way to do so.
+/// - 25000: Invalid transaction state. Not returned here.
 ///   Returning 25000 would require a `has_active_transaction` flag on `ConnectionHandle`,
 ///   which is not currently tracked. Deferred.
-/// - HY000: General error — returned for any backend `disconnect` error with no specific SQLSTATE.
-/// - HY001: Memory allocation failure — not returned here (Rust panics on alloc failure).
+/// - HY000: General error. Returned for any backend `disconnect` error with no specific SQLSTATE.
+/// - HY001: Memory allocation failure. Not returned here (Rust panics on alloc failure).
 /// - HY008: Operation canceled; not returned here. Cancelling a connection-level call needs
 ///   `SQLCancelHandle` on a connection handle, which this driver does not export, so no cancel
-///   token exists for this call to observe — `SQLCancel` takes a statement handle and cannot
+///   token exists for this call to observe. `SQLCancel` takes a statement handle and cannot
 ///   reach one. The asynchronous clause is likewise inapplicable: core never returns
 ///   `SQL_STILL_EXECUTING`.
-/// - HY010: Function sequence error (async in progress) — (driver-manager-handled; not returned here).
-/// - HY013: Memory management error — not returned here (Rust panics on alloc failure).
-/// - HY117: Connection suspended due to unknown transaction state — (driver-manager-handled; not returned here).
-/// - HYT01: Connection timeout expired — not returned here (connection timeout not enforced).
-/// - IM001: Driver does not support this function — (driver-manager-handled; not returned here).
+/// - HY010: Function sequence error, async in progress (driver-manager-handled; not returned here).
+/// - HY013: Memory management error. Not returned here (Rust panics on alloc failure).
+/// - HY117: Connection suspended due to unknown transaction state (driver-manager-handled; not returned here).
+/// - HYT01: Connection timeout expired. Not returned here (connection timeout not enforced).
+/// - IM001: Driver does not support this function (driver-manager-handled; not returned here).
 /// - IM017: Polling disabled; not returned here (the asynchronous notification model is not
-///   supported — not DM-annotated in the spec).
+///   supported, not DM-annotated in the spec).
 /// - IM018: SQLCompleteAsync not called; not returned here (the asynchronous notification
-///   model is not supported — not DM-annotated in the spec).
+///   model is not supported, not DM-annotated in the spec).
 ///
 /// # Safety
 ///
@@ -1022,7 +1020,7 @@ pub unsafe fn sql_disconnect<B: Backend>(connection_handle: *mut c_void) -> SqlR
             let handle = scope.get::<ConnectionHandle<B>>(connection_handle)?;
             handle.diagnostics.clear();
 
-            // Spec 08003: Connection not open — except during a browse.
+            // Spec 08003: Connection not open, except during a browse.
             let Some(ref mut conn) = handle.connection else {
                 // Spec (Comments): "If an application calls SQLDisconnect after
                 // SQLBrowseConnect returns SQL_NEED_DATA and before it returns
@@ -1097,40 +1095,40 @@ pub unsafe fn sql_disconnect<B: Backend>(connection_handle: *mut c_void) -> SqlR
 ///
 /// # Spec compliance
 ///
-/// - 01000: General warning — not returned here (no driver-specific info messages).
-/// - 01004: String data, right truncated — returned as `SUCCESS_WITH_INFO` when the output
+/// - 01000: General warning. Not returned here (no driver-specific info messages).
+/// - 01004: String data, right truncated. Returned as `SUCCESS_WITH_INFO` when the output
 ///   buffer is too small to hold the translated SQL string.
-/// - 08003: Connection not open — returned when `handle.connection` is `None`.
-/// - 08S01: Communication link failure — not returned here (no network I/O in NativeSql).
-/// - 22007: Invalid datetime format — not returned here (date/time escapes are rendered
+/// - 08003: Connection not open. Returned when `handle.connection` is `None`.
+/// - 08S01: Communication link failure. Not returned here (no network I/O in NativeSql).
+/// - 22007: Invalid datetime format. Not returned here (date/time escapes are rendered
 ///   as literal text by the dialect's `render_date`/`render_time`/`render_timestamp`,
 ///   not validated).
-/// - 24000: Invalid cursor state — not returned here (no cursor involvement in NativeSql).
-/// - HY000: General error — returned for unexpected errors, including escape-translation
+/// - 24000: Invalid cursor state. Not returned here (no cursor involvement in NativeSql).
+/// - HY000: General error. Returned for unexpected errors, including escape-translation
 ///   failures from `crate::escape::translate_escapes` (an unsupported `{call ...}`/
 ///   `{?= call ...}` stored-procedure escape, or an unterminated/malformed escape
 ///   sequence). Unlike `SQLExecDirectW`/`SQLPrepareW`, the SQLNativeSql diagnostics
 ///   table has no `42000` or `HYC00` entries, so those cases are reported as `HY000`
 ///   here rather than propagating the codes `translate_escapes` uses elsewhere.
-/// - HY001: Memory allocation failure — not returned here (Rust panics on alloc failure).
-/// - HY009: Invalid use of null pointer — the spec annotates this `(DM)`, and its single
+/// - HY001: Memory allocation failure. Not returned here (Rust panics on alloc failure).
+/// - HY009: Invalid use of null pointer. The spec annotates this `(DM)`, and its single
 ///   clause is a null `InStatementText`; it is guarded defensively here, because a null
 ///   pointer that reaches `utf16_to_string` is a soundness question rather than a spec one.
-/// - HY010: Function sequence error (async in progress) — (driver-manager-handled; not returned here).
-/// - HY013: Memory management error — not returned here (Rust panics on alloc failure).
-/// - HY090: Invalid string or buffer length — every clause of this row is `(DM)`, and it is
+/// - HY010: Function sequence error, async in progress (driver-manager-handled; not returned here).
+/// - HY013: Memory management error. Not returned here (Rust panics on alloc failure).
+/// - HY090: Invalid string or buffer length. Every clause of this row is `(DM)`, and it is
 ///   guarded defensively here for the reason `HY009` gives: returned when
 ///   `text_length1 < 0 && != SQL_NTS`, or when `buffer_length < 0` and `out_statement_text`
 ///   is not null. **Also returned** for `InStatementText` passed as `SQL_NTS` with no null
-///   terminator within `MAX_NTS_SCAN` (1 048 576) code units — this function's only `SQL_NTS`
-///   argument, so the whole set — which is a length the driver cannot determine, and where
-///   the scanned prefix used to be translated and echoed back as though complete. An
+///   terminator within `MAX_NTS_SCAN` (1 048 576) code units, which is a length the driver
+///   cannot determine. It is this function's only `SQL_NTS` argument, so that is the whole
+///   set. Translating the scanned prefix instead would echo it back as though complete. An
 ///   explicitly measured `TextLength1` is not limited, at any size. See
 ///   `native_sql_refuses_an_nts_statement_that_runs_to_the_scan_cap`.
-/// - HY109: Invalid cursor position — not returned here (no cursor involvement in NativeSql).
-/// - HY117: Connection suspended due to unknown transaction state — (driver-manager-handled; not returned here).
-/// - HYT01: Connection timeout expired — not returned here (connection timeout not enforced).
-/// - IM001: Driver does not support this function — (driver-manager-handled; not returned here).
+/// - HY109: Invalid cursor position. Not returned here (no cursor involvement in NativeSql).
+/// - HY117: Connection suspended due to unknown transaction state (driver-manager-handled; not returned here).
+/// - HYT01: Connection timeout expired. Not returned here (connection timeout not enforced).
+/// - IM001: Driver does not support this function (driver-manager-handled; not returned here).
 ///
 /// # Safety
 ///
@@ -1229,7 +1227,7 @@ pub unsafe fn sql_native_sql_w<B: Backend>(
                 } else if !wide.is_empty() {
                     // A buffer the application declared empty is the extreme
                     // case of the spec's "not large enough": nothing fits, not
-                    // even the null terminator, so nothing is written — but the
+                    // even the null terminator, so nothing is written. The
                     // truncation is real and must be reported. The required
                     // length has already gone to TextLength2Ptr above, which is
                     // what lets the application retry with a real buffer.
@@ -1264,8 +1262,8 @@ mod tests {
     /// has a different layout for every backend, while validation is a registry
     /// slot, generation and kind compare that never dereferences the caller's
     /// value. Allocating as one backend and calling as another therefore passes
-    /// that compare and then reads memory laid out for a different type —
-    /// undefined behaviour Miri catches and a plain `cargo test` does not.
+    /// that compare and then reads memory laid out for a different type. That
+    /// is undefined behaviour Miri catches and a plain `cargo test` does not.
     unsafe fn alloc_env_and_conn_for<B: Backend>() -> (*mut c_void, *mut c_void) {
         let mut env: *mut c_void = std::ptr::null_mut();
         let _ = unsafe {
@@ -1512,7 +1510,7 @@ mod tests {
     #[cfg_attr(miri, ignore = "calls the foreign SQLGetPrivateProfileStringW")]
     #[test]
     fn sql_connect_has_no_completion_argument_and_so_permits_prompting() {
-        // `SQLConnect` is the DSN path — `isql` and Excel reach it, and those
+        // `SQLConnect` is the DSN path, which `isql` and Excel reach, and those
         // are the likeliest interactive callers. Reading the absent argument as
         // `SQL_DRIVER_NOPROMPT` would lock DSN connections out of interactive
         // authentication entirely.
@@ -1543,14 +1541,14 @@ mod tests {
     ///
     /// `read_dsn_keys` enumerates the odbc.ini section, and a section lists the
     /// keywords inside it rather than its own heading, so the DSN name is the
-    /// one connection parameter that is *not* among the keys it returns. Until
-    /// core inserted it, `ConnectParams::dsn()` was `None` here while being
-    /// `Some` for the same DSN through `SQLDriverConnectW` — and the spec makes
-    /// this the authoritative source for `SQL_DATA_SOURCE_NAME`, which "is the
-    /// value of the *ServerName* argument in SQLConnect".
+    /// one connection parameter that is *not* among the keys it returns. Core
+    /// inserts it, so `ConnectParams::dsn()` answers the same here as it does
+    /// for the same DSN through `SQLDriverConnectW`. The spec makes this the
+    /// authoritative source for `SQL_DATA_SOURCE_NAME`, which "is the value of
+    /// the *ServerName* argument in SQLConnect".
     ///
-    /// A nonexistent DSN is deliberate: it proves the name arrives on its own
-    /// rather than by being echoed back out of a section that happened to
+    /// The DSN is nonexistent on purpose: that proves the name arrives on its
+    /// own rather than by being echoed back out of a section that happened to
     /// contain it.
     #[cfg_attr(miri, ignore = "calls the foreign SQLGetPrivateProfileStringW")]
     #[test]
@@ -2081,8 +2079,8 @@ mod tests {
     /// Spec 01004: "The buffer \*OutStatementText was not large enough to return
     /// the entire SQL string, so truncation occurred. (Function returns
     /// SQL_SUCCESS_WITH_INFO.)" A buffer the application declared empty is the
-    /// extreme case of not large enough, and it used to report plain
-    /// SQL_SUCCESS with no diagnostic at all.
+    /// extreme case of not large enough, so it reports the diagnostic too
+    /// rather than plain SQL_SUCCESS.
     #[test]
     fn native_sql_w_zero_length_buffer_reports_truncation() {
         use crate::ffi::diag::sql_get_diag_rec_w;
@@ -2378,8 +2376,8 @@ mod tests {
     /// use **SQLDisconnect** to cancel the browse process."
     ///
     /// `handle.connection` is `None` for the whole of a browse, so the `08003`
-    /// guard used to answer this call and an application had no way to abandon
-    /// a browse at all.
+    /// guard has to make an exception for one. Without it an application would
+    /// have no way to abandon a browse at all.
     #[test]
     fn disconnect_during_a_browse_cancels_it_instead_of_reporting_08003() {
         unsafe {
@@ -2442,8 +2440,9 @@ mod tests {
 
     /// An abandoned browse must not contaminate a later one.
     /// `SQLBrowseConnectW` clears the accumulated attributes on its own success,
-    /// but an ordinary connect used to leave them in place, so the next browse
-    /// on that handle started from the attributes of the one before it.
+    /// and an ordinary connect clears them too. Leaving them in place would
+    /// start the next browse on that handle from the attributes of the one
+    /// before it.
     #[test]
     fn sql_driver_connect_clears_abandoned_browse_state() {
         unsafe {
@@ -2552,19 +2551,20 @@ mod tests {
     // -----------------------------------------------------------------------
     // The MAX_NTS_SCAN limit on SQL_NTS arguments
     //
-    // Four call sites in this module resolve SQL_NTS, and all four used to take
-    // the scanned prefix when the scan reached the bound. A truncated
-    // connection string is not a syntax error the way a truncated statement is:
-    // `ConnectParams` parses whatever it is given, so the connect proceeded
-    // against a *different data source* than the application named.
+    // Four call sites in this module resolve SQL_NTS, and all four refuse the
+    // input when the scan reaches the bound rather than taking the scanned
+    // prefix. A truncated connection string is not a syntax error the way a
+    // truncated statement is: `ConnectParams` parses whatever it is given, so
+    // the connect would proceed against a *different data source* than the
+    // application named.
     // -----------------------------------------------------------------------
 
     // -----------------------------------------------------------------------
     // The Backend::connect failure path
     //
-    // `MockBackend` connects unconditionally, so until `MockFailBackend` existed
-    // nothing exercised what happens when a backend refuses: whether its
-    // SQLSTATE survives, and whether the handle is left connected.
+    // `MockBackend` connects unconditionally, so `MockFailBackend` is what
+    // exercises a backend that refuses: whether its SQLSTATE survives, and
+    // whether the handle is left connected.
     // -----------------------------------------------------------------------
 
     /// The state the backend chose is what the application reads, not a generic
@@ -2729,7 +2729,7 @@ mod tests {
     }
 
     /// [`dbc_sqlstate_for`] for [`MockBackend`], which is what most tests here
-    /// want — including the `HY090` a scan overrun posts.
+    /// want, including the `HY090` a scan overrun posts.
     unsafe fn dbc_sqlstate(conn: *mut c_void) -> String {
         unsafe { dbc_sqlstate_for::<MockBackend>(conn) }
     }
@@ -2825,12 +2825,11 @@ mod tests {
         }
     }
 
-    /// The credential arguments, which were read inside `if let Ok(..)` and so
-    /// discarded the error rather than propagating it. A swallowed `HY090` here
-    /// connects with whatever credentials the DSN supplies, under a *UserName*
-    /// the application believes it passed — a silent authorisation change, not a
-    /// missing diagnostic. Delete either `?` in `sql_connect_w`'s credential
-    /// block and this test fails.
+    /// The credential arguments propagate a scan overrun rather than discarding
+    /// it. A swallowed `HY090` here connects with whatever credentials the DSN
+    /// supplies, under a *UserName* the application believes it passed, which is
+    /// a silent authorisation change rather than a missing diagnostic. Delete
+    /// either `?` in `sql_connect_w`'s credential block and this test fails.
     /// Unlike its `ServerName` sibling, this one reaches the DSN resolver: the
     /// server name parses first and only the *credential* scan overruns, so
     /// `read_dsn_keys` has already run by then.
@@ -2900,12 +2899,12 @@ mod tests {
     }
 
     /// A 100 000-character `SQL_NTS` statement is translated in full, and the
-    /// length reported back proves it — `SQLNativeSql` is the one function in
+    /// length reported back proves it. `SQLNativeSql` is the one function in
     /// the crate that echoes an `SQL_NTS` argument's resolved length to the
     /// application, so it can distinguish "accepted" from "accepted a prefix".
     ///
-    /// 100 000 is above `i16::MAX` (32 767), which `MAX_NTS_SCAN` used to be, so
-    /// this call was `HY090` until the cap was raised. A literal rather than a
+    /// 100 000 is above `i16::MAX` (32 767), so the input only succeeds while
+    /// `MAX_NTS_SCAN` stays well clear of that bound. A literal rather than a
     /// fraction of `MAX_NTS_SCAN`, because a test written against the constant
     /// passes at every value of it.
     #[cfg_attr(
@@ -2985,7 +2984,7 @@ mod tests {
     }
 
     /// The other side of the same line. A handle that never connected and never
-    /// browsed is genuinely not open, and `08003` is still the answer — the
+    /// browsed is genuinely not open, and `08003` is still the answer, so the
     /// browse carve-out must not swallow it.
     #[test]
     fn disconnect_with_no_connection_and_no_browse_is_still_08003() {

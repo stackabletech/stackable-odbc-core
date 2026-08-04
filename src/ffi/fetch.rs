@@ -2,8 +2,8 @@
 //! `SQLExtendedFetch` and `SQLGetData`.
 //!
 //! `SQLExtendedFetch` is the one deprecated ODBC 2.x function core exports, because the
-//! Driver Manager does not map it (see `CORE_UNEXPORTED_FUNCTIONS` in `function_id.rs`
-//! for the seventeen it does).
+//! Driver Manager does not map it. `CORE_UNEXPORTED_FUNCTIONS` in `function_id.rs` is the
+//! list core leaves to the Driver Manager, each entry with its reason.
 
 use std::ffi::c_void;
 
@@ -25,20 +25,20 @@ use crate::types::{ColumnValue, FetchResult, SqlReturn, SqlState, fetch_orientat
 /// The concise type stays **raw**, not parsed to a `CDataType`: reading it as a C
 /// type can fail, and the spec orders that failure *after* this call's `HY010`
 /// and `24000` checks. Collecting is not checking, so `c_type_of` is called in
-/// the write loop instead — which is *why* this tuple carries an `i16` rather
-/// than a `CDataType`, and why fusing that parse into the collection pass would
-/// be a spec-ordering bug rather than an optimisation.
+/// the write loop instead. That is why this field is an `i16` rather than a
+/// `CDataType`, and why fusing the parse into the collection pass would be a
+/// spec-ordering bug rather than an optimisation.
 ///
 /// The two pointers **have** the row-bind offset applied, because that is
 /// infallible pointer arithmetic and so carries no ordering constraint. Applying
 /// it here is what lets the write loop read this list directly, instead of
 /// mapping it into a second vector allocated on every row.
-/// A struct rather than the tuple this was, because it now carries seven
-/// fields and two of them are adjacent `i16`s. That is the shape
-/// `SQLForeignKeys`' argument list is a standing warning about: crossing
-/// `precision` with `scale` would compile silently and produce a
-/// `SQL_NUMERIC_STRUCT` describing a different number. Named fields cannot be
-/// crossed.
+///
+/// A struct rather than a tuple, because several of these are adjacent numbers
+/// of the same type. That is the shape `SQLForeignKeys`' argument list is a
+/// standing warning about: crossing `precision` with `scale` would compile
+/// silently and produce a `SQL_NUMERIC_STRUCT` describing a different number.
+/// Named fields cannot be crossed.
 #[derive(Clone, Copy)]
 struct Binding {
     col: u16,
@@ -59,8 +59,9 @@ struct Binding {
 /// connection's group throughout.
 ///
 /// A record with a null `SQL_DESC_DATA_PTR` and a live `SQL_DESC_INDICATOR_PTR`
-/// **is** included. It is not a data binding — [`DescriptorRecord::is_bound`]
-/// says so, and `write_column_value` declines to write through the null target —
+/// **is** included. It is not a data binding, since
+/// [`DescriptorRecord::is_bound`] says so and `write_column_value` declines to
+/// write through the null target,
 /// but the spec makes it a legal state of `SQLBindCol` ("An application can
 /// unbind the data buffer for a column but still have a length/indicator buffer
 /// bound for the column"), and the length is the only thing such an application
@@ -78,9 +79,9 @@ struct Binding {
 /// binding.
 ///
 /// Sorted by column number, which the records themselves are not: they live in a
-/// `HashMap`, so the iteration order — and with it *which* bound column's error
-/// an application sees when two would fail — varied between runs of the same
-/// program. Ascending column order is the one an application can predict.
+/// `HashMap`, whose iteration order varies between runs of the same program. It
+/// decides *which* bound column's error an application sees when two would fail,
+/// and ascending column order is the one an application can predict.
 fn collect_bindings(ard: &Descriptor, bind_offset: crate::descriptor::BindOffset) -> Vec<Binding> {
     let mut bindings: Vec<Binding> = ard
         .records
@@ -91,8 +92,8 @@ fn collect_bindings(ard: &Descriptor, bind_offset: crate::descriptor::BindOffset
             concise_type: r.concise_type,
             // A null pointer is left alone rather than shifted, which is
             // `BindOffset::apply`'s business: a record may carry either
-            // pointer null — the indicator-only binding the spec allows —
-            // and offsetting `0` would turn that absence into a non-null
+            // pointer null, which is the indicator-only binding the spec
+            // allows, and offsetting `0` would turn that absence into a non-null
             // address the `22002` check and `write_column_value` would then
             // treat as real.
             target_ptr: bind_offset.apply(r.data_ptr),
@@ -111,8 +112,8 @@ fn collect_bindings(ard: &Descriptor, bind_offset: crate::descriptor::BindOffset
 /// The `OdbcError` a backend's [`ValueWarning`](crate::types::ValueWarning)
 /// becomes.
 ///
-/// One function so both drain sites — `SQLGetData` and `SQLFetch`'s
-/// bound-column loop — cannot disagree about which SQLSTATE a backend warning
+/// One function, so the two drain sites (`SQLGetData` and `SQLFetch`'s
+/// bound-column loop) cannot disagree about which SQLSTATE a backend warning
 /// carries. `OdbcError::FractionalTruncation` already maps to `01S07` and
 /// already classifies as a warning rather than a failure (`errors.rs`), so this
 /// reuses that path rather than building a second one.
@@ -126,9 +127,9 @@ fn value_warning_error(warning: crate::types::ValueWarning) -> OdbcError {
     }
 }
 
-/// `SQL_ROW_SUCCESS` — the row-status value for a row fetched without warning.
+/// `SQL_ROW_SUCCESS`: the row-status value for a row fetched without warning.
 const SQL_ROW_SUCCESS: u16 = 0;
-/// `SQL_ROW_SUCCESS_WITH_INFO` — fetched, but a diagnostic was raised for it.
+/// `SQL_ROW_SUCCESS_WITH_INFO`: fetched, but a diagnostic was raised for it.
 const SQL_ROW_SUCCESS_WITH_INFO: u16 = 6;
 
 /// Where a fetch reports its row count and row status.
@@ -168,8 +169,8 @@ enum RowReport {
 /// # Safety
 ///
 /// For [`RowReport::Attributes`], each stored attribute must be null or a
-/// pointer to a valid, writable `usize` / `u16` respectively — the application's
-/// undertaking when it set them. For [`RowReport::Arguments`], the same
+/// pointer to a valid, writable `usize` / `u16` respectively, which is the
+/// application's undertaking when it set them. For [`RowReport::Arguments`], the same
 /// undertaking applies to the two arguments, per the `SQLExtendedFetch` contract.
 unsafe fn report_rows_fetched<B: Backend>(
     stmt: &StatementHandle<B>,
@@ -248,7 +249,7 @@ unsafe fn report_rows_fetched_only<B: Backend>(
 /// - 07009 (invalid descriptor index): not returned here, and the row carries no `(DM)`
 ///   marker, so this is the driver's answer to give. Neither of its two clauses can arise:
 ///   a column-0 binding cannot exist to be fetched into, because `sql_bind_col` refuses
-///   column 0 with `HYC00` before a binding is stored (bookmarks are unsupported — the
+///   column 0 with `HYC00` before a binding is stored (bookmarks are unsupported, since the
 ///   `Backend` trait has no concept of stable row identifiers), and the other clause
 ///   describes an ODBC 2.x driver, which core is not.
 /// - 08S01 (communication link failure): propagated from the backend fetch.
@@ -263,8 +264,8 @@ unsafe fn report_rows_fetched_only<B: Backend>(
 /// - 22015 (interval field overflow): returned via `write_column_value`.
 /// - 22018 (invalid character value for cast specification): returned via `write_column_value`.
 /// - 24000 (invalid cursor state): **returned by this driver**. The row carries no `(DM)`
-///   marker and has one clause — "the *StatementHandle* was in an executed state but no
-///   result set was associated with the *StatementHandle*" — which is ODBC state S4 and is
+///   marker and has one clause, "the *StatementHandle* was in an executed state but no
+///   result set was associated with the *StatementHandle*", which is ODBC state S4 and is
 ///   core's to answer. Core also returns it for a statement that is **prepared but not yet
 ///   executed** (S2/S3), which that clause does not describe: it is core's own extension,
 ///   taken because the alternative is driving the backend for a row in a state where no
@@ -274,8 +275,8 @@ unsafe fn report_rows_fetched_only<B: Backend>(
 /// - 40003 (statement completion unknown): propagated from the backend.
 /// - HY000 (general error): propagated from the backend.
 /// - HY001 (memory allocation error): not returned; Rust panics on allocation failure.
-/// - HY008: Operation canceled. The row's first clause — asynchronous processing, then the
-///   function called again — is not applicable: core implements no asynchronous execution and
+/// - HY008: Operation canceled. The row's first clause, asynchronous processing and then the
+///   function called again, is not applicable: core implements no asynchronous execution and
 ///   never returns `SQL_STILL_EXECUTING`. The second clause, `SQLCancel` called on the
 ///   statement "from a different thread in a multithread application", **is returned by this
 ///   driver**: the row carries no `(DM)` marker, and when a backend call fails with
@@ -283,8 +284,8 @@ unsafe fn report_rows_fetched_only<B: Backend>(
 ///   the backend's own SQLSTATE.
 /// - HY010 (function sequence error): the spec annotates this `(DM)`; it is guarded
 ///   defensively here. **Every one of the row's six clauses carries the marker**, including
-///   the one core acts on — "the specified *StatementHandle* was not in an executed state"
-///   — so this is not a case of core answering an unmarked half. The check (`stmt.statement`
+///   the one core acts on ("the specified *StatementHandle* was not in an executed state"),
+///   so this is not a case of core answering an unmarked half. The check (`stmt.statement`
 ///   is `None`) is kept because core is also linked without a Driver Manager in front of it,
 ///   by its own tests and by an embedder, and the inline comment at the site says the same.
 /// - HY013 (memory management error): not returned: `SqlState` has no `HY013` constant and no factory for it, so no path in
@@ -307,14 +308,14 @@ unsafe fn report_rows_fetched_only<B: Backend>(
 ///   statement-producing calls because a data source may return column metadata long before it
 ///   computes a row, which puts the whole wait on the fetch.
 /// - HYT01 (connection timeout expired): propagated from the backend unchanged. Core
-///   implements no connection timeout of its own — `SQL_ATTR_CONNECTION_TIMEOUT` is the
-///   backend's to honour — and this function reaches a fallible backend call, so the
+///   implements no connection timeout of its own, because `SQL_ATTR_CONNECTION_TIMEOUT` is
+///   the backend's to honour, and this function reaches a fallible backend call, so the
 ///   state can arrive from there and is passed through as it came.
 /// - IM001 (driver does not support this function): driver-manager-handled; not returned here.
 /// - IM017: Polling disabled; not returned here (the asynchronous notification model is not
-///   supported — not DM-annotated in the spec).
+///   supported, not DM-annotated in the spec).
 /// - IM018: SQLCompleteAsync not called; not returned here (the asynchronous notification model
-///   is not supported — not DM-annotated in the spec).
+///   is not supported, not DM-annotated in the spec).
 ///
 /// # Safety
 ///
@@ -360,13 +361,14 @@ unsafe fn fetch_with_report<B: Backend>(
             // application may change between fetches; the spec has the driver add
             // that value to every bound address rather than fold it into the
             // binding once. Read once per fetch so one row uses one offset
-            // throughout. It lives on the ARD's own header, not `stmt.attrs` —
-            // the attribute *is* `SQL_DESC_BIND_OFFSET_PTR`, see `HeaderOwner` —
-            // and `Descriptor::bind_offset` is the same reader the parameter side
+            // throughout. It lives on the ARD's own header, not `stmt.attrs`,
+            // because the attribute *is* `SQL_DESC_BIND_OFFSET_PTR` (see
+            // `HeaderOwner`), and `Descriptor::bind_offset` is the reader the parameter side
             // uses for `SQL_ATTR_PARAM_BIND_OFFSET_PTR`, which is that same field
             // on the APD.
             //
-            // SAFETY: `Descriptor::bind_offset`'s contract — the stored attribute
+            // SAFETY: `Descriptor::bind_offset`'s contract, which is that the
+            // stored attribute
             // is null or a pointer to a valid `SQLULEN`, which is the
             // application's undertaking when it sets the attribute.
             let bindings = {
@@ -381,7 +383,7 @@ unsafe fn fetch_with_report<B: Backend>(
             let cursor_open = stmt.cursor_open;
 
             // `SQLFetch` consumes the cursor a previous execution opened, so it
-            // observes *that* execution's token rather than minting one — the
+            // observes *that* execution's token rather than minting one: the
             // token the backend was handed when it produced this statement.
             // `None` means no backend call has run here, so nothing could have
             // been cancelled. Resolved off the registry, which needs no borrow
@@ -399,8 +401,7 @@ unsafe fn fetch_with_report<B: Backend>(
             // set*, and a data source is free to answer with column metadata
             // long before it has computed a row. Against such a source every
             // execute finishes in milliseconds and the whole wait lands on
-            // `SQLFetch` — measured at 0.1s for the execute and 24.6s for the
-            // following fetch, under a 2-second deadline. `SQLFetch`'s
+            // `SQLFetch`. `SQLFetch`'s
             // diagnostics table carries `HYT00` with no `(DM)` marker for
             // exactly this attribute, so the site is the driver's to arm.
             //
@@ -432,7 +433,7 @@ unsafe fn fetch_with_report<B: Backend>(
             //
             // `cursor_open`, not `statement.is_some()`: a statement outlives
             // its cursor. `set_result_set` leaves `cursor_open` false when the
-            // backend reports zero columns — an UPDATE, ODBC state S4 — and
+            // backend reports zero columns (an UPDATE, ODBC state S4), and
             // `set_prepared_statement` leaves it false in the prepared states
             // S2/S3. Both keep a statement, so testing for one would drive the
             // backend in exactly the two states this SQLSTATE names.
@@ -458,7 +459,7 @@ unsafe fn fetch_with_report<B: Backend>(
                     //
                     // The application supplied both the base pointer and the
                     // offset, and the spec makes the sum its responsibility to
-                    // keep in bounds — the same contract as the unoffset pointer.
+                    // keep in bounds, the same contract as the unoffset pointer.
                     //
                     // `c_type_of` is called **here** rather than at collection
                     // time, and the ordering is the reason: it can fail with
@@ -529,7 +530,7 @@ unsafe fn fetch_with_report<B: Backend>(
                         if truncated {
                             stmt.diagnostics.push(&OdbcError::StringTruncated);
                         }
-                        // The backend's own warnings about this row's values —
+                        // The backend's own warnings about this row's values:
                         // precision it dropped in its own conversion, before a
                         // `ColumnValue` existed for core to inspect.
                         for warning in value_warnings {
@@ -545,7 +546,7 @@ unsafe fn fetch_with_report<B: Backend>(
                 }
                 FetchResult::NoData => {
                     // Spec: on SQL_NO_DATA the rows-fetched buffer is set to 0.
-                    // The row-status array is left alone — with no row fetched
+                    // The row-status array is left alone: with no row fetched
                     // there is no status to report, and SQL_ROW_NOROW describes
                     // an element of a rowset larger than the one row this
                     // driver ever produces.
@@ -569,7 +570,7 @@ unsafe fn fetch_with_report<B: Backend>(
 /// # Parameters
 ///
 /// - `statement_handle`: Statement handle (input).
-/// - `fetch_orientation`: Type of fetch — one of `SQL_FETCH_NEXT`, `SQL_FETCH_PRIOR`,
+/// - `fetch_orientation`: Type of fetch, one of `SQL_FETCH_NEXT`, `SQL_FETCH_PRIOR`,
 ///   `SQL_FETCH_FIRST`, `SQL_FETCH_LAST`, `SQL_FETCH_ABSOLUTE`, `SQL_FETCH_RELATIVE`,
 ///   or `SQL_FETCH_BOOKMARK`. Only `SQL_FETCH_NEXT` is supported.
 /// - `fetch_offset`: Row offset used with `SQL_FETCH_ABSOLUTE`, `SQL_FETCH_RELATIVE`, and
@@ -602,8 +603,8 @@ unsafe fn fetch_with_report<B: Backend>(
 /// - 40003 (statement completion unknown): delegated to `sql_fetch`.
 /// - HY000 (general error): propagated from the backend.
 /// - HY001 (memory allocation error): not returned; Rust panics on allocation failure.
-/// - HY008: Operation canceled. The row's first clause — asynchronous processing, then the
-///   function called again — is not applicable: core implements no asynchronous execution and
+/// - HY008: Operation canceled. The row's first clause, asynchronous processing and then the
+///   function called again, is not applicable: core implements no asynchronous execution and
 ///   never returns `SQL_STILL_EXECUTING`. The second clause, `SQLCancel` called on the
 ///   statement "from a different thread in a multithread application", **is returned by this
 ///   driver**: the row carries no `(DM)` marker, and when a backend call fails with
@@ -617,8 +618,8 @@ unsafe fn fetch_with_report<B: Backend>(
 /// - HY090 (invalid string or buffer length): not applicable, and the row carries no `(DM)`
 ///   marker; see `sql_fetch`, whose identical row it delegates to.
 /// - HY106 (fetch type out of range): **returned by this driver** for any `FetchOrientation`
-///   other than `SQL_FETCH_NEXT`. The row is `(DM)`-marked on only two of its four clauses —
-///   an invalid value, and `SQL_FETCH_BOOKMARK` with `SQL_UB_OFF` — and the two that are not
+///   other than `SQL_FETCH_NEXT`. The row is `(DM)`-marked on only two of its four clauses,
+///   an invalid value and `SQL_FETCH_BOOKMARK` with `SQL_UB_OFF`, and the two that are not
 ///   are the ones core acts on: `SQL_CURSOR_FORWARD_ONLY` with an orientation that is not
 ///   `SQL_FETCH_NEXT`, and the same for `SQL_NONSCROLLABLE`. This driver's cursors are
 ///   forward-only and non-scrollable, so both apply and `HY106` is the driver's to return.
@@ -628,17 +629,17 @@ unsafe fn fetch_with_report<B: Backend>(
 /// - HYC00 (optional feature not implemented): delegated to `sql_fetch` for `SQL_FETCH_NEXT`.
 /// - HYT00 (timeout expired): **returned by this driver**, via the same delegation. The row
 ///   carries no `(DM)` marker here either, and `SQL_FETCH_NEXT` is the only orientation that
-///   reaches the backend at all — every other one is rejected with `HY106` above — so arming
-///   the deadline in `sql_fetch` covers this function completely.
+///   reaches the backend at all, since every other one is rejected with `HY106` above, so
+///   arming the deadline in `sql_fetch` covers this function completely.
 /// - HYT01 (connection timeout expired): propagated from the backend unchanged. Core
-///   implements no connection timeout of its own — `SQL_ATTR_CONNECTION_TIMEOUT` is the
-///   backend's to honour — and this function reaches a fallible backend call, so the
+///   implements no connection timeout of its own, because `SQL_ATTR_CONNECTION_TIMEOUT` is
+///   the backend's to honour, and this function reaches a fallible backend call, so the
 ///   state can arrive from there and is passed through as it came.
 /// - IM001 (driver does not support this function): driver-manager-handled.
 /// - IM017: Polling disabled; not returned here (the asynchronous notification model is not
-///   supported — not DM-annotated in the spec).
+///   supported, not DM-annotated in the spec).
 /// - IM018: SQLCompleteAsync not called; not returned here (the asynchronous notification model
-///   is not supported — not DM-annotated in the spec).
+///   is not supported, not DM-annotated in the spec).
 ///
 /// # Safety
 ///
@@ -664,8 +665,8 @@ pub unsafe fn sql_fetch_scroll<B: Backend>(
     let ret = if orientation == Some(FetchOrientation::Next) {
         // Forward-only: the one orientation this driver's cursors serve. Routed
         // through the shared body rather than through `sql_fetch`, so the exit
-        // log below names this function — `sql_fetch` logs under its own name,
-        // and a `return` through it left a trace claiming a `SQLFetch` the
+        // log below names this function. `sql_fetch` logs under its own name,
+        // so a `return` through it would leave a trace claiming a `SQLFetch` the
         // application never called. Same reasoning, and the same shape, as
         // `sql_extended_fetch`.
         //
@@ -711,7 +712,7 @@ pub unsafe fn sql_fetch_scroll<B: Backend>(
 /// Its Comments open with "the behavior of **SQLExtendedFetch** is identical to
 /// that of **SQLFetchScroll**, with the following exceptions", and for a
 /// forward-only driver with a rowset of one only two of those exceptions have
-/// any effect — both about *where* the results are reported:
+/// any effect, and both are about *where* the results are reported:
 ///
 /// - the row count goes to `*RowCountPtr`, because that buffer "is used only by
 ///   **SQLExtendedFetch**. It is not used by **SQLFetch** or **SQLFetchScroll**";
@@ -721,8 +722,8 @@ pub unsafe fn sql_fetch_scroll<B: Backend>(
 /// So this shares [`sql_fetch`]'s body through a caller-directed report and does
 /// **not** touch `SQL_ATTR_ROWS_FETCHED_PTR` or `SQL_ATTR_ROW_STATUS_PTR`. The
 /// remaining exceptions are inert here: bookmarks are unsupported, binding
-/// offsets are read per fetch either way, and the rowset size —
-/// `SQL_ROWSET_SIZE` rather than `SQL_ATTR_ROW_ARRAY_SIZE` — is pinned at 1 by
+/// offsets are read per fetch either way, and the rowset size
+/// (`SQL_ROWSET_SIZE` rather than `SQL_ATTR_ROW_ARRAY_SIZE`) is pinned at 1 by
 /// `ffi/stmt_attr.rs` through both doors.
 ///
 /// # Parameters
@@ -774,8 +775,8 @@ pub unsafe fn sql_fetch_scroll<B: Backend>(
 /// - HY001 (memory allocation error): not returned; Rust panics on allocation
 ///   failure.
 /// - HY008 (operation canceled): **returned by this driver**, via the shared
-///   body. The row's asynchronous clauses do not apply — core implements no
-///   asynchronous execution and never returns `SQL_STILL_EXECUTING` — but its
+///   body. The row's asynchronous clauses do not apply, since core implements no
+///   asynchronous execution and never returns `SQL_STILL_EXECUTING`, but its
 ///   "from a different thread in a multithread application" clause carries no
 ///   (DM) marker and is honoured.
 /// - HY010 (function sequence error): every clause on this row carries (DM),
@@ -787,9 +788,9 @@ pub unsafe fn sql_fetch_scroll<B: Backend>(
 ///   and `panic_safe` contains any unwind.
 /// - HY106 (fetch type out of range): **returned by this driver** for any
 ///   orientation other than `SQL_FETCH_NEXT`. The row's first clause carries
-///   (DM), but the clause describing this driver — "The value of the
+///   (DM), but the clause describing this driver does not: "The value of the
 ///   SQL_CURSOR_TYPE statement option was SQL_CURSOR_FORWARD_ONLY, and the value
-///   of argument *FetchOrientation* was not SQL_FETCH_NEXT" — does not.
+///   of argument *FetchOrientation* was not SQL_FETCH_NEXT".
 /// - HY107 (row value out of range): not applicable; keyset cursors are not
 ///   supported and `SQL_KEYSET_SIZE` is pinned at its default.
 /// - HY111 (invalid bookmark value): not applicable; bookmarks are not
@@ -802,8 +803,8 @@ pub unsafe fn sql_fetch_scroll<B: Backend>(
 ///   which arms the core-side deadline for a backend answering
 ///   [`crate::types::QueryTimeout::CoreCancels`].
 /// - HYT01 (connection timeout expired): propagated from the backend unchanged. Core
-///   implements no connection timeout of its own — `SQL_ATTR_CONNECTION_TIMEOUT` is the
-///   backend's to honour — and this function reaches a fallible backend call, so the
+///   implements no connection timeout of its own, because `SQL_ATTR_CONNECTION_TIMEOUT` is
+///   the backend's to honour, and this function reaches a fallible backend call, so the
 ///   state can arrive from there and is passed through as it came.
 /// - IM001 (driver does not support this function): driver-manager-handled; not
 ///   returned here.
@@ -898,9 +899,9 @@ pub unsafe fn sql_extended_fetch<B: Backend>(
 /// while ((rc = SQLGetData(...)) == SQL_SUCCESS_WITH_INFO) { /* append */ }
 /// ```
 ///
-/// terminate. A call with a non-null buffer and `buffer_length` 0 — the
+/// terminate. A call with a non-null buffer and `buffer_length` 0 is the
 /// standard length-probe idiom, used to size a buffer before a second call
-/// fetches the value — is one iteration of this same loop, not a special
+/// fetches the value. It is one iteration of this same loop, not a special
 /// case: it reports `SQL_SUCCESS_WITH_INFO` with `01004` and the byte length
 /// still needed, and the column remains fully readable afterwards. A
 /// **null** buffer also stays plain `SQL_SUCCESS`, but this function's own
@@ -908,7 +909,7 @@ pub unsafe fn sql_extended_fetch<B: Backend>(
 /// `01004` entry below for where that branch is actually exercised.
 ///
 /// Three limits come straight from the spec rather than from this
-/// implementation. Fixed-width targets cannot be read in parts at all — the
+/// implementation. Fixed-width targets cannot be read in parts at all, so the
 /// second call for one returns `SQL_NO_DATA`. The position is per *statement*,
 /// not per column: reading a different column discards it, so
 /// `SQLGetData(n)`, `SQLGetData(m)`, `SQLGetData(n)` restarts column `n` from
@@ -933,51 +934,50 @@ pub unsafe fn sql_extended_fetch<B: Backend>(
 /// - 01004 (string data right truncated): returned via `write_column_value` when character
 ///   or binary data does not fit the buffer; diagnostic is pushed to the statement queue.
 ///   **`buffer_length == 0` with a non-null `target_value_ptr` is this case, not
-///   `SQL_SUCCESS`** — the standard "how large a buffer do I need" probe supplies somewhere
+///   `SQL_SUCCESS`**: the standard "how large a buffer do I need" probe supplies somewhere
 ///   to write and nothing is written there, which is total truncation per the spec's own step
 ///   5: "If the data buffer supplied is too small to hold the null-termination character,
 ///   SQLGetData returns SQL_SUCCESS_WITH_INFO and SQLSTATE 01004." A **null** `target_value_ptr`
 ///   still stays plain `SQL_SUCCESS`, but that is not this function's own spec sanctioning a null
-///   buffer — the Arguments section says plainly "TargetValuePtr cannot be NULL," and the
+///   buffer: the Arguments section says plainly "TargetValuePtr cannot be NULL," and the
 ///   `HY009` clause for that below is simply not checked. The writers
 ///   (`write_wchar`/`write_char`/`write_binary` in `column_value.rs`) are shared with
 ///   `sql_fetch`'s bound-column loop, where a null `SQL_DESC_DATA_PTR` paired with a live
 ///   `SQL_DESC_INDICATOR_PTR` is the spec-legal indicator-only binding, and that caller still
-///   needs the length written with nothing to write the data into. Getting the `buffer_length ==
-///   0` half of this wrong made the second half of the documented probe-then-fetch idiom —
-///   `SQLGetData(col, type, buf, 0, &ind)` to size the buffer, then a second call with a
-///   `buf`-sized allocation — return `SQL_NO_DATA`, because `SQL_SUCCESS` marks a chunkable
+///   needs the length written with nothing to write the data into. Answering `SQL_SUCCESS` to
+///   the `buffer_length == 0` probe would make the second half of the documented
+///   probe-then-fetch idiom return `SQL_NO_DATA`, because `SQL_SUCCESS` marks a chunkable
 ///   column exhausted (`cursor.done` below).
 /// - 01S07 (fractional truncation): returned via `write_column_value` for numeric fractional
 ///   truncation, and when a non-zero `ColumnValue::Time` fraction is dropped writing to
 ///   `SQL_C_TYPE_TIME` (`SQL_TIME_STRUCT` has no fraction field).
 /// - 07006 (restricted data type attribute violation): returned via `write_column_value`'s
-///   two "unsupported conversion" fallthroughs — the column value's variant has no defined
+///   two "unsupported conversion" fallthroughs, where the column value's variant has no defined
 ///   conversion to the requested C type (e.g. `Bytes` requested as a numeric C type, or any
 ///   value/target-type combination not covered by a specific arm).
 /// - 07009 (invalid descriptor index): the row's first three clauses carry no `(DM)` marker
 ///   and are the driver's. The column-0 one is **returned by this driver**, when
 ///   `col_or_param_num` is 0 (bookmark). The one naming a column number greater than the number
 ///   of columns in the result set is **also returned by this driver**, checked against
-///   [`StatementBackend::column_count`]. It was delegated to the backend — which answered
-///   `HY000` — on the recorded grounds that "a precise check would require an extra round-trip
-///   to obtain the column count". That was false: `column_count` is a local accessor with no
-///   I/O behind it, and `describe_col` is already range-checked against the same call. The
+///   [`StatementBackend::column_count`]. Core checks it rather than delegating to the backend,
+///   which would answer `HY000`: `column_count` is a local accessor with no I/O behind it, so
+///   the check costs no round-trip, and `describe_col` is already range-checked against the
+///   same call. The
 ///   third clause names a parameter ordinal, which cannot arise because core returns no
-///   streamed output parameters. The five clauses that follow — bound column, column ordering,
-///   ARD consistency and ARD count — are all `(DM)`-marked and not returned here.
+///   streamed output parameters. The five clauses that follow (bound column, column ordering,
+///   ARD consistency and ARD count) are all `(DM)`-marked and not returned here.
 /// - 08S01 (communication link failure): propagated from the backend.
 /// - 22002 (indicator variable required but not supplied): returned when the column value
 ///   is NULL and `str_len_or_ind_ptr` is null.
 /// - 22003 (numeric value out of range): returned via `write_column_value` in two distinct
 ///   cases. A numeric pivot that does not fit the requested *fixed-width* C target type is
-///   the first. The second is the *SQL to C: Numeric* table's character row — a numeric
+///   the first. The second is the *SQL to C: Numeric* table's character row, a numeric
 ///   column read into `SQL_C_CHAR` or `SQL_C_WCHAR` whose *whole* digits do not fit
 ///   `BufferLength` ("Number of whole (as opposed to fractional) digits >= *BufferLength*"),
 ///   where losing only fractional digits stays `01004`. That second case is not a pivot: the
 ///   value is rendered as text and the buffer is measured against it. A call supplying no
-///   buffer at all — a null `TargetValuePtr`, or a `BufferLength` with no room for the null
-///   terminator — is exempt and keeps its `01004` length-probe behaviour.
+///   buffer at all (a null `TargetValuePtr`, or a `BufferLength` with no room for the null
+///   terminator) is exempt and keeps its `01004` length-probe behaviour.
 /// - 22007 (invalid datetime format): returned via `write_column_value` when character data
 ///   parses as a date/time/timestamp but a field value is out of range (e.g. month 13, or a
 ///   numeric field too large for its target width, e.g. year `"99999"`). Per this function's
@@ -986,8 +986,8 @@ pub unsafe fn sql_extended_fetch<B: Backend>(
 ///   has no defined conversion at all and instead falls into the generic 07006 case above. A
 ///   backend whose data source stores a datetime column using some other, numeric physical
 ///   encoding is responsible for decoding it into a proper `ColumnValue::Date`/`Time`/`Timestamp`
-///   at fetch time, before it ever reaches this function — stackable-odbc-core has no such backend-specific
-///   knowledge.
+///   at fetch time, before it ever reaches this function; stackable-odbc-core has no such
+///   backend-specific knowledge.
 /// - 22012 (division by zero): propagated from the backend.
 /// - 22015 (interval field overflow): not returned; `write_column_value` has no interval C type
 ///   arms, so a request for one falls through to the generic 07006 case above.
@@ -996,33 +996,33 @@ pub unsafe fn sql_extended_fetch<B: Backend>(
 /// - 24000 (invalid cursor state): returned when no cursor is open (`stmt.cursor_open` is
 ///   `false`), which includes a statement that is only prepared, one that executed without
 ///   producing a result set, and one whose cursor `SQLEndTran` closed under `SQL_CB_CLOSE`.
-///   Two of the row's three clauses are `(DM)`-marked — not yet fetched, and an executed
+///   Two of the row's three clauses are `(DM)`-marked: not yet fetched, and an executed
 ///   statement with no result set. The second of those **is** what `cursor_open` tests, so
 ///   the spec annotates it `(DM)` and it is guarded defensively here, for a driver loaded
 ///   without a Driver Manager. The prepared-but-not-executed case (S2/S3) is core's own
 ///   extension: no clause of this row describes it. The third clause carries no marker and is
-///   the driver's — a cursor open and fetched, but positioned before the start of the result
-///   set or after its end — and it cannot arise, because this driver's cursor is forward-only
+///   the driver's, a cursor open and fetched but positioned before the start of the result
+///   set or after its end, and it cannot arise, because this driver's cursor is forward-only
 ///   and never rests outside the result set with a value still to read.
 /// - HY000 (general error): propagated from the backend; `write_column_value` does not produce
-///   this code — its coercion-failure paths return 07006 (see above).
+///   this code, since its coercion-failure paths return 07006 (see above).
 /// - HY001 (memory allocation error): not returned; Rust panics on allocation failure.
 /// - HY003 (program type out of range): returned both when `target_type` is not a recognized C
 ///   data type, and via `write_column_value`'s numeric-pivot catch-all for a `CDataType` with no
 ///   numeric arm. (DM) variants (column 0 with wrong bookmark type) are driver-manager-handled.
-/// - HY008: Operation canceled. The row's first clause — asynchronous processing, then the
-///   function called again — is not applicable: core implements no asynchronous execution and
+/// - HY008: Operation canceled. The row's first clause, asynchronous processing and then the
+///   function called again, is not applicable: core implements no asynchronous execution and
 ///   never returns `SQL_STILL_EXECUTING`. The second clause, `SQLCancel` called on the
 ///   statement "from a different thread in a multithread application", **is returned by this
 ///   driver**: the row carries no `(DM)` marker, and when a backend call fails with
 ///   `Backend::is_cancelled` reporting its token signalled, core reports `HY008` in place of
 ///   the backend's own SQLSTATE.
 /// - HY009 (invalid use of null pointer): not checked; `target_value_ptr` null is not
-///   validated. (DM) — driver-manager-handled.
+///   validated. (DM), driver-manager-handled.
 /// - HY010 (function sequence error): five of the row's six clauses carry `(DM)` and are
-///   driver-manager-handled. The sixth does not — "a call to **SQLExecute**,
+///   driver-manager-handled. The sixth does not: "a call to **SQLExecute**,
 ///   **SQLExecDirect**, or **SQLMoreResults** returned `SQL_PARAM_DATA_AVAILABLE`, but
-///   **SQLGetData** was called, instead of **SQLParamData**" — and it cannot arise here:
+///   **SQLGetData** was called, instead of **SQLParamData**". It cannot arise here:
 ///   `SQL_PARAM_DATA_AVAILABLE` describes a streamed *output* parameter, which core never
 ///   produces. `sql_execute` and `sql_exec_direct_w` answer `SQL_NEED_DATA` for
 ///   data-at-execution *input* and otherwise a completion code, so there is no state in
@@ -1036,12 +1036,12 @@ pub unsafe fn sql_extended_fetch<B: Backend>(
 ///   the Arguments section attributes it to the driver in as many words: "**SQLGetData**
 ///   returns SQLSTATE HY090 (Invalid string or buffer length) when *BufferLength* is less
 ///   than 0 but not when *BufferLength* is 0." So a negative length is refused here and a
-///   zero length is accepted, which is what that sentence asks for — "accepted" meaning this
+///   zero length is accepted, which is what that sentence asks for. "Accepted" means this
 ///   check does not fire and the call proceeds, not that it always answers `SQL_SUCCESS`: for a
-///   chunkable target a zero length still reaches the writer, which now reports `01004` (see
+///   chunkable target a zero length still reaches the writer, which reports `01004` (see
 ///   above) rather than silently discarding the column. The row's second clause carries no
-///   marker and is the driver's — a `BufferLength` less than 4 with `Col_or_Param_Num` 0 on an
-///   ODBC 2.x driver — and cannot arise, since core is a 3.x driver and refuses column 0
+///   marker and is the driver's, a `BufferLength` less than 4 with `Col_or_Param_Num` 0 on an
+///   ODBC 2.x driver, and cannot arise, since core is a 3.x driver and refuses column 0
 ///   regardless.
 /// - HY109 (invalid cursor position): not checked; detecting deleted/unfetchable rows
 ///   requires backend support.
@@ -1049,20 +1049,21 @@ pub unsafe fn sql_extended_fetch<B: Backend>(
 /// - HYC00 (optional feature not implemented): not returned by `write_column_value`; its
 ///   unsupported-conversion paths return 07006 (see above).
 /// - HYT01 (connection timeout expired): propagated from the backend unchanged. Core
-///   implements no connection timeout of its own — `SQL_ATTR_CONNECTION_TIMEOUT` is the
-///   backend's to honour — and this function reaches a fallible backend call, so the
+///   implements no connection timeout of its own, because `SQL_ATTR_CONNECTION_TIMEOUT` is
+///   the backend's to honour, and this function reaches a fallible backend call, so the
 ///   state can arrive from there and is passed through as it came.
-/// - HYT00 is **absent from this function's diagnostics table** — deliberately, and not an
-///   oversight in this list. `SQLFetch` and `SQLFetchScroll` both carry it; `SQLGetData` carries
+/// - HYT00 is **absent from this function's diagnostics table**, which is the spec's doing
+///   rather than an omission in this list. `SQLFetch` and `SQLFetchScroll` both carry it;
+///   `SQLGetData` carries
 ///   only `HYT01`. So core arms no `SQL_ATTR_QUERY_TIMEOUT` deadline here, and a driver must not
 ///   add one: the query timeout governs returning the result set, which has already happened by
 ///   the time this function is reachable. The bound-column reads that run *inside* `SQLFetch` are
 ///   a different matter and do fall under that call's deadline.
 /// - IM001 (driver does not support this function): driver-manager-handled.
 /// - IM017: Polling disabled; not returned here (the asynchronous notification model is not
-///   supported — not DM-annotated in the spec).
+///   supported, not DM-annotated in the spec).
 /// - IM018: SQLCompleteAsync not called; not returned here (the asynchronous notification model
-///   is not supported — not DM-annotated in the spec).
+///   is not supported, not DM-annotated in the spec).
 ///
 /// # Safety
 ///
@@ -1160,14 +1161,12 @@ pub unsafe fn sql_get_data<B: Backend>(
             // number of columns in the result set". It carries no `(DM)`
             // marker, so it is the driver's.
             //
-            // This was delegated to the backend for years on the stated
-            // grounds that "a precise check would require an extra round-trip
-            // to obtain the column count" — which was false.
-            // `StatementBackend::column_count` is a local accessor with no I/O
-            // behind it, and `describe_col` is already range-checked against
-            // that very call (see its doc comment). The cost was imagined; the
-            // consequence was that every backend answered this with whatever
-            // its error mapping produced, usually `HY000`.
+            // Checked here rather than delegated to the backend, which costs no
+            // round-trip: `StatementBackend::column_count` is a local accessor
+            // with no I/O behind it, and `describe_col` is already range-checked
+            // against that very call (see its doc comment). Delegating leaves
+            // every backend answering with whatever its error mapping produces,
+            // usually `HY000`.
             //
             // Compared as `i32` so a `col_or_param_num` above `i16::MAX` is out
             // of range rather than wrapping negative: `column_count` returns
@@ -1284,8 +1283,8 @@ pub unsafe fn sql_get_data<B: Backend>(
                             numeric,
                         )?,
                     };
-                    // Drained here, after the last use of `value` — which
-                    // borrows `statement` — and before the diagnostic queue is
+                    // Drained here, after the last use of `value`, which
+                    // borrows `statement`, and before the diagnostic queue is
                     // touched, which borrows the handle. Only on this arm: the
                     // cached-chunk arm above delivers a later part of a value
                     // an *earlier* call already read, and reporting the
@@ -1296,8 +1295,8 @@ pub unsafe fn sql_get_data<B: Backend>(
                 }
             };
 
-            // A fixed-width target is finished by definition — the spec forbids
-            // reading it in parts — and so is a chunkable one that reported
+            // A fixed-width target is finished by definition, since the spec
+            // forbids reading it in parts, and so is a chunkable one that reported
             // anything other than truncation, since SQL_SUCCESS marks the last
             // part. Either way the next call for this column is SQL_NO_DATA.
             cursor.delivered += write.delivered;
@@ -1392,14 +1391,14 @@ mod tests {
         }
     }
 
-    /// Spec, `SQLFetch` `HY008` — the row carries no `(DM)` marker, and its
+    /// Spec, `SQLFetch` `HY008`: the row carries no `(DM)` marker, and its
     /// second clause is exactly this crate's cross-thread cancel: "the
     /// `SQLFetch` function was called, and before it completed execution,
     /// `SQLCancel` … was called on the `StatementHandle` from a different
     /// thread in a multithread application."
     ///
-    /// `SQLFetch` has no token of its own — `StatementBackend::fetch` takes
-    /// none — so this also pins that core reads the token the *producing*
+    /// `SQLFetch` has no token of its own, since `StatementBackend::fetch` takes
+    /// none, so this also pins that core reads the token the *producing*
     /// execution minted.
     #[test]
     fn a_cancelled_fetch_reports_hy008() {
@@ -1451,7 +1450,7 @@ mod tests {
     /// A backend that lost precision in its *own* type conversion can now say
     /// so, and `SQLGetData` reports `01S07`.
     ///
-    /// Core already raises `01S07` where *it* drops precision — a non-zero
+    /// Core already raises `01S07` where *it* drops precision: a non-zero
     /// `ColumnValue::Time` fraction written to `SQL_C_TYPE_TIME`, or a fraction
     /// lost reaching an exact-integer C type. But a driver converting a
     /// `timestamp(12)` to nine fractional digits does that before a
@@ -1492,7 +1491,7 @@ mod tests {
     }
 
     /// The bound-column loop is the other `get_data` call site and must drain
-    /// the warning too, or it is visible through `SQLGetData` only — which is
+    /// the warning too, or it is visible through `SQLGetData` only, which is
     /// the path an application using `SQLBindCol` never takes.
     #[test]
     fn a_backend_value_warning_becomes_01s07_on_a_bound_fetch() {
@@ -1530,7 +1529,7 @@ mod tests {
     /// The guard against over-reach: the defaulted `None` must not downgrade
     /// every successful read to `SQL_SUCCESS_WITH_INFO`. The mock warns on
     /// column 1 only, so column 2 proves the warning belongs to the value
-    /// rather than to the statement — and proves `take_value_warning` really
+    /// rather than to the statement, and proves `take_value_warning` really
     /// takes, since column 1 was read first and cleared it.
     #[test]
     fn a_value_with_no_backend_warning_is_plain_success() {
@@ -1618,11 +1617,11 @@ mod tests {
         }
     }
 
-    /// A delegating entry point must still log under its own name. The
-    /// `SQL_FETCH_NEXT` branch used to `return` through `sql_fetch`, so the only
-    /// branch that actually fetches never reached `SQLFetchScroll`'s own exit
-    /// log and a trace read `SQLFetch -> SUCCESS` for a call the application
-    /// never made. `fetch_with_report` exists precisely so this cannot happen.
+    /// A delegating entry point must still log under its own name. A
+    /// `SQL_FETCH_NEXT` branch that `return`ed through `sql_fetch` would leave
+    /// the only branch that actually fetches never reaching `SQLFetchScroll`'s
+    /// own exit log, so a trace would read `SQLFetch -> SUCCESS` for a call the
+    /// application never made. `fetch_with_report` exists so that cannot happen.
     #[test]
     fn fetch_scroll_logs_its_own_return_value() {
         use crate::sync::{Arc, Mutex};
@@ -1780,9 +1779,9 @@ mod tests {
         }
     }
 
-    /// Task 1.3 / B2: a length-probe call — `SQLGetData` with a non-null
-    /// buffer and `BufferLength` 0, the documented idiom for "tell me how
-    /// much room I need" — must not consume the column. Spec step 5: "If the
+    /// A length-probe call, `SQLGetData` with a non-null buffer and
+    /// `BufferLength` 0, is the documented idiom for "tell me how much room I
+    /// need" and must not consume the column. Spec step 5: "If the
     /// data buffer supplied is too small to hold the null-termination
     /// character, SQLGetData returns SQL_SUCCESS_WITH_INFO and SQLSTATE
     /// 01004." A zero-length buffer is always too small to hold it, so this
@@ -2108,10 +2107,10 @@ mod tests {
         }
     }
 
-    /// `SQL_ATTR_ROWS_FETCHED_PTR` and `SQL_ATTR_ROW_STATUS_PTR` were accepted
-    /// and then ignored, so an application driving its loop off the fetched
-    /// count read whatever it had initialised the variable to — forever, if it
-    /// waited for zero.
+    /// `SQL_ATTR_ROWS_FETCHED_PTR` and `SQL_ATTR_ROW_STATUS_PTR` are written,
+    /// not merely accepted. Ignoring them leaves an application driving its loop
+    /// off the fetched count reading whatever it initialised the variable to,
+    /// forever if it waits for zero.
     #[test]
     fn fetch_reports_rows_fetched_and_row_status_through_the_bound_pointers() {
         unsafe {
@@ -2194,7 +2193,7 @@ mod tests {
     /// `SQL_ATTR_ROWS_FETCHED_PTR` and `SQL_ATTR_ROW_STATUS_PTR` at odd
     /// addresses. These are written by `SQLFetch` itself rather than by the
     /// column marshalling, and the row-status one is an array write, which is
-    /// the shape that would reach for `slice::from_raw_parts` — UB on
+    /// the shape that would reach for `slice::from_raw_parts`, UB on
     /// construction, before anything is read.
     #[test]
     fn fetch_writes_through_misaligned_status_pointers() {
@@ -2243,8 +2242,8 @@ mod tests {
 
     /// The other half of the split: [`RowReport::Arguments`] writes through the
     /// caller's own pointers and leaves the statement attributes alone. The
-    /// spec makes them separate storage — that buffer "is used only by
-    /// **SQLExtendedFetch**" — so a destination that wrote both would satisfy
+    /// spec makes them separate storage, since that buffer "is used only by
+    /// **SQLExtendedFetch**", so a destination that wrote both would satisfy
     /// the attribute test above and still be wrong.
     #[test]
     fn a_report_to_arguments_bypasses_the_statement_attributes() {
@@ -2366,8 +2365,8 @@ mod tests {
         }
     }
 
-    /// Every orientation but `SQL_FETCH_NEXT` is `HY106` — and, unlike the macro
-    /// stub this replaces, with a diagnostic the application can actually read.
+    /// Every orientation but `SQL_FETCH_NEXT` is `HY106`, with a diagnostic the
+    /// application can actually read rather than a bare return code.
     #[test]
     fn extended_fetch_rejects_every_other_orientation_with_a_readable_hy106() {
         unsafe {
@@ -2507,7 +2506,7 @@ mod tests {
     ///
     /// `SQLSetDescField` creates such a record by setting any single field, so
     /// presence in the map does not by itself mean a binding. The record with a
-    /// null data pointer *and* a live indicator is a different thing — the spec
+    /// null data pointer *and* a live indicator is a different thing: the spec
     /// makes it a legal `SQLBindCol` state and `SQLFetch` serves it; see
     /// [`fetch_writes_the_indicator_of_an_indicator_only_binding`].
     ///
@@ -2519,16 +2518,16 @@ mod tests {
     /// the state rather than a weakness that can be tested away: a record with
     /// neither pointer has nothing to write *through*, so admitting it costs a
     /// wasted column read and produces no observable difference. It is kept as
-    /// a statement of the rule, and the filter's other half — the indicator-only
-    /// record — is what carries the mutation coverage.
+    /// a statement of the rule, and the filter's other half, the indicator-only
+    /// record, is what carries the mutation coverage.
     #[test]
     fn fetch_skips_a_record_that_carries_neither_pointer() {
         unsafe {
             let (env, conn, stmt) = long_data_stmt_no_fetch();
 
             // Sentinel: no ODBC length is negative, so any write is visible.
-            // The pointer is kept out of the record on purpose — this test is
-            // about a record with no indicator at all — and used only to prove
+            // The pointer is kept out of the record on purpose, since this test
+            // is about a record with no indicator at all, and used only to prove
             // afterwards that nothing wrote through the neighbourhood.
             let mut indicator: isize = -99;
             let indicator_ptr = std::ptr::from_mut(&mut indicator);
@@ -2611,7 +2610,7 @@ mod tests {
     /// table's 22003 row would break if it were applied literally: four whole
     /// digits against an octet length of 0. The row exists to stop a wrong
     /// number reaching the application's buffer, and this binding has no
-    /// buffer — the spec sanctions it in as many words ("An application can
+    /// buffer, which the spec sanctions in as many words ("An application can
     /// unbind the data buffer for a column but still have a length/indicator
     /// buffer bound for the column"), so it must stay `SQL_SUCCESS` with the
     /// length reported.
@@ -2654,9 +2653,10 @@ mod tests {
         }
     }
 
-    /// `SQL_ATTR_ROW_BIND_OFFSET_PTR` was accepted and ignored, so a bound
-    /// column landed at the base address instead of the offset one — the
-    /// application reads the wrong slot of its own buffer and never learns why.
+    /// `SQL_ATTR_ROW_BIND_OFFSET_PTR` is applied, not merely accepted. Ignoring
+    /// it lands a bound column at the base address instead of the offset one, so
+    /// the application reads the wrong slot of its own buffer and never learns
+    /// why.
     #[test]
     fn fetch_applies_the_row_bind_offset_to_bound_columns() {
         unsafe {
@@ -2668,7 +2668,7 @@ mod tests {
             // Every access after the bind goes through `slots_ptr`, never
             // through `slots`. The driver holds that raw pointer across the
             // fetches, and writing through the local would invalidate it under
-            // Stacked Borrows — Miri rejects the test, not the driver. An ODBC
+            // Stacked Borrows, so Miri would reject the test, not the driver. An ODBC
             // application has no such constraint: it owns the buffer outright.
             let mut slots: [i32; 2] = [0, 0];
             let mut indicators: [isize; 2] = [0, 0];
@@ -2703,8 +2703,8 @@ mod tests {
             assert_eq!((slot(0), slot(1)), (4242, 0));
 
             // Clear through the same pointer the driver was given, then move the
-            // offset — which is the whole reason the attribute is a pointer *to*
-            // the offset rather than the offset itself.
+            // offset, which is why the attribute is a pointer *to* the offset
+            // rather than the offset itself.
             std::ptr::write(slots_ptr, 0);
             std::ptr::write(slots_ptr.add(1), 0);
             bind_offset = offset;
@@ -2724,13 +2724,13 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
-    // MockNullBackend — a single row whose one column is `ColumnValue::Null`
+    // MockNullBackend: a single row whose one column is `ColumnValue::Null`
     // -------------------------------------------------------------------
 
     /// A one-column statement whose row is always `ColumnValue::Null`.
     ///
-    /// No mock in `test_utils.rs` returns `ColumnValue::Null` from `get_data`
-    /// — every one of them stands for a real value `SQLGetData` can read —
+    /// No mock in `test_utils.rs` returns `ColumnValue::Null` from `get_data`,
+    /// since every one of them stands for a real value `SQLGetData` can read,
     /// and this module's tests are scoped to `fetch.rs`, so this one is local
     /// rather than added there.
     struct MockNullStatement {
@@ -2763,8 +2763,8 @@ mod tests {
 
     /// Hands out one [`MockNullStatement`] per execution. Every capability
     /// declaration below is the least-capable value the spec defines (see
-    /// `test_utils.rs`'s `minimal_capability_decls!` for the same list) —
-    /// this mock exists only to drive `get_data` down the `ColumnValue::Null`
+    /// `test_utils.rs`'s `minimal_capability_decls!` for the same list).
+    /// This mock exists only to drive `get_data` down the `ColumnValue::Null`
     /// branch, so none of them is exercised by the tests that use it.
     struct MockNullBackend;
 
@@ -2943,7 +2943,7 @@ mod tests {
     }
 
     /// Env + connection + statement for [`MockNullBackend`], executed but with
-    /// the cursor still before the first row — the same shape as
+    /// the cursor still before the first row, the same shape as
     /// `long_data_stmt_no_fetch`, for a backend whose one row is NULL instead
     /// of a real value.
     unsafe fn null_stmt_no_fetch() -> (*mut c_void, *mut c_void, *mut c_void) {
@@ -2992,17 +2992,17 @@ mod tests {
         }
     }
 
-    /// B1: `SQL_ATTR_ROW_BIND_OFFSET_PTR` must not turn a null
+    /// `SQL_ATTR_ROW_BIND_OFFSET_PTR` must not turn a null
     /// `SQL_DESC_INDICATOR_PTR` into a non-null one.
     ///
-    /// The column has a real, bound data buffer but no indicator — the
-    /// application never supplied one — so the fetched `NULL` value must be
+    /// The column has a real, bound data buffer but no indicator, because the
+    /// application never supplied one, so the fetched `NULL` value must be
     /// reported as spec 22002 ("indicator variable required but not
-    /// supplied"), exactly as it would be with no offset in force at all. Before
-    /// the fix, `indicator_ptr.wrapping_byte_add(64)` turned the null pointer
-    /// into address `0x40`: the 22002 check saw a non-null pointer and skipped
-    /// the error, and `write_column_value` then wrote the `SQL_NULL_DATA`
-    /// sentinel through that wild address.
+    /// supplied"), exactly as it would be with no offset in force at all. An
+    /// unconditional `indicator_ptr.wrapping_byte_add(64)` would turn the null
+    /// pointer into address `0x40`: the 22002 check would see a non-null pointer
+    /// and skip the error, and `write_column_value` would write the
+    /// `SQL_NULL_DATA` sentinel through that wild address.
     #[test]
     fn row_bind_offset_does_not_offset_a_null_indicator_pointer() {
         unsafe {
@@ -3045,17 +3045,17 @@ mod tests {
         }
     }
 
-    /// B1: `SQL_ATTR_ROW_BIND_OFFSET_PTR` must not turn a null
+    /// `SQL_ATTR_ROW_BIND_OFFSET_PTR` must not turn a null
     /// `SQL_DESC_DATA_PTR` into a non-null one.
     ///
-    /// Indicator-only binding — `TargetValuePtr` is null, `StrLen_or_IndPtr` is
-    /// real — is the spec-legal state
+    /// An indicator-only binding, where `TargetValuePtr` is null and
+    /// `StrLen_or_IndPtr` is real, is the spec-legal state
     /// [`fetch_writes_the_indicator_of_an_indicator_only_binding`] already
     /// covers without an offset; this pins the same behaviour with a non-zero
-    /// `SQL_ATTR_ROW_BIND_OFFSET_PTR` in force. Before the fix,
-    /// `data_ptr.wrapping_byte_add(offset)` turned the null data pointer into a
-    /// non-null address, and `write_column_value` attempted to write the
-    /// column's real (non-NULL) value through it.
+    /// `SQL_ATTR_ROW_BIND_OFFSET_PTR` in force. An unconditional
+    /// `data_ptr.wrapping_byte_add(offset)` would turn the null data pointer
+    /// into a non-null address, and `write_column_value` would attempt to write
+    /// the column's real (non-NULL) value through it.
     ///
     /// `data_canary` stands in for the Miri wild-write demonstration the plan
     /// called for: it is never bound to anything, so if a future regression
@@ -3120,7 +3120,7 @@ mod tests {
     /// Read the SQLSTATE of the statement's first diagnostic record.
     ///
     /// Generic over the backend because the token names a
-    /// `StatementHandle<B>`, and reading it back as any other `B` is unsound —
+    /// `StatementHandle<B>`, and reading it back as any other `B` is unsound;
     /// see `handles/scope.rs`. Every call site must name the same backend it
     /// allocated the statement against.
     unsafe fn first_sqlstate<B: Backend>(stmt: *mut c_void) -> String {
@@ -3196,7 +3196,7 @@ mod tests {
             assert_eq!(first_sqlstate::<MockBackend>(stmt), "24000");
 
             // SQLDisconnect frees every statement on the connection as a side
-            // effect, so `stmt` is already gone by here — pass null rather
+            // effect, so `stmt` is already gone by here. Pass null rather
             // than the now-stale token, per `cleanup_env_conn_stmt`'s
             // documented "must be live, not already freed" precondition.
             let _ = crate::ffi::connect::sql_disconnect::<MockBackend>(conn);
@@ -3292,7 +3292,7 @@ mod tests {
                 1,
                 CDataType::Char as i16,
                 std::ptr::null_mut(),
-                -1, // negative — HY090 check fires after cursor check
+                -1, // negative: HY090 check fires after cursor check
                 std::ptr::null_mut(),
             );
             assert_eq!(ret, SqlReturn::ERROR);
@@ -3310,7 +3310,7 @@ mod tests {
     /// Re-materialising per call makes reading an N-byte column in K-byte
     /// chunks cost O(N²/K): the whole value is rebuilt for every part. With a
     /// 64 KiB column and the 512-byte buffer a driver manager may choose, that
-    /// is 128 calls copying 8 MiB to deliver 64 KiB — a denial-of-service
+    /// is 128 calls copying 8 MiB to deliver 64 KiB, a denial-of-service
     /// amplification an application cannot avoid, since the chunk size is its
     /// own buffer's.
     #[test]
@@ -3356,11 +3356,11 @@ mod tests {
     /// Bound columns are written in ascending column order, so when two of them
     /// would fail it is the lower-numbered one an application hears about.
     ///
-    /// The records live in a `HashMap`, so before `collect_bindings` sorted them
-    /// this was whichever the iterator happened to yield first — stable within a
+    /// The records live in a `HashMap`, so without `collect_bindings`' sort it
+    /// would be whichever the iterator happened to yield first: stable within a
     /// run and not across runs, because `RandomState` is seeded per process. With
-    /// the sort removed, this test fails **7 runs in 12**; with it, always passes.
-    /// So a failure here is a real ordering change rather than flakiness.
+    /// the sort removed this test fails most runs, and with it always passes, so
+    /// a failure here is a real ordering change rather than flakiness.
     #[test]
     fn bound_columns_are_written_in_ascending_column_order() {
         unsafe {
@@ -3441,7 +3441,7 @@ mod tests {
     /// `SQL_SUCCESS_WITH_INFO` tells an application to call `SQLGetDiagRec`; a
     /// record with an empty or unrelated message leaves it unable to tell
     /// truncation from any other informational condition. The state alone is
-    /// already asserted elsewhere — this pins the record's content.
+    /// already asserted elsewhere, so this pins the record's content.
     #[test]
     fn a_truncating_get_data_posts_a_01004_record_that_says_so() {
         unsafe {
@@ -3486,15 +3486,13 @@ mod tests {
 
     /// A column ordinal at `u16::MAX` with a row fetched is `07009`.
     ///
-    /// This test previously pinned the opposite — the backend's `HY000` — and
-    /// said so "so that changing it is a decision rather than an accident".
-    /// This is that decision. The reason recorded for delegating the check was
-    /// that "a precise check would cost an extra round-trip", and that was
-    /// simply false: [`StatementBackend::column_count`] is a local accessor
-    /// with no I/O behind it, and core already range-checks `describe_col`
-    /// against exactly that call. The clause naming "a column number greater
-    /// than the number of columns in the result set" carries no Driver-Manager
-    /// marker, so it is the driver's to answer, and now does.
+    /// Core answers this rather than delegating to the backend, which would
+    /// report whatever its own error mapping produces, usually `HY000`. The
+    /// check costs no round-trip: [`StatementBackend::column_count`] is a local
+    /// accessor with no I/O behind it, and core already range-checks
+    /// `describe_col` against exactly that call. The clause naming "a column
+    /// number greater than the number of columns in the result set" carries no
+    /// Driver-Manager marker, so it is the driver's to answer.
     #[test]
     fn get_data_past_the_last_column_is_07009() {
         unsafe {
@@ -3581,7 +3579,7 @@ mod tests {
             let mut ind: isize = 0;
             let ret = sql_get_data::<MockBackend>(
                 stmt,
-                0, // bookmark column — not supported
+                0, // bookmark column: not supported
                 CDataType::SLong as i16,
                 &mut buf as *mut i32 as *mut c_void,
                 4,
@@ -3598,10 +3596,10 @@ mod tests {
     ///
     /// `execute.rs`'s `an_execution_that_overruns_its_query_timeout_reports_hyt00`
     /// is the sibling of this test and cannot stand in for it: it blocks in
-    /// `exec_direct`, so it keeps passing with `SQLFetch` entirely unarmed —
-    /// which is exactly the state this driver shipped in. Measured against a
-    /// live coordinator under a 2-second deadline, the execute returned
-    /// `SQL_SUCCESS` in 0.1s and the fetch in 24.6s.
+    /// `exec_direct`, so it keeps passing with `SQLFetch` entirely unarmed.
+    /// Against a live coordinator the execute can return `SQL_SUCCESS` in a
+    /// fraction of a second while the following fetch runs for tens of seconds,
+    /// so an execute-only timer bounds nothing.
     ///
     /// Not run under Miri: a real one-second deadline and a spin-until-cancelled
     /// fetch, which Miri would stretch unpredictably for no memory-safety gain.

@@ -88,10 +88,10 @@ use crate::utf16::write_utf16;
 ///   below covers them explicitly.
 /// - Every *other* named-but-unhandled `InfoType` (i.e. not a genuine
 ///   `SQL_CONVERT_*` code) gets a value in the shape the spec declares for
-///   it, not a flat `U32(0)` regardless of shape — the same requirement as
+///   it, not a flat `U32(0)` regardless of shape, the same requirement as
 ///   `SQL_INTEGRITY` above. The fallback below is shape-aware for any info
 ///   type [`crate::types::info_type_from_raw`] recognises (see
-///   [`crate::types::expected_kind`]), covering all 109 named info types.
+///   [`crate::types::expected_kind`]), which covers every named info type.
 ///
 /// Returning `SQL_ERROR` from `SQLGetInfoW` for an info type the backend
 /// simply hasn't implemented corrupts the Windows Driver Manager's internal
@@ -126,17 +126,17 @@ use crate::utf16::write_utf16;
 /// [`Backend::cursor_rollback_behavior`], the same hooks
 /// [`crate::ffi::tran::sql_end_tran`] applies. Without that, a backend that
 /// answers neither info type anywhere would fall through to the shape-aware
-/// default and report `U16(0)` for 23 and `U32(0)` for 24 — both
-/// `SQL_CB_DELETE`, the second in the wrong shape — while `sql_end_tran`
-/// applied whatever the hooks actually declare. That mismatch is the exact
-/// defect the hooks exist to prevent: an application that believes
+/// default and report `U16(0)` for 23 and `U32(0)` for 24 (both
+/// `SQL_CB_DELETE`, the second in the wrong shape) while `sql_end_tran`
+/// applies whatever the hooks declare. That mismatch is the defect the hooks
+/// exist to prevent: an application that believes
 /// `SQL_CB_DELETE` discards its statements' state per the `SQLEndTran`
 /// transition table.
 ///
-/// A backend can still deliberately override both, from its own typed
-/// `get_info` match (for 23) or from [`Backend::get_info_raw`] (for either) —
-/// `get_info_raw` is consulted above, before this special case — but it must
-/// then keep the reported value and its hooks in sync itself.
+/// A backend can still override both, from its own typed `get_info` match (for
+/// 23) or from [`Backend::get_info_raw`] (for either), which is consulted above
+/// and ahead of this special case. It must then keep the reported value and its
+/// hooks in sync itself.
 fn info_type_default_response<B: Backend>(
     conn: Option<&B::Connection>,
     current_catalog: Option<&str>,
@@ -211,9 +211,9 @@ fn info_type_default_response<B: Backend>(
     // does not model, so `info_type_from_raw` cannot supply their shape below.
     //
     // Getting this wrong is a buffer overrun, not a cosmetic mismatch:
-    // `SQLGetInfo`'s `BufferLength` is *ignored* for a non-string value — the
+    // `SQLGetInfo`'s `BufferLength` is *ignored* for a non-string value, and the
     // driver is required to assume the buffer matches the type the spec
-    // declares — so answering `U32` here writes four bytes into the two an
+    // declares, so answering `U32` here writes four bytes into the two an
     // application correctly allocated for a `SQLUSMALLINT`.
     //
     // Listed rather than shape-derived because there is nothing to derive from:
@@ -308,8 +308,8 @@ fn info_type_or_default<B: Backend>(
 /// - HYC00 (optional feature not implemented): not returned here. A recognised `InfoType`
 ///   the backend reports as `OdbcError::NotImplemented` falls through to the same
 ///   DM-safe default as an unnamed info type (see `info_type_or_default`) rather than
-///   surfacing HYC00 — naming a raw value must never be what turns a benign default
-///   into an error.
+///   surfacing HYC00, because naming a raw value must never be what turns a benign
+///   default into an error.
 /// - HYT01 (connection timeout): propagated from the backend via `OdbcError`.
 /// - IM001 (driver does not support function): (driver-manager-handled; not returned here)
 ///
@@ -360,7 +360,7 @@ pub unsafe fn sql_get_info_w<B: Backend>(
             // as `SQL_DATABASE_NAME`. Read before the dispatch below, which
             // borrows the handle's diagnostics mutably.
             // What the application set, else what the session is actually
-            // using — the same two sources, in the same order, that
+            // using: the same two sources, in the same order, that
             // `SQLGetConnectAttr(SQL_ATTR_CURRENT_CATALOG)` reads. The spec
             // makes these one value, so they must not consult different things.
             let current_catalog = handle
@@ -473,8 +473,8 @@ pub unsafe fn sql_get_info_w<B: Backend>(
 ///
 /// The character columns split into two groups. `TYPE_NAME` and
 /// `LOCAL_TYPE_NAME` name a data-source type, which is an identifier in the
-/// data source's own namespace — the same quantity `SQLColumns.TYPE_NAME`
-/// already reports — so they take `identifier_len`. `LITERAL_PREFIX`,
+/// data source's own namespace (the same quantity `SQLColumns.TYPE_NAME`
+/// already reports), so they take `identifier_len`. `LITERAL_PREFIX`,
 /// `LITERAL_SUFFIX` and `CREATE_PARAMS` hold literal syntax fragments rather
 /// than names; they are not bounded by the data source's identifier limit and
 /// so take their own spec-independent widths.
@@ -535,15 +535,15 @@ pub(crate) fn type_info_columns(widths: &CatalogResultColumnWidths) -> Vec<Colum
 ///
 /// - 01000 (general warning): not returned; driver does not produce informational messages here.
 /// - 01S02 (option value changed): not returned here, and the row carries no `(DM)`
-///   marker. Core makes its `01S02` substitutions where the value is set — a
+///   marker. Core makes its `01S02` substitutions where the value is set: a
 ///   `SQL_ATTR_ROW_ARRAY_SIZE` or `SQL_ROWSET_SIZE` other than 1 is substituted back at
 ///   `SQLSetStmtAttr` time, and a `SQL_ATTR_MAX_ROWS` an unimplemented hook refused is
-///   substituted there too — so by the time this result set is built there is no value
+///   substituted there too. By the time this result set is built there is no value
 ///   left to change.
 /// - 08S01 (communication link failure): propagated from the backend via `OdbcError`.
 /// - 24000 (invalid cursor state): **returned by this driver** when a cursor is already open
-///   on the statement. The row's first clause is the Driver Manager's — it answers while
-///   `SQLFetch` has not yet returned `SQL_NO_DATA` — but the other two are the driver's, and
+///   on the statement. The row's first clause is the Driver Manager's, which answers while
+///   `SQLFetch` has not yet returned `SQL_NO_DATA`; the other two are the driver's, and
 ///   Appendix B puts this function in one transition table with the ten catalog functions,
 ///   whose cursor-states row is `24000` in all three columns.
 /// - 40001 (serialization failure): propagated from the backend via `OdbcError` if applicable.
@@ -554,10 +554,10 @@ pub(crate) fn type_info_columns(widths: &CatalogResultColumnWidths) -> Vec<Colum
 ///   rather than SQL_ERROR/HY004. This is a common driver behavior: the result set column
 ///   structure is the same regardless of the filter, and returning an empty set is less
 ///   disruptive than rejecting values that may be driver-specific extensions.
-/// - HY008: Operation canceled; not returned here. This call makes no fallible backend call —
-///   `Backend::get_type_info` returns its rows infallibly, as a `Cow` — so there is no error for a
-///   cancellation to be reported through. The asynchronous clause is inapplicable: core never
-///   returns `SQL_STILL_EXECUTING`.
+/// - HY008: Operation canceled; not returned here. This call makes no fallible backend
+///   call, since `Backend::get_type_info` returns its rows infallibly as a `Cow`, so there
+///   is no error for a cancellation to be reported through. The asynchronous clause is
+///   inapplicable: core never returns `SQL_STILL_EXECUTING`.
 /// - HY010 (function sequence error): `(DM)`-marked on every clause, and **returned by this
 ///   driver** anyway: a statement whose connection is not open has no data source to name a
 ///   type list, so this function answers `HY010` rather than building a result set from
@@ -570,9 +570,9 @@ pub(crate) fn type_info_columns(widths: &CatalogResultColumnWidths) -> Vec<Colum
 /// - HYT01 (connection timeout): propagated from the backend via `OdbcError`.
 /// - IM001 (driver does not support function): (driver-manager-handled; not returned here)
 /// - IM017 (polling disabled): not returned here (the asynchronous notification model is
-///   not supported — not DM-annotated in the spec).
+///   not supported; not DM-annotated in the spec).
 /// - IM018 (SQLCompleteAsync not called): not returned here (the asynchronous notification
-///   model is not supported — not DM-annotated in the spec).
+///   model is not supported; not DM-annotated in the spec).
 ///
 /// # Safety
 ///
@@ -598,12 +598,12 @@ pub unsafe fn sql_get_type_info<B: Backend>(
 
             // Spec 24000: "A result set was open on the StatementHandle, but
             // SQLFetch or SQLFetchScroll had not been called." Two of that row's
-            // three clauses are the driver's — the (DM) half covers only the
-            // case where SQLFetch has not yet returned SQL_NO_DATA — and
-            // Appendix B puts this function in one transition table with the ten
-            // catalog functions, whose cursor-states row is `24000` in all three
-            // columns. Without it a second call silently overwrote the first
-            // result set.
+            // three clauses are the driver's: the (DM) half covers only the
+            // case where SQLFetch has not yet returned SQL_NO_DATA. Appendix B
+            // puts this function in one transition table with the ten catalog
+            // functions, whose cursor-states row is `24000` in all three
+            // columns. Without the check, a second call silently overwrites the
+            // first result set.
             if handle.cursor_open {
                 return Err(OdbcError::general(
                     "A cursor is already open on this statement",
@@ -634,7 +634,7 @@ pub unsafe fn sql_get_type_info<B: Backend>(
             // type". Core cannot rank closeness of mapping, so it orders by
             // TYPE_NAME within a DATA_TYPE, which is stable and total. Sorted
             // here rather than left to the backend so that every driver's
-            // result set is ordered, and ordered the same way — an application
+            // result set is ordered, and ordered the same way: an application
             // picking "the first row for this DATA_TYPE" as the preferred type
             // otherwise gets whatever order the backend happened to declare.
             //
@@ -689,10 +689,10 @@ pub unsafe fn sql_get_type_info<B: Backend>(
 /// - 08S01 (communication link failure): propagated from the backend via `OdbcError`.
 /// - HY000 (general error): propagated via `OdbcError` for unclassified failures.
 /// - HY001 (memory allocation error): not explicitly returned; Rust panics on OOM.
-/// - HY010 (function sequence error — called before connect): (driver-manager-handled;
+/// - HY010 (function sequence error, called before connect): (driver-manager-handled;
 ///   not returned here)
 /// - HY013 (memory management error): not explicitly returned; Rust panics on OOM.
-/// - HY095 (function type out of range — invalid FunctionId): every clause of this row is
+/// - HY095 (function type out of range, invalid FunctionId): every clause of this row is
 ///   `(DM)` (driver-manager-handled; not returned here). Core does not guard it even
 ///   defensively: an unknown single function ID resolves to `SQL_FALSE` (unsupported),
 ///   which answers the question the application asked rather than refusing it.
@@ -888,8 +888,8 @@ mod tests {
 
     /// **Core exports none of these functions**, and this array must report them
     /// present anyway. The two are not in conflict: the 2.x array answers "can an
-    /// ODBC 2.x application call this", and it can — the Driver Manager maps every
-    /// one of them onto the 3.x function core does export. The 3.x bitmap is the
+    /// ODBC 2.x application call this", and it can, because the Driver Manager maps
+    /// every one of them onto the 3.x function core does export. The 3.x bitmap is the
     /// one that must *not* claim them, because a claim there is what suppresses
     /// that mapping.
     ///
@@ -905,9 +905,9 @@ mod tests {
         use crate::function_id::FunctionId as F;
         let buf = all_functions_2x::<MockFunctionsBackend>();
 
-        // SQLGetConnectOption is 42. It was once recorded at 30 — an unassigned
-        // slot — so the Windows DM, which dispatches from this array, was told a
-        // function it could reach did not exist.
+        // SQLGetConnectOption is 42. Recording it at 30, an unassigned slot,
+        // tells the Windows DM, which dispatches from this array, that a
+        // function it could reach does not exist.
         for (id, label) in [
             (F::GetConnectOption, "SQLGetConnectOption"),
             (F::SetConnectOption, "SQLSetConnectOption"),
@@ -1054,13 +1054,13 @@ mod tests {
     }
 
     /// Four info types the spec declares `SQLUSMALLINT` have no
-    /// `odbc_sys::InfoType` variant, so nothing gave the shape-aware fallback a
-    /// shape to honour and they took the generic `U32(0)`.
+    /// `odbc_sys::InfoType` variant, so nothing gives the shape-aware fallback a
+    /// shape to honour and they would otherwise take the generic `U32(0)`.
     ///
     /// That is a buffer overrun rather than a cosmetic mismatch: `SQLGetInfo`
-    /// *ignores* `BufferLength` for a non-string value — the driver must assume
-    /// the buffer matches the type the spec declares — so four bytes land in the
-    /// two an application correctly allocated. `read_u16_info`'s sentinel is
+    /// *ignores* `BufferLength` for a non-string value, and the driver must
+    /// assume the buffer matches the type the spec declares, so four bytes land
+    /// in the two an application correctly allocated. `read_u16_info`'s sentinel is
     /// what catches the two extra bytes; asserting on `StringLengthPtr` alone
     /// would not, since a `U32` answer reports a plausible `4`.
     #[test]
@@ -1100,13 +1100,13 @@ mod tests {
         // `MockTxnDeleteCloseBackend::get_info` returns an error for every info
         // type and the backend does not override `get_info_raw`, so it answers
         // SQL_CURSOR_COMMIT_BEHAVIOR (23) and SQL_CURSOR_ROLLBACK_BEHAVIOR (24)
-        // *nowhere* — the state a driver is in when it adds transaction support
-        // and follows core's defaults. Without the special case in
+        // *nowhere*, which is the state a driver is in when it adds transaction
+        // support and follows core's defaults. Without the special case in
         // `info_type_default_response` these fall through to U16(0) and U32(0),
         // both SQL_CB_DELETE (and the second in the wrong shape), while
         // `sql_end_tran` applies whatever the hooks declare. That is the
-        // original defect: an application told SQL_CB_DELETE discards its
-        // statements' state per the SQLEndTran transition table.
+        // defect: an application told SQL_CB_DELETE discards its statements'
+        // state per the SQLEndTran transition table.
         //
         // This backend declares Delete for commit and Close for rollback, so a
         // regression to a hardcoded 0 is distinguishable on the rollback leg.
@@ -1612,8 +1612,8 @@ mod tests {
 
             // OuterJoins (38) is `String`-shaped ("Y"/"P"/"N" per spec), and is
             // derived from `Backend::outer_join_capabilities` rather than left
-            // to the shape default — "" is not one of the values the spec
-            // defines for it. `MockBackend` declares LEFT | NESTED.
+            // to the shape default, because "" is not one of the values the
+            // spec defines for it. `MockBackend` declares LEFT | NESTED.
             let mut buf = [0xEEu16; 8];
             let mut str_len: i16 = -1;
             let ret = sql_get_info_w::<MockBackend>(
@@ -1762,13 +1762,11 @@ mod tests {
     /// application reading any of them into a character buffer then gets four
     /// bytes of binary zero with `StringLength = 4`.
     ///
-    /// This is the defect that was fixed for `SQL_ROW_UPDATES` and
-    /// `SQL_PROCEDURES` one type at a time. The list is the result of sweeping
-    /// every info-type number in `sql.h`/`sqlext.h` against
-    /// `info_type_from_raw`, so a new one cannot be missed by hand again — and
-    /// the assertion runs through the whole `sql_get_info_w` path rather than
-    /// calling `common_get_info_raw` directly, so the dispatch ordering is
-    /// exercised too.
+    /// The list is swept from every info-type number in `sql.h`/`sqlext.h`
+    /// against `info_type_from_raw` rather than collected one type at a time,
+    /// so a new one cannot be missed by hand. The assertion runs through the
+    /// whole `sql_get_info_w` path rather than calling `common_get_info_raw`
+    /// directly, so the dispatch ordering is exercised too.
     #[rustfmt::skip]
     const STRING_SHAPED_WITHOUT_INFOTYPE_VARIANT: &[(u16, &str, &str)] = &[
         (crate::types::SQL_ROW_UPDATES,         "N",         "SQL_ROW_UPDATES"),
@@ -1815,7 +1813,7 @@ mod tests {
                 assert_eq!(
                     str_len as usize,
                     expected_units * 2,
-                    "{name} reported the wrong StringLength — a U32(0) answer \
+                    "{name} reported the wrong StringLength: a U32(0) answer \
                      reports 4 bytes for what the spec declares a character string"
                 );
                 let actual = String::from_utf16_lossy(&buf[..expected_units]);
@@ -1905,7 +1903,7 @@ mod tests {
     }
 
     /// Runs `SQLGetInfoW(SQL_KEYWORDS)` against `B` through the whole FFI path
-    /// — allocate, connect, query, disconnect, free — and returns the text it
+    /// (allocate, connect, query, disconnect, free) and returns the text it
     /// wrote. Generic, unlike the shared helpers above, because the point of
     /// these assertions is that the answer moves with the backend.
     unsafe fn sql_keywords_of<B: Backend>() -> String {
@@ -1988,7 +1986,7 @@ mod tests {
             // nothing behind.
             assert_eq!(sql_keywords_of::<MockReservedOnlyKeywordsBackend>(), "");
             // Sorted and comma-separated with no spaces, whatever order the
-            // backend enumerates in — `MockBackend` declares
+            // backend enumerates in. `MockBackend` declares
             // `["MOCK_PRAGMA", "SELECT", "MOCK_ATTACH"]`.
             assert_eq!(sql_keywords_of::<MockBackend>(), "MOCK_ATTACH,MOCK_PRAGMA");
             // And it moves with the backend.

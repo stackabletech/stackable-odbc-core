@@ -19,7 +19,7 @@ use crate::types::{SqlReturn, SqlState};
 pub enum OdbcError {
     /// The handle the application passed is not one this driver handed out, or
     /// was freed. Maps to `SQL_INVALID_HANDLE`, which posts no diagnostic
-    /// record at all — see [`OdbcError::sqlstate`].
+    /// record at all: see [`OdbcError::sqlstate`].
     #[snafu(display("Invalid handle"))]
     InvalidHandle,
 
@@ -81,9 +81,9 @@ pub enum OdbcError {
         /// The error this one wrapped, preserved so a driver's causal chain
         /// survives the FFI boundary instead of being flattened to a string.
         ///
-        /// Named `cause` rather than `source` deliberately. `snafu` special-cases
-        /// a field called `source` and requires it to implement
-        /// [`std::error::Error`] — which `Box<dyn Error + Send + Sync>` does not,
+        /// Named `cause` rather than `source`, because `snafu` special-cases a
+        /// field called `source` and requires it to implement
+        /// [`std::error::Error`], which `Box<dyn Error + Send + Sync>` does not,
         /// there being no such impl in `std`. Reach it through
         /// [`OdbcError::cause`].
         cause: Option<Box<dyn std::error::Error + Send + Sync>>,
@@ -216,8 +216,8 @@ impl OdbcError {
 /// driver's own `Self::Error`, so each call across that boundary converts.
 ///
 /// Plain `?` cannot do it. `?` needs `OdbcError: From<B::Error>`, and the
-/// `B::Error: Into<OdbcError>` bound does not give the compiler that — the
-/// blanket `impl<T, U: From<T>> Into<U> for T` only runs in the other
+/// `B::Error: Into<OdbcError>` bound does not give the compiler that, because
+/// the blanket `impl<T, U: From<T>> Into<U> for T` only runs in the other
 /// direction. Stating the bound as `where OdbcError: From<Self::Error>` on the
 /// trait does not help either: a `where` clause mentioning an associated type
 /// is not elaborated into an implied bound, so every one of core's generic

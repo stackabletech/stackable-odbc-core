@@ -138,18 +138,18 @@ pub(crate) fn verbose_type(sql_type: SqlDataType) -> i16 {
 ///
 /// The counterpart of [`verbose_type`], and the reason both live here: a
 /// concise datetime type determines the verbose type *and* the subcode, so the
-/// two answers come from one place. Every writer of `SQL_DESC_CONCISE_TYPE` —
-/// `SQLBindCol`, `SQLBindParameter`, `SQLSetDescField`, `SQLSetDescRec` — sets
+/// two answers come from one place. Every writer of `SQL_DESC_CONCISE_TYPE`
+/// (`SQLBindCol`, `SQLBindParameter`, `SQLSetDescField`, `SQLSetDescRec`) sets
 /// both through [`DescriptorRecord::set_concise_type`], and `SQLColAttribute`
 /// and the IRD read both through here. A second mapping is a second thing to be
 /// wrong about the same column.
 ///
 /// The subcode is **not** the concise type. `sqlext.h` builds one from the
-/// other — `SQL_TYPE_DATE` is 91 and `SQL_CODE_DATE` is 1, `SQL_INTERVAL_YEAR`
-/// is defined as `100 + SQL_CODE_YEAR` — so returning the concise type here
-/// would put 91 in a field whose only legal datetime values are 1, 2 and 3, and
-/// the consistency check would then reject a `SQL_C_TYPE_DATE` binding that has
-/// nothing wrong with it.
+/// other: `SQL_TYPE_DATE` is 91 and `SQL_CODE_DATE` is 1, and
+/// `SQL_INTERVAL_YEAR` is defined as `100 + SQL_CODE_YEAR`. Returning the
+/// concise type here would put 91 in a field whose only legal datetime values
+/// are 1, 2 and 3, and the consistency check would then reject a
+/// `SQL_C_TYPE_DATE` binding that has nothing wrong with it.
 ///
 /// The spec leaves the field undefined for a type that is neither family, and
 /// `0` is both what an application tests against and what the consistency
@@ -230,9 +230,9 @@ fn type_name_for(sql_type: SqlDataType) -> &'static str {
     } else if sql_type == SqlDataType::EXT_LONG_VAR_BINARY {
         "LONGVARBINARY"
     // `odbc_sys` names 9 `DATETIME` after the *verbose* `SQL_DATETIME`, but as
-    // a concise type — which is what a backend reports for a column — 9 is the
+    // a concise type (which is what a backend reports for a column) 9 is the
     // ODBC 2.0 `SQL_DATE`. See `verbose_type` below for the other direction,
-    // where 9 is deliberately not treated as a concise datetime code at all.
+    // where 9 is not treated as a concise datetime code at all.
     } else if sql_type == SqlDataType::DATE || sql_type == SqlDataType::DATETIME {
         "DATE"
     } else if sql_type == SqlDataType::TIME || sql_type == SqlDataType::EXT_TIME_OR_INTERVAL {
@@ -436,9 +436,9 @@ fn octet_length_for(desc: &ColumnDescriptor) -> isize {
 
 /// One column of a result set as a `DescriptorRecord`.
 ///
-/// The IRD stores no records — reads are computed from [`ColumnDescriptor`] — so
-/// this is the only form in which one can leave its statement, which is what
-/// `SQLCopyDesc` needs to take an IRD as its source.
+/// The IRD stores no records, since reads are computed from
+/// [`ColumnDescriptor`], so this is the only form in which one can leave its
+/// statement. That is what `SQLCopyDesc` needs to take an IRD as its source.
 ///
 /// Every field goes through [`get_column_attribute`], the same function
 /// `SQLColAttributeW` and `SQLGetDescField`'s IRD path use, so a copied record
@@ -446,8 +446,8 @@ fn octet_length_for(desc: &ColumnDescriptor) -> isize {
 /// here are the ones an IRD does not define: `SQL_DESC_DATA_PTR`,
 /// `SQL_DESC_INDICATOR_PTR` and `SQL_DESC_OCTET_LENGTH_PTR` are application-side
 /// addresses, and `SQL_DESC_PARAMETER_TYPE` is the IPD's. Their `Default` values
-/// are what a fresh record carries, which for the three pointers is null — an
-/// unbound record, correctly, since a copy carries no application buffer with it.
+/// are what a fresh record carries, which for the three pointers is null. That
+/// is an unbound record, correctly, since a copy carries no application buffer.
 pub(crate) fn record_from_column(
     desc: &ColumnDescriptor,
     column_count: i16,
@@ -482,9 +482,9 @@ pub(crate) fn record_from_column(
     };
     // Last, and through `set_concise_type`, so the two fields it derives are not
     // then overwritten by an earlier-set value. It is *not* the only writer of the
-    // type trio — `descriptor::set_field`'s `Desc::Type` arm writes all three and its
-    // `Desc::DatetimeIntervalCode` arm writes one — but it is the last write here,
-    // which is what this ordering needs.
+    // type trio (`descriptor::set_field`'s `Desc::Type` arm writes all three and
+    // its `Desc::DatetimeIntervalCode` arm writes one), but it is the last write
+    // here, which is what this ordering needs.
     record.set_concise_type(i16::try_from(numeric(Desc::ConciseType)?).unwrap_or(0));
     Ok(record)
 }
@@ -584,10 +584,10 @@ mod tests {
         // and SQL_DESC_DATETIME_INTERVAL_CODE carries the *subcode*.
         //
         // The subcode is not the concise type. `sqlext.h` builds one from the
-        // other — SQL_TYPE_TIMESTAMP is 93 and SQL_CODE_TIMESTAMP is 3 — and
-        // this test asserted 93 until the descriptor records started writing 3
-        // through the same mapping, at which point the ARD and the IRD
-        // disagreed about one field of one column.
+        // other: SQL_TYPE_TIMESTAMP is 93 and SQL_CODE_TIMESTAMP is 3. Asserting
+        // 93 here would let the ARD and the IRD disagree about one field of one
+        // column, since descriptor records write the subcode through the same
+        // mapping.
         let desc = ColumnDescriptor::new("ts", SqlDataType::TIMESTAMP);
         assert_eq!(desc.sql_type.0, 93, "SQL_TYPE_TIMESTAMP");
 
@@ -668,8 +668,8 @@ mod tests {
     fn col_attr_nullable_reports_the_unknown_case_the_bool_could_not() {
         // The reason `nullable` is an enum: SQL_NULLABLE_UNKNOWN is what the
         // spec requires for a computed or outer-joined column, and a `bool`
-        // forced it to be reported as SQL_NO_NULLS — telling an application it
-        // could skip a NULL check it needs.
+        // would force it to be reported as SQL_NO_NULLS, telling an application
+        // it could skip a NULL check it needs.
         let desc = ColumnDescriptor::new("computed", SqlDataType::INTEGER)
             .with_nullable(Nullable::SqlNullableUnknown);
         match get_column_attribute(&desc, 5, Desc::Nullable).unwrap() {
@@ -1012,7 +1012,7 @@ mod tests {
         // fractional-seconds count is reported via SQL_DESC_PRECISION
         // instead, per the two tests above), but this driver still exposes
         // `desc.scale` verbatim through SQL_DESC_SCALE rather than forcing it
-        // to 0 — pinning that `precision_for`'s special case does not affect
+        // to 0. This pins that `precision_for`'s special case does not affect
         // the `Desc::Scale` arm.
         let desc = timestamp_desc(6, 26);
         let n = expect_numeric(get_column_attribute(&desc, 5, Desc::Scale).unwrap());
@@ -1020,7 +1020,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // DisplaySize — type-specific logic
+    // DisplaySize: type-specific logic
     // -----------------------------------------------------------------------
 
     #[test]
@@ -1152,7 +1152,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // OctetLength — type-specific logic
+    // OctetLength: type-specific logic
     // -----------------------------------------------------------------------
 
     #[test]
@@ -1385,7 +1385,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // CaseSensitive — VARCHAR vs non-VARCHAR
+    // CaseSensitive: VARCHAR vs non-VARCHAR
     // -----------------------------------------------------------------------
 
     #[test]
@@ -1423,7 +1423,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // NumPrecRadix — numeric vs non-numeric
+    // NumPrecRadix: numeric vs non-numeric
     // -----------------------------------------------------------------------
 
     #[test]
@@ -1441,7 +1441,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Unnamed — empty vs non-empty name
+    // Unnamed: empty vs non-empty name
     // -----------------------------------------------------------------------
 
     #[test]
@@ -1459,7 +1459,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // type_name_for — all types
+    // type_name_for: all types
     // -----------------------------------------------------------------------
 
     #[test]

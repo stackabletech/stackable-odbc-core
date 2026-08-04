@@ -6,20 +6,20 @@
 //! Named fields rather than `Vec<ColumnValue>` so a backend cannot get the
 //! column order or count wrong. `SyntheticStatement::new` only
 //! `debug_assert!`s that the row width matches the descriptor count, which a
-//! release build does not check — with typed rows the mismatch is
-//! unrepresentable instead.
+//! release build does not check. Typed rows make the mismatch unrepresentable
+//! instead.
 //!
 //! # Every row type here is `#[non_exhaustive]`
 //!
 //! Core owns these column layouts: a spec result set that gains a column is a
 //! change to this file, and a backend fills named fields rather than positions.
-//! `#[non_exhaustive]` is what makes that a *core-only* change — without it, a
+//! `#[non_exhaustive]` is what makes that a *core-only* change. Without it, a
 //! new field breaks every struct literal in every driver, which is a major
 //! version bump for a column the driver does not even have to populate.
 //!
-//! A `#[non_exhaustive]` struct has no struct expression outside its own crate
-//! — not even `..Default::default()`, which Rust rejects with `E0639` — so
-//! every row type carries a consuming setter per column, generated from the
+//! A `#[non_exhaustive]` struct has no struct expression outside its own crate,
+//! not even `..Default::default()`, which Rust rejects with `E0639`. Every row
+//! type therefore carries a consuming setter per column, generated from the
 //! same field list by the `catalog_rows!` macro below. A backend names the
 //! columns it has and says nothing about the rest:
 //!
@@ -36,12 +36,12 @@
 //! bare `String` and a `String` column accepts a `&str`. Adding a column later
 //! adds a setter, which no driver has to react to.
 //!
-//! Deliberately not a positional constructor. `ColumnRow` has eighteen columns
-//! and `ProcedureColumnRow` nineteen; a `new(...)` taking them in order would
-//! reintroduce exactly the argument-order mistake that named fields exist to
-//! make unrepresentable. This doc example is a doctest, so it is compiled as a
-//! separate crate — which is what makes it proof that the idiom works from
-//! *outside* core rather than only inside it.
+//! There is no positional constructor. `ColumnRow` has eighteen columns and
+//! `ProcedureColumnRow` nineteen, so a `new(...)` taking them in order would
+//! reintroduce the argument-order mistake that named fields exist to make
+//! unrepresentable. The doc example above is a doctest, compiled as a separate
+//! crate, so it proves the idiom works from *outside* core rather than only
+//! inside it.
 
 use crate::types::ColumnValue;
 
@@ -224,7 +224,7 @@ catalog_rows! {
         pub ordinal_position: Option<i16>,
         /// `COLUMN_NAME` (9).
         pub column_name: Option<String>,
-        /// `ASC_OR_DESC` (10) — the one catalog column the spec declares
+        /// `ASC_OR_DESC` (10), the one catalog column the spec declares
         /// `char(1)` rather than `varchar`.
         pub asc_or_desc: Option<String>,
         /// `CARDINALITY` (11).
@@ -259,7 +259,7 @@ catalog_rows! {
     ///
     /// `PROCEDURE_NAME` (3) is the only column the spec marks "not NULL".
     ///
-    /// Columns 4-6 are listed with data type "N/A" — "reserved for future use" —
+    /// Columns 4-6 are listed with data type "N/A", "reserved for future use",
     /// but core reports them as `SMALLINT`, the ODBC 2.0 layout that applications
     /// binding by column number expect, so they are modelled as `Option<i16>`
     /// rather than dropped.
@@ -278,7 +278,7 @@ catalog_rows! {
         pub num_result_sets: Option<i16>,
         /// `REMARKS` (7).
         pub remarks: Option<String>,
-        /// `PROCEDURE_TYPE` (8) — one of the
+        /// `PROCEDURE_TYPE` (8): one of the
         /// [`SQL_PT_*`](crate::types::SQL_PT_PROCEDURE) values.
         pub procedure_type: Option<i16>,
     }
@@ -297,7 +297,7 @@ catalog_rows! {
         pub procedure_name: String,
         /// `COLUMN_NAME` (4), not NULL.
         pub column_name: String,
-        /// `COLUMN_TYPE` (5), not NULL — an [`odbc_sys::ParamType`] discriminant,
+        /// `COLUMN_TYPE` (5), not NULL. An [`odbc_sys::ParamType`] discriminant,
         /// whose values are exactly the spec's `SQL_PARAM_*` / `SQL_RESULT_COL` /
         /// `SQL_RETURN_VALUE` set, so spell it `ParamType::Input as i16`.
         pub column_type: i16,
@@ -402,7 +402,7 @@ impl TableRow {
     /// `TABLE_TYPE`, `REMARKS`.
     /// Consuming, so the strings move rather than being cloned. The
     /// borrowing [`Self::to_values`] delegates here, which keeps the column
-    /// order defined once — two lists in this order is how they come to
+    /// order defined once. Two lists in this order is how they come to
     /// disagree, and an application binds by number.
     pub fn into_values(self) -> Vec<ColumnValue> {
         vec![
@@ -427,7 +427,7 @@ impl ColumnRow {
     /// Values in spec column order; 18 columns, matching the field order.
     /// Consuming, so the strings move rather than being cloned. The
     /// borrowing [`Self::to_values`] delegates here, which keeps the column
-    /// order defined once — two lists in this order is how they come to
+    /// order defined once. Two lists in this order is how they come to
     /// disagree, and an application binds by number.
     pub fn into_values(self) -> Vec<ColumnValue> {
         vec![
@@ -465,7 +465,7 @@ impl PrimaryKeyRow {
     /// Values in spec column order; 6 columns, matching the field order.
     /// Consuming, so the strings move rather than being cloned. The
     /// borrowing [`Self::to_values`] delegates here, which keeps the column
-    /// order defined once — two lists in this order is how they come to
+    /// order defined once. Two lists in this order is how they come to
     /// disagree, and an application binds by number.
     pub fn into_values(self) -> Vec<ColumnValue> {
         vec![
@@ -491,7 +491,7 @@ impl ForeignKeyRow {
     /// Values in spec column order; 14 columns, matching the field order.
     /// Consuming, so the strings move rather than being cloned. The
     /// borrowing [`Self::to_values`] delegates here, which keeps the column
-    /// order defined once — two lists in this order is how they come to
+    /// order defined once. Two lists in this order is how they come to
     /// disagree, and an application binds by number.
     pub fn into_values(self) -> Vec<ColumnValue> {
         vec![
@@ -525,7 +525,7 @@ impl StatisticsRow {
     /// Values in spec column order; 13 columns, matching the field order.
     /// Consuming, so the strings move rather than being cloned. The
     /// borrowing [`Self::to_values`] delegates here, which keeps the column
-    /// order defined once — two lists in this order is how they come to
+    /// order defined once. Two lists in this order is how they come to
     /// disagree, and an application binds by number.
     pub fn into_values(self) -> Vec<ColumnValue> {
         vec![
@@ -558,7 +558,7 @@ impl SpecialColumnRow {
     /// Values in spec column order; 8 columns, matching the field order.
     /// Consuming, so the strings move rather than being cloned. The
     /// borrowing [`Self::to_values`] delegates here, which keeps the column
-    /// order defined once — two lists in this order is how they come to
+    /// order defined once. Two lists in this order is how they come to
     /// disagree, and an application binds by number.
     pub fn into_values(self) -> Vec<ColumnValue> {
         vec![
@@ -586,7 +586,7 @@ impl ProcedureRow {
     /// Values in spec column order; 8 columns, matching the field order.
     /// Consuming, so the strings move rather than being cloned. The
     /// borrowing [`Self::to_values`] delegates here, which keeps the column
-    /// order defined once — two lists in this order is how they come to
+    /// order defined once. Two lists in this order is how they come to
     /// disagree, and an application binds by number.
     pub fn into_values(self) -> Vec<ColumnValue> {
         vec![
@@ -614,7 +614,7 @@ impl ProcedureColumnRow {
     /// Values in spec column order; 19 columns, matching the field order.
     /// Consuming, so the strings move rather than being cloned. The
     /// borrowing [`Self::to_values`] delegates here, which keeps the column
-    /// order defined once — two lists in this order is how they come to
+    /// order defined once. Two lists in this order is how they come to
     /// disagree, and an application binds by number.
     pub fn into_values(self) -> Vec<ColumnValue> {
         vec![
@@ -653,7 +653,7 @@ impl ColumnPrivilegeRow {
     /// Values in spec column order; 8 columns, matching the field order.
     /// Consuming, so the strings move rather than being cloned. The
     /// borrowing [`Self::to_values`] delegates here, which keeps the column
-    /// order defined once — two lists in this order is how they come to
+    /// order defined once. Two lists in this order is how they come to
     /// disagree, and an application binds by number.
     pub fn into_values(self) -> Vec<ColumnValue> {
         vec![
@@ -681,7 +681,7 @@ impl TablePrivilegeRow {
     /// Values in spec column order; 7 columns, matching the field order.
     /// Consuming, so the strings move rather than being cloned. The
     /// borrowing [`Self::to_values`] delegates here, which keeps the column
-    /// order defined once — two lists in this order is how they come to
+    /// order defined once. Two lists in this order is how they come to
     /// disagree, and an application binds by number.
     pub fn into_values(self) -> Vec<ColumnValue> {
         vec![
@@ -721,9 +721,10 @@ mod tests {
     /// nullable string column takes a bare `String`, a not-NULL string column
     /// takes a `&str`, and a nullable numeric column takes the bare number.
     ///
-    /// A driver has no other way to build these types — `#[non_exhaustive]`
-    /// rules out a struct expression outside this crate — so a setter that
-    /// wrote the wrong field would be unreachable by any in-crate literal test.
+    /// A driver has no other way to build these types, because
+    /// `#[non_exhaustive]` rules out a struct expression outside this crate, so
+    /// a setter writing the wrong field is unreachable by an in-crate literal
+    /// test.
     #[test]
     fn the_generated_setters_assign_their_own_field() {
         assert_eq!(
@@ -828,8 +829,8 @@ mod tests {
     }
 
     /// `SQLProcedureColumns`' nineteen columns, in spec order. One more than
-    /// `SQLColumns`, and the extra one — `COLUMN_TYPE` at ordinal 5 — sits in the
-    /// middle, shifting every column after it, so this is the row where an
+    /// `SQLColumns`, and the extra one (`COLUMN_TYPE` at ordinal 5) sits in the
+    /// middle, shifting every column after it. This is the row where an
     /// off-by-one is easiest to introduce and hardest to notice.
     #[test]
     fn procedure_column_row_converts_in_spec_column_order() {
@@ -913,8 +914,8 @@ mod tests {
         );
         // The last four descriptor functions live beside their FFI entry
         // points rather than in `types`, so they are imported here rather than
-        // restated — a second statement of a column layout is a second way to
-        // state it differently.
+        // restated, because a second statement of a column layout is a second
+        // way to state it differently.
         assert_eq!(
             ProcedureRow::default().to_values().len(),
             procedures_columns(&widths).len()
@@ -968,7 +969,7 @@ mod tests {
         // 5 NUM_OUTPUT_PARAMS, 6 NUM_RESULT_SETS, 7 REMARKS,
         // 8 PROCEDURE_TYPE. Columns 4-6 are "reserved for future use", so a
         // conversion that dropped them would still produce plausible-looking
-        // values in 7 and 8 — this pins their positions.
+        // values in 7 and 8, so this pins their positions.
         let row = ProcedureRow {
             catalog: Some("cat".into()),
             schema: None,

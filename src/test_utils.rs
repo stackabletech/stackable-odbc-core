@@ -2,7 +2,7 @@
 //!
 //! `MockBackend` is the default: connect and disconnect succeed and everything else
 //! answers `NotImplemented`. Beside it are purpose-built mocks for paths `MockBackend`
-//! cannot reach — `MockAltBackend` declares a different value for every capability
+//! cannot reach. `MockAltBackend` declares a different value for every capability
 //! method, `MockTypeInfoBackend` and `MockFunctionsBackend` declare real rows and a real
 //! function list so a loop over them cannot pass vacuously, `MockFailingCloseBackend`
 //! fails a cursor close, and the `mock_isolation_backend!` / `mock_txn_backend!` families
@@ -57,7 +57,7 @@ pub(crate) unsafe fn alloc_env_conn_stmt() -> (*mut c_void, *mut c_void, *mut c_
 /// [`alloc_env_conn_stmt`], in child-before-parent order.
 ///
 /// Any of the three may instead be `SQL_NULL_HANDLE` (null) for "already torn
-/// down by other means, nothing to do here" — e.g. a test that disconnected
+/// down by other means, nothing to do here": a test that disconnected
 /// the connection itself, which frees its statements as a side effect. The
 /// underlying `sql_free_handle` calls reject null without dereferencing it, so
 /// this degrades to a no-op rather than freeing anything twice.
@@ -82,8 +82,8 @@ pub(crate) unsafe fn cleanup_env_conn_stmt(env: *mut c_void, conn: *mut c_void, 
 /// whole point: that helper leaves `ConnectionHandle::connection` as `None`, so
 /// any code path guarded by "is there a connection to ask?" takes its
 /// no-connection branch. A test written against it to prove a `Backend` hook is
-/// consulted proves nothing — the hook is never reached and the test passes on
-/// the fallback it was meant to rule out.
+/// consulted proves nothing, because the hook is never reached and the test
+/// passes on the fallback it was meant to rule out.
 ///
 /// # Safety
 ///
@@ -202,7 +202,7 @@ pub struct MockStatement;
 ///
 /// `saw_execution` is written only by [`MockRecordingBackend`]'s
 /// `exec_direct`, which stores `true` into whatever token it receives, and
-/// read only by the tests exercising it — proof that the token a
+/// read only by the tests exercising it, as proof that the token a
 /// statement-producing call is handed is the same one `SQLCancel` would
 /// later read back out of the registry, not merely some token.
 ///
@@ -252,7 +252,7 @@ impl From<OdbcError> for MockError {
         // Required by the `Backend::Error` / `StatementBackend::Error` bounds so
         // that a defaulted trait body can construct an error and still name
         // `Self::Error`. The mock collapses every error to one value, which is
-        // lossy — but the round trip back through `From<MockError> for OdbcError`
+        // lossy, but the round trip back through `From<MockError> for OdbcError`
         // lands on `NotImplemented`, which is what the defaults produce anyway.
         MockError
     }
@@ -269,7 +269,7 @@ impl StatementBackend for MockStatement {
 /// Every value is the *least* capable one the spec defines, which for four of
 /// them happens to be `0`. That is deliberate: `0` is a real claim for these
 /// info types, so a mock that means "minimal" should say so explicitly rather
-/// than have core assume it — which is the whole point of the methods being
+/// than have core assume it, which is the whole point of the methods being
 /// required. Expand this in a mock that is actually testing one of them.
 ///
 /// `minimal_capability_decls!(keywords = <slice>)` keeps every other value
@@ -279,7 +279,7 @@ impl StatementBackend for MockStatement {
 ///
 /// `minimal_capability_decls!(identifier_case = <SQL_IC_*>, search_pattern_escape
 /// = <str>)` states the two declarations `SQL_ATTR_METADATA_ID` normalisation
-/// reads. The minimal pair — `SQL_IC_SENSITIVE` and no escape character — makes
+/// reads. The minimal pair, `SQL_IC_SENSITIVE` and no escape character, makes
 /// normalisation a no-op, so a mock testing it has to say otherwise or every
 /// assertion passes whether core normalised or not.
 macro_rules! minimal_capability_decls {
@@ -340,7 +340,7 @@ macro_rules! minimal_capability_decls {
             false
         }
         // Conforms to no SQL-92 level, which is consistent with the values
-        // above — an entry-level claim would contradict SQL_CN_NONE and
+        // above: an entry-level claim would contradict SQL_CN_NONE and
         // SQL_NNC_NULL.
         fn sql_conformance(_conn: &Self::Connection) -> u32 {
             0
@@ -400,8 +400,8 @@ macro_rules! minimal_capability_decls {
         fn accessible_procedures(_conn: &Self::Connection) -> bool {
             false
         }
-        // Identity has no minimal value — the empty string is what these
-        // methods exist to stop a driver reporting — so the mocks state
+        // Identity has no minimal value: the empty string is what these
+        // methods exist to stop a driver reporting, so the mocks state
         // something recognisable instead.
         fn driver_name() -> Cow<'static, str> {
             Cow::Borrowed("Mock ODBC Driver")
@@ -422,7 +422,7 @@ macro_rules! minimal_capability_decls {
 ///
 /// Tests that need a statement with a genuinely open cursor must go through
 /// `StatementHandle::set_result_set`, which derives
-/// `cursor_open` from the column count — a zero-column result set opens no
+/// `cursor_open` from the column count, so a zero-column result set opens no
 /// cursor, because that is what an `UPDATE` produces.
 pub fn synthetic_result_set(
     rows: Vec<Vec<crate::types::ColumnValue>>,
@@ -442,7 +442,7 @@ pub fn synthetic_result_set(
 }
 
 // ---------------------------------------------------------------------------
-// MockBackend — connect and disconnect succeed
+// MockBackend: connect and disconnect succeed
 // ---------------------------------------------------------------------------
 
 /// A mock backend where `connect` and `disconnect` succeed.
@@ -550,10 +550,10 @@ impl Backend for MockBackend {
     // value an entry-level driver returns for three of these, so declaring
     // `SQL_SC_SQL92_ENTRY` and then contradicting it would make this mock a
     // bad example as well as a bad test fixture. Each value is also
-    // deliberately *not* the old core default, so a test cannot pass by
-    // accident against the hard-coded value it replaced.
+    // chosen so that no value here is one core could supply on its own, so a
+    // test cannot pass by accident against a hard-coded default.
     fn group_by(_conn: &Self::Connection) -> u16 {
-        crate::types::SQL_GB_GROUP_BY_EQUALS_SELECT // was SQL_GB_NO_RELATION
+        crate::types::SQL_GB_GROUP_BY_EQUALS_SELECT
     }
     fn null_collation(_conn: &Self::Connection) -> u16 {
         crate::types::SQL_NC_END // was SQL_NC_HIGH (0), via the shape default
@@ -607,7 +607,7 @@ impl Backend for MockBackend {
         crate::types::SQL_NNC_NON_NULL // was SQL_NNC_NULL (0)
     }
     fn expressions_in_order_by(_conn: &Self::Connection) -> bool {
-        true // was "" — neither "Y" nor "N"
+        true // an empty string is neither "Y" nor "N"
     }
     fn sql_conformance(_conn: &Self::Connection) -> u32 {
         crate::types::SQL_SC_SQL92_ENTRY
@@ -672,7 +672,7 @@ impl Backend for MockBackend {
 }
 
 // ---------------------------------------------------------------------------
-// MockNoCatalogBackend — a data source with neither catalogs nor schemas
+// MockNoCatalogBackend: a data source with neither catalogs nor schemas
 // ---------------------------------------------------------------------------
 
 /// A backend that declares no catalogs and no schemas, like SQLite.
@@ -782,8 +782,8 @@ impl Backend for MockNoCatalogBackend {
 /// Generates a minimal `Backend` whose only interesting declaration is
 /// [`Backend::keywords`].
 ///
-/// The `SQL_KEYWORDS` subtraction has three outcomes worth pinning separately —
-/// nothing to filter, some entries filtered, everything filtered — and each
+/// The `SQL_KEYWORDS` subtraction has three outcomes worth pinning separately,
+/// nothing to filter, some entries filtered and everything filtered, and each
 /// needs its own backend type because `keywords` is an associated function with
 /// no receiver to vary.
 macro_rules! mock_keywords_backend {
@@ -887,8 +887,8 @@ macro_rules! mock_keywords_backend {
 }
 
 mock_keywords_backend!(
-    /// A data source that reserves nothing beyond ODBC — the value core
-    /// produced for every backend before `Backend::keywords` existed.
+    /// A data source that reserves nothing beyond ODBC, so `SQL_KEYWORDS`
+    /// reports only what the spec's own subtraction leaves.
     MockNoKeywordsBackend,
     keywords = &[]
 );
@@ -907,7 +907,7 @@ mock_keywords_backend!(
 );
 
 // ---------------------------------------------------------------------------
-// MockAltBackend — differs from MockBackend in every capability hook
+// MockAltBackend: differs from MockBackend in every capability hook
 // ---------------------------------------------------------------------------
 
 /// A backend declaring a *different* value from [`MockBackend`] for every
@@ -916,7 +916,7 @@ mock_keywords_backend!(
 /// This exists for `default_get_info_answers_are_backend_derived_or_declared`,
 /// which classifies each info type by asking whether the answer moves when the
 /// backend does. An info type that answers identically for two backends with
-/// nothing in common is, by construction, one core decides — so it must be
+/// nothing in common is, by construction, one core decides, so it must be
 /// listed as a core fact with a reason, or it is a claim core has no business
 /// making.
 ///
@@ -1031,8 +1031,8 @@ impl Backend for MockAltBackend {
     fn quoted_identifier_case(_conn: &Self::Connection) -> u16 {
         crate::types::SQL_IC_LOWER
     }
-    // Reports a session catalog, so the getter's fallback branch — and
-    // `SQL_DATABASE_NAME`, which reads the same two sources — have something to
+    // Reports a session catalog, so the getter's fallback branch and
+    // `SQL_DATABASE_NAME`, which reads the same two sources, have something to
     // find when the application has set nothing.
     fn current_catalog(_conn: &Self::Connection) -> Option<Cow<'static, str>> {
         Some(Cow::Borrowed("alt_catalog"))
@@ -1283,7 +1283,7 @@ mock_isolation_backend!(
 );
 // Declares two levels but genuinely never implements `set_txn_isolation`, so
 // it stands for the backend author who reports a capability and forgets to
-// wire it up — and inherits the real trait default, not a copy of it.
+// wire it up, and it inherits the real trait default rather than a copy of it.
 mock_isolation_backend!(
     MockUnappliedIsolationBackend,
     options = crate::types::SQL_TXN_READ_COMMITTED | crate::types::SQL_TXN_SERIALIZABLE,
@@ -1336,7 +1336,7 @@ pub struct MockAppliedConnection {
 }
 
 /// Generates a `Backend` whose only interesting behaviour is the extra items
-/// passed in — everything else is the minimum the trait requires.
+/// passed in. Everything else is the minimum the trait requires.
 ///
 /// Same shape as [`mock_isolation_backend`]: the trailing `$extra` items are
 /// spliced into the `impl`, so a variant that omits one genuinely inherits the
@@ -1348,7 +1348,7 @@ macro_rules! mock_applied_backend {
     };
     // `error = OdbcError` for a mock that must report a *real* failure.
     // `MockError` converts to `OdbcError::NotImplemented` by design, so a mock
-    // using it cannot express "this genuinely went wrong" — every error it
+    // using it cannot express "this genuinely went wrong": every error it
     // returns looks to core like "I do not implement this", which is a
     // different branch on every hook that distinguishes the two.
     (error = $err:ty, $name:ident $(, $extra:item)*) => {
@@ -1397,8 +1397,8 @@ macro_rules! mock_applied_backend {
             // `"BLOCK"` stands in for a runaway query: it waits until something
             // cancels the token, then fails the way a real client library would
             // when its query was killed out from under it. That is the only
-            // shape in which core's query timer can be observed end to end —
-            // the timer exists precisely because a backend call blocks the
+            // shape in which core's query timer can be observed end to end,
+            // since the timer exists precisely because a backend call blocks the
             // calling thread, so a mock that returns immediately can never
             // exercise it.
             //
@@ -1408,7 +1408,7 @@ macro_rules! mock_applied_backend {
             // The wait is **bounded**, and that is not belt-and-braces. If core
             // ever stops arming its timer, nothing will cancel this token, and
             // an unbounded wait would turn the test that catches the regression
-            // into a hung CI job — a much worse signal than a failed assertion.
+            // into a hung CI job, a much worse signal than a failed assertion.
             // The bound is far longer than any deadline a test sets, so it
             // cannot mask a genuine timeout.
             fn exec_direct(
@@ -1427,7 +1427,7 @@ macro_rules! mock_applied_backend {
                         steps += 1;
                         assert!(
                             steps < MAX_STEPS,
-                            "nothing cancelled this call — core almost certainly \
+                            "nothing cancelled this call, so core almost certainly \
                              stopped arming its query timer",
                         );
                         std::thread::sleep(std::time::Duration::from_millis(STEP_MS));
@@ -1608,7 +1608,7 @@ mock_applied_backend!(
     }
 );
 
-// A backend whose connection has been lost — what a pool must not be handed.
+// A backend whose connection has been lost: what a pool must not be handed.
 mock_applied_backend!(
     MockDeadConnectionBackend,
     fn connection_dead(_conn: &MockAppliedConnection) -> bool {
@@ -1633,7 +1633,7 @@ pub struct MockTxnConnection {
 /// behaviours. `end_tran` succeeds unless the connection was opened with
 /// `ENDTRANFAIL=1`, in which case it fails with a generic HY000. Pass
 /// `error = ...` for a backend whose `end_tran` reports something more
-/// specific — e.g. `OdbcError::NotConnected`, to exercise a *backend*
+/// specific, such as `OdbcError::NotConnected`, to exercise a *backend*
 /// reporting the same variant core's own "no open connection" pre-check uses
 /// internally (see `end_tran_on_connection`'s `EndTranOutcome`).
 macro_rules! mock_txn_backend {
@@ -1659,7 +1659,7 @@ macro_rules! mock_txn_backend {
             /// a real error with a message and SQLSTATE, and routing that
             /// through `MockError` would collapse it to `NotImplemented`. Using
             /// `OdbcError` directly also exercises the case of a backend whose
-            /// error type simply *is* core's — which the bounds allow, since
+            /// error type simply *is* core's, which the bounds allow, since
             /// `OdbcError` converts to and from itself.
             type Error = OdbcError;
             type CancelToken = MockCancelToken;
@@ -1978,7 +1978,7 @@ impl Backend for MockTypeInfoBackend {
 pub struct MockCatalogBackend;
 
 // `SQL_TRUE`/`SQL_FALSE` and the `SQL_SCOPE_*` constants are declared at the
-// width of the argument that carries them — `u32` for the attribute values,
+// width of the argument that carries them: `u32` for the attribute values,
 // `u16` for `SQLSpecialColumns`' `Scope` argument. The `NON_UNIQUE` and
 // `SCOPE` *result* columns are Smallint. Same spec values, narrower column;
 // `i16::try_from` is not usable in a `const` initialiser, and none of these
@@ -2214,7 +2214,7 @@ impl Backend for MockCatalogBackend {
 
     /// Out of spec order on `COLUMN_TYPE`, whose values are `ParamType`
     /// discriminants; `COLUMN_NAME` labels each row. Every row shares a
-    /// procedure, so `COLUMN_TYPE` is the discriminating key — and it is an
+    /// procedure, so `COLUMN_TYPE` is the discriminating key, and it is an
     /// integer, so a sort comparing it as text would put `ReturnValue` (5)
     /// before `InputOutput` (2) undetected if the values were single digits
     /// only. They are, which is why the labels rather than the values are what
@@ -2273,7 +2273,7 @@ impl Backend for MockCatalogBackend {
     /// Out of spec order on `PRIVILEGE` and, within one privilege, on
     /// `GRANTEE`. The spec sorts by PRIVILEGE *before* GRANTEE, so the two
     /// `SELECT` rows must come out grantee-ordered while `UPDATE` follows both
-    /// regardless of its grantee — which a keys list truncated to the table
+    /// regardless of its grantee, which a keys list truncated to the table
     /// trio, or one with the last two keys swapped, gets wrong.
     /// `IS_GRANTABLE` labels each row.
     fn table_privileges(
@@ -2349,8 +2349,9 @@ pub struct RecordedCatalogArgs {
     /// `table` so a test cannot pass by reading the wrong argument.
     pub proc: Option<String>,
     pub column: Option<String>,
-    /// `SQLTables`' `TableType`, as the parsed value list core passes down —
-    /// not the raw string the application supplied. Empty means no filter.
+    /// `SQLTables`' `TableType`, as the parsed value list core passes down
+    /// rather than the raw string the application supplied. Empty means no
+    /// filter.
     pub table_types: Vec<String>,
     pub fk_catalog: Option<String>,
     pub fk_schema: Option<String>,
@@ -2375,7 +2376,7 @@ thread_local! {
 /// nothing, so every assertion would pass whether core normalised or not.
 ///
 /// It also declares catalogs, schemas and table types, so the `SQL_ALL_*`
-/// enumerations can be exercised *with* `METADATA_ID` set — a normalised `"%"`
+/// enumerations can be exercised *with* `METADATA_ID` set: a normalised `"%"`
 /// would be escaped to `"\\%"` and stop being the sentinel, which is exactly
 /// the ordering bug the enumeration test pins.
 pub struct MockCatalogArgsBackend;
@@ -2386,7 +2387,7 @@ impl MockCatalogArgsBackend {
     }
 
     /// The arguments of the most recent catalog call on this thread, or `None`
-    /// if no catalog method was reached — which is itself worth asserting when
+    /// if no catalog method was reached, which is itself worth asserting when
     /// a test expects core to answer without the backend.
     pub fn recorded() -> Option<RecordedCatalogArgs> {
         RECORDED_CATALOG_ARGS.with(|cell| cell.borrow().clone())
@@ -2628,10 +2629,10 @@ impl Backend for MockCatalogArgsBackend {
 /// Declares a realistic ODBC 3.x function list, so `SQLGetFunctions` actually
 /// executes its bitmap and 2.x-mapping arms.
 ///
-/// `MockBackend::get_functions` returns an empty slice, which meant every
-/// existing `SQLGetFunctions` test walked a loop with no iterations and no
-/// mapping arm ever ran — the gap that let `SQLGetConnectOption` sit at the
-/// wrong index in the 2.x array.
+/// `MockBackend::get_functions` returns an empty slice, so a `SQLGetFunctions`
+/// test written against it walks a loop with no iterations and runs no mapping
+/// arm. That is the gap that lets an entry such as `SQLGetConnectOption` sit at
+/// the wrong index in the 2.x array unnoticed.
 pub struct MockFunctionsBackend;
 
 impl Backend for MockFunctionsBackend {
@@ -2894,7 +2895,7 @@ impl Backend for MockFailingCloseBackend {
 }
 
 // ---------------------------------------------------------------------------
-// MockLongDataBackend — a row whose columns SQLGetData can actually read
+// MockLongDataBackend: a row whose columns SQLGetData can actually read
 // ---------------------------------------------------------------------------
 
 /// The character column [`MockLongDataStatement`] serves, long enough that a
@@ -2916,8 +2917,8 @@ pub const LONG_BYTES: &[u8] = &[
 /// One row with three columns: long text (1), a fixed-width `i32` (2), and long
 /// binary (3).
 ///
-/// Exists because no other mock returns row data at all — `MockStatement` takes
-/// the trait defaults and answers `NotImplemented` — so nothing could exercise
+/// Exists because no other mock returns row data at all: `MockStatement` takes
+/// the trait defaults and answers `NotImplemented`, so nothing else exercises
 /// `SQLGetData` past its argument validation, let alone the multi-call loop the
 /// spec defines for retrieving variable-length data in parts.
 ///
@@ -3092,7 +3093,7 @@ impl Backend for MockLongDataBackend {
 }
 
 // ---------------------------------------------------------------------------
-// MockRowCountBackend — column and row counts chosen from the SQL text
+// MockRowCountBackend: column and row counts chosen from the SQL text
 // ---------------------------------------------------------------------------
 
 /// A statement whose `column_count` and `row_count` are fixed at construction,
@@ -3126,12 +3127,12 @@ impl StatementBackend for MockRowCountStatement {
 /// Hands out [`MockRowCountStatement`]s shaped by the SQL text, so a test picks
 /// a case by the statement it executes rather than by reaching into a handle:
 ///
-/// - text containing `SELECT` — one column, zero rows. A query with an empty
+/// - text containing `SELECT`: one column, zero rows. A query with an empty
 ///   result set, which is `SQL_SUCCESS`, not `SQL_NO_DATA`.
-/// - text containing `MANY` — no columns, three rows. DML that affected rows.
-/// - text containing `UNKNOWN` — no columns, no row count. A backend that
+/// - text containing `MANY`: no columns, three rows. DML that affected rows.
+/// - text containing `UNKNOWN`: no columns, no row count. A backend that
 ///   cannot say, where `SQL_SUCCESS` stands.
-/// - anything else — no columns, zero rows. The searched DML the spec answers
+/// - anything else: no columns, zero rows. The searched DML the spec answers
 ///   with `SQL_NO_DATA`.
 pub struct MockRowCountBackend;
 
@@ -3250,7 +3251,7 @@ impl Backend for MockRowCountBackend {
 }
 
 // ---------------------------------------------------------------------------
-// MockRecordingBackend — proves a statement-producing call gets its own token
+// MockRecordingBackend: proves a statement-producing call gets its own token
 // ---------------------------------------------------------------------------
 
 /// A backend whose `exec_direct` records the [`MockCancelToken`] it was
@@ -3260,8 +3261,8 @@ impl Backend for MockRowCountBackend {
 /// a driver author: a statement-producing call receives *this statement's*
 /// token, not merely a token, so a backend whose cancellation needs a value
 /// only known at execution time (a query id, say) can actually record it
-/// there. `MockBackend::exec_direct` cannot stand in for this — it discards
-/// every argument and returns `Err` unconditionally.
+/// there. `MockBackend::exec_direct` cannot stand in for this, because it
+/// discards every argument and returns `Err` unconditionally.
 pub struct MockRecordingBackend;
 
 impl Backend for MockRecordingBackend {
@@ -3386,7 +3387,7 @@ thread_local! {
 /// `SQLCancel` on another thread signals its token, and the call then fails.
 /// [`Self::cancel_before_returning`] makes the mock signal its own token from
 /// *inside* the call, immediately before returning `Err`, which leaves core
-/// facing exactly the same state — a failed call whose token reads cancelled —
+/// facing exactly the same state, a failed call whose token reads cancelled,
 /// with none of a real thread's timing nondeterminism.
 ///
 /// The genuinely concurrent path is proved separately by the cross-thread test;
@@ -3593,7 +3594,7 @@ impl Backend for MockCancelAwareBackend {
 ///
 /// A plain `static` rather than a `thread_local!`, because the whole point is
 /// that two threads observe it. Exactly one test uses this backend, so there is
-/// no cross-test interference to guard against — and adding a second test that
+/// no cross-test interference to guard against, and adding a second test that
 /// uses it would need this reset between them.
 static BLOCKING_CALL_STARTED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
@@ -3648,7 +3649,7 @@ impl Backend for MockBlockingBackend {
     fn is_cancelled(token: &Self::CancelToken) -> bool {
         token.cancelled.load(std::sync::atomic::Ordering::SeqCst)
     }
-    /// Announces that it has started, then waits to be cancelled and fails —
+    /// Announces that it has started, then waits to be cancelled and fails,
     /// which is what a real client library does when a query is aborted
     /// server-side.
     ///
@@ -3742,7 +3743,7 @@ impl Backend for MockBlockingBackend {
 /// `exec_direct`, which proves core arms a deadline at a statement-producing
 /// call; it cannot prove anything about `SQLFetch`, because its statement
 /// returns from `fetch` immediately. A data source that answers with column
-/// metadata before computing a row — the case this exists for — inverts those
+/// metadata before computing a row, the case this exists for, inverts those
 /// two costs entirely.
 ///
 /// The token is held by `Arc` rather than borrowed: `exec_direct` receives the
@@ -3761,7 +3762,7 @@ impl StatementBackend for MockFetchTimeoutStatement {
         1
     }
 
-    /// Blocks until cancelled, then fails — a runaway fetch.
+    /// Blocks until cancelled, then fails: a runaway fetch.
     ///
     /// The wait is **bounded**, for the reason
     /// [`MockCoreCancelsTimeoutBackend`]'s `exec_direct` records: if core stops
@@ -3783,7 +3784,7 @@ impl StatementBackend for MockFetchTimeoutStatement {
             steps += 1;
             assert!(
                 steps < MAX_STEPS,
-                "nothing cancelled this fetch — core almost certainly stopped \
+                "nothing cancelled this fetch, so core almost certainly stopped \
                  arming its query timer at SQLFetch",
             );
             std::thread::sleep(std::time::Duration::from_millis(STEP_MS));
@@ -3826,7 +3827,7 @@ impl Backend for MockFetchTimeoutBackend {
     ) -> Result<crate::types::QueryTimeout, MockError> {
         Ok(crate::types::QueryTimeout::CoreCancels)
     }
-    /// Returns at once — the whole point. The wait is all in `fetch`.
+    /// Returns at once, which is the point. The wait is all in `fetch`.
     fn exec_direct(
         _: &MockConnection,
         cancel: &Self::CancelToken,
@@ -3908,7 +3909,7 @@ impl Backend for MockFetchTimeoutBackend {
 /// `type Error = OdbcError`, and that is the whole point rather than a
 /// convenience. `MockError` converts to `OdbcError::NotImplemented` by design,
 /// so a mock built on it sends core down its *unimplemented* branch instead of
-/// its "this genuinely failed" branch — a test written against one would assert
+/// its "this genuinely failed" branch, so a test written against one asserts
 /// nothing about whether the backend's SQLSTATE survives.
 ///
 /// `column_count` is **2, and that is load-bearing**: core range-checks the
@@ -3940,8 +3941,8 @@ impl StatementBackend for MockFailingDescribeStatement {
 ///
 /// Exists so a test can prove `SQLDescribeColW` and `SQLColAttributeW` report
 /// the backend's own failure rather than overwriting it with `07009` "column
-/// number out of range" — which is what both did before, for every failure
-/// whatever its cause.
+/// number out of range", which is the answer a describe path gives if it
+/// substitutes its own state for the backend's.
 pub struct MockFailingDescribeBackend;
 
 impl Backend for MockFailingDescribeBackend {
@@ -4039,8 +4040,7 @@ impl Backend for MockFailingDescribeBackend {
 }
 
 // ---------------------------------------------------------------------------
-// A backend whose column_count is negative, for the u16 narrowing regression
-// (Task 2.10)
+// A backend whose column_count is negative, for the u16 narrowing guard.
 // ---------------------------------------------------------------------------
 
 /// A statement whose `column_count` cannot be represented in `u16`.
@@ -4048,7 +4048,7 @@ impl Backend for MockFailingDescribeBackend {
 /// `StatementBackend::column_count` returns `i16`, so this is the *only* way
 /// `u16::try_from` on it can fail: a positive `i16` always fits, since its
 /// max (32 767) is below `u16::MAX` (65 535). A backend cannot report "too
-/// many columns" through this method at all — it can only report a count
+/// many columns" through this method at all; it can only report a count
 /// that is negative, which is what this mock does.
 ///
 /// `describe_col` succeeds for any column, so a test can tell "core's range
@@ -4074,10 +4074,10 @@ impl StatementBackend for MockNegativeColumnCountStatement {
 
 /// Hands out statements whose reported column count does not fit `u16`.
 ///
-/// Exists to prove `u16::try_from(column_count).unwrap_or(0)` — which
-/// collapses a count `u16` cannot hold to zero — does not turn "the count is
-/// unrepresentable" into "reject every column, including valid ones." The
-/// fix saturates up instead, so column 1 must still reach `describe_col`.
+/// Exists to prove that collapsing a count `u16` cannot hold to zero, as
+/// `u16::try_from(column_count).unwrap_or(0)` would, does not turn "the count is
+/// unrepresentable" into "reject every column, including valid ones." Core
+/// saturates up instead, so column 1 must still reach `describe_col`.
 pub struct MockNegativeColumnCountBackend;
 
 impl Backend for MockNegativeColumnCountBackend {
@@ -4180,7 +4180,7 @@ impl Backend for MockNegativeColumnCountBackend {
 
 /// A statement whose `describe_col` panics instead of returning an error.
 ///
-/// `column_count` is 1 — enough to make `snapshot_ird`'s loop
+/// `column_count` is 1, which is enough to make `snapshot_ird`'s loop
 /// (`src/handles/scope.rs`) call `describe_col` at all, which is the one
 /// driver-author call `SQLCopyDesc`'s phase one runs before phase two's
 /// `panic_safe` is even reached.
@@ -4205,8 +4205,8 @@ impl StatementBackend for MockPanickingDescribeStatement {
 /// panicking.
 ///
 /// The `MockFailingDescribeBackend` sibling above proves core surfaces a
-/// backend's own *error*; this one proves core survives a backend's *panic*
-/// — the distinction `SQLCopyDesc`'s phase one needed a guard for.
+/// backend's own *error*; this one proves core survives a backend's *panic*,
+/// which is the distinction `SQLCopyDesc`'s phase one needs a guard for.
 pub struct MockPanickingDescribeBackend;
 
 impl Backend for MockPanickingDescribeBackend {
@@ -4310,7 +4310,7 @@ impl Backend for MockPanickingDescribeBackend {
 /// Rejects any catalog but `"good"`, with the spec's `3D000`.
 ///
 /// `type Error = OdbcError` so the rejection is a genuine failure rather than
-/// the `NotImplemented` a `MockError` collapses to — which core treats as "this
+/// the `NotImplemented` a `MockError` collapses to, which core treats as "this
 /// backend has no catalogs" and reports as `HYC00`, a different answer entirely.
 ///
 /// Accepting *one* name matters as much as rejecting the rest: a mock that
@@ -4415,7 +4415,7 @@ impl Backend for MockCatalogRejectingBackend {
 }
 
 // ---------------------------------------------------------------------------
-// MockBrowseBackend — requires one attribute, so SQLBrowseConnectW actually
+// MockBrowseBackend: requires one attribute, so SQLBrowseConnectW actually
 // reaches its SQL_NEED_DATA branch
 // ---------------------------------------------------------------------------
 
@@ -4424,7 +4424,7 @@ impl Backend for MockCatalogRejectingBackend {
 /// Every other mock leaves `browse_connect_attrs` defaulted to an empty slice,
 /// which makes the very first `SQLBrowseConnectW` call connect outright. None
 /// of them can therefore reach the `SQL_NEED_DATA` branch, and none can leave a
-/// half-finished browse on a handle — which is the state the browse-cancellation
+/// half-finished browse on a handle, which is the state the browse-cancellation
 /// and browse-hygiene tests are about.
 pub struct MockBrowseBackend;
 
@@ -4520,7 +4520,7 @@ impl Backend for MockBrowseBackend {
 }
 
 // ---------------------------------------------------------------------------
-// MockPrompterBackend — declares a `Prompter`, and records whether one arrived
+// MockPrompterBackend: declares a `Prompter`, and records whether one arrived
 // ---------------------------------------------------------------------------
 
 /// A [`Prompter`](crate::prompt::Prompter) that records what it was shown.
@@ -4667,7 +4667,7 @@ impl Backend for MockPrompterBackend {
 /// `MockError` collapses to `NotImplemented`/`HYC00`, so it could not carry a
 /// connection-specific SQLSTATE even if it did fail. This one answers `08004`
 /// ("server rejected the connection"), the state `SQLDriverConnect`'s own
-/// diagnostics table gives a backend refusal — core has no factory for it,
+/// diagnostics table gives a backend refusal. Core has no factory for it,
 /// because it is the data source's answer rather than core's.
 pub struct MockFailBackend;
 
@@ -4699,8 +4699,8 @@ impl Backend for MockFailBackend {
         token.cancelled.load(std::sync::atomic::Ordering::SeqCst)
     }
 
-    // Everything below is unreachable through this mock — no test can obtain a
-    // connection from it — but the trait requires them.
+    // Everything below is unreachable through this mock, since no test can
+    // obtain a connection from it, but the trait requires them.
     fn exec_direct(
         _: &MockConnection,
         _: &Self::CancelToken,
@@ -4920,7 +4920,7 @@ impl Backend for MockCountingBackend {
 }
 
 // ---------------------------------------------------------------------------
-// MockTruncatingBackend — a backend that reports its own precision loss
+// MockTruncatingBackend: a backend that reports its own precision loss
 // ---------------------------------------------------------------------------
 
 /// A statement whose `get_data` succeeds and then reports that it dropped
@@ -4929,8 +4929,8 @@ impl Backend for MockCountingBackend {
 /// This is the shape `StatementBackend::take_value_warning` exists for: a
 /// driver converting a `timestamp(12)` to nine fractional digits loses those
 /// digits inside its own type conversion, before a `ColumnValue` exists, so
-/// core cannot detect the loss and used to answer `SQL_SUCCESS` with no
-/// diagnostic at all.
+/// core cannot detect the loss and would otherwise answer `SQL_SUCCESS` with
+/// no diagnostic at all.
 ///
 /// The warning is **taken**, not held: the flag is cleared on read, so a test
 /// can tell "drained once per value" from "reported forever". A mock that

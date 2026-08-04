@@ -1,4 +1,4 @@
-//! `CursorBehavior` — what `SQLEndTran` does to open cursors on a connection.
+//! `CursorBehavior`: what `SQLEndTran` does to open cursors on a connection.
 
 use crate::types::{SQL_CB_CLOSE, SQL_CB_DELETE, SQL_CB_PRESERVE};
 
@@ -14,13 +14,13 @@ use crate::types::{SQL_CB_CLOSE, SQL_CB_DELETE, SQL_CB_PRESERVE};
 /// Spec: <https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/statement-transitions>
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CursorBehavior {
-    /// `SQL_CB_DELETE` — cursors closed, access plans discarded. Prepared
+    /// `SQL_CB_DELETE`: cursors closed, access plans discarded. Prepared
     /// statements return to the allocated (unprepared) state S1.
     Delete,
-    /// `SQL_CB_CLOSE` — cursors closed, access plans retained. Prepared
+    /// `SQL_CB_CLOSE`: cursors closed, access plans retained. Prepared
     /// statements return to their prepared state (S2/S3).
     Close,
-    /// `SQL_CB_PRESERVE` — cursors and access plans both untouched.
+    /// `SQL_CB_PRESERVE`: cursors and access plans both untouched.
     Preserve,
 }
 
@@ -48,9 +48,10 @@ mod tests {
     }
 
     /// Ties the constants back to the ODBC specification's own source rather
-    /// than to another expression in this crate. Deliberately uses raw
-    /// literals, for the same reason `info_type_constants_match_sqlext_h` in
-    /// `constants.rs` does: the literal *is* the check.
+    /// than to another expression in this crate. It uses raw
+    /// literals on purpose, for the same reason
+    /// `info_type_constants_match_sqlext_h` in `constants.rs` does: the
+    /// literal *is* the check.
     #[test]
     fn sql_cb_constants_match_sql_h() {
         assert_eq!(SQL_CB_DELETE, 0, "SQL_CB_DELETE (sql.h)");

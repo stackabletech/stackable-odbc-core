@@ -3,7 +3,7 @@
 //! used.
 //!
 //! ODBC has one record shape, not three. A descriptor record carries every
-//! `SQL_DESC_*` record field, and each descriptor *role* uses a subset — which
+//! `SQL_DESC_*` record field, and each descriptor *role* uses a subset, which
 //! is why `SQLSetDescField` accepts any field identifier against any descriptor
 //! and decides validity from the role. Modelling that directly is what lets an
 //! explicitly allocated descriptor exist at all: the spec says "it is not known
@@ -26,14 +26,14 @@ use crate::types::{SqlState, ULen, c_data_type_from_raw};
 /// [`Descriptor`]: crate::handles::Descriptor
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DescriptorRole {
-    /// Application row descriptor — where `SQLBindCol` writes.
+    /// Application row descriptor: where `SQLBindCol` writes.
     Ard,
-    /// Application parameter descriptor — `SQLBindParameter`'s C-side half.
+    /// Application parameter descriptor: `SQLBindParameter`'s C-side half.
     Apd,
-    /// Implementation row descriptor — result metadata. Core stores no records
+    /// Implementation row descriptor: result metadata. Core stores no records
     /// here; reads are computed from `ColumnDescriptor`.
     Ird,
-    /// Implementation parameter descriptor — `SQLBindParameter`'s declared-type
+    /// Implementation parameter descriptor: `SQLBindParameter`'s declared-type
     /// half.
     Ipd,
     /// An explicitly allocated application descriptor whose role is not yet
@@ -41,8 +41,8 @@ pub enum DescriptorRole {
     ///
     /// The spec: "it is not known whether an explicitly allocated application
     /// descriptor is an APD or ARD until execute time". Only application
-    /// descriptors can be explicit — "the application cannot specify alternate
-    /// implementation descriptors" — so the unknown is only ARD-versus-APD, and
+    /// descriptors can be explicit ("the application cannot specify alternate
+    /// implementation descriptors"), so the unknown is only ARD-versus-APD, and
     /// the two field tables agree in every cell.
     ///
     /// This is what an unassociated descriptor answers *for itself*. The
@@ -56,13 +56,13 @@ pub enum DescriptorRole {
 ///
 /// The header field holds a *pointer to* an `SQLULEN` rather than the offset
 /// itself, so an application can move a whole binding set between calls by
-/// writing through that one pointer — no `SQLBindCol` or `SQLBindParameter`
+/// writing through that one pointer, with no `SQLBindCol` or `SQLBindParameter`
 /// again, and no `SQLSetDescField` either. `SQLSetStmtAttr`'s mapping table
 /// makes it one field with two names: `SQL_ATTR_ROW_BIND_OFFSET_PTR` on an ARD,
 /// `SQL_ATTR_PARAM_BIND_OFFSET_PTR` on an APD.
 ///
 /// A resolved value rather than the raw pointer, because the spec fixes *when*
-/// the dereference happens — `SQLBindParameter`'s "Rebinding with Offsets":
+/// the dereference happens. `SQLBindParameter`'s "Rebinding with Offsets" says
 /// the driver "adds the dereferenced value to those fields in the descriptor
 /// records **at execution time**". One read per call, applied to every pointer
 /// of that call, is what keeps a data pointer and its indicator from being
@@ -74,7 +74,7 @@ pub enum DescriptorRole {
 pub struct BindOffset(usize);
 
 impl BindOffset {
-    /// No offset in force — the state of a descriptor whose
+    /// No offset in force: the state of a descriptor whose
     /// `SQL_DESC_BIND_OFFSET_PTR` is null, which is the default.
     pub const NONE: Self = Self(0);
 
@@ -107,7 +107,7 @@ impl BindOffset {
     /// `SQL_DESC_DATA_PTR` or `SQL_DESC_INDICATOR_PTR` means there is no buffer,
     /// so there is nothing to shift. `wrapping_byte_add` on a null pointer would
     /// otherwise turn "no buffer" into a non-null address built from the offset
-    /// alone — not a real allocation — and every reader downstream treats
+    /// alone rather than a real allocation, and every reader downstream treats
     /// non-null as "there is a buffer here": `SQLFetch`'s `22002` check,
     /// `write_column_value`, and `read_param_value`'s `SQL_NULL_DATA` test.
     ///
@@ -119,12 +119,12 @@ impl BindOffset {
     ///
     /// **Read per pointer, not all-or-nothing.** Taken literally, that sentence
     /// would withhold the offset from a record's data pointer merely because its
-    /// *indicator* is absent — and a fixed-width parameter bound with a null
+    /// *indicator* is absent, and a fixed-width parameter bound with a null
     /// `StrLen_or_IndPtr` is the commonest binding there is, so the literal
     /// reading disables the attribute for exactly the case it was added to
     /// serve. MySQL Connector/ODBC resolves it the same way, per pointer, in
     /// `ptr_offset_adjust` (`driver/utility.cc`), whose contract is stated in
-    /// its own doc comment — "If the base pointer is NULL, NULL is returned" —
+    /// its own doc comment ("If the base pointer is NULL, NULL is returned"),
     /// and whose body is `return ptr ? ((SQLCHAR *) ptr) + offset : NULL;`.
     /// psqlODBC guards the same way at its one parameter-side site, `bind.c`:
     /// `if (pcbValue && apdopts->param_offset_ptr)`.
@@ -140,7 +140,7 @@ impl BindOffset {
 /// One descriptor record: every `SQL_DESC_*` record field, whatever the role.
 ///
 /// Fields the spec initialises "ND" (no default) still have a Rust value here,
-/// because a Rust struct has no third state — the spec's own answer for reading
+/// because a Rust struct has no third state. The spec's own answer for reading
 /// one before it is set is that the value is undefined, not that the read
 /// fails, so any value is conforming. The `Default` impl uses the spec's stated
 /// defaults where it gives one and a zero otherwise.
@@ -150,16 +150,16 @@ pub struct DescriptorRecord {
     /// IPD. Stored raw because it is one field with two readings; see
     /// [`Self::c_type`] and [`Self::sql_type`].
     pub concise_type: i16,
-    /// `SQL_DESC_TYPE` — the *verbose* type, which differs from the concise one
+    /// `SQL_DESC_TYPE`: the *verbose* type, which differs from the concise one
     /// only for the datetime and interval families.
     pub verbose_type: i16,
     /// `SQL_DESC_DATETIME_INTERVAL_CODE`.
     pub datetime_interval_code: i16,
     /// `SQL_DESC_DATETIME_INTERVAL_PRECISION`.
     pub datetime_interval_precision: i32,
-    /// `SQL_DESC_LENGTH` — the declared column size.
+    /// `SQL_DESC_LENGTH`: the declared column size.
     pub length: ULen,
-    /// `SQL_DESC_OCTET_LENGTH` — the buffer length in bytes.
+    /// `SQL_DESC_OCTET_LENGTH`: the buffer length in bytes.
     pub octet_length: isize,
     /// `SQL_DESC_PRECISION`.
     pub precision: i16,
@@ -167,17 +167,17 @@ pub struct DescriptorRecord {
     pub scale: i16,
     /// `SQL_DESC_NUM_PREC_RADIX`.
     pub num_prec_radix: i32,
-    /// `SQL_DESC_DATA_PTR`. Null means unbound — see [`Self::is_bound`].
+    /// `SQL_DESC_DATA_PTR`. Null means unbound; see [`Self::is_bound`].
     pub data_ptr: *mut c_void,
     /// `SQL_DESC_INDICATOR_PTR`.
     pub indicator_ptr: *mut isize,
     /// `SQL_DESC_OCTET_LENGTH_PTR`.
     pub octet_length_ptr: *mut isize,
-    /// `SQL_DESC_PARAMETER_TYPE` — IPD only.
+    /// `SQL_DESC_PARAMETER_TYPE`, IPD only.
     pub parameter_type: ParamType,
-    /// `SQL_DESC_NAME` — IPD writable, IRD read-only.
+    /// `SQL_DESC_NAME`: IPD writable, IRD read-only.
     pub name: String,
-    /// `SQL_DESC_UNNAMED` — `SQL_NAMED` or `SQL_UNNAMED`.
+    /// `SQL_DESC_UNNAMED`: `SQL_NAMED` or `SQL_UNNAMED`.
     pub unnamed: isize,
 }
 
@@ -217,11 +217,11 @@ impl Default for DescriptorRecord {
 /// lock-ordering rule (environment before connection) intact: no call ever holds
 /// two peer groups.
 ///
-/// The IRD is materialised here too — its records are computed from column
-/// metadata rather than stored, so a snapshot is the only form in which it can
-/// leave its statement.
+/// The IRD is materialised here too, because its records are computed from
+/// column metadata rather than stored, so a snapshot is the only form in which
+/// it can leave its statement.
 ///
-/// Two fields are deliberately absent. `SQL_DESC_ALLOC_TYPE` is the one field
+/// Two fields are absent. `SQL_DESC_ALLOC_TYPE` is the one field
 /// `SQLCopyDesc` never copies, because it belongs to the allocation rather than to
 /// its contents. And the *source's* role is not carried either: the consistency
 /// check runs under the **target's** role, and a snapshot that remembered where it
@@ -249,8 +249,9 @@ pub struct DescriptorSnapshot {
 /// `SQLBindCol` already uses for an unrecognised C type.
 ///
 /// Separate from [`DescriptorRecord::c_type`], which delegates to it, so a caller
-/// holding the value out of a record — `SQLFetch`, which collects its bindings
-/// before it borrows the statement — gives the same answer rather than its own.
+/// holding the value out of a record gives the same answer rather than its own.
+/// `SQLFetch` is such a caller: it collects its bindings before it borrows the
+/// statement.
 pub fn c_type_of(concise_type: i16) -> Result<CDataType, OdbcError> {
     c_data_type_from_raw(concise_type).ok_or_else(|| {
         OdbcError::general(
@@ -271,7 +272,7 @@ impl DescriptorRecord {
     /// [`Self::concise_type`] read as a SQL data type, for an IPD.
     ///
     /// Infallible, because `SqlDataType` is a newtype over `i16` with no closed
-    /// set — a driver-specific SQL type is a legal value the spec's own
+    /// set. A driver-specific SQL type is a legal value the spec's own
     /// consistency check allows.
     pub fn sql_type(&self) -> SqlDataType {
         SqlDataType(self.concise_type)
@@ -280,13 +281,10 @@ impl DescriptorRecord {
     /// Whether this record is a *binding*, as opposed to a record that merely
     /// exists.
     ///
-    /// The distinction did not exist before descriptors were writable: a record
-    /// was created whole by `SQLBindCol` or `SQLBindParameter` and removed
-    /// entirely by the unbind form, so "the key is present" answered the
-    /// question. `SQLSetDescField` can create a record by setting any one
-    /// field, so the spec's own answer is the only one left — a null
-    /// `SQL_DESC_DATA_PTR` means unbound, and setting it to null is how
-    /// `SQLSetDescRec` unbinds a column.
+    /// `SQLSetDescField` can create a record by setting any one field, so "the
+    /// key is present" does not answer the question and the spec's own answer is
+    /// the only one left: a null `SQL_DESC_DATA_PTR` means unbound, and setting
+    /// it to null is how `SQLSetDescRec` unbinds a column.
     pub fn is_bound(&self) -> bool {
         !self.data_ptr.is_null()
     }
@@ -298,7 +296,7 @@ impl DescriptorRecord {
     /// set to the corresponding verbose type, and the
     /// SQL_DESC_DATETIME_INTERVAL_CODE field is set to the corresponding
     /// subcode." One act, not three, so every writer of a concise type goes
-    /// through here — `SQLBindCol`, `SQLBindParameter`, `SQLSetDescField` and
+    /// through here: `SQLBindCol`, `SQLBindParameter`, `SQLSetDescField` and
     /// `SQLSetDescRec` alike. A site that set the three itself would be one
     /// datetime bind away from failing its own consistency check.
     pub fn set_concise_type(&mut self, concise: i16) {
@@ -312,8 +310,8 @@ impl DescriptorRecord {
 ///
 /// `SQLSetDescRec`'s "Consistency Checks" section, which states when it runs:
 /// "This check is always performed when **SQLBindParameter** or **SQLBindCol**
-/// is called or when **SQLSetDescRec** is called for an APD, ARD, or IPD" —
-/// and `SQLSetDescField` adds a fourth site, when it sets
+/// is called or when **SQLSetDescRec** is called for an APD, ARD, or IPD".
+/// `SQLSetDescField` adds a fourth site, when it sets
 /// `SQL_DESC_DATA_PTR`. All four call this.
 ///
 /// The five clauses, and what core does with each:
@@ -327,7 +325,7 @@ impl DescriptorRecord {
 ///    SQL_DESC_DATETIME_INTERVAL_CODE field must be one of the valid datetime
 ///    or interval codes."** Checked for datetime. **Reduced for interval:**
 ///    core supports no interval types, so it cannot enumerate their codes, and
-///    the half of the clause it can act on is the converse — a datetime or
+///    the half of the clause it can act on is the converse: a datetime or
 ///    interval subcode on a type that has neither is rejected.
 /// 3. **"If the type is numeric, the SQL_DESC_PRECISION and SQL_DESC_SCALE
 ///    fields are verified to be valid."** Checked for the exact numeric types,
@@ -340,9 +338,9 @@ impl DescriptorRecord {
 /// 5. **"If SQL_DESC_CONCISE_TYPE is an interval type,
 ///    SQL_DESC_DATETIME_INTERVAL_PRECISION is a valid interval leading
 ///    precision."** Checked: a leading precision is a digit count and cannot be
-///    negative. Zero passes, stating that the application declared none — the
-///    reading [`crate::numeric_convert`]'s interval row gives it when deciding
-///    whether to range-check a value against it.
+///    negative. Zero passes, stating that the application declared none, which
+///    is the reading [`crate::numeric_convert`]'s interval row gives it when
+///    deciding whether to range-check a value against it.
 pub fn consistency_check(record: &DescriptorRecord, role: DescriptorRole) -> Result<(), OdbcError> {
     use crate::types::{
         SQL_CODE_DATE, SQL_CODE_TIME, SQL_CODE_TIMESTAMP, SQL_DATETIME, SQL_INTERVAL,
@@ -436,7 +434,7 @@ pub fn consistency_check(record: &DescriptorRecord, role: DescriptorRole) -> Res
 /// The largest fractional-seconds precision ODBC defines, in digits.
 const MAX_SECONDS_PRECISION: i16 = 9;
 
-/// `HY021` — "inconsistent descriptor information".
+/// `HY021`: "inconsistent descriptor information".
 fn inconsistent(detail: String) -> OdbcError {
     OdbcError::general(detail, SqlState::inconsistent_descriptor_information())
 }
@@ -462,7 +460,8 @@ pub enum FieldAccess {
 /// One arm per row of the spec's two initialization tables, in the order they
 /// give them: the header fields, then the record fields, then the IRD's
 /// read-only set. Reviewing this function means reading it against that page
-/// cell by cell — nothing about it is inferable from the rest of the crate.
+/// cell by cell, because nothing about it is inferable from the rest of the
+/// crate.
 ///
 /// This decides `HY091` for every field identifier that names a real field, header
 /// or record alike, because the caller decides *where* a field is stored and this
@@ -479,9 +478,9 @@ pub fn field_access(role: DescriptorRole, field: Desc) -> FieldAccess {
         // Header fields
         // ------------------------------------------------------------------
 
-        // R on every role. The value follows the allocation —
-        // `SQL_DESC_ALLOC_USER` for one the application allocated,
-        // `SQL_DESC_ALLOC_AUTO` for the four a statement owns — and is the one
+        // R on every role. The value follows the allocation:
+        // `SQL_DESC_ALLOC_USER` for one the application allocated, and
+        // `SQL_DESC_ALLOC_AUTO` for the four a statement owns. It is the one
         // field `SQLCopyDesc` never copies.
         Desc::AllocType => ReadOnly,
         Desc::ArraySize => match role {
@@ -531,7 +530,7 @@ pub fn field_access(role: DescriptorRole, field: Desc) -> FieldAccess {
         // to force a consistency check", and "the value ... is not actually
         // stored and cannot be retrieved". So a write is legal and discarded
         // (see [`set_record_field`]), and a read gets back the null that was
-        // never overwritten — which is conforming, since the spec only says a
+        // never overwritten, which is conforming, since the spec only says a
         // read is not *required* to return what was set.
         Desc::DataPtr => match role {
             Ard | Apd | App | Ipd => ReadWrite,
@@ -586,7 +585,7 @@ pub fn field_access(role: DescriptorRole, field: Desc) -> FieldAccess {
 
         // `SQL_DESC_MAXIMUM_SCALE` and `SQL_DESC_MINIMUM_SCALE` appear in
         // `sqlext.h`, and therefore in `odbc-sys`, but in neither of
-        // `SQLSetDescField`'s tables — they describe a *type*, which is
+        // `SQLSetDescField`'s tables, because they describe a *type*, which is
         // `SQLGetTypeInfo`'s subject, not a descriptor record's.
         //
         // The catch-all beside them exists only for the identifiers `odbc-sys`
@@ -604,7 +603,7 @@ pub fn field_access(role: DescriptorRole, field: Desc) -> FieldAccess {
 /// [`HeaderOwner::of`] answers "which descriptor and which field does this
 /// statement attribute name"; this answers "which statement attribute is this
 /// header field of this descriptor". They must name the same storage, or the two
-/// doors onto one value disagree — which single storage exists to prevent.
+/// doors onto one value disagree, which single storage exists to prevent.
 ///
 /// The role parameter survives the storage being keyed by *field*, because it is
 /// what decides **whether** a field is stored as a statement attribute at all:
@@ -634,7 +633,7 @@ pub fn header_attribute(role: DescriptorRole, field: Desc) -> Option<StatementAt
         (Desc::BindOffsetPtr, Ard) => Some(A::RowBindOffsetPtr),
         (Desc::BindOffsetPtr, Apd) => Some(A::ParamBindOffsetPtr),
         // `odbc-sys` spells `SQL_ATTR_PARAM_OPERATION_PTR`
-        // `ParamOpterationPtr` — transposed letters, upstream.
+        // `ParamOpterationPtr`, with transposed letters, upstream.
         (Desc::ArrayStatusPtr, Ard) => Some(A::RowOperationPtr),
         (Desc::ArrayStatusPtr, Apd) => Some(A::ParamOpterationPtr),
         (Desc::ArrayStatusPtr, Ird) => Some(A::RowStatusPtr),
@@ -649,7 +648,7 @@ pub fn header_attribute(role: DescriptorRole, field: Desc) -> Option<StatementAt
 ///
 /// The "Default" column of the spec's header table: `1` for
 /// `SQL_DESC_ARRAY_SIZE`, `SQL_BIND_BY_COLUMN` for `SQL_DESC_BIND_TYPE` and a
-/// null pointer for the rest — all of which are `0` except the first.
+/// null pointer for the rest, all of which are `0` except the first.
 pub fn header_default(field: Desc) -> usize {
     match field {
         Desc::ArraySize => 1,
@@ -681,7 +680,7 @@ pub enum DescFieldValue {
 /// - **The header fields**, which live on the descriptor rather than on any
 ///   record.
 /// - **The IRD's read-only metadata**, which is computed from the result set's
-///   `ColumnDescriptor` and never stored — that is the whole point of the IRD
+///   `ColumnDescriptor` and never stored, which is the whole point of the IRD
 ///   being a view.
 pub fn get_record_field(
     record: &DescriptorRecord,
@@ -752,8 +751,8 @@ pub fn set_record_field(
 
     match field {
         // Setting the concise type sets the verbose type and the
-        // datetime/interval code with it — the spec makes them one act. See
-        // [`DescriptorRecord::set_concise_type`]. The `Desc::Type` and
+        // datetime/interval code with it, because the spec makes them one act.
+        // See [`DescriptorRecord::set_concise_type`]. The `Desc::Type` and
         // `Desc::DatetimeIntervalCode` arms below write the trio's fields directly
         // instead, so this is the shared helper for *this* field rather than the
         // only path into those three.
@@ -781,9 +780,9 @@ pub fn set_record_field(
         Desc::Precision => record.precision = narrow_i16(n, field)?,
         Desc::Scale => record.scale = narrow_i16(n, field)?,
         Desc::NumPrecRadix => record.num_prec_radix = narrow_i32(n, field)?,
-        // The IPD's is set to force the consistency check and deliberately not
-        // stored — see [`field_access`]. The check itself is the caller's, at
-        // all four of the sites the spec names.
+        // The IPD's is set to force the consistency check and not stored; see
+        // [`field_access`]. The check itself is the caller's, at all four of the
+        // sites the spec names.
         Desc::DataPtr => {
             if role != DescriptorRole::Ipd {
                 record.data_ptr = n as *mut c_void;
@@ -815,7 +814,7 @@ pub fn set_record_field(
     Ok(())
 }
 
-/// `HY091` — the field is not defined for this role, or is read-only on it.
+/// `HY091`: the field is not defined for this role, or is read-only on it.
 fn undefined_field(role: DescriptorRole, field: Desc) -> OdbcError {
     OdbcError::general(
         format!("Descriptor field {field:?} is not writable on {role:?}"),
@@ -823,7 +822,7 @@ fn undefined_field(role: DescriptorRole, field: Desc) -> OdbcError {
     )
 }
 
-/// `HY092` — "the value in *ValuePtr was not valid for the FieldIdentifier
+/// `HY092`: "the value in *ValuePtr was not valid for the FieldIdentifier
 /// argument".
 fn wrong_value(field: Desc) -> OdbcError {
     OdbcError::general(
@@ -927,7 +926,7 @@ mod tests {
     }
 
     /// An unrecognised concise type is `HY003`, the same code `SQLBindCol`
-    /// already returns for one — not a panic and not a silent default, because
+    /// already returns for one. Not a panic and not a silent default, because
     /// `SQLSetDescField` can put an arbitrary i16 here.
     #[test]
     fn an_unknown_concise_type_reports_hy003() {
@@ -1060,9 +1059,9 @@ mod tests {
     /// must hold for all of them rather than for a chosen few.
     ///
     /// `Desc` is a fieldless enum with no iterator, so this is the list. The two
-    /// identifiers deliberately absent are `SQL_DESC_MAXIMUM_SCALE` and
+    /// identifiers absent are `SQL_DESC_MAXIMUM_SCALE` and
     /// `SQL_DESC_MINIMUM_SCALE`, which appear in `sqlext.h` but in neither of
-    /// `SQLSetDescField`'s tables — see `field_access`'s closing comment.
+    /// `SQLSetDescField`'s tables; see `field_access`'s closing comment.
     const ALL_DESC_FIELDS: &[Desc] = &[
         Desc::AllocType,
         Desc::ArraySize,
@@ -1252,10 +1251,9 @@ mod tests {
     /// precision." A leading precision is a digit count, so a negative one is
     /// not valid.
     ///
-    /// This clause was documented as unenforceable — "core supports no interval
-    /// types, so there is no leading precision it could validate against" —
-    /// until the *C to SQL: Numeric* table's interval row started reading the
-    /// field.
+    /// The *C to SQL: Numeric* table's interval row reads this field, which is
+    /// what makes the clause enforceable even though core supports no interval
+    /// types of its own.
     #[test]
     fn a_negative_interval_leading_precision_is_inconsistent() {
         let record = DescriptorRecord {
@@ -1329,7 +1327,7 @@ mod tests {
     /// SQL_DESC_DATETIME_INTERVAL_CODE field must be one of the valid datetime
     /// or interval codes." Core supports no interval types, so the reduction
     /// this check makes is to reject an interval code on a type that is not an
-    /// interval — which is the half of the clause core can act on.
+    /// interval, which is the half of the clause core can act on.
     #[test]
     fn a_datetime_interval_code_on_a_plain_type_is_inconsistent() {
         let record = DescriptorRecord {

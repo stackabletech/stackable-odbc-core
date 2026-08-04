@@ -1,5 +1,5 @@
 //! `SQLGetDescFieldW`, `SQLSetDescFieldW`, `SQLGetDescRecW`, `SQLSetDescRec` and
-//! `SQLCopyDesc` — the five descriptor functions, over a statement's own descriptors
+//! `SQLCopyDesc`: the five descriptor functions, over a statement's own descriptors
 //! and over any the application allocated itself.
 //!
 //! # How a call reaches a field
@@ -8,10 +8,10 @@
 //! of the four descriptors it is. The descriptor itself answers that: each is its
 //! own registered allocation carrying its own `role`, so a token names exactly
 //! one `Descriptor` and that struct says which role it is. `resolve_target`
-//! pairs it with the statement it was allocated with — through
+//! pairs it with the statement it was allocated with, through
 //! `HandleScope::stmt_with_desc`, which is sound for the same reason
-//! `stmt_with_parent` is — or with no statement at all, for a descriptor the
-//! application allocated against a connection.
+//! `stmt_with_parent` is. A descriptor the application allocated against a
+//! connection is paired with no statement at all.
 //!
 //! From that pair the caller reaches whichever of three sources owns the field:
 //!
@@ -23,20 +23,20 @@
 //!   `ColumnDescriptor`s, which stores nothing and delegates to the same
 //!   `get_column_attribute` that implements `SQLColAttributeW`.
 //!
-//! `descriptor::field_access` decides `HY091` for all of them, from the spec's
-//! "Initialization of Descriptor Fields" tables — for every identifier that names a
-//! real field. An integer naming none is refused earlier, by `field_from_raw` in this
-//! module, with the same state.
+//! `descriptor::field_access` decides `HY091` from the spec's "Initialization of
+//! Descriptor Fields" tables, for every identifier that names a real field. An
+//! integer naming none is refused earlier, by `field_from_raw` in this module,
+//! with the same state.
 //!
 //! # What is still missing
 //!
-//! Two things, both deliberate: **bookmark records** (record 0), and **automatic
-//! population of the IPD** — `SQL_ATTR_AUTO_IPD` stays `SQL_FALSE`, so the five
-//! fields the spec's footnote 1 names stay `Undefined` on the IPD.
+//! Two things, both out of scope on purpose: **bookmark records** (record 0), and
+//! **automatic population of the IPD**. `SQL_ATTR_AUTO_IPD` stays `SQL_FALSE`, so
+//! the five fields the spec's footnote 1 names stay `Undefined` on the IPD.
 //!
 //! **`SQL_OIC_CORE` is satisfied.** Core-level conformance requires allocating and
 //! freeing every handle type and manipulating descriptor fields through all five of
-//! these functions, which `SQLCopyDesc` and `SQLAllocHandle(SQL_HANDLE_DESC)` closed.
+//! these functions, which `SQLCopyDesc` and `SQLAllocHandle(SQL_HANDLE_DESC)` cover.
 //! An application descriptor can be swapped in through `SQL_ATTR_APP_ROW_DESC` /
 //! `SQL_ATTR_APP_PARAM_DESC`, and one descriptor may be shared across statements on a
 //! connection.
@@ -61,13 +61,13 @@ use crate::types::{SqlReturn, SqlState};
 /// What one of the four accessors is addressing: a descriptor, and the statement
 /// it was allocated with if it has one.
 ///
-/// Both borrows at once, which [`HandleScope::stmt_with_desc`] makes sound now
-/// that a descriptor is its own allocation. `stmt` is what the IRD's computed
+/// Both borrows at once, which [`HandleScope::stmt_with_desc`] makes sound
+/// because a descriptor is its own allocation. `stmt` is what the IRD's computed
 /// view and the four IRD/IPD header pairs need; everything else is on `desc`.
 ///
 /// `stmt` is `None` for a descriptor the application allocated against a
-/// connection. That is never an IRD — only application descriptors can be
-/// explicit — so the IRD paths treat `None` as an error rather than substituting
+/// connection. That is never an IRD, since only application descriptors can be
+/// explicit, so the IRD paths treat `None` as an error rather than substituting
 /// an answer.
 struct DescTarget<'a, B: Backend> {
     stmt: Option<&'a mut StatementHandle<B>>,
@@ -133,31 +133,31 @@ fn resolve_target<'s, B: Backend>(
 ///
 /// Diagnostics from the ODBC spec Diagnostics table:
 ///
-/// - `01000` General warning — (not returned here; core raises no general warning)
-/// - `01004` String data, right truncated — returned when a character field does not fit
+/// - `01000` General warning (not returned here; core raises no general warning)
+/// - `01004` String data, right truncated: returned when a character field does not fit
 ///   `value_ptr`
-/// - `07009` Invalid descriptor index — returned for a negative `record_number` on an ARD or
+/// - `07009` Invalid descriptor index: returned for a negative `record_number` on an ARD or
 ///   an APD, and for a record field at `record_number` 0 on an IPD. Read the row's `(DM)`
 ///   markers clause by clause: they precede only the bookmark clause, so both of these are
-///   the driver's. The IPD clause is not the bookmark record — bookmarks are an ARD and IRD
-///   concept, and record 0 on an IPD addresses no parameter
-/// - `08S01` Communication link failure — (not returned here; this function performs no I/O)
-/// - `HY000` General error — returned only for an internal panic caught by `panic_safe`
-/// - `HY001` Memory allocation error — (not returned here; nothing is allocated)
-/// - `HY007` Associated statement is not prepared — returned for any IRD field read before
+///   the driver's. The IPD clause is not the bookmark record, because bookmarks are an ARD
+///   and IRD concept and record 0 on an IPD addresses no parameter
+/// - `08S01` Communication link failure (not returned here; this function performs no I/O)
+/// - `HY000` General error: returned only for an internal panic caught by `panic_safe`
+/// - `HY001` Memory allocation error (not returned here; nothing is allocated)
+/// - `HY007` Associated statement is not prepared: returned for any IRD field read before
 ///   the statement has produced column metadata. The spec: "Until the IRD has been populated,
 ///   any attempt to gain access to a field of an IRD will return an error"
-/// - `HY010` Function sequence error — **(DM)** on all three of its clauses (asynchronous
+/// - `HY010` Function sequence error: **(DM)** on all three of its clauses (asynchronous
 ///   execution and `SQL_NEED_DATA`); not returned here
-/// - `HY013` Memory management error — (not returned here)
-/// - `HY021` Inconsistent descriptor information — (not returned here; the consistency check
+/// - `HY013` Memory management error (not returned here)
+/// - `HY021` Inconsistent descriptor information (not returned here; the consistency check
 ///   runs on a write, and this function writes nothing)
-/// - `HY090` Invalid string or buffer length — **(DM)**; not returned here
-/// - `HY091` Invalid descriptor field identifier — returned for an unrecognised
+/// - `HY090` Invalid string or buffer length: **(DM)**; not returned here
+/// - `HY091` Invalid descriptor field identifier: returned for an unrecognised
 ///   `field_identifier`, and for one that is not defined on this descriptor's role
-/// - `HY117` Connection is suspended — **(DM)**; not returned here
-/// - `HYT01` Connection timeout expired — (not returned here; this function performs no I/O)
-/// - `IM001` Driver does not support this function — **(DM)**; not returned here
+/// - `HY117` Connection is suspended: **(DM)**; not returned here
+/// - `HYT01` Connection timeout expired (not returned here; this function performs no I/O)
+/// - `IM001` Driver does not support this function: **(DM)**; not returned here
 ///
 /// Also from the Returns section: `SQL_NO_DATA` when `record_number` exceeds
 /// `SQL_DESC_COUNT`, which is not an error and not a defaulted record.
@@ -192,7 +192,7 @@ pub unsafe fn sql_get_desc_field_w<B: Backend>(
         panic_safe::<B, _>(descriptor_handle, |scope| {
             let mut target = resolve_target::<B>(scope, descriptor_handle)?;
             let role = target.role;
-            // Spec: clear diagnostics at the start of each ODBC call — before
+            // Spec: clear diagnostics at the start of each ODBC call, before
             // the field parse, so an unrecognised identifier reports `HY091`
             // onto an empty queue rather than behind the previous call's
             // records.
@@ -415,9 +415,9 @@ fn read_ird_field<B: Backend>(
 /// Spec: <https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlsetdescfield-function>
 ///
 /// The write counterpart of [`sql_get_desc_field_w`], routed the same three
-/// ways — except that the IRD is not writable at all beyond the two header
-/// fields the spec's `HY016` row names, because it is a computed view and has
-/// nothing to write into.
+/// ways. The IRD is the exception: it is not writable at all beyond the two
+/// header fields the spec's `HY016` row names, because it is a computed view and
+/// has nothing to write into.
 ///
 /// # Parameters
 ///
@@ -432,55 +432,55 @@ fn read_ird_field<B: Backend>(
 ///
 /// Diagnostics from the ODBC spec Diagnostics table:
 ///
-/// - `01000` General warning — (not returned here; core raises no general warning)
-/// - `01S02` Option value changed — returned for `SQL_DESC_ARRAY_SIZE` above 1, which core
+/// - `01000` General warning (not returned here; core raises no general warning)
+/// - `01S02` Option value changed: returned for `SQL_DESC_ARRAY_SIZE` above 1, which core
 ///   substitutes back to 1. It is the same value and the same substitution
 ///   `SQLSetStmtAttr(SQL_ATTR_ROW_ARRAY_SIZE)` applies, through the other door
-/// - `07009` Invalid descriptor index — **returned by this driver** for the two clauses this
+/// - `07009` Invalid descriptor index: **returned by this driver** for the two clauses this
 ///   row states without a `(DM)` marker: a `RecNumber` less than 0 where the
 ///   `DescriptorHandle` referred to an ARD or an APD, and a record field at `RecNumber` 0
 ///   where it referred to an IPD. The `(DM)` markers on this row precede the
 ///   `SQL_DESC_COUNT` and implicitly-allocated-APD clauses only, so it has to be read
 ///   clause by clause
-/// - `08S01` Communication link failure — (not returned here; this function performs no I/O)
-/// - `22001` String data, right truncated — returned when `SQL_DESC_NAME` is longer than
+/// - `08S01` Communication link failure (not returned here; this function performs no I/O)
+/// - `22001` String data, right truncated: returned when `SQL_DESC_NAME` is longer than
 ///   `SQL_MAX_IDENTIFIER_LEN`, which core answers per backend from
 ///   `Backend::catalog_result_column_widths().identifier_len`. The spec's row names
 ///   `BufferLength`, a byte count for this Wide function, while `SQL_MAX_IDENTIFIER_LEN` is a
-///   character count — so the comparison is against the decoded name's characters, which is
+///   character count, so the comparison is against the decoded name's characters. That is
 ///   the only reading that gives the ANSI and Wide entry points the same limit
-/// - `HY000` General error — returned only for an internal panic caught by `panic_safe`
-/// - `HY001` Memory allocation error — (not returned here; nothing is allocated)
-/// - `HY010` Function sequence error — **(DM)** on all four of its clauses; not returned here
-/// - `HY013` Memory management error — (not returned here)
-/// - `HY016` Cannot modify an implementation row descriptor — returned for any IRD write
+/// - `HY000` General error: returned only for an internal panic caught by `panic_safe`
+/// - `HY001` Memory allocation error (not returned here; nothing is allocated)
+/// - `HY010` Function sequence error: **(DM)** on all four of its clauses; not returned here
+/// - `HY013` Memory management error (not returned here)
+/// - `HY016` Cannot modify an implementation row descriptor: returned for any IRD write
 ///   other than `SQL_DESC_ARRAY_STATUS_PTR` and `SQL_DESC_ROWS_PROCESSED_PTR`, which the
 ///   row exempts by name
-/// - `HY021` Inconsistent descriptor information — returned when setting
+/// - `HY021` Inconsistent descriptor information: returned when setting
 ///   `SQL_DESC_DATA_PTR` leaves the record failing the spec's consistency check
-/// - `HY090` Invalid string or buffer length — **(DM)** on both of its clauses, so neither of
+/// - `HY090` Invalid string or buffer length: **(DM)** on both of its clauses, so neither of
 ///   the row's own clauses is returned here. `HY090` **is** returned for a condition the row
-///   does not state: `SQL_DESC_NAME` — the one field of this function whose value is a
-///   string, and so the whole set — set with a `BufferLength` of `SQL_NTS` and no null
+///   does not state: `SQL_DESC_NAME` set with a `BufferLength` of `SQL_NTS` and no null
 ///   terminator within `MAX_NTS_SCAN` (1 048 576) code units, a length the driver cannot
-///   determine. It precedes the `22001` identifier-length check by construction: that check
+///   determine. It is the one field of this function whose value is a string, so that is the
+///   whole set. It precedes the `22001` identifier-length check by construction: that check
 ///   compares the decoded name, and there is no decoded name. See
 ///   `set_desc_field_refuses_an_nts_name_that_runs_to_the_scan_cap`
-/// - `HY091` Invalid descriptor field identifier — returned for an unrecognised
+/// - `HY091` Invalid descriptor field identifier: returned for an unrecognised
 ///   `field_identifier`, for one that is not defined on this descriptor's role, and for one
 ///   that is defined but read-only there
-/// - `HY092` Invalid attribute/option identifier — returned when the value is not valid for
+/// - `HY092` Invalid attribute/option identifier: returned when the value is not valid for
 ///   the field: a numeric handed to `SQL_DESC_NAME`, a value too wide for the field, or
 ///   `SQL_NAMED` written to `SQL_DESC_UNNAMED`, which the row names explicitly
-/// - `HY105` Invalid parameter type — **(DM)**; not returned here. Core does still reject an
+/// - `HY105` Invalid parameter type: **(DM)**; not returned here. Core does still reject an
 ///   unrecognised `SQL_DESC_PARAMETER_TYPE`, in `descriptor::set_record_field`, but reports
-///   it as `HY092` — the driver-side row for a value that is not valid for the field. The
+///   it as `HY092`, the driver-side row for a value that is not valid for the field. The
 ///   check is defence in depth for a caller that does not come through a Driver Manager,
 ///   since this door bypasses `SQLBindParameter`'s own validation; it is not this row, and
 ///   core does not borrow a `(DM)` code to report a check of its own
-/// - `HY117` Connection is suspended — **(DM)**; not returned here
-/// - `HYT01` Connection timeout expired — (not returned here; this function performs no I/O)
-/// - `IM001` Driver does not support this function — **(DM)**; not returned here
+/// - `HY117` Connection is suspended: **(DM)**; not returned here
+/// - `HYT01` Connection timeout expired (not returned here; this function performs no I/O)
+/// - `IM001` Driver does not support this function: **(DM)**; not returned here
 ///
 /// # Safety
 ///
@@ -511,7 +511,7 @@ pub unsafe fn sql_set_desc_field_w<B: Backend>(
         panic_safe::<B, _>(descriptor_handle, |scope| {
             let mut target = resolve_target::<B>(scope, descriptor_handle)?;
             let role = target.role;
-            // Spec: clear diagnostics at the start of each ODBC call — before
+            // Spec: clear diagnostics at the start of each ODBC call, before
             // the field parse, so an unrecognised identifier reports `HY091`
             // onto an empty queue rather than behind the previous call's
             // records.
@@ -654,7 +654,7 @@ unsafe fn write_desc_field<B: Backend>(
     //
     // A failure leaves the record as it is: "If a call to SQLSetDescRec fails,
     // the contents of the descriptor record identified by the RecNumber
-    // argument are undefined", so no rollback is owed — only a report before
+    // argument are undefined", so no rollback is owed, only a report before
     // anything reads it.
     if field == Desc::DataPtr {
         consistency_check(record, role)?;
@@ -680,9 +680,10 @@ fn truncate_records<B: Backend>(target: &mut DescTarget<'_, B>, count: usize) ->
 /// `SQL_DESC_ARRAY_SIZE` is `SQL_ATTR_ROW_ARRAY_SIZE` on the ARD and
 /// `SQL_ATTR_PARAMSET_SIZE` on the APD, and `SQLSetStmtAttr` substitutes any
 /// value but 1 with `01S02` because core rejects a multi-row rowset. The same
-/// value reached through the descriptor gets the same answer, or the two views
-/// disagree — which single storage exists to prevent. The warning lands on the
-/// *descriptor's* queue, since that is the handle the application named.
+/// value reached through the descriptor gets the same answer, because otherwise
+/// the two views disagree, which single storage exists to prevent. The warning
+/// lands on the *descriptor's* queue, since that is the handle the application
+/// named.
 fn write_header_field<B: Backend>(
     target: &mut DescTarget<'_, B>,
     field: Desc,
@@ -728,8 +729,8 @@ const SQL_DESC_ARRAY_SIZE_SUPPORTED: usize = 1;
 /// The value [`sql_get_desc_rec_w`] reports for a field this descriptor's role
 /// leaves undefined.
 ///
-/// The spec permits leaving the application's buffer as it was — the value "is
-/// undefined". A defined value is written instead: an output the application
+/// The spec permits leaving the application's buffer as it was, since the value
+/// "is undefined". A defined value is written instead: an output the application
 /// can read is strictly more useful than one it cannot, and it is the half of
 /// the behaviour a test can assert on.
 fn undefined_placeholder(field: Desc) -> DescFieldValue {
@@ -738,7 +739,7 @@ fn undefined_placeholder(field: Desc) -> DescFieldValue {
         // terminator and a length of zero rather than leaving the buffer as it
         // was found.
         Desc::Name => DescFieldValue::String(String::new()),
-        // "Nullability is unknown" — the same answer `get_record_field` gives
+        // "Nullability is unknown", the same answer `get_record_field` gives
         // for the IPD's `SQL_DESC_NULLABLE`, which core never auto-populates.
         Desc::Nullable => {
             DescFieldValue::Numeric(crate::types::Nullable::SqlNullableUnknown as isize)
@@ -799,7 +800,7 @@ fn read_desc_rec_field<B: Backend>(
 /// - `record_number`: The descriptor record to read.
 /// - `name`: Buffer for `SQL_DESC_NAME`.
 /// - `buffer_length`: Length of `name` in **characters**, per this page's own
-///   wording — unlike [`sql_get_desc_field_w`], whose page counts bytes. See
+///   wording, unlike [`sql_get_desc_field_w`], whose page counts bytes. See
 ///   the comment at the `SQL_DESC_NAME` write for the evidence.
 /// - `string_length_ptr`: Receives the available **character** count for `name`.
 /// - `type_ptr`: Receives `SQL_DESC_TYPE`.
@@ -818,7 +819,7 @@ fn read_desc_rec_field<B: Backend>(
 /// `HY021` row at all.
 ///
 /// The missing `HY091` row is load-bearing rather than incidental. Two of the
-/// seven fields — `SQL_DESC_NAME` and `SQL_DESC_NULLABLE` — are undefined on an
+/// seven fields, `SQL_DESC_NAME` and `SQL_DESC_NULLABLE`, are undefined on an
 /// ARD and an APD, and the Comments section states what this function does
 /// about it: "When an application calls SQLGetDescRec to retrieve the value of
 /// a field that is undefined for a particular descriptor type, the function
@@ -827,24 +828,24 @@ fn read_desc_rec_field<B: Backend>(
 /// different function whose table lists it. `read_desc_rec_field` is where the
 /// two part company.
 ///
-/// - `01000` General warning — (not returned here; core raises no general warning)
-/// - `01004` String data, right truncated — returned when `SQL_DESC_NAME` does not fit `name`
-/// - `07009` Invalid descriptor index — the row's first clause carries no marker and is the
+/// - `01000` General warning (not returned here; core raises no general warning)
+/// - `01004` String data, right truncated: returned when `SQL_DESC_NAME` does not fit `name`
+/// - `07009` Invalid descriptor index: the row's first clause carries no marker and is the
 ///   driver's: a record field at `RecNumber` 0 on an IPD handle. Core returns `07009` for
 ///   a negative `record_number` on an ARD or an APD, and for a record number outside the
-///   current result set on an IRD. The clauses that follow are `(DM)`-marked — a bookmark
-///   record with `SQL_UB_OFF`, and a `RecNumber` above `SQL_DESC_COUNT` — and are not
+///   current result set on an IRD. The clauses that follow are `(DM)`-marked, namely a
+///   bookmark record with `SQL_UB_OFF` and a `RecNumber` above `SQL_DESC_COUNT`, and are not
 ///   returned here
-/// - `08S01` Communication link failure — (not returned here; this function performs no I/O)
-/// - `HY000` General error — returned only for an internal panic caught by `panic_safe`
-/// - `HY001` Memory allocation error — (not returned here; nothing is allocated)
-/// - `HY007` Associated statement is not prepared — returned for an IRD read before the
+/// - `08S01` Communication link failure (not returned here; this function performs no I/O)
+/// - `HY000` General error: returned only for an internal panic caught by `panic_safe`
+/// - `HY001` Memory allocation error (not returned here; nothing is allocated)
+/// - `HY007` Associated statement is not prepared: returned for an IRD read before the
 ///   statement has produced column metadata
-/// - `HY010` Function sequence error — **(DM)**; not returned here
-/// - `HY013` Memory management error — (not returned here)
-/// - `HY117` Connection is suspended — **(DM)**; not returned here
-/// - `HYT01` Connection timeout expired — (not returned here; this function performs no I/O)
-/// - `IM001` Driver does not support this function — **(DM)**; not returned here
+/// - `HY010` Function sequence error: **(DM)**; not returned here
+/// - `HY013` Memory management error (not returned here)
+/// - `HY117` Connection is suspended: **(DM)**; not returned here
+/// - `HYT01` Connection timeout expired (not returned here; this function performs no I/O)
+/// - `IM001` Driver does not support this function: **(DM)**; not returned here
 ///
 /// Also from the Returns section: `SQL_NO_DATA` when `record_number` exceeds
 /// `SQL_DESC_COUNT`.
@@ -854,7 +855,7 @@ fn read_desc_rec_field<B: Backend>(
 /// `descriptor_handle` must be null or a token issued by one of the `alloc_*`
 /// functions in `handles`. Every output pointer must be null or point to
 /// writable memory of its own type; `name` must be null or point to
-/// `buffer_length` writable `u16`s — characters, not bytes, per the parameter
+/// `buffer_length` writable `u16`s, characters and not bytes, per the parameter
 /// list above.
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn sql_get_desc_rec_w<B: Backend>(
@@ -888,7 +889,7 @@ pub unsafe fn sql_get_desc_rec_w<B: Backend>(
             target.desc.diagnostics.clear();
 
             // The six numeric fields, each read through the same
-            // `get_record_field` `SQLGetDescField` uses — one mapping, two
+            // `get_record_field` `SQLGetDescField` uses: one mapping and two
             // callers, so the two functions cannot report a record differently.
             // `SQL_NO_DATA` from any one of them is `SQL_NO_DATA` for the call:
             // they all address the same record.
@@ -931,11 +932,11 @@ pub unsafe fn sql_get_desc_rec_w<B: Backend>(
             // Length of the **Name* buffer, in characters", and
             // "*StringLengthPtr* [Output] ... the number of characters of data
             // available to return". `SQLGetDescField`'s page says "total number
-            // of bytes" for both of its counterparts *and* carries the clause
-            // this page does not — "if the value in **ValuePtr* is of a Unicode
-            // data type (when calling SQLGetDescFieldW), the *BufferLength*
-            // argument must be an even number" — so the two are deliberately
-            // different rather than one page being loose. `SQLGetCursorNameW`
+            // of bytes" for both of its counterparts *and* carries a clause this
+            // page does not: "if the value in **ValuePtr* is of a Unicode data
+            // type (when calling SQLGetDescFieldW), the *BufferLength* argument
+            // must be an even number". So the two pages differ on purpose rather
+            // than one of them being loose. `SQLGetCursorNameW`
             // ("in characters", no even-number clause) is on this side of the
             // line too.
             //
@@ -947,13 +948,13 @@ pub unsafe fn sql_get_desc_rec_w<B: Backend>(
             // (`include/freetds/odbc.h`), and psqlODBC's `SQLGetDescRecW`
             // assigns `*StringLength = nlen` where `nlen` is the UTF-16 unit
             // count returned by `utf8_to_ucs2_lf` (`odbcapi30w.c`). MySQL
-            // Connector/ODBC abstains — its `SQLGetDescRecW` is
+            // Connector/ODBC abstains, since its `SQLGetDescRecW` is
             // `NOT_IMPLEMENTED` (`driver/unicode.cc`).
             //
             // unixODBC's Driver Manager is the one dissenting voice, and it
             // dissents from itself: `DriverManager/SQLGetDescRecW.c` passes
-            // `buffer_length` and `string_length` to a Unicode driver
-            // untouched — so it constrains nothing here — while its ANSI path
+            // `buffer_length` and `string_length` to a Unicode driver untouched,
+            // so it constrains nothing here, while its ANSI path
             // does `*string_length *= sizeof(SQLWCHAR)` after converting the
             // name, which hands the application a byte count for the same call.
             // One of its two paths must be wrong; neither is authority for what
@@ -1006,9 +1007,9 @@ unsafe fn write_small_int(ptr: *mut i16, value: isize) {
 /// Spec: <https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlsetdescrec-function>
 ///
 /// Eight record fields in one call, where [`sql_set_desc_field_w`] sets one
-/// named field — and the consistency check runs once at the end rather than on
-/// every field, because a record assembled field by field is inconsistent for
-/// most of that.
+/// named field. The consistency check runs once at the end rather than on every
+/// field, because a record assembled field by field is inconsistent for most of
+/// that.
 ///
 /// Two differences from [`sql_get_desc_rec_w`], both from the page's own
 /// argument descriptions:
@@ -1043,23 +1044,23 @@ unsafe fn write_small_int(ptr: *mut i16, value: isize) {
 ///
 /// Diagnostics from the ODBC spec Diagnostics table:
 ///
-/// - `01000` General warning — (not returned here; core raises no general warning)
-/// - `07009` Invalid descriptor index — returned for a negative `record_number` on **any**
+/// - `01000` General warning (not returned here; core raises no general warning)
+/// - `07009` Invalid descriptor index: returned for a negative `record_number` on **any**
 ///   role, and for `record_number` 0 on an IPD. This row has no `(DM)`-marked clause,
-///   and the negative clause names no descriptor role — so it is reported ahead of the
+///   and the negative clause names no descriptor role, so it is reported ahead of the
 ///   `HY016` an IRD would otherwise get
-/// - `08S01` Communication link failure — (not returned here; this function performs no I/O)
-/// - `HY000` General error — returned only for an internal panic caught by `panic_safe`
-/// - `HY001` Memory allocation error — (not returned here; nothing is allocated)
-/// - `HY010` Function sequence error — **(DM)** on all four of its clauses; not returned here
-/// - `HY013` Memory management error — (not returned here)
-/// - `HY016` Cannot modify an implementation row descriptor — returned for any IRD write
-/// - `HY021` Inconsistent descriptor information — returned when the assembled record fails
+/// - `08S01` Communication link failure (not returned here; this function performs no I/O)
+/// - `HY000` General error: returned only for an internal panic caught by `panic_safe`
+/// - `HY001` Memory allocation error (not returned here; nothing is allocated)
+/// - `HY010` Function sequence error: **(DM)** on all four of its clauses; not returned here
+/// - `HY013` Memory management error (not returned here)
+/// - `HY016` Cannot modify an implementation row descriptor: returned for any IRD write
+/// - `HY021` Inconsistent descriptor information: returned when the assembled record fails
 ///   the spec's consistency check
-/// - `HY090` Invalid string or buffer length — **(DM)**; not returned here
-/// - `HY117` Connection is suspended — **(DM)**; not returned here
-/// - `HYT01` Connection timeout expired — (not returned here; this function performs no I/O)
-/// - `IM001` Driver does not support this function — **(DM)**; not returned here
+/// - `HY090` Invalid string or buffer length: **(DM)**; not returned here
+/// - `HY117` Connection is suspended: **(DM)**; not returned here
+/// - `HYT01` Connection timeout expired (not returned here; this function performs no I/O)
+/// - `IM001` Driver does not support this function: **(DM)**; not returned here
 ///
 /// # Safety
 ///
@@ -1109,7 +1110,7 @@ pub unsafe fn sql_set_desc_rec<B: Backend>(
             // 0."
             //
             // The negative clause names no descriptor role, unlike
-            // `SQLGetDescField`'s, so it is checked for all four — including an
+            // `SQLGetDescField`'s, so it is checked for all four, including an
             // IRD, ahead of that role's `HY016`. The argument is wrong whichever
             // descriptor it names, and "this index does not exist" is the more
             // specific of the two answers.
@@ -1143,7 +1144,7 @@ pub unsafe fn sql_set_desc_rec<B: Backend>(
 
             // The spec's own list, in its order. Each goes through
             // `set_record_field` so the `HY091` rules are identical to
-            // `SQLSetDescField`'s — a field this role does not define is
+            // `SQLSetDescField`'s: a field this role does not define is
             // refused the same way through both doors.
             //
             // `SQL_DESC_TYPE` is set before the subcode, because setting the
@@ -1169,7 +1170,7 @@ pub unsafe fn sql_set_desc_rec<B: Backend>(
 
             for (field, value) in fields {
                 // The IPD defines neither pointer field, and the spec expects
-                // this call to work against one — its `SQL_DESC_DATA_PTR` is
+                // this call to work against one; its `SQL_DESC_DATA_PTR` is
                 // the documented oddity below. Skipping them here rather than
                 // reporting `HY091` is what lets an application set an IPD
                 // record with the same call it uses for an APD.
@@ -1205,10 +1206,10 @@ pub unsafe fn sql_set_desc_rec<B: Backend>(
 ///
 /// Copies one descriptor's contents onto another, in two phases that never hold
 /// two group locks at once. The spec permits a copy across connections and even
-/// across environments — "Descriptor handles can be copied across connections
-/// even if the connections are under different environments" — so source and
-/// target may be in two different lock groups, and a call holding both would be a
-/// second nested-lock site where the crate has exactly one (environment before
+/// across environments ("Descriptor handles can be copied across connections
+/// even if the connections are under different environments"), so source and
+/// target may be in two different lock groups. A call holding both would be a
+/// second nested-lock site, where the crate has exactly one (environment before
 /// connection). Instead:
 ///
 /// 1. **Source group alone.** Materialise an owned `DescriptorSnapshot`. An IRD
@@ -1217,15 +1218,14 @@ pub unsafe fn sql_set_desc_rec<B: Backend>(
 /// 2. **Target group alone**, under an ordinary `panic_safe`, where every
 ///    diagnostic this call posts belongs.
 ///
-/// Two phases cannot deadlock in either direction by construction, which is the
-/// whole reason for the shape.
+/// Two phases cannot deadlock in either direction by construction.
 ///
 /// `SQL_DESC_ALLOC_TYPE` is never copied: the spec exempts it by name, and it
 /// belongs to the allocation rather than to its contents.
 ///
-/// The source's diagnostic queue is deliberately **not** cleared. The spec's
-/// sentence about that describes the Driver Manager's cross-driver implementation
-/// via `SQLGetDescField`/`SQLSetDescField`, not an obligation on a driver that
+/// The source's diagnostic queue is **not** cleared. The spec's sentence about
+/// that describes the Driver Manager's cross-driver implementation via
+/// `SQLGetDescField`/`SQLSetDescField`, not an obligation on a driver that
 /// copies directly.
 ///
 /// # Parameters
@@ -1238,42 +1238,42 @@ pub unsafe fn sql_set_desc_rec<B: Backend>(
 ///
 /// Every SQLSTATE from this function's Diagnostics table:
 ///
-/// - `01000` General warning — not produced here.
-/// - `08S01` Communication link failure — not returned; this call performs no
+/// - `01000` General warning: not produced here.
+/// - `08S01` Communication link failure: not returned; this call performs no
 ///   I/O.
-/// - `HY000` General error — returned for a failure with no more specific
+/// - `HY000` General error: returned for a failure with no more specific
 ///   code, including an internal panic. Phase two's own panic is caught by
 ///   `panic_safe`, as everywhere else; phase one's is caught by
 ///   `panic::catch_panic_as_error` (`src/panic.rs`, crate-private), since
-///   phase one holds no target handle to post a diagnostic through yet —
-///   both are folded into the same
+///   phase one holds no target handle to post a diagnostic through yet.
+///   Both are folded into the same
 ///   `OdbcError::Panic` and posted to the target's queue by phase two's
 ///   `panic_safe`, exactly where `HY007` is.
-/// - `HY001` Memory allocation error — not returned; allocation here is an
+/// - `HY001` Memory allocation error: not returned; allocation here is an
 ///   infallible `Box`/`HashMap` clone.
-/// - `HY007` Associated statement is not prepared — returned when the source is
+/// - `HY007` Associated statement is not prepared: returned when the source is
 ///   an IRD whose statement has produced no column metadata. Determined in phase
 ///   one and posted in phase two, against the target, which is the handle the
 ///   spec says to read this call's diagnostics with.
-/// - `HY010` Function sequence error — **(DM)** on all four of its clauses; not
+/// - `HY010` Function sequence error: **(DM)** on all four of its clauses; not
 ///   returned here.
-/// - `HY013` Memory management error — not returned.
-/// - `HY016` Cannot modify an implementation row descriptor — returned when
+/// - `HY013` Memory management error: not returned.
+/// - `HY016` Cannot modify an implementation row descriptor: returned when
 ///   `target_desc_handle` names an IRD: "TargetDescHandle cannot be set to a
 ///   handle to an IRD."
-/// - `HY021` Inconsistent descriptor information — returned when a copied record
+/// - `HY021` Inconsistent descriptor information: returned when a copied record
 ///   fails the consistency check under the target's role. Core checks the
 ///   *snapshot* before writing anything, so the target is left untouched; the
 ///   spec permits it to be undefined, and an owned snapshot makes doing better
 ///   free.
-/// - `HY092` Invalid attribute/option identifier — not returned. Core copies
+/// - `HY092` Invalid attribute/option identifier: not returned. Core copies
 ///   wholesale rather than field by field, as the spec's own "All fields of the
 ///   descriptor, except SQL_DESC_ALLOC_TYPE ..., are copied, whether or not the
 ///   field is defined for the destination descriptor" describes; this row
 ///   describes the Driver Manager's field-by-field implementation.
-/// - `HY117` Connection is suspended — **(DM)**; not returned here.
-/// - `HYT01` Connection timeout expired — not returned; no I/O.
-/// - `IM001` Driver does not support this function — **(DM)**; not returned here.
+/// - `HY117` Connection is suspended: **(DM)**; not returned here.
+/// - `HYT01` Connection timeout expired: not returned; no I/O.
+/// - `IM001` Driver does not support this function: **(DM)**; not returned here.
 ///
 /// An invalid `source_desc_handle` is `SQL_INVALID_HANDLE` with **no** diagnostic
 /// record, per the page's own sentence: "If an invalid SourceDescHandle was
@@ -1294,13 +1294,13 @@ pub unsafe fn sql_copy_desc<B: Backend>(
         target_desc_handle
     );
     // Phase one: the source's group, alone. Released before phase two takes the
-    // target's, so this call never holds two peer groups — the crate's one
+    // target's, so this call never holds two peer groups. The crate's one
     // ordering rule (environment before connection) stays the only one, and a
     // copy in the opposite direction on another thread cannot deadlock.
     //
-    // `HandleScope::with_group` is the acquisition, and its return type carries no
-    // guard — so that the lock is released before phase two is a fact its
-    // signature states rather than something this function has to remember.
+    // `HandleScope::with_group` is the acquisition, and its return type carries
+    // no guard, so the release before phase two is a fact its signature states
+    // rather than something this function has to remember.
     let Some(snapshot) = HandleScope::with_group(source_desc_handle, HandleKind::Desc, |scope| {
         // `with_group` is a plain lock-then-call with no `catch_unwind` of its
         // own, so a panic from `describe_col` (via `snapshot_ird`) would
@@ -1318,7 +1318,7 @@ pub unsafe fn sql_copy_desc<B: Backend>(
 
     // Phase two: the target's group. Every diagnostic this call posts goes to the
     // target's queue, per the spec's own instruction to read them with a `Handle`
-    // of `TargetDescHandle` — including `HY007`, which phase one decided.
+    // of `TargetDescHandle`, including `HY007`, which phase one decided.
     let ret = unsafe {
         panic_safe::<B, _>(target_desc_handle, |scope| {
             let mut target = resolve_target::<B>(scope, target_desc_handle)?;
@@ -1348,8 +1348,9 @@ pub unsafe fn sql_copy_desc<B: Backend>(
             }
 
             // The header fields this role keeps on its owning statement rather
-            // than in its own header — `SQL_ATTR_PARAM_STATUS_PTR` and
-            // `SQL_ATTR_PARAMS_PROCESSED_PTR` for an IPD target. Written where
+            // than in its own header, which for an IPD target are
+            // `SQL_ATTR_PARAM_STATUS_PTR` and
+            // `SQL_ATTR_PARAMS_PROCESSED_PTR`. Written where
             // this role *reads* them, or the copy would land in a map nothing
             // consults and the spec's "all fields ... are copied" would hold
             // only for the roles whose header lives on the descriptor.
@@ -1358,8 +1359,8 @@ pub unsafe fn sql_copy_desc<B: Backend>(
                     continue;
                 };
                 // `Some` here means the field is on the descriptor's own header
-                // after all — the ARD and APD pairs — which the wholesale
-                // assignment below already carries.
+                // after all, which is the case for the ARD and APD pairs, and
+                // the wholesale assignment below already carries those.
                 if HeaderOwner::of(Some(attr)).is_some() {
                     continue;
                 }
@@ -1375,7 +1376,7 @@ pub unsafe fn sql_copy_desc<B: Backend>(
             // Spec: "All fields of the descriptor, except SQL_DESC_ALLOC_TYPE
             // ..., are copied, whether or not the field is defined for the
             // destination descriptor." So this is a wholesale replace rather than
-            // a field-by-field validated set — which is also why HY091 cannot
+            // a field-by-field validated set, which is also why HY091 cannot
             // arise here and HY092 is not core's.
             target.desc.records = snapshot.records;
             target.desc.attrs = snapshot.attrs;
@@ -1424,8 +1425,8 @@ mod tests {
     }
 
     /// Read back the first diagnostic record posted on `handle`, as
-    /// `SQLGetDiagRecW` would — which is the half of this that the old bare
-    /// `SQL_ERROR` failed: asserting the return code alone passes against it.
+    /// `SQLGetDiagRecW` would. A bare `SQL_ERROR` carries no SQLSTATE, so
+    /// asserting the return code alone would pass against one.
     unsafe fn first_sqlstate(handle: *mut c_void) -> String {
         unsafe { first_sqlstate_of::<MockBackend>(handle) }
     }
@@ -1503,7 +1504,7 @@ mod tests {
     }
 
     /// `SQLGetDescFieldW`'s numeric output at an odd address, and
-    /// `SQLGetDescRecW`'s beside it — the latter writes six scalars and an
+    /// `SQLGetDescRecW`'s beside it. The latter writes six scalars and an
     /// `SQLLEN`, so it is the widest set of integer outputs in this module.
     #[test]
     fn desc_field_and_rec_write_through_misaligned_pointers() {
@@ -1618,7 +1619,7 @@ mod tests {
     /// IRD too, and reports the same `HY007`.
     ///
     /// The distinction matters because "not executed" and "executed, no
-    /// columns" are different statement states — S2 versus S4 — and only the
+    /// columns" are different statement states, S2 versus S4, and only the
     /// second has a `stmt.statement` to look at. A check that tested only for
     /// the absence of a statement would sail past this one and then ask a
     /// column-less result set to describe column 1.
@@ -1671,7 +1672,7 @@ mod tests {
     /// After execution the IRD answers from the same `ColumnDescriptor`
     /// `SQLColAttributeW` reads, so the two cannot disagree about a column.
     /// That is the whole reason the IRD is a computed view rather than stored
-    /// state — a second copy is a second thing to be wrong.
+    /// state: a second copy is a second thing to be wrong.
     ///
     /// Driven through `SQLGetTypeInfo`, whose result set core owns and can
     /// describe; the plain mocks take `describe_col`'s `NotImplemented`
@@ -1820,8 +1821,8 @@ mod tests {
 
     /// The second clause of the same row: "The RecNumber argument was less than
     /// 0." It names no descriptor role, unlike `SQLGetDescField`'s, so it holds
-    /// for an IPD too — where a negative number previously wrapped to record 0
-    /// through `u16::try_from(...).unwrap_or(0)` and wrote a record the caller
+    /// for an IPD too. Without the check a negative number wraps to record 0
+    /// through `u16::try_from(...).unwrap_or(0)` and writes a record the caller
     /// never asked for.
     #[test]
     fn set_desc_rec_with_a_negative_record_number_on_an_ipd_reports_07009() {
@@ -1916,7 +1917,7 @@ mod tests {
     }
 
     /// The clause says "a **record** field", and a header field ignores
-    /// `RecNumber` entirely — the page: `SQLGetDescField` "does not retrieve
+    /// `RecNumber` entirely. The page: `SQLGetDescField` "does not retrieve
     /// the values for header fields" by record. So record 0 must still answer
     /// `SQL_DESC_COUNT` on an IPD, and a check placed ahead of the header
     /// routing would break it.
@@ -1947,7 +1948,7 @@ mod tests {
     /// field identifier is parsed.
     ///
     /// The parse is the first thing that can fail, so clearing after it would
-    /// leave `HY091` queued behind the previous call's records — and
+    /// leave `HY091` queued behind the previous call's records, and
     /// `SQLGetDiagRec` numbers from 1, so the application would read the stale
     /// one and never see the real answer.
     #[test]
@@ -1994,7 +1995,7 @@ mod tests {
     }
 
     /// `SQL_NO_DATA` when the record number is past `SQL_DESC_COUNT`, per the
-    /// Returns section — not an error, and not a defaulted record.
+    /// Returns section: not an error, and not a defaulted record.
     #[test]
     fn a_record_number_past_the_count_returns_no_data() {
         unsafe {
@@ -2065,9 +2066,9 @@ mod tests {
 
     /// `SQL_DESC_ARRAY_SIZE` is the ARD header field `SQL_ATTR_ROW_ARRAY_SIZE`
     /// aliases. Core substitutes any value but 1 with `01S02` through
-    /// `SQLSetStmtAttr`, and must do the same here — the two are one value, and
-    /// a door that accepts what the other refuses is the disagreement single
-    /// storage exists to prevent.
+    /// `SQLSetStmtAttr`, and must do the same here, because the two are one
+    /// value. A door that accepts what the other refuses is the disagreement
+    /// single storage exists to prevent.
     #[test]
     fn an_oversized_array_size_is_substituted_through_the_descriptor_too() {
         unsafe {
@@ -2157,8 +2158,8 @@ mod tests {
     /// states that happen to agree.
     ///
     /// Column 2 of `MockLongDataBackend`'s row is the fixed-width 4242, so the
-    /// value itself is asserted and not merely the indicator — an indicator
-    /// alone would pass for a column that was bound but never written into.
+    /// value itself is asserted and not merely the indicator, because an
+    /// indicator alone would pass for a column bound but never written into.
     #[test]
     fn a_binding_built_through_the_descriptor_receives_fetched_data() {
         unsafe {
@@ -2232,7 +2233,7 @@ mod tests {
     }
 
     /// One call sets eight fields, and the consistency check runs once at the
-    /// end — `SQL_DESC_DATA_PTR` is among them.
+    /// end, and `SQL_DESC_DATA_PTR` is among them.
     #[test]
     fn set_desc_rec_sets_the_record_in_one_call() {
         unsafe {
@@ -2313,7 +2314,7 @@ mod tests {
     }
 
     /// `HY016`: "The DescriptorHandle argument was associated with an IRD."
-    /// Unconditional here — unlike `SQLSetDescField`, this function has no
+    /// Unconditional here: unlike `SQLSetDescField`, this function has no
     /// exempt header fields, because it sets record fields only.
     #[test]
     fn set_desc_rec_on_the_ird_reports_hy016() {
@@ -2378,13 +2379,13 @@ mod tests {
     }
 
     /// `SQLGetDescRec` counts `BufferLength` and `*StringLengthPtr` in
-    /// **characters**, not bytes — the one place this function differs from its
+    /// **characters** and not bytes, the one place this function differs from its
     /// sibling `SQLGetDescField`, which its own page counts in bytes and which
     /// carries the "must be an even number" clause this page does not have.
     ///
     /// The two neighbouring `get_desc_rec_*` tests cannot see the difference:
     /// both read an unnamed record, and zero bytes is zero characters. A name of
-    /// six characters makes the units observable in both directions at once —
+    /// six characters makes the units observable in both directions at once:
     /// the reported length, and how much of the buffer a truncating call fills.
     #[test]
     fn get_desc_rec_counts_the_name_buffer_in_characters_not_bytes() {
@@ -2409,8 +2410,8 @@ mod tests {
                 SqlReturn::SUCCESS
             );
 
-            // SQLSetDescField's BufferLength *is* a byte count — that page says
-            // "total number of bytes" and carries the even-number clause — so
+            // SQLSetDescField's BufferLength *is* a byte count: that page says
+            // "total number of bytes" and carries the even-number clause, so
             // the two functions of this test disagree on units by design.
             let wide: Vec<u16> = "ABCDEF".encode_utf16().collect();
             assert_eq!(
@@ -2469,7 +2470,7 @@ mod tests {
             );
             assert_eq!(ret, SqlReturn::SUCCESS_WITH_INFO);
             // The warning-severity 01004, not the 22001 that `SQLSetDescField`
-            // answers for an over-long name — this row is "the buffer **Name*
+            // answers for an over-long name. This row is "the buffer **Name*
             // was not large enough ... therefore, the field was truncated".
             assert_eq!(first_sqlstate(ipd), sql_state::STRING_DATA_RIGHT_TRUNCATED);
             assert_eq!(
@@ -2841,7 +2842,7 @@ mod tests {
     /// `HY105` row for that condition is `(DM)`-marked. A caller that does not
     /// come through a Driver Manager would otherwise store an integer naming no
     /// `SQL_PARAM_*` value, and `SQLBindParameter`'s own validation would never
-    /// see it — this door bypasses that one.
+    /// see it, because this door bypasses that one.
     ///
     /// The state is `HY092`, the driver-side row for a value that is not valid
     /// for the field, not the Driver Manager's `HY105`. Core does not borrow a
@@ -2911,7 +2912,7 @@ mod tests {
     /// SQL_MAX_IDENTIFIER_LEN."
     ///
     /// `MockAltBackend` declares `identifier_len: 63`, where the default is
-    /// 128 — so a test that passed against a hard-coded limit in core would
+    /// 128, so a test that passed against a hard-coded limit in core would
     /// fail here, which is the point of using it. The spec names `BufferLength`,
     /// a byte count for this Wide function, while `SQL_MAX_IDENTIFIER_LEN` is a
     /// character count; the comparison is against the decoded name's characters.
@@ -2961,7 +2962,7 @@ mod tests {
     }
 
     /// `SQL_DESC_NAME` is the one descriptor field whose value is a string, so
-    /// it is the one that resolves `SQL_NTS` — `BufferLength` is a byte count
+    /// it is the one that resolves `SQL_NTS`. `BufferLength` is a byte count
     /// here, and `SQL_NTS / 2` is still negative, which is what selects the
     /// scan. A name running to `MAX_NTS_SCAN` is `HY090`.
     ///
@@ -3048,8 +3049,8 @@ mod tests {
     }
 
     /// Across two connections under one environment, which the spec permits and
-    /// which is the case that puts source and target in different lock groups —
-    /// the whole reason for the two-phase shape.
+    /// which is the case that puts source and target in different lock groups,
+    /// the reason for the two-phase shape.
     #[test]
     fn copy_desc_spans_two_connections() {
         unsafe {
@@ -3147,7 +3148,7 @@ mod tests {
     }
 
     /// An invalid source is `SQL_INVALID_HANDLE` with **no** SQLSTATE, per the
-    /// page's own sentence — phase one fails before any queue is in reach.
+    /// page's own sentence: phase one fails before any queue is in reach.
     #[test]
     fn copy_desc_refuses_an_invalid_source_without_a_diagnostic() {
         unsafe {
@@ -3200,15 +3201,15 @@ mod tests {
 
             // A record that is consistent where it is written and inconsistent
             // under the target's role. Clause 1 of the consistency check is the
-            // only role-dependent one — "SQL_DESC_CONCISE_TYPE is a valid ODBC C
-            // data type" applies to an ARD or APD and not to an IPD — so a concise
+            // only role-dependent one: "SQL_DESC_CONCISE_TYPE is a valid ODBC C
+            // data type" applies to an ARD or APD and not to an IPD, so a concise
             // type that is a valid SQL type and *not* a valid C type is exactly
             // the case. `SQL_VARCHAR` (12) is one: `c_data_type_from_raw` has no
             // entry for it.
             //
-            // Written in this order deliberately. `SQLSetDescField` runs the check
-            // only when `SQL_DESC_DATA_PTR` is set, so setting the pointer first —
-            // while the record still carries the default C type — passes, and
+            // The order of the two writes matters. `SQLSetDescField` runs the
+            // check only when `SQL_DESC_DATA_PTR` is set, so setting the pointer
+            // first passes while the record still carries the default C type, and
             // setting the concise type afterwards runs no check. The result is a
             // *bound* record whose type only an IPD would accept, which is what
             // makes the copy's own check the thing under test.
@@ -3384,7 +3385,7 @@ mod tests {
     /// The other direction: an IPD **target**. `SQL_DESC_ARRAY_STATUS_PTR` is
     /// `SQL_ATTR_PARAM_STATUS_PTR` there and lives on the statement, so a copy
     /// that wrote it into the descriptor's own map would land it where nothing
-    /// reads it — the value would be silently unreadable through either door.
+    /// reads it, leaving the value silently unreadable through either door.
     #[test]
     fn copy_desc_routes_the_ipds_statement_held_header_fields() {
         unsafe {
@@ -3400,7 +3401,7 @@ mod tests {
             );
 
             // On an ARD this attribute *is* `SQL_DESC_ARRAY_STATUS_PTR`, stored
-            // on the descriptor's own header — so the source side needs no fix
+            // on the descriptor's own header, so the source side needs no fix
             // and only the target's routing is under test here.
             let mut row_operation: u16 = 0;
             let operation_ptr = std::ptr::from_mut(&mut row_operation).cast::<c_void>();
@@ -3451,15 +3452,14 @@ mod tests {
         }
     }
 
-    /// Audit finding B4: phase one runs `describe_col` (through
-    /// `snapshot_ird`) before phase two's `panic_safe` is ever reached, so a
-    /// panicking `describe_col` used to unwind straight out of
-    /// `sql_copy_desc` and across the `extern "system"` boundary
-    /// `forward_ffi!` generates for it — an abort, not a `SqlReturn`. Driven
-    /// through `catch_unwind` because that escape is exactly what a bare
-    /// `assert_eq!` on the return value cannot see: before the fix, this test
-    /// itself never gets to the `assert_eq!`, because the panic unwinds
-    /// through it too.
+    /// Phase one runs `describe_col` (through `snapshot_ird`) before phase two's
+    /// `panic_safe` is ever reached, so without `catch_panic_as_error` a
+    /// panicking `describe_col` unwinds straight out of `sql_copy_desc` and
+    /// across the `extern "system"` boundary `forward_ffi!` generates for it,
+    /// which aborts rather than returning a `SqlReturn`. Driven through
+    /// `catch_unwind`, because that escape is exactly what a bare `assert_eq!`
+    /// on the return value cannot see: an unguarded panic unwinds through this
+    /// test too, so it never reaches the assertion at all.
     #[test]
     fn copy_desc_from_ird_with_panicking_describe_col_returns_error_not_abort() {
         unsafe {
@@ -3509,8 +3509,8 @@ mod tests {
 
             // The group lock was never held across the panic (it is caught
             // inside phase one's own closure, before `with_group` even sees
-            // it), so it is not poisoned and the statement is still usable —
-            // prove it with an ordinary follow-up call.
+            // it), so it is not poisoned and the statement is still usable.
+            // Prove that with an ordinary follow-up call.
             let mut columns: i16 = -1;
             assert_eq!(
                 crate::ffi::cursor::sql_num_result_cols::<MockPanickingDescribeBackend>(

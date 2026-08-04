@@ -10,12 +10,12 @@ use crate::setup::ConfigRequest;
 use crate::setup::{InstallerError, config_request_from_raw};
 
 /// Longest single DSN attribute segment scanned before giving up, in UTF-16
-/// code units. Serves the same purpose as `utf16.rs`'s `MAX_NTS_SCAN` — without
+/// code units. Serves the same purpose as `utf16.rs`'s `MAX_NTS_SCAN`: without
 /// a bound, an attribute list missing its terminator walks memory until it
-/// faults — over a different subject, so the two values are set separately.
+/// faults. The subject differs, so the two values are set separately.
 ///
-/// `MAX_NTS_SCAN` had to be raised past `i16::MAX` because it governs SQL text,
-/// which is routinely longer than that. This one governs one `Keyword=Value`
+/// `MAX_NTS_SCAN` sits past `i16::MAX` because it governs SQL text, which is
+/// routinely longer than that. This one governs one `Keyword=Value`
 /// segment of a `ConfigDSN` attribute list, whose parts the spec sizes at
 /// `SQL_MAX_DSN_LENGTH` (32) and `SQL_MAX_OPTION_STRING_LENGTH` (256).
 /// `i16::MAX` is already three orders of magnitude above that, so nothing here
@@ -43,13 +43,12 @@ pub(crate) enum AttributeSyntaxError {
 
 /// What [`parse_attributes_w`] found, and what it could not read.
 ///
-/// The parser is deliberately lenient and reports rather than refuses: a
-/// partial map is more useful to a caller than none, and the *policy* (that
-/// `ConfigDSN` treats any syntax error as a failure) belongs at the call site
-/// rather than in the parser. Before this carried a report, both malformed
-/// shapes were indistinguishable from a well-formed list at the call site,
-/// which is how a data source came to be written with keywords silently
-/// missing.
+/// The parser is lenient and reports rather than refuses: a partial map is more
+/// useful to a caller than none, and the *policy* (that `ConfigDSN` treats any
+/// syntax error as a failure) belongs at the call site rather than in the
+/// parser. Without the report, both malformed shapes read as a well-formed list
+/// at the call site, which is how a data source comes to be written with
+/// keywords silently missing.
 #[derive(Debug, Default)]
 #[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) struct AttributeList {
@@ -90,7 +89,7 @@ pub(crate) unsafe fn parse_attributes_w(ptr: *const u16) -> AttributeList {
         //
         // Read unaligned: the pointer comes from the Driver Manager and carries
         // no alignment guarantee, and an aligned read of a misaligned address
-        // is undefined behaviour — in a debug build the standard library's
+        // is undefined behaviour: in a debug build the standard library's
         // precondition check turns it into a non-unwinding abort that
         // `panic_safe` cannot catch.
         //
@@ -136,7 +135,7 @@ pub(crate) unsafe fn parse_attributes_w(ptr: *const u16) -> AttributeList {
                 segment[eq_pos + 1..].to_string(),
             );
         } else {
-            // Skipped, but no longer silently. AGENTS.md requires a `warn!` for
+            // Skipped, and never silently. AGENTS.md requires a `warn!` for
             // a silent accept, and the caller needs to know the list it handed
             // over was not entirely readable: a partial map otherwise looks
             // exactly like a complete one. The segment's text is not logged, as
@@ -252,7 +251,7 @@ pub(crate) fn dsn_name(attrs: &HashMap<String, String>) -> Option<&str> {
 /// The spec: "if a data source name was passed to it, **ConfigDSN** displays
 /// that name but does not allow the user to change it." Core enforces that
 /// rather than trusting the hook, because the failure it prevents is
-/// destructive — a hook altering `DSN=` on an `ODBC_REMOVE_DSN` deletes a data
+/// destructive: a hook altering `DSN=` on an `ODBC_REMOVE_DSN` deletes a data
 /// source the user never named.
 #[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn renamed<'a>(
@@ -360,7 +359,7 @@ fn profile_string(section: &[u16], entry: Option<&[u16]>) -> Option<Vec<u16>> {
 /// Best-effort by design: a read that fails yields an empty map and a `warn!`
 /// rather than failing the call. `ODBC_CONFIG_DSN` only writes the keywords it
 /// is given and leaves the rest standing, so a dialog that opens without its
-/// prefill cannot destroy an existing data source — it just shows blank fields.
+/// prefill cannot destroy an existing data source; it just shows blank fields.
 /// Failing the whole call instead would turn a transient installer problem into
 /// an unconfigurable data source.
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -412,8 +411,8 @@ unsafe extern "system" {
 ///
 /// Every `return 0` in [`config_dsn_w`] goes through here. `ConfigDSN` returns a
 /// bare `BOOL`, so a bare `0` tells the ODBC Administrator that something failed
-/// and nothing about what — the spec's Diagnostics section exists precisely to
-/// close that gap: "When **ConfigDSN** returns FALSE, an associated
+/// and nothing about what. The spec's Diagnostics section exists to close that
+/// gap: "When **ConfigDSN** returns FALSE, an associated
 /// *\*pfErrorCode* value is posted to the installer error buffer by a call to
 /// **SQLPostInstallerError**."
 #[cfg(windows)]
@@ -431,7 +430,7 @@ fn fail(code: InstallerError, message: &str) -> i32 {
 /// the reason is that nothing failed: the user was asked and said no. The spec
 /// ties that buffer to a *failure* ("When **ConfigDSN** returns FALSE, an
 /// associated *\*pfErrorCode* value is posted"), and `ConfigDSN`'s own table
-/// lists no cancellation code — `odbcinst.h` does define
+/// lists no cancellation code. `odbcinst.h` does define
 /// `ODBC_ERROR_USER_CANCELED` (16), but it belongs to other installer entry
 /// points and is absent from this function's table.
 ///
@@ -581,7 +580,7 @@ fn write_dsn_attributes(dsn_w: &[u16], attrs: &std::collections::HashMap<String,
 /// - `f_request`: Type of request. Must be one of:
 ///   - `ODBC_ADD_DSN` (1): Add a new data source. Registers the name with
 ///     `SQLWriteDSNToIni`, which "removes the old section before creating the
-///     new one" — so re-adding an existing data source drops any keyword this
+///     new one", so re-adding an existing data source drops any keyword this
 ///     call leaves out.
 ///   - `ODBC_CONFIG_DSN` (2): Configure (modify) an existing data source.
 ///     Writes only through `SQLWritePrivateProfileString`, so keywords absent
@@ -623,12 +622,12 @@ fn write_dsn_attributes(dsn_w: &[u16], attrs: &std::collections::HashMap<String,
 /// The ConfigDSN spec defines no ODBC SQLSTATEs; errors go through the installer
 /// mechanism instead. Every code in its diagnostics table:
 ///
-/// - **ODBC_ERROR_INVALID_HWND** — not returned. `hwnd_parent` is never
+/// - **ODBC_ERROR_INVALID_HWND**: not returned. `hwnd_parent` is never
 ///   dereferenced: this implementation is headless and shows no dialog, so
 ///   there is no window handle for it to find invalid. A non-null value is
 ///   logged rather than rejected, because the spec's own fallback for a driver
 ///   that cannot prompt is the null-handle behaviour, which is what happens.
-/// - **ODBC_ERROR_INVALID_KEYWORD_VALUE** — **posted** when the attribute list
+/// - **ODBC_ERROR_INVALID_KEYWORD_VALUE**: **posted** when the attribute list
 ///   carries no `DSN` keyword, and when `SQLValidDSN` rejects the name the `DSN`
 ///   keyword carries. The spec asks for the latter check by name: "ConfigDSN
 ///   should call **SQLValidDSN** to check the length of the data source name and
@@ -644,35 +643,35 @@ fn write_dsn_attributes(dsn_w: &[u16], attrs: &std::collections::HashMap<String,
 ///   the attribute list.
 ///
 ///   A `DRIVER=` pair in the attribute list is **not** reported this way. The
-///   spec's word is "does not accept" — "(**ConfigDSN** does not accept the
-///   **DRIVER** keyword.)" — so it is dropped with a `warn!` rather than made a
+///   spec's word is "does not accept": "(**ConfigDSN** does not accept the
+///   **DRIVER** keyword.)". So it is dropped with a `warn!` rather than made a
 ///   failure, and the driver the caller actually asked for still reaches the
 ///   registry through the *lpszDriver* argument. Refusing the call instead
 ///   would make a data source unconfigurable whenever a setup tool round-trips
 ///   a connection string carrying that keyword.
-/// - **ODBC_ERROR_INVALID_NAME** — **posted** when `lpszDriver` is null. A driver
+/// - **ODBC_ERROR_INVALID_NAME**: **posted** when `lpszDriver` is null. A driver
 ///   name that is non-null but absent from the registry is `SQLWriteDSNToIniW`'s
 ///   to detect, and it posts its own error for that.
-/// - **ODBC_ERROR_INVALID_REQUEST_TYPE** — **posted** for an `fRequest` outside
+/// - **ODBC_ERROR_INVALID_REQUEST_TYPE**: **posted** for an `fRequest` outside
 ///   the three defined values, and posted *first*: it is checked before the
 ///   driver name, the attribute list and `SQLValidDSN`, so an unrecognised
 ///   request is diagnosed as one rather than as whatever else the call also got
 ///   wrong. `odbcinst.h`'s `ODBC_ADD_SYS_DSN` (4) and its neighbours are
 ///   `SQLConfigDataSource`'s and land here.
-/// - **ODBC_ERROR_REQUEST_FAILED** — **posted** when a panic is caught (see
+/// - **ODBC_ERROR_REQUEST_FAILED**: **posted** when a panic is caught (see
 ///   below), and when `ODBC_CONFIG_DSN` names a data source that is not in
 ///   ODBC.INI. The spec makes that check `ConfigDSN`'s: "**ConfigDSN** checks
 ///   that the data source name is in the Odbc.ini file (or registry)", and of
 ///   the codes this function's table offers, "Could not perform the operation
-///   requested by the *fRequest* argument" is the one that describes it —
-///   `ODBC_ERROR_INVALID_KEYWORD_VALUE` is for a syntax error and
+///   requested by the *fRequest* argument" is the one that describes it:
+///   `ODBC_ERROR_INVALID_KEYWORD_VALUE` is for a syntax error, and
 ///   `odbcinst.h`'s `ODBC_ERROR_INVALID_DSN` is absent from this table.
 ///   A failure *inside* `odbccp32` is left to it: `SQLWriteDSNToIniW`,
 ///   `SQLWritePrivateProfileStringW` and `SQLRemoveDSNFromIniW` each post their
 ///   own error before returning zero, and overwriting it here would replace a
 ///   specific cause with a generic one. Their zero is **propagated**, not
-///   discarded — a posted error alongside a TRUE return is a diagnostic no
-///   caller has any reason to read.
+///   discarded, because a posted error alongside a TRUE return is a diagnostic
+///   no caller has any reason to read.
 ///
 ///   Also **posted** when a driver's
 ///   [`Backend::configure_dsn`](crate::backend::Backend::configure_dsn) returns
@@ -682,8 +681,8 @@ fn write_dsn_attributes(dsn_w: &[u16], attrs: &std::collections::HashMap<String,
 ///   that hook returns a data source name different from the one it was handed,
 ///   which the spec forbids: "if a data source name was passed to it,
 ///   **ConfigDSN** displays that name but does not allow the user to change it."
-/// - **ODBC_ERROR_DRIVER_SPECIFIC** — not returned, and it cannot be. The spec's
-///   table names it, but **no header defines it** — checked against the Windows
+/// - **ODBC_ERROR_DRIVER_SPECIFIC**: not returned, and it cannot be. The spec's
+///   table names it, but **no header defines it**, checked against the Windows
 ///   SDK 10.0.22621.0 `um/odbcinst.h` as well as unixODBC's, mingw-w64's and
 ///   ReactOS's psdk mirror. All four agree, and the SDK's list ends at
 ///   `ODBC_ERROR_NOTRANINFO` (23), which is also `ODBC_ERROR_MAX`, so the
@@ -695,17 +694,17 @@ fn write_dsn_attributes(dsn_w: &[u16], attrs: &std::collections::HashMap<String,
 ///
 /// The body runs inside [`panic_safe_unlocked`], because this is an
 /// `extern "system"` boundary and an unwind across it lands in the ODBC
-/// Administrator — a C++ process that cannot receive a Rust panic.
+/// Administrator, a C++ process that cannot receive a Rust panic.
 ///
-/// [`crate::panic::panic_safe`], which every `SQL*` entry point uses, is not
-/// merely unnecessary here but **inapplicable**: it takes a handle token, locks
-/// that handle's group and pushes diagnostics through the resulting scope, and
+/// [`crate::panic::panic_safe`], which every `SQL*` entry point uses, is
+/// **inapplicable** here: it takes a handle token, locks that handle's group
+/// and pushes diagnostics through the resulting scope, and
 /// `ConfigDSN` is handed no ODBC handle at all. That makes this the second of
 /// the crate's two unlocked entry points, beside `SQLCancel`.
 ///
 /// A caught panic posts `ODBC_ERROR_REQUEST_FAILED` and returns FALSE, so it
 /// reaches the user as a failure with a cause rather than as an empty error
-/// buffer — the same rule as every other exit here.
+/// buffer, the same rule as every other exit here.
 ///
 /// # Safety
 /// - `lpsz_driver` must be null or a valid null-terminated UTF-16 string.
@@ -822,7 +821,7 @@ unsafe fn config_dsn_body<B: crate::backend::Backend>(
     // Prefill before the hook, so a driver's dialog opens with the data
     // source's current settings and never has to read ODBC.INI itself. The spec
     // requires it for a modify: "for information not in lpszAttributes, it uses
-    // information from the system information." Add is excluded — see
+    // information from the system information." Add is excluded; see
     // `should_prefill`.
     if should_prefill(request)
         && let Some(name) = supplied_name.as_deref()
@@ -984,9 +983,9 @@ mod tests {
     /// A call written without it discards the result, and the failure that
     /// produces is not visible from the outside: the DSN name registers, an
     /// attribute write fails, `odbccp32` posts its own error, and `ConfigDSN`
-    /// answers TRUE. The spec ties that buffer to the other answer — "When
+    /// answers TRUE. The spec ties that buffer to the other answer ("When
     /// **ConfigDSN** returns FALSE, an associated *\*pfErrorCode* value is
-    /// posted" — so an Administrator that got TRUE never reads it.
+    /// posted"), so an Administrator that got TRUE never reads it.
     ///
     /// Counted rather than merely searched for: `installer_result("X", unsafe {
     /// X(..) })` names `X` twice, once as the literal and once as the call, so a
@@ -1039,11 +1038,11 @@ mod tests {
     /// [`installer_result`], no more and no fewer.
     ///
     /// The list is the audit's claim about which exits carry an installer error
-    /// that this file did not post. Checking it in one direction only is how it
-    /// came to name one function while the doc comment named three: the third
-    /// exit was a tail expression (`ODBC_REMOVE_DSN => unsafe {
-    /// SQLRemoveDSNFromIniW(..) }`), which no whole-line pattern can match, so
-    /// it was never counted and the counts agreed anyway.
+    /// that this file did not post. Checking it in one direction only lets the
+    /// list name fewer functions than there are exits: one of them is a tail
+    /// expression (`ODBC_REMOVE_DSN => unsafe { SQLRemoveDSNFromIniW(..) }`),
+    /// which no whole-line pattern can match, so it goes uncounted and the
+    /// counts agree anyway.
     #[test]
     fn the_installer_error_list_names_exactly_the_calls_that_post_their_own() {
         let body = audited_source();
@@ -1200,13 +1199,13 @@ mod tests {
     /// tests.
     #[test]
     fn the_parent_window_reaches_the_drivers_setup_hook() {
-        // The warning itself moved to `Backend::configure_dsn`'s default
+        // The warning lives on `Backend::configure_dsn`'s default
         // implementation, where
         // `the_default_configure_dsn_warns_only_about_a_non_null_parent_window`
-        // in `backend.rs` pins it. Core no longer *ignores* the handle, so
-        // warning here would be warning about something core does not do; what
-        // matters here instead is that the handle is forwarded rather than
-        // dropped, since a driver cannot parent a dialog without it.
+        // in `backend.rs` pins it. Core does not *ignore* the handle, so
+        // warning here would be warning about something core does not do. What
+        // matters here is that the handle is forwarded rather than dropped,
+        // since a driver cannot parent a dialog without it.
         let body = function_source("unsafe fn config_dsn_body<");
         assert!(
             body.contains("configure_dsn(hwnd_parent,"),
@@ -1422,7 +1421,7 @@ mod tests {
     }
 
     /// The two arms are separate, and both write their attributes through the
-    /// same helper — so the reserved-key filter and the propagated failure
+    /// same helper, so the reserved-key filter and the propagated failure
     /// cannot apply to one and not the other.
     #[test]
     fn both_write_arms_go_through_write_dsn_attributes() {
@@ -1555,7 +1554,8 @@ mod tests {
     ///
     /// The spec: "if a data source name was passed to it, **ConfigDSN**
     /// displays that name but does not allow the user to change it." Trusting
-    /// the hook is not enough — the failure this prevents is destructive.
+    /// the hook is not enough, because the failure this prevents is
+    /// destructive.
     #[test]
     fn the_returned_data_source_name_is_checked_against_the_supplied_one() {
         let body = function_source("unsafe fn config_dsn_body<");
@@ -1624,7 +1624,7 @@ mod tests {
     }
 
     /// The attributes the Driver Manager supplied win over the ones read from
-    /// `ODBC.INI` — the same precedence `merge_dsn_params` applies to `DSN=` in
+    /// `ODBC.INI`, the same precedence `merge_dsn_params` applies to `DSN=` in
     /// a connection string.
     #[test]
     fn supplied_attributes_win_over_stored_ones() {
@@ -1672,8 +1672,8 @@ mod tests {
 
     /// ODBC keywords are case-insensitive, and the registry returns whatever
     /// case it stored. A stored `host` beside a supplied `Host` must resolve to
-    /// one keyword, not two — otherwise the same setting is written twice under
-    /// two spellings and which one wins is undefined.
+    /// one keyword, not two, because otherwise the same setting is written
+    /// twice under two spellings and which one wins is undefined.
     #[test]
     fn a_stored_key_is_shadowed_case_insensitively_by_a_supplied_one() {
         let mut stored = HashMap::new();
@@ -1732,9 +1732,9 @@ mod tests {
         assert_eq!(renamed(Some("Sales"), Some("Sales")), None);
     }
 
-    /// With no name supplied — the **Add…** case — the hook may return any
-    /// name, because there is nothing it could have changed. This is the whole
-    /// reason the Administrator's Add button can work at all.
+    /// With no name supplied (the **Add…** case) the hook may return any name,
+    /// because there is nothing it could have changed. That is what lets the
+    /// Administrator's Add button work at all.
     #[test]
     fn supplying_no_name_leaves_the_hook_free_to_choose() {
         assert_eq!(renamed(None, Some("Anything")), None);

@@ -6,15 +6,15 @@
 //! `InfoType` `odbc-sys` compiles, through the same real
 //! [`crate::ffi::info::sql_get_info_w`] entry point:
 //!
-//! 1. **Shape** — the returned [`crate::types::InfoValue`] variant matches
+//! 1. **Shape.** The returned [`crate::types::InfoValue`] variant matches
 //!    what [`crate::types::expected_kind`] declares for that info type (see
 //!    [`crate::types::info_type_shape`] for the spec transcription and the
 //!    three real bugs this catches).
-//! 2. **No genuine `SQL_CONVERT_*` code ever returns 0** — a `0` conversion
+//! 2. **No genuine `SQL_CONVERT_*` code ever returns 0.** A `0` conversion
 //!    bitmap is what makes the Windows Driver Manager block `SQLGetData`
 //!    with `HYC00` (see `AGENTS.md`'s Windows Driver Manager compatibility
 //!    checklist).
-//! 3. **Info types that constrain each other agree** — see
+//! 3. **Info types that constrain each other agree.** See
 //!    [`crate::conformance::info_group_inconsistencies`]. Several `SQLGetInfo`
 //!    answers are statements about one fact under different names, and core
 //!    cannot police a backend's [`crate::backend::Backend::get_info`] at
@@ -29,7 +29,7 @@
 //! wrote without bypassing that function, and the group-consistency check.
 //!
 //! No backend-specific references belong here or in any of its callers in
-//! this crate — this module is shared, driver-agnostic infrastructure.
+//! this crate, because this module is shared, driver-agnostic infrastructure.
 
 use std::ffi::c_void;
 
@@ -235,7 +235,8 @@ pub unsafe fn observe_u16_value<B: Backend>(
 }
 
 /// Checks the `SQLGetInfo` groups whose members constrain each other, and
-/// returns one message per violation — empty when the driver is consistent.
+/// returns one message per violation, so an empty result means the driver is
+/// consistent.
 ///
 /// # Why this is here rather than in core's own tests
 ///
@@ -262,15 +263,15 @@ pub unsafe fn observe_u16_value<B: Backend>(
 ///   `SQL_CATALOG_LOCATION` are `0`: there is nothing for a catalog to be used
 ///   in, or located relative to.
 /// - An empty `SQL_SCHEMA_TERM` implies `SQL_SCHEMA_USAGE = 0`, but **not** the
-///   converse. There is no `SQL_SCHEMA_NAME` info type to pair the term with —
+///   converse. There is no `SQL_SCHEMA_NAME` info type to pair the term with:
 ///   the `SQL_SCHEMA_TERM` page names one, but no such code exists in
-///   `sqlext.h` — so the term is itself the only support signal, and a data
+///   `sqlext.h`. So the term is itself the only support signal, and a data
 ///   source may have schemas that appear in no statement this bitmask
 ///   enumerates.
 /// - `SQL_PROCEDURES = "Y"` implies a non-empty `SQL_PROCEDURE_TERM`, and
-///   **not** the converse. The spec makes `SQL_PROCEDURES` a conjunction —
+///   **not** the converse. The spec makes `SQL_PROCEDURES` a conjunction,
 ///   "the data source supports procedures **and** the driver supports the ODBC
-///   procedure invocation syntax" — so a data source with procedures reports
+///   procedure invocation syntax", so a data source with procedures reports
 ///   `"N"` on a driver without `{call}`, while still having a vendor term for
 ///   them.
 /// - `SQL_TXN_CAPABLE = SQL_TC_NONE` if and only if
@@ -488,7 +489,7 @@ mod tests {
     }
 
     /// Core plus a backend that answers no info type of its own must already
-    /// satisfy every group invariant — otherwise the defaults core supplies
+    /// satisfy every group invariant. Otherwise the defaults core supplies
     /// contradict each other, and a driver inherits the contradiction before it
     /// has written a line of `get_info`.
     #[test]
@@ -556,7 +557,7 @@ mod tests {
                 );
                 assert_ne!(
                     value, 0,
-                    "raw SQL_CONVERT_* info type {info_type} returned 0 — this is the \
+                    "raw SQL_CONVERT_* info type {info_type} returned 0; this is the \
                      exact shape that makes the Windows Driver Manager block \
                      SQLGetData with HYC00 (AGENTS.md)"
                 );

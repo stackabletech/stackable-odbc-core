@@ -2,8 +2,8 @@
 //!
 //! One `pub unsafe extern "system" fn` per entry point, each a thin forward to the
 //! generic implementation in [`crate::ffi`], plus the two tables `SQLGetFunctions`
-//! answers from. Nothing here decides behaviour — a function that needs a decision
-//! belongs in `ffi/`, so that every driver inherits it — and nothing here is
+//! answers from. Nothing here decides behaviour: a function that needs a decision
+//! belongs in `ffi/`, so that every driver inherits it. Nothing here is
 //! conditional on the backend beyond the type it is given.
 //!
 //! `ConfigDSNW` is `#[cfg(windows)]` and is the one export that is not an ODBC
@@ -541,7 +541,7 @@ macro_rules! forward_ffi {
             unsafe { $crate::ffi::info::sql_get_type_info::<$B>(stmt, data_type) }
         }
 
-        /// W-suffix alias — Windows DM may look up either name.
+        /// W-suffix alias, because the Windows DM may look up either name.
         #[allow(non_snake_case, clippy::missing_safety_doc)]
         #[unsafe(no_mangle)]
         pub unsafe extern "system" fn SQLGetTypeInfoW(
@@ -675,7 +675,7 @@ macro_rules! forward_ffi {
         }
 
         // ---------------------------------------------------------------------------
-        // Stubs — less-common catalog functions
+        // Stubs: less-common catalog functions
         // ---------------------------------------------------------------------------
 
         #[allow(non_snake_case, clippy::too_many_arguments, clippy::missing_safety_doc)]
@@ -851,7 +851,7 @@ macro_rules! forward_ffi {
         }
 
         // ---------------------------------------------------------------------------
-        // Windows DM compatibility — functions that require no backend
+        // Windows DM compatibility: functions that require no backend
         // ---------------------------------------------------------------------------
 
         #[allow(non_snake_case, clippy::too_many_arguments, clippy::missing_safety_doc)]
@@ -874,13 +874,13 @@ macro_rules! forward_ffi {
             }
         }
 
-        // SQLSetScrollOptions is deliberately not exported. Its spec page defines
+        // SQLSetScrollOptions is not exported. Its spec page defines
         // no diagnostics table at all, and documents what the Driver Manager does
         // "for an application working with an ODBC 3.x driver that does not
         // support SQLSetScrollOptions": it sets SQL_ROWSET_SIZE itself. unixODBC's
-        // DM implements that mapping in full -- SQLGetInfo to validate the
+        // DM implements that mapping in full, calling SQLGetInfo to validate the
         // requested concurrency, then SQLSetStmtAttr for SQL_ATTR_CONCURRENCY,
-        // SQL_ATTR_CURSOR_TYPE, SQL_ATTR_KEYSET_SIZE and SQL_ROWSET_SIZE -- and
+        // SQL_ATTR_CURSOR_TYPE, SQL_ATTR_KEYSET_SIZE and SQL_ROWSET_SIZE. It
         // dispatches to the driver's own entry point only when the driver exports
         // one. So exporting anything here replaces a capability-checked mapping,
         // derived from this driver's own SQLGetInfo answers, with whatever the

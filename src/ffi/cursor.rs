@@ -40,13 +40,13 @@ static CURSOR_NAME_COUNTER: AtomicU32 = AtomicU32::new(1);
 ///
 /// Diagnostics table from the ODBC spec:
 ///
-/// - 01000 (general warning): driver-specific informational message — not produced here.
+/// - 01000 (general warning): driver-specific informational message, not produced here.
 /// - 08S01 (communication link failure): not applicable; the framework is in-process.
 /// - HY000 (general error): returned via `OdbcError::general` for unexpected failures.
 /// - HY001 (memory allocation error): not applicable; Rust allocation panics are caught by
 ///   `panic_safe`.
-/// - HY008: Operation canceled; not returned here. This call makes no fallible backend call —
-///   `StatementBackend::column_count` returns a plain `i16` — so there is no error for a
+/// - HY008: Operation canceled; not returned here. This call makes no fallible backend call,
+///   since `StatementBackend::column_count` returns a plain `i16`, so there is no error for a
 ///   cancellation to be reported through. The asynchronous clause is inapplicable: core never
 ///   returns `SQL_STILL_EXECUTING`.
 /// - HY010 (function sequence error): returned with SQLSTATE `HY010` when no result set is
@@ -55,14 +55,14 @@ static CURSOR_NAME_COUNTER: AtomicU32 = AtomicU32::new(1);
 /// - HY013 (memory management error): not applicable; Rust memory access cannot fail silently.
 /// - HY117 (connection suspended): (driver-manager-handled; not returned here)
 /// - HYT01 (connection timeout): not returned. Core implements no connection timeout of
-///   its own, and the only backend method this function calls —
-///   `StatementBackend::column_count` — returns a plain `i16` rather than a `Result`, so no SQLSTATE
+///   its own, and the only backend method this function calls,
+///   `StatementBackend::column_count`, returns a plain `i16` rather than a `Result`, so no SQLSTATE
 ///   can reach here from the backend either.
 /// - IM001 (driver does not support function): (driver-manager-handled; not returned here)
 /// - IM017 (polling disabled): not returned here (the asynchronous notification model is not
-///   supported — not DM-annotated in the spec).
+///   supported, not DM-annotated in the spec).
 /// - IM018 (SQLCompleteAsync not called): not returned here (the asynchronous notification
-///   model is not supported — not DM-annotated in the spec).
+///   model is not supported, not DM-annotated in the spec).
 ///
 /// # Safety
 ///
@@ -116,7 +116,7 @@ pub unsafe fn sql_num_result_cols<B: Backend>(
 /// Shared with `SQLGetDiagField`'s `SQL_DIAG_ROW_COUNT`, because the spec makes
 /// them one value: "The data in this field is also returned in the
 /// *RowCountPtr* argument of **SQLRowCount**." Two computations of one number
-/// is how the two come to disagree — the same reason the IRD reads through
+/// is how the two come to disagree, the same reason the IRD reads through
 /// `col_attr::get_column_attribute` rather than through a second table.
 pub(crate) fn statement_row_count<B: Backend>(stmt: &StatementHandle<B>) -> isize {
     match stmt.statement {
@@ -131,8 +131,8 @@ pub(crate) fn statement_row_count<B: Backend>(stmt: &StatementHandle<B>) -> isiz
                 );
                 -1
             }),
-            // Not applicable to this statement — distinct from the backend
-            // saying it could not work the count out.
+            // Not applicable to this statement, which is distinct from the
+            // backend saying it could not work the count out.
             None => -1,
         },
         None => 0, // no statement executed
@@ -158,7 +158,7 @@ pub(crate) fn statement_row_count<B: Backend>(stmt: &StatementHandle<B>) -> isiz
 ///
 /// Diagnostics table from the ODBC spec:
 ///
-/// - 01000 (general warning): driver-specific informational message — not produced here.
+/// - 01000 (general warning): driver-specific informational message, not produced here.
 /// - HY000 (general error): returned via `OdbcError::general` for unexpected failures.
 /// - HY001 (memory allocation error): not applicable; Rust allocation panics are caught by
 ///   `panic_safe`.
@@ -169,8 +169,8 @@ pub(crate) fn statement_row_count<B: Backend>(stmt: &StatementHandle<B>) -> isiz
 /// - HY013 (memory management error): not applicable; Rust memory access cannot fail silently.
 /// - HY117 (connection suspended): (driver-manager-handled; not returned here)
 /// - HYT01 (connection timeout): not returned. Core implements no connection timeout of
-///   its own, and the only backend method this function calls —
-///   `StatementBackend::row_count` — returns an `Option<i64>` rather than a `Result`, so no SQLSTATE
+///   its own, and the only backend method this function calls,
+///   `StatementBackend::row_count`, returns an `Option<i64>` rather than a `Result`, so no SQLSTATE
 ///   can reach here from the backend either.
 /// - IM001 (driver does not support function): (driver-manager-handled; not returned here)
 ///
@@ -212,7 +212,7 @@ pub unsafe fn sql_row_count<B: Backend>(
 /// Spec: <https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlmoreresults-function>
 ///
 /// Always returns `SQL_NO_DATA`: only single result sets are supported, so there is never
-/// a next result to make available. The current one is discarded on the way out — Appendix
+/// a next result to make available. The current one is discarded on the way out. Appendix
 /// B's `SQL_NO_DATA` entries for this function are `S1` when the statement was not prepared
 /// and `S2`/`S3` when it was, which is `SQLFreeStmt(SQL_CLOSE)`'s row exactly. A statement
 /// in `S1 Allocated` or `S2-S3 Prepared` is left untouched: those columns are `--` with the
@@ -226,7 +226,7 @@ pub unsafe fn sql_row_count<B: Backend>(
 ///
 /// Diagnostics table from the ODBC spec:
 ///
-/// - 01000 (general warning): driver-specific informational message — not produced here.
+/// - 01000 (general warning): driver-specific informational message, not produced here.
 /// - 01S02 (option value changed): would be returned if a statement attribute changed while
 ///   processing a batch; not applicable, as there is never a next result to move to.
 /// - 08S01 (communication link failure): **returned by this driver** when
@@ -241,7 +241,7 @@ pub unsafe fn sql_row_count<B: Backend>(
 ///   `panic_safe`.
 /// - HY008: Operation canceled; not returned here. This call reaches the backend only
 ///   through `StatementBackend::close_cursor`, which core does not reclassify against the
-///   cancel token — `crate::cancel` is applied at the statement-producing and
+///   cancel token: `crate::cancel` is applied at the statement-producing and
 ///   cursor-consuming calls, not at teardown. The asynchronous clause is inapplicable: core
 ///   never returns `SQL_STILL_EXECUTING`.
 /// - HY010 (function sequence error): (driver-manager-handled; not returned here)
@@ -252,9 +252,9 @@ pub unsafe fn sql_row_count<B: Backend>(
 ///   `StatementBackend::close_cursor`, so the state can arrive from there.
 /// - IM001 (driver does not support function): (driver-manager-handled; not returned here)
 /// - IM017 (polling disabled): not returned here (the asynchronous notification model is not
-///   supported — not DM-annotated in the spec).
+///   supported, not DM-annotated in the spec).
 /// - IM018 (SQLCompleteAsync not called): not returned here (the asynchronous notification
-///   model is not supported — not DM-annotated in the spec).
+///   model is not supported, not DM-annotated in the spec).
 ///
 /// # Safety
 ///
@@ -275,11 +275,11 @@ pub unsafe fn sql_more_results<B: Backend>(statement_handle: *mut c_void) -> Sql
             // SQLMoreResults returns SQL_NO_DATA."
             //
             // This driver never has a next result, so every call is the second
-            // sentence — but the first still governs what is left behind, and
+            // sentence, but the first still governs what is left behind, and
             // Appendix B says exactly what that is. Restricted to the single
             // result core produces (footnote [4], "the current result is the
             // last result"), the SQL_NO_DATA entries are `S1 [np]` / `S2 [p]`
-            // from S4 and `S1 [np]` / `S3 [p]` from S5-S7 — the same pair
+            // from S4 and `S1 [np]` / `S3 [p]` from S5-S7, the same pair
             // SQLFreeStmt(SQL_CLOSE)'s own row gives, so this does what that
             // option does: tell the backend, then discard. `prepared_sql`
             // survives the discard, which is what makes the `[p]` half of those
@@ -323,9 +323,9 @@ pub unsafe fn sql_more_results<B: Backend>(statement_handle: *mut c_void) -> Sql
 /// Closes the cursor associated with the statement: calls
 /// [`crate::backend::StatementBackend::close_cursor`] so the backend can
 /// release whatever the cursor holds, then discards the result set. The
-/// statement **handle** remains allocated and can be executed again — the
-/// prepared SQL survives in `prepared_sql`, so a later `SQLExecute` re-prepares
-/// — but the result set and its metadata do not survive the call.
+/// statement **handle** remains allocated and can be executed again, because the
+/// prepared SQL survives in `prepared_sql` and a later `SQLExecute` re-prepares.
+/// The result set and its metadata do not survive the call.
 ///
 /// # Parameters
 ///
@@ -335,15 +335,15 @@ pub unsafe fn sql_more_results<B: Backend>(statement_handle: *mut c_void) -> Sql
 ///
 /// Diagnostics table from the ODBC spec:
 ///
-/// - 01000 (general warning): driver-specific informational message — not produced here.
+/// - 01000 (general warning): driver-specific informational message, not produced here.
 /// - 24000 (invalid cursor state): returned with SQLSTATE `24000` when no cursor is open on the
 ///   statement handle (ODBC 3.x driver behaviour). A statement that is only prepared, or that
 ///   executed without producing a result set, has no cursor to close and gets this code, as does
 ///   one whose cursor `SQLEndTran` already closed under `SQL_CB_CLOSE`.
 /// - HY000 (general error): returned via `OdbcError::general` for unexpected failures, and the
 ///   home this table gives a failed `StatementBackend::close_cursor` when the driver's error
-///   mapping produced no more specific state. A backend that maps it to something else — a
-///   `08S01` link failure, say — has that propagated as-is: this table lists no `08S01` row, but
+///   mapping produced no more specific state. A backend that maps it to something else, a
+///   `08S01` link failure say, has that propagated as-is: this table lists no `08S01` row, but
 ///   substituting `HY000` for a state the driver already determined would be less true, not more
 ///   compliant. Whatever the state, the result set is discarded either way, so the application is
 ///   never left holding a cursor it cannot clear.
@@ -380,22 +380,22 @@ pub unsafe fn sql_close_cursor<B: Backend>(statement_handle: *mut c_void) -> Sql
                 ));
             }
 
-            // Tell the backend before tearing the statement down. Core used to
-            // reach only `discard_result_set`, which drops the backend
-            // statement — so a backend needing to release a server-side cursor,
-            // cancel a pending fetch, or return a connection to a pool got a
-            // `Drop` and no way to report a failure.
-            // `StatementBackend::close_cursor` is fallible precisely because
-            // that teardown is a round trip that can fail.
+            // Tell the backend before tearing the statement down. Reaching only
+            // `discard_result_set` would drop the backend statement, so a
+            // backend needing to release a server-side cursor, cancel a pending
+            // fetch, or return a connection to a pool would get a `Drop` and no
+            // way to report a failure. `StatementBackend::close_cursor` is
+            // fallible precisely because that teardown is a round trip that can
+            // fail.
             let close_err = stmt
                 .statement
                 .as_mut()
                 .and_then(|statement| statement.close_cursor().err());
 
-            // Discarded even when the close failed, and deliberately so: the
-            // application would otherwise be left holding a cursor it has no way
-            // to clear, since every retry would call the same failing backend.
-            // The failure is still reported — `SQLEndTran`'s "recorded and
+            // Discarded even when the close failed: the application would
+            // otherwise be left holding a cursor it has no way to clear, since
+            // every retry would call the same failing backend.
+            // The failure is still reported, in `SQLEndTran`'s "recorded and
             // carried, not swallowed" shape. After this the statement handle is
             // in a clean state and SQLExecDirect / SQLExecute can be called
             // again.
@@ -427,16 +427,16 @@ pub unsafe fn sql_close_cursor<B: Backend>(statement_handle: *mut c_void) -> Sql
 ///   being canceled function and does not post its own diagnostic records",
 ///   and "only SQL_SUCCESS or SQL_ERROR can be returned". So this path only
 ///   signals `Backend::cancel` with the statement's token and touches no
-///   handle state — which is also the only sound thing to do, since another
+///   handle state. That is also the only sound thing to do, since another
 ///   thread is in the middle of mutating that state. Taking the lock
 ///   unconditionally here would make cancel wait for the very call it was
-///   asked to interrupt, which is why `try_lock` is load-bearing rather than
-///   an optimisation.
+///   asked to interrupt, so `try_lock` is load-bearing rather than an
+///   optimisation.
 /// - **The lock is free.** Nobody else is inside this connection, so this is
 ///   the data-at-execution case, or ODBC 3.5's "no processing in progress, no
 ///   effect at all" case. The full path runs: diagnostics are cleared (this
-///   function's own entry-clear, the same as every other FFI call makes — the
-///   cross-thread branch above is the spec's deliberate exception, not this
+///   function's own entry-clear, the same as every other FFI call makes; the
+///   cross-thread branch above is the spec's exception, not this
 ///   one), any pending data-at-execution state is discarded, `Backend::cancel`
 ///   runs, and its own diagnostic is posted if that fails.
 ///
@@ -445,17 +445,17 @@ pub unsafe fn sql_close_cursor<B: Backend>(statement_handle: *mut c_void) -> Sql
 /// lifetime guarantee this needs against a concurrent `SQLDisconnect` or
 /// `SQLFreeHandle` does not come from that ordering, though: it comes from
 /// `Registry::cancel_of` itself, which takes the registry's read lock, checks
-/// the token's generation, and hands back an owned `Arc` clone — mutually
-/// exclusive with `unregister`'s write lock, so either the clone wins while
-/// the slot still holds its own reference, or the free wins first and
+/// the token's generation, and hands back an owned `Arc` clone. That is
+/// mutually exclusive with `unregister`'s write lock, so either the clone wins
+/// while the slot still holds its own reference, or the free wins first and
 /// `cancel_of` correctly returns `None`. Neither order can observe a token
 /// that "might still be there" only to find it gone underneath it; see
 /// `Registry::cancel_of`'s doc comment for the SQLite precedent this
 /// protects. What the clone-first order actually narrows is a race in
 /// *outcome*, not in soundness: resolving the token later gives a concurrent
 /// free a wider window to win that race, so cancel more often observes
-/// `None` and cancels nothing — spec-legal, and the reason to keep the
-/// clone first is to shrink that window, not to avoid a dangling reference.
+/// `None` and cancels nothing, which is spec-legal. The clone comes first to
+/// shrink that window, not to avoid a dangling reference.
 ///
 /// # Consequences of running lock-free
 ///
@@ -466,7 +466,7 @@ pub unsafe fn sql_close_cursor<B: Backend>(statement_handle: *mut c_void) -> Sql
 ///   could have been cleared. Harmless, and explicitly spec-legal ("How the
 ///   function is canceled depends on the driver and the operating system").
 /// - A `SQLGetDiagRecW`/`SQLGetDiagFieldW` call immediately following a
-///   cross-thread cancel now blocks until the cancelled call has unwound
+///   cross-thread cancel blocks until the cancelled call has unwound
 ///   through the backend: both of those take the connection's lock, and
 ///   reading the diagnostic queue while another thread pushes to it is
 ///   undefined behaviour, so there is no sound alternative. `SQLCancel`
@@ -482,15 +482,15 @@ pub unsafe fn sql_close_cursor<B: Backend>(statement_handle: *mut c_void) -> Sql
 /// Diagnostics table from the ODBC spec:
 ///
 /// - 01000 (general warning): driver-specific informational message
-///   (`SQL_SUCCESS_WITH_INFO`) — not produced here; this function only ever
+///   (`SQL_SUCCESS_WITH_INFO`): not produced here; this function only ever
 ///   returns `SQL_SUCCESS`, `SQL_ERROR` or `SQL_INVALID_HANDLE`.
 /// - HY000 (general error): may surface from the backend's own error-mapping
 ///   function for an otherwise-unclassified `Backend::cancel` failure.
 /// - HY001 (memory allocation error): not applicable; a Rust allocation panic
 ///   here is caught by `panic_safe_unlocked`, this function's own panic guard
-///   (`panic_safe` cannot be used here — see that function's doc comment for
+///   (`panic_safe` cannot be used here; see that function's doc comment for
 ///   why). Unlike `panic_safe`, that catch posts no diagnostic record at all,
-///   so this SQLSTATE is never actually produced — the panic surfaces only as
+///   so this SQLSTATE is never actually produced: the panic surfaces only as
 ///   a bare `SQL_ERROR`.
 /// - HY010 (function sequence error): the spec's whole entry for this
 ///   SQLSTATE is `(DM)`-prefixed (an asynchronous function on the associated
@@ -498,8 +498,8 @@ pub unsafe fn sql_close_cursor<B: Backend>(statement_handle: *mut c_void) -> Sql
 ///   here.
 /// - HY013 (memory management error): not applicable; Rust memory access
 ///   cannot fail silently.
-/// - HY018 (server declined cancel request): propagated from `Backend::cancel`
-///   — mapping a declined cancellation to this SQLSTATE is the backend's
+/// - HY018 (server declined cancel request): propagated from `Backend::cancel`.
+///   Mapping a declined cancellation to this SQLSTATE is the backend's
 ///   error-mapping function's job, not core's.
 /// - HY117 (connection suspended): `(DM)`; not returned here.
 /// - HYT01 (connection timeout expired): may surface from `Backend::cancel` if
@@ -512,8 +512,8 @@ pub unsafe fn sql_close_cursor<B: Backend>(statement_handle: *mut c_void) -> Sql
 pub unsafe fn sql_cancel<B: Backend>(statement_handle: *mut c_void) -> SqlReturn {
     tracing::debug!("SQLCancel(stmt={:?})", statement_handle);
 
-    // Cloned out of the registry before anything else — in particular, before
-    // the `try_lock` below — so this `Arc` keeps the backend's token alive
+    // Cloned out of the registry before anything else, and in particular before
+    // the `try_lock` below, so this `Arc` keeps the backend's token alive
     // even if `SQLDisconnect` or `SQLFreeHandle` frees this statement or its
     // connection on another thread while this call is in flight. `None` here
     // covers a stale/foreign token as well as a live statement that has made
@@ -521,9 +521,9 @@ pub unsafe fn sql_cancel<B: Backend>(statement_handle: *mut c_void) -> SqlReturn
     // cancel" and handled identically by `signal_cancel` below.
     //
     // The stored type is `CancelState<B::CancelToken>`, the wrapper
-    // `mint_cancel_token` puts in the registry — naming `B::CancelToken` here
+    // `mint_cancel_token` puts in the registry. Naming `B::CancelToken` here
     // would compile and then fail every downcast, silently turning `SQLCancel`
-    // into a no-op. Eight tests catch it, most of them by asserting the `HY008`
+    // into a no-op. The tests catch it, most of them by asserting the `HY008`
     // that a landed cancel produces two calls later;
     // `a_cancel_reaches_the_token_an_execution_minted` is the one that asserts
     // the cancel landed at all.
@@ -548,7 +548,7 @@ pub unsafe fn sql_cancel<B: Backend>(statement_handle: *mut c_void) -> SqlReturn
     // `catch_unwind`, which sits *above* this frame, so `guard` is never in a
     // frame the unwind passes through and its `Drop` never runs as part of an
     // unwind. It drops normally, without poisoning, when this function
-    // returns — the same reasoning `panic_safe`'s own `_guard` relies on.
+    // returns, the same reasoning `panic_safe`'s own `_guard` relies on.
     let guard = group.try_lock();
 
     let ret = panic_safe_unlocked(
@@ -633,7 +633,7 @@ fn signal_cancel<B: Backend>(
 ///
 /// Diagnostics table from the ODBC spec:
 ///
-/// - 01000 (general warning): driver-specific informational message — not produced here.
+/// - 01000 (general warning): driver-specific informational message, not produced here.
 /// - 01004 (string data, right truncated): returned when the cursor name is longer than
 ///   `buffer_length`; handled by `write_utf16`.
 /// - HY000 (general error): returned via `OdbcError::general` for unexpected failures.
@@ -650,8 +650,8 @@ fn signal_cancel<B: Backend>(
 ///   error: `write_utf16` reports it as `01004` and writes what fits.
 /// - HY117 (connection suspended): (driver-manager-handled; not returned here)
 /// - HYT01 (connection timeout): not returned. Core implements no connection timeout of
-///   its own, and this function makes no backend call at all — it reads and writes
-///   handle state only — so there is no path by which the state could arrive.
+///   its own, and this function makes no backend call at all: it reads and writes
+///   handle state only, so there is no path by which the state could arrive.
 /// - IM001 (driver does not support function): (driver-manager-handled; not returned here)
 ///
 /// # Safety
@@ -725,7 +725,7 @@ pub unsafe fn sql_get_cursor_name_w<B: Backend>(
 ///   as defined by the driver". Truncating would leave the application believing it had
 ///   named a cursor it cannot then reference.
 /// - 24000 (invalid cursor state): **returned by this driver**. The row carries no (DM)
-///   marker, and the Comments state the rule in the positive direction — a cursor may be
+///   marker, and the Comments state the rule in the positive direction: a cursor may be
 ///   renamed "as long as the cursor is in an allocated or prepared state". Appendix B's
 ///   row gives all four columns: `--` for `S1 Allocated` and `S2-S3 Prepared`, `24000`
 ///   for `S4 Executed` and `S5-S7 Cursor`. So a prepared-but-unexecuted statement is
@@ -733,15 +733,15 @@ pub unsafe fn sql_get_cursor_name_w<B: Backend>(
 ///   why the check reads `StatementHandle::executed` rather than `statement.is_some()`.
 /// - 34000 (invalid cursor name): **returned by this driver** for an empty name, for one
 ///   longer than `SQL_MAX_CURSOR_NAME_LEN`, and for one starting with `SQLCUR` or
-///   `SQL_CUR` — prefixes reserved for the names [`sql_get_cursor_name_w`] generates.
+///   `SQL_CUR`, prefixes reserved for the names [`sql_get_cursor_name_w`] generates.
 /// - 3C000 (duplicate cursor name): **returned by this driver**. "All cursor names within
-///   the connection must be unique", so the check walks this connection's statements —
+///   the connection must be unique", so the check walks this connection's statements,
 ///   all of which already share the group lock this call holds.
 ///
 ///   Names are compared **byte-exactly**, so `C1` and `c1` are two cursors. The spec
 ///   defines no notion of sameness for this row and states only the quoted half of the
-///   rule — "in ODBC 3.x, if a cursor name is a quoted identifier, it is treated in a
-///   case-sensitive manner" — which implies something about unquoted names without saying
+///   rule, "in ODBC 3.x, if a cursor name is a quoted identifier, it is treated in a
+///   case-sensitive manner", which implies something about unquoted names without saying
 ///   what. Reading the mature drivers settles it in an unexpected direction: psqlODBC
 ///   (`PGAPI_SetCursorName`), MySQL Connector/ODBC (`MySQLSetCursorName`), FreeTDS
 ///   (`SQLSetCursorName`) and unixODBC's Driver Manager
@@ -760,21 +760,21 @@ pub unsafe fn sql_get_cursor_name_w<B: Backend>(
 /// - HY013 (memory management error): not applicable; Rust memory access cannot fail silently.
 /// - HY090 (invalid string or buffer length): the row's own clause is not returned. It is
 ///   (DM)-marked and describes `NameLength` "less than 0 but not equal to SQL_NTS", which
-///   the Driver Manager rejects before the call arrives. An earlier revision returned it for
-///   an *empty* name, which is a different condition and is now `34000`.
+///   the Driver Manager rejects before the call arrives. An *empty* name is a different
+///   condition and is `34000`.
 ///
-///   `HY090` **is** returned here for a condition the row does not state: `CursorName` —
-///   this function's only string argument, so the whole set — passed as `SQL_NTS` with no
+///   `HY090` **is** returned here for a condition the row does not state: `CursorName`
+///   passed as `SQL_NTS` with no
 ///   null terminator within `MAX_NTS_SCAN` (1 048 576) code units, a length the driver cannot
-///   determine. Note that this function used to rewrite *every* failure from
-///   `utf16_to_string` as `HY009`, so the state is now the condition's rather than the
-///   call site's. A null `CursorName` is still `HY009`. See
+///   determine. It is this function's only string argument, so that is the whole set. Each
+///   failure from `utf16_to_string` carries the condition's own state rather than the call
+///   site's, so a null `CursorName` is `HY009` and this one is `HY090`. See
 ///   `set_cursor_name_refuses_an_nts_name_that_runs_to_the_scan_cap` and
 ///   `set_cursor_name_still_reports_hy009_for_a_null_pointer`.
 /// - HY117 (connection suspended): (driver-manager-handled; not returned here)
 /// - HYT01 (connection timeout): not returned. Core implements no connection timeout of
-///   its own, and this function makes no backend call at all — it reads and writes
-///   handle state only — so there is no path by which the state could arrive.
+///   its own, and this function makes no backend call at all: it reads and writes
+///   handle state only, so there is no path by which the state could arrive.
 /// - IM001 (driver does not support function): (driver-manager-handled; not returned here)
 ///
 /// # Safety
@@ -804,12 +804,12 @@ pub unsafe fn sql_set_cursor_name_w<B: Backend>(
                 .diagnostics
                 .clear();
 
-            // Spec HY009: null pointer — which is the state `utf16_to_string`
+            // Spec HY009: null pointer, which is the state `utf16_to_string`
             // already returns for one, so it is propagated rather than
-            // rebuilt. The `map_err` that used to sit here rewrote *every*
-            // failure as "Cursor name pointer is null", which became a lie the
-            // moment the helper gained a second failure: an `SQL_NTS` name
-            // running to `MAX_NTS_SCAN` is `HY090`, not `HY009`.
+            // rebuilt. A `map_err` here would rewrite *every* failure as
+            // "Cursor name pointer is null", and the helper has a second
+            // failure: an `SQL_NTS` name running to `MAX_NTS_SCAN` is `HY090`,
+            // not `HY009`.
             let name = utf16_to_string(cursor_name, i32::from(name_length))?;
             tracing::debug!(
                 "SQLSetCursorNameW(stmt={:?}, name={:?})",
@@ -825,7 +825,7 @@ pub unsafe fn sql_set_cursor_name_w<B: Backend>(
             //
             // An empty name is rejected here rather than with `HY090`, which the
             // spec's table marks (DM) and defines as "NameLength was less than 0
-            // but not equal to SQL_NTS" — a different condition, and the Driver
+            // but not equal to SQL_NTS": a different condition, and the Driver
             // Manager's.
             if name.is_empty() {
                 return Err(OdbcError::general(
@@ -860,16 +860,16 @@ pub unsafe fn sql_set_cursor_name_w<B: Backend>(
 
             // Spec 24000: "the statement corresponding to StatementHandle was
             // already in an executed or cursor-positioned state". The Comments
-            // say the same in the positive direction — a cursor may be renamed
-            // "as long as the cursor is in an allocated or prepared state" — and
-            // Appendix B's row spells out all four columns: `--` for
+            // say the same in the positive direction, that a cursor may be
+            // renamed "as long as the cursor is in an allocated or prepared
+            // state", and Appendix B's row spells out all four columns: `--` for
             // `S1 Allocated` and `S2-S3 Prepared`, `24000` for `S4 Executed` and
             // `S5-S7 Cursor`.
             //
             // So this reads `executed`, not `statement.is_some()`: `SQLPrepare`
             // stores a backend statement without executing anything, and
             // `SQLPrepare` -> `SQLSetCursorName` -> `SQLExecute` is the ordinary
-            // positioned-update setup. `cursor_open` alone would not do either —
+            // positioned-update setup. `cursor_open` alone would not do either:
             // an `UPDATE` that executed leaves S4, which this row still refuses.
             //
             // `SQLEndTran` under `SQL_CB_CLOSE` deliberately leaves `executed`
@@ -885,7 +885,7 @@ pub unsafe fn sql_set_cursor_name_w<B: Backend>(
 
             // Spec 3C000: "All cursor names within the connection must be unique."
             // Every statement on this connection shares the group lock this call
-            // already holds, so the walk adds no lock and no ordering rule — the
+            // already holds, so the walk adds no lock and no ordering rule, the
             // same footing as `SQLEndTran`'s. An owned snapshot, for the reason
             // given there: a statement freed mid-walk cannot shift it.
             let registry = crate::handles::registry::registry();
@@ -944,7 +944,7 @@ pub unsafe fn sql_set_cursor_name_w<B: Backend>(
 ///
 /// Diagnostics table from the ODBC spec:
 ///
-/// - 01000 (general warning): driver-specific informational message — not produced here.
+/// - 01000 (general warning): driver-specific informational message, not produced here.
 /// - 01004 (string data, right truncated): not applicable; no data movement occurs.
 /// - 01S01 (error in row): not applicable; HYC00 is returned before any row processing.
 /// - 01S07 (fractional truncation): not applicable; `HYC00` is returned before any value is
@@ -967,8 +967,8 @@ pub unsafe fn sql_set_cursor_name_w<B: Backend>(
 /// - HY000 (general error): returned via `OdbcError::general` for unexpected failures.
 /// - HY001 (memory allocation error): not applicable; Rust allocation panics are caught by
 ///   `panic_safe`.
-/// - HY008: Operation canceled; not returned here. This call makes no fallible backend call —
-///   `SQLBulkOperations` reports `HYC00` without asking the backend — so there is no error for a
+/// - HY008: Operation canceled; not returned here. This call makes no fallible backend call,
+///   since `SQLBulkOperations` reports `HYC00` without asking the backend, so there is no error for a
 ///   cancellation to be reported through. The asynchronous clause is inapplicable: core never
 ///   returns `SQL_STILL_EXECUTING`.
 /// - HY010 (function sequence error): (driver-manager-handled; not returned here)
@@ -981,22 +981,22 @@ pub unsafe fn sql_set_cursor_name_w<B: Backend>(
 ///   `SQL_UPDATE_BY_BOOKMARK`, `SQL_DELETE_BY_BOOKMARK`, `SQL_FETCH_BY_BOOKMARK`). Only that
 ///   first clause is `(DM)`-marked, and it is guarded defensively here: `odbc_sys` models
 ///   `Operation` as a newtype over a private `i16` with no accessor, so core validates
-///   against the named constants in `types/constants.rs` — the documented exception to the
+///   against the named constants in `types/constants.rs`, the documented exception to the
 ///   raw-value conversion rule, recorded in `AGENTS.md`. The two clauses that carry no
 ///   marker are the driver's, and neither can arise: one needs `SQL_CONCUR_READ_ONLY`
 ///   concurrency and the other a bound bookmark column, and core supports neither.
 /// - HY117 (connection suspended): (driver-manager-handled; not returned here)
-/// - HYC00 (optional feature not implemented): returned for all valid `operation` values —
-///   this driver does not support bulk operations or bookmarks.
+/// - HYC00 (optional feature not implemented): returned for all valid `operation` values,
+///   because this driver does not support bulk operations or bookmarks.
 /// - HYT00 (timeout expired): not applicable; the framework is in-process.
 /// - HYT01 (connection timeout): not returned. Core implements no connection timeout of
-///   its own, and this function makes no backend call at all — it reads and writes
-///   handle state only — so there is no path by which the state could arrive.
+///   its own, and this function makes no backend call at all: it reads and writes
+///   handle state only, so there is no path by which the state could arrive.
 /// - IM001 (driver does not support function): (driver-manager-handled; not returned here)
 /// - IM017 (polling disabled): not returned here (the asynchronous notification model is not
-///   supported — not DM-annotated in the spec).
+///   supported, not DM-annotated in the spec).
 /// - IM018 (SQLCompleteAsync not called): not returned here (the asynchronous notification
-///   model is not supported — not DM-annotated in the spec).
+///   model is not supported, not DM-annotated in the spec).
 ///
 /// # Safety
 ///
@@ -1062,7 +1062,7 @@ pub unsafe fn sql_bulk_operations<B: Backend>(
 ///
 /// Diagnostics table from the ODBC spec:
 ///
-/// - 01000 (general warning): driver-specific informational message — not produced here.
+/// - 01000 (general warning): driver-specific informational message, not produced here.
 /// - 01001 (cursor operation conflict): not applicable; HYC00 is returned before any operation.
 /// - 01004 (string data, right truncated): not applicable.
 /// - 01S01 (error in row): not applicable.
@@ -1079,7 +1079,7 @@ pub unsafe fn sql_bulk_operations<B: Backend>(
 /// - 22018 (invalid character value for cast specification): not applicable.
 /// - 23000 (integrity constraint violation): not applicable.
 /// - 24000 (invalid cursor state): not applicable; `HYC00` is returned first. Only the second
-///   of the row's four clauses is `(DM)`-marked — a cursor open where `SQLFetch` or
+///   of the row's four clauses is `(DM)`-marked, a cursor open where `SQLFetch` or
 ///   `SQLFetchScroll` had not been called. The other three carry no marker and are the
 ///   driver's, including the two that describe a cursor positioned before the start of the
 ///   result set or after its end; none is reached, because this function refuses every
@@ -1091,8 +1091,8 @@ pub unsafe fn sql_bulk_operations<B: Backend>(
 /// - HY000 (general error): returned via `OdbcError::general` for unexpected failures.
 /// - HY001 (memory allocation error): not applicable; Rust allocation panics are caught by
 ///   `panic_safe`.
-/// - HY008: Operation canceled; not returned here. This call makes no fallible backend call —
-///   `SQLSetPos` reports `HYC00` without asking the backend — so there is no error for a
+/// - HY008: Operation canceled; not returned here. This call makes no fallible backend call,
+///   since `SQLSetPos` reports `HYC00` without asking the backend, so there is no error for a
 ///   cancellation to be reported through. The asynchronous clause is inapplicable: core never
 ///   returns `SQL_STILL_EXECUTING`.
 /// - HY010 (function sequence error): (driver-manager-handled; not returned here)
@@ -1105,28 +1105,29 @@ pub unsafe fn sql_bulk_operations<B: Backend>(
 ///   `lock_type` is not one of `SQL_LOCK_NO_CHANGE`, `SQL_LOCK_EXCLUSIVE`,
 ///   `SQL_LOCK_UNLOCK`. Both of those clauses are `(DM)`-marked and are guarded defensively
 ///   here: `odbc_sys` models `Operation` and `Lock` as newtypes over a private `i16` with no
-///   accessor, so core validates against the named constants in `types/constants.rs` — the
+///   accessor, so core validates against the named constants in `types/constants.rs`, the
 ///   documented exception to the raw-value conversion rule, recorded in `AGENTS.md`. The
 ///   third clause carries no marker and is the driver's; it needs `SQL_ATTR_CONCUR_READ_ONLY`
 ///   concurrency, which core does not support.
 /// - HY107 (row value out of range): not applicable; HYC00 is returned before row validation.
 /// - HY109 (invalid cursor position): not applicable; `HYC00` is returned before cursor checks.
 ///   Only the third of the row's four clauses is `(DM)`-marked, a `RowNumber` of 0 with
-///   `SQL_POSITION`. The rest carry no marker and are the driver's — including the first,
+///   `SQL_POSITION`. The rest carry no marker and are the driver's, including the first,
 ///   which describes a cursor "defined as forward-only, so the cursor could not be positioned
 ///   within the rowset", the condition that would apply to every cursor this driver creates.
 /// - HY117 (connection suspended): (driver-manager-handled; not returned here)
 /// - HYC00 (optional feature not implemented): returned for all valid `operation`/`lock_type`
-///   combinations — this driver does not support scrollable cursors or positioned operations.
+///   combinations, because this driver supports neither scrollable cursors nor positioned
+///   operations.
 /// - HYT00 (timeout expired): not applicable; the framework is in-process.
 /// - HYT01 (connection timeout): not returned. Core implements no connection timeout of
-///   its own, and this function makes no backend call at all — it reads and writes
-///   handle state only — so there is no path by which the state could arrive.
+///   its own, and this function makes no backend call at all: it reads and writes
+///   handle state only, so there is no path by which the state could arrive.
 /// - IM001 (driver does not support function): (driver-manager-handled; not returned here)
 /// - IM017 (polling disabled): not returned here (the asynchronous notification model is not
-///   supported — not DM-annotated in the spec).
+///   supported, not DM-annotated in the spec).
 /// - IM018 (SQLCompleteAsync not called): not returned here (the asynchronous notification
-///   model is not supported — not DM-annotated in the spec).
+///   model is not supported, not DM-annotated in the spec).
 ///
 /// # Safety
 ///
@@ -1160,7 +1161,7 @@ pub unsafe fn sql_set_pos<B: Backend>(
             );
 
             // Spec HY092: validate operation. Matched against the constants
-            // rather than converted to `odbc_sys::Operation` — see the comment
+            // rather than converted to `odbc_sys::Operation`; see the comment
             // over `SQL_POSITION` in `types/constants.rs` for why that type
             // cannot carry this value.
             match operation {
@@ -1293,9 +1294,9 @@ mod tests {
 
     /// Appendix B's `SQLMoreResults` row, restricted to the single-result-set
     /// case core produces: from `S5-S7 Cursor` the `[nf]` entries are
-    /// `S1 [np]` and `S3 [p]` — the same pair `SQLFreeStmt(SQL_CLOSE)` names.
-    /// Returning `SQL_NO_DATA` and leaving the cursor open left a following
-    /// `SQLFetch` re-reading the result set that had just been reported away.
+    /// `S1 [np]` and `S3 [p]`, the same pair `SQLFreeStmt(SQL_CLOSE)` names.
+    /// Returning `SQL_NO_DATA` and leaving the cursor open would let a following
+    /// `SQLFetch` re-read the result set that had just been reported away.
     #[test]
     fn more_results_discards_the_result_set_it_reports_away() {
         unsafe {
@@ -1648,7 +1649,7 @@ mod tests {
             // Disconnect first: `free_connection` refuses a still-open
             // connection with `HY010` and frees nothing, so a test that
             // connected would leak the handle and whatever its diagnostic
-            // queue holds — which Miri reports as a leak and CI fails on.
+            // queue holds, which Miri reports as a leak and CI fails on.
             // Harmless when nothing is connected: that answers `08003`,
             // which this discards like the frees below.
             let _ = crate::ffi::connect::sql_disconnect::<B>(conn);
@@ -1693,9 +1694,9 @@ mod tests {
     /// mints the token, and `SQLCancel` reads it back.
     ///
     /// Nothing makes a disagreement between `mint_cancel_token` and
-    /// `sql_cancel` a compile error — `Arc::downcast` on a mismatch returns
+    /// `sql_cancel` a compile error: `Arc::downcast` on a mismatch returns
     /// `Err`, and `signal_cancel` reads the resulting `None` as "no token yet,
-    /// nothing to cancel" — so what a disagreement produces is a `SQLCancel`
+    /// nothing to cancel". So a disagreement produces a `SQLCancel`
     /// that returns `SQL_SUCCESS` and silently cancels nothing.
     ///
     /// It is *not* the only test that catches that. The neighbouring cancel
@@ -1804,8 +1805,8 @@ mod tests {
 
     /// The spec's own bifurcation, stated from the idle side: with nobody
     /// else inside the connection, `SQLCancel` takes the full path and clears
-    /// diagnostics unconditionally, even with nothing to cancel — the same
-    /// entry-clear every other FFI function performs. Only the cross-thread
+    /// diagnostics unconditionally, even with nothing to cancel, which is the
+    /// same entry-clear every other FFI function performs. Only the cross-thread
     /// branch (`cancel_signals_the_backend_while_another_thread_holds_the_group`
     /// below) is the spec's deliberate exception to that.
     #[test]
@@ -1884,7 +1885,7 @@ mod tests {
     /// The other half of the cross-thread branch's spec obligation: not just
     /// that the backend is signalled (the test above), but that a record
     /// already posted by the function being canceled is left in place and
-    /// that `SQLCancel` posts none of its own — "does not clear the
+    /// that `SQLCancel` posts none of its own: "does not clear the
     /// diagnostic records of the being canceled function and does not post
     /// its own diagnostic records". Same handshake, with a diagnostic pushed
     /// before the holder thread ever takes the group, so this exercises the
@@ -1933,16 +1934,16 @@ mod tests {
     }
 
     /// A cancel that has already cloned its token must survive the statement
-    /// being freed underneath it — the SQLite close-during-interrupt hazard
-    /// `Registry::cancel_of`'s doc comment names. Unlike
+    /// being freed underneath it, which is the SQLite close-during-interrupt
+    /// hazard `Registry::cancel_of`'s doc comment names. Unlike
     /// `a_cloned_cancel_token_survives_the_handle_being_freed`
     /// (`handles::registry`'s own unit test, which drives `Registry::unregister`
-    /// directly), this goes through the real `SQLFreeHandle` cascade — the
-    /// statement, then its connection, then the environment — to prove the
+    /// directly), this goes through the real `SQLFreeHandle` cascade (the
+    /// statement, then its connection, then the environment) to prove the
     /// clone survives the production teardown path, not only the registry
     /// primitive it is built from.
     ///
-    /// This does not, however, pin the ordering that matters most —
+    /// This does not, however, pin the ordering that matters most:
     /// that `sql_cancel` clones the token *before* attempting `try_lock`.
     /// That ordering is two adjacent statements at the top of `sql_cancel`'s
     /// body with no branch between them; the only way to turn it into a
@@ -2086,11 +2087,10 @@ mod tests {
     /// A cursor name passed as `SQL_NTS` that runs to `MAX_NTS_SCAN` is
     /// `HY090`, not `HY009`.
     ///
-    /// `sql_set_cursor_name_w` rewrote *every* failure from `utf16_to_string`
-    /// as "Cursor name pointer is null" with `HY009`, which was true while a
-    /// null pointer was the helper's only failure and became a lie the moment
-    /// it gained a second one. Delete the `map_err`'s replacement — that is,
-    /// reinstate it — and this test reports `HY009`.
+    /// `sql_set_cursor_name_w` propagates `utf16_to_string`'s own state rather
+    /// than rewriting every failure as "Cursor name pointer is null" with
+    /// `HY009`. A null pointer is not the helper's only failure. Add a
+    /// `map_err` that replaces the state and this test reports `HY009`.
     ///
     /// The buffer is exactly the cap, so an over-read is a heap overflow Miri
     /// sees rather than a longer name.
@@ -2162,8 +2162,9 @@ mod tests {
         }
     }
 
-    /// An empty name was `HY090`, which the spec marks (DM) and defines as
-    /// `NameLength < 0 && != SQL_NTS` — a different condition entirely.
+    /// An empty name is `34000`, not `HY090`. The spec marks `HY090` (DM) and
+    /// defines it as `NameLength < 0 && != SQL_NTS`, a different condition
+    /// entirely.
     #[test]
     fn set_cursor_name_rejects_an_empty_name_with_34000_not_hy090() {
         unsafe {
@@ -2232,9 +2233,9 @@ mod tests {
         }
     }
 
-    /// Names differing only in case are **not** the same name. This is a
-    /// deliberate ruling, not an oversight — do not "fix" it into a
-    /// case-insensitive comparison without new evidence.
+    /// Names differing only in case are **not** the same name. This is a ruling
+    /// rather than an oversight, so do not "fix" it into a case-insensitive
+    /// comparison without new evidence.
     ///
     /// The spec's `3C000` row defines no notion of sameness, and the Comments
     /// state only the quoted half of the rule: "in ODBC 3.x, if a cursor name is
@@ -2246,14 +2247,14 @@ mod tests {
     /// Four were read, and none of them implements a duplicate-cursor-name
     /// check at all, so none can supply a folding rule:
     ///
-    /// - psqlODBC `PGAPI_SetCursorName` (`results.c`) — checks the length
+    /// - psqlODBC `PGAPI_SetCursorName` (`results.c`): checks the length
     ///   against `MAX_CURSOR_LEN` and stores; no search of sibling statements.
-    /// - MySQL Connector/ODBC `MySQLSetCursorName` (`driver/cursor.cc`) —
+    /// - MySQL Connector/ODBC `MySQLSetCursorName` (`driver/cursor.cc`):
     ///   length, plus `myodbc_casecmp` against the reserved `SQLCUR`/`SQL_CUR`
     ///   prefixes, then stores.
-    /// - FreeTDS `SQLSetCursorName` (`src/odbc/odbc.c`) — `24000` if a cursor is
+    /// - FreeTDS `SQLSetCursorName` (`src/odbc/odbc.c`): `24000` if a cursor is
     ///   already open, then copies the string.
-    /// - unixODBC's Driver Manager (`DriverManager/SQLSetCursorName.c`) —
+    /// - unixODBC's Driver Manager (`DriverManager/SQLSetCursorName.c`):
     ///   validates the handle, the name and the statement state, then forwards.
     ///
     /// A search for the literal `3C000` finds nothing in the first three, and in
@@ -2287,8 +2288,9 @@ mod tests {
         }
     }
 
-    /// The same name on a second connection is legal — the spec scopes uniqueness
-    /// to the connection, and a check that walked more would reject valid calls.
+    /// The same name on a second connection is legal, because the spec scopes
+    /// uniqueness to the connection, and a check that walked more would reject
+    /// valid calls.
     #[test]
     fn set_cursor_name_allows_the_same_name_on_another_connection() {
         unsafe {
@@ -2525,8 +2527,8 @@ mod tests {
     /// flight pointing at a name that no longer resolves.
     ///
     /// Driven through `sql_exec_direct_w` on a backend that really produces a
-    /// result set — asserting on a hand-set `cursor_open` would prove only that
-    /// the test can write a bool.
+    /// result set, because asserting on a hand-set `cursor_open` would prove
+    /// only that the test can write a bool.
     #[test]
     fn set_cursor_name_is_refused_once_the_statement_has_executed() {
         unsafe {
@@ -2605,8 +2607,8 @@ mod tests {
 
     /// The other half of the same table row: state S4, executed with no result
     /// set, is `24000` even though no cursor was ever opened. Dropping the
-    /// `statement.is_some()` term outright — the obvious way to let the prepared
-    /// state through — would accept this, so it is pinned in its own test.
+    /// `statement.is_some()` term outright, the obvious way to let the prepared
+    /// state through, would accept this, so it is pinned in its own test.
     ///
     /// `MockStatement` reports zero columns, so `SQLExecute` leaves the handle
     /// in S4 rather than S5.
@@ -2648,12 +2650,13 @@ mod tests {
         }
     }
 
-    /// `SQLCloseCursor` reached only `discard_result_set`, so a backend needing
-    /// to release a server-side cursor, cancel a pending fetch, or return a
-    /// connection to a pool never heard about the most obvious place an
-    /// application closes a cursor — it got a `Drop`, where a failure cannot be
-    /// reported at all. `StatementBackend::close_cursor` is fallible precisely
-    /// because that teardown is a round trip that can fail.
+    /// `SQLCloseCursor` calls the backend rather than reaching only
+    /// `discard_result_set`. Without that call a backend needing to release a
+    /// server-side cursor, cancel a pending fetch, or return a connection to a
+    /// pool hears nothing at the most obvious place an application closes a
+    /// cursor: it gets a `Drop`, where a failure cannot be reported at all.
+    /// `StatementBackend::close_cursor` is fallible precisely because that
+    /// teardown is a round trip that can fail.
     #[test]
     fn close_cursor_calls_the_backend_and_reports_its_failure() {
         unsafe {

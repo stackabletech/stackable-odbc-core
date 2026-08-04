@@ -1,4 +1,4 @@
-//! Result-set column layouts for the ODBC catalog functions — the fixed
+//! Result-set column layouts for the ODBC catalog functions: the fixed
 //! column sets `SQLTables`, `SQLColumns`, `SQLPrimaryKeys` and
 //! `SQLForeignKeys` must return, as enums that produce the corresponding
 //! [`ColumnDescriptor`]s.
@@ -7,11 +7,11 @@ use crate::types::{ColumnDescriptor, Nullable, SqlDataType};
 
 /// The data-source-dependent widths of an ODBC catalog result set's columns.
 ///
-/// The ODBC spec fixes the *structure* of the catalog result sets --
-/// `SQLTables`, `SQLColumns`, `SQLPrimaryKeys`, `SQLForeignKeys`,
+/// The ODBC spec fixes the *structure* of the catalog result sets
+/// (`SQLTables`, `SQLColumns`, `SQLPrimaryKeys`, `SQLForeignKeys`,
 /// `SQLStatistics`, `SQLSpecialColumns`, `SQLProcedures`,
 /// `SQLProcedureColumns`, `SQLColumnPrivileges`, `SQLTablePrivileges` and
-/// `SQLGetTypeInfo` — which columns exist, in what order, and whether each is
+/// `SQLGetTypeInfo`): which columns exist, in what order, and whether each is
 /// character, `SMALLINT` or `INTEGER`. That part is identical for every driver
 /// and is not configurable here.
 ///
@@ -23,10 +23,9 @@ use crate::types::{ColumnDescriptor, Nullable, SqlDataType};
 /// The same values answer `SQL_MAX_CATALOG_NAME_LEN`,
 /// `SQL_MAX_SCHEMA_NAME_LEN`, `SQL_MAX_TABLE_NAME_LEN`,
 /// `SQL_MAX_COLUMN_NAME_LEN` and `SQL_MAX_IDENTIFIER_LEN` via
-/// [`crate::backend::default_get_info`]. Deriving both from one value is
-/// deliberate: a driver whose catalog result sets disagree with its own
-/// `SQLGetInfo` answers is telling an application two different things about
-/// the same limit, which is the defect that motivated this type.
+/// [`crate::backend::default_get_info`]. Both derive from one value, because a
+/// driver whose catalog result sets disagree with its own `SQLGetInfo` answers
+/// is telling an application two different things about the same limit.
 ///
 /// Supply a non-default value by overriding
 /// [`crate::backend::Backend::catalog_result_column_widths`].
@@ -44,17 +43,17 @@ pub struct CatalogResultColumnWidths {
     pub remarks_len: u32,
     /// SQL type reported for the character columns.
     ///
-    /// `SQL_WVARCHAR` for a Unicode driver — which the driver crates are,
-    /// since only the W-suffix ODBC functions are exported and these columns
-    /// are delivered as UTF-16. An ANSI driver would report
+    /// `SQL_WVARCHAR` for a Unicode driver, which the driver crates are, since
+    /// only the W-suffix ODBC functions are exported and these columns are
+    /// delivered as UTF-16. An ANSI driver would report
     /// `SqlDataType::VARCHAR`.
     pub char_sql_type: SqlDataType,
     /// SQL type reported for the *fixed-width* character columns.
     ///
     /// The spec declares exactly one catalog column as `char(n)` rather than
     /// `varchar`: `SQLStatistics.ASC_OR_DESC`, which is `char(1)`. It gets its
-    /// own type for the same reason [`Self::char_sql_type`] exists — a
-    /// Unicode driver must report `SQL_WCHAR`, not the ANSI `SQL_CHAR`.
+    /// own type for the same reason [`Self::char_sql_type`] exists: a Unicode
+    /// driver must report `SQL_WCHAR`, not the ANSI `SQL_CHAR`.
     pub fixed_char_sql_type: SqlDataType,
 }
 
@@ -211,15 +210,15 @@ pub(crate) fn integer(name: &'static str, nullable: Nullable) -> ColumnDescripto
 /// Use `.pos()` to get the column number to pass to `describe_col` / `get_data`.
 #[derive(Debug, Clone, Copy)]
 pub enum TablesResultCol {
-    /// `TABLE_CAT` — column 1 of the `SQLTables` result set.
+    /// `TABLE_CAT`: column 1 of the `SQLTables` result set.
     TableCat = 1,
-    /// `TABLE_SCHEM` — column 2 of the `SQLTables` result set.
+    /// `TABLE_SCHEM`: column 2 of the `SQLTables` result set.
     TableSchem = 2,
-    /// `TABLE_NAME` — column 3 of the `SQLTables` result set.
+    /// `TABLE_NAME`: column 3 of the `SQLTables` result set.
     TableName = 3,
-    /// `TABLE_TYPE` — column 4 of the `SQLTables` result set.
+    /// `TABLE_TYPE`: column 4 of the `SQLTables` result set.
     TableType = 4,
-    /// `REMARKS` — column 5 of the `SQLTables` result set.
+    /// `REMARKS`: column 5 of the `SQLTables` result set.
     Remarks = 5,
 }
 
@@ -247,9 +246,9 @@ impl TablesResultCol {
     /// any of the five as "not NULL", and its Comments section is explicit
     /// that under the enumeration special cases (e.g. `SQL_ALL_CATALOGS`
     /// with empty schema/table patterns) "all columns except TABLE_CAT
-    /// contain NULLs" — so TABLE_NAME and TABLE_TYPE, in particular, must
-    /// be reported nullable even though a normal (non-enumeration) row
-    /// always populates them.
+    /// contain NULLs". TABLE_NAME and TABLE_TYPE in particular must therefore
+    /// be reported nullable, even though a normal (non-enumeration) row always
+    /// populates them.
     pub fn descriptor(self, widths: &CatalogResultColumnWidths) -> ColumnDescriptor {
         match self {
             Self::TableCat => identifier(self.name(), widths, Nullable::SqlNullable),
@@ -287,41 +286,41 @@ impl TablesResultCol {
 /// Use `.pos()` to get the column number to pass to `describe_col` / `get_data`.
 #[derive(Debug, Clone, Copy)]
 pub enum ColumnsResultCol {
-    /// `TABLE_CAT` — column 1 of the `SQLColumns` result set.
+    /// `TABLE_CAT`: column 1 of the `SQLColumns` result set.
     TableCat = 1,
-    /// `TABLE_SCHEM` — column 2 of the `SQLColumns` result set.
+    /// `TABLE_SCHEM`: column 2 of the `SQLColumns` result set.
     TableSchem = 2,
-    /// `TABLE_NAME` — column 3 of the `SQLColumns` result set.
+    /// `TABLE_NAME`: column 3 of the `SQLColumns` result set.
     TableName = 3,
-    /// `COLUMN_NAME` — column 4 of the `SQLColumns` result set.
+    /// `COLUMN_NAME`: column 4 of the `SQLColumns` result set.
     ColumnName = 4,
-    /// `DATA_TYPE` — column 5 of the `SQLColumns` result set.
+    /// `DATA_TYPE`: column 5 of the `SQLColumns` result set.
     DataType = 5,
-    /// `TYPE_NAME` — column 6 of the `SQLColumns` result set.
+    /// `TYPE_NAME`: column 6 of the `SQLColumns` result set.
     TypeName = 6,
-    /// `COLUMN_SIZE` — column 7 of the `SQLColumns` result set.
+    /// `COLUMN_SIZE`: column 7 of the `SQLColumns` result set.
     ColumnSize = 7,
-    /// `BUFFER_LENGTH` — column 8 of the `SQLColumns` result set.
+    /// `BUFFER_LENGTH`: column 8 of the `SQLColumns` result set.
     BufferLength = 8,
-    /// `DECIMAL_DIGITS` — column 9 of the `SQLColumns` result set.
+    /// `DECIMAL_DIGITS`: column 9 of the `SQLColumns` result set.
     DecimalDigits = 9,
-    /// `NUM_PREC_RADIX` — column 10 of the `SQLColumns` result set.
+    /// `NUM_PREC_RADIX`: column 10 of the `SQLColumns` result set.
     NumPrecRadix = 10,
-    /// `NULLABLE` — column 11 of the `SQLColumns` result set.
+    /// `NULLABLE`: column 11 of the `SQLColumns` result set.
     Nullable = 11,
-    /// `REMARKS` — column 12 of the `SQLColumns` result set.
+    /// `REMARKS`: column 12 of the `SQLColumns` result set.
     Remarks = 12,
-    /// `COLUMN_DEF` — column 13 of the `SQLColumns` result set.
+    /// `COLUMN_DEF`: column 13 of the `SQLColumns` result set.
     ColumnDef = 13,
-    /// `SQL_DATA_TYPE` — column 14 of the `SQLColumns` result set.
+    /// `SQL_DATA_TYPE`: column 14 of the `SQLColumns` result set.
     SqlDataType = 14,
-    /// `SQL_DATETIME_SUB` — column 15 of the `SQLColumns` result set.
+    /// `SQL_DATETIME_SUB`: column 15 of the `SQLColumns` result set.
     SqlDatetimeSub = 15,
-    /// `CHAR_OCTET_LENGTH` — column 16 of the `SQLColumns` result set.
+    /// `CHAR_OCTET_LENGTH`: column 16 of the `SQLColumns` result set.
     CharOctetLength = 16,
-    /// `ORDINAL_POSITION` — column 17 of the `SQLColumns` result set.
+    /// `ORDINAL_POSITION`: column 17 of the `SQLColumns` result set.
     OrdinalPosition = 17,
-    /// `IS_NULLABLE` — column 18 of the `SQLColumns` result set.
+    /// `IS_NULLABLE`: column 18 of the `SQLColumns` result set.
     IsNullable = 18,
 }
 
@@ -423,17 +422,17 @@ impl ColumnsResultCol {
 /// Use `.pos()` to get the column number to pass to `describe_col` / `get_data`.
 #[derive(Debug, Clone, Copy)]
 pub enum PrimaryKeysResultCol {
-    /// `TABLE_CAT` — column 1 of the `SQLPrimaryKeys` result set.
+    /// `TABLE_CAT`: column 1 of the `SQLPrimaryKeys` result set.
     TableCat = 1,
-    /// `TABLE_SCHEM` — column 2 of the `SQLPrimaryKeys` result set.
+    /// `TABLE_SCHEM`: column 2 of the `SQLPrimaryKeys` result set.
     TableSchem = 2,
-    /// `TABLE_NAME` — column 3 of the `SQLPrimaryKeys` result set.
+    /// `TABLE_NAME`: column 3 of the `SQLPrimaryKeys` result set.
     TableName = 3,
-    /// `COLUMN_NAME` — column 4 of the `SQLPrimaryKeys` result set.
+    /// `COLUMN_NAME`: column 4 of the `SQLPrimaryKeys` result set.
     ColumnName = 4,
-    /// `KEY_SEQ` — column 5 of the `SQLPrimaryKeys` result set.
+    /// `KEY_SEQ`: column 5 of the `SQLPrimaryKeys` result set.
     KeySeq = 5,
-    /// `PK_NAME` — column 6 of the `SQLPrimaryKeys` result set.
+    /// `PK_NAME`: column 6 of the `SQLPrimaryKeys` result set.
     PkName = 6,
 }
 
@@ -489,33 +488,33 @@ impl PrimaryKeysResultCol {
 /// Use `.pos()` to get the column number to pass to `describe_col` / `get_data`.
 #[derive(Debug, Clone, Copy)]
 pub enum ForeignKeysResultCol {
-    /// `PKTABLE_CAT` — column 1 of the `SQLForeignKeys` result set.
+    /// `PKTABLE_CAT`: column 1 of the `SQLForeignKeys` result set.
     PkTableCat = 1,
-    /// `PKTABLE_SCHEM` — column 2 of the `SQLForeignKeys` result set.
+    /// `PKTABLE_SCHEM`: column 2 of the `SQLForeignKeys` result set.
     PkTableSchem = 2,
-    /// `PKTABLE_NAME` — column 3 of the `SQLForeignKeys` result set.
+    /// `PKTABLE_NAME`: column 3 of the `SQLForeignKeys` result set.
     PkTableName = 3,
-    /// `PKCOLUMN_NAME` — column 4 of the `SQLForeignKeys` result set.
+    /// `PKCOLUMN_NAME`: column 4 of the `SQLForeignKeys` result set.
     PkColumnName = 4,
-    /// `FKTABLE_CAT` — column 5 of the `SQLForeignKeys` result set.
+    /// `FKTABLE_CAT`: column 5 of the `SQLForeignKeys` result set.
     FkTableCat = 5,
-    /// `FKTABLE_SCHEM` — column 6 of the `SQLForeignKeys` result set.
+    /// `FKTABLE_SCHEM`: column 6 of the `SQLForeignKeys` result set.
     FkTableSchem = 6,
-    /// `FKTABLE_NAME` — column 7 of the `SQLForeignKeys` result set.
+    /// `FKTABLE_NAME`: column 7 of the `SQLForeignKeys` result set.
     FkTableName = 7,
-    /// `FKCOLUMN_NAME` — column 8 of the `SQLForeignKeys` result set.
+    /// `FKCOLUMN_NAME`: column 8 of the `SQLForeignKeys` result set.
     FkColumnName = 8,
-    /// `KEY_SEQ` — column 9 of the `SQLForeignKeys` result set.
+    /// `KEY_SEQ`: column 9 of the `SQLForeignKeys` result set.
     KeySeq = 9,
-    /// `UPDATE_RULE` — column 10 of the `SQLForeignKeys` result set.
+    /// `UPDATE_RULE`: column 10 of the `SQLForeignKeys` result set.
     UpdateRule = 10,
-    /// `DELETE_RULE` — column 11 of the `SQLForeignKeys` result set.
+    /// `DELETE_RULE`: column 11 of the `SQLForeignKeys` result set.
     DeleteRule = 11,
-    /// `FK_NAME` — column 12 of the `SQLForeignKeys` result set.
+    /// `FK_NAME`: column 12 of the `SQLForeignKeys` result set.
     FkName = 12,
-    /// `PK_NAME` — column 13 of the `SQLForeignKeys` result set.
+    /// `PK_NAME`: column 13 of the `SQLForeignKeys` result set.
     PkName = 13,
-    /// `DEFERRABILITY` — column 14 of the `SQLForeignKeys` result set.
+    /// `DEFERRABILITY`: column 14 of the `SQLForeignKeys` result set.
     Deferrability = 14,
 }
 
@@ -674,7 +673,7 @@ mod tests {
     }
 
     /// Descriptors must be in spec order, because the caller feeds them to
-    /// SyntheticStatement positionally — a reordering would silently
+    /// SyntheticStatement positionally, so a reordering would silently
     /// mislabel every row.
     #[test]
     fn descriptors_are_in_spec_column_order() {
@@ -784,9 +783,9 @@ mod tests {
     /// marks none of the five "not NULL", and its Comments section states
     /// that under `SQL_ALL_CATALOGS` (and the analogous schema/table-type
     /// enumeration cases) all columns except the one being enumerated
-    /// contain NULLs — so, unlike SQLColumns/SQLPrimaryKeys/SQLForeignKeys,
-    /// SQLTables has no column the driver may report as non-nullable. This
-    /// pins that so a future edit cannot silently reintroduce `nullable:
+    /// contain NULLs. Unlike SQLColumns/SQLPrimaryKeys/SQLForeignKeys,
+    /// SQLTables therefore has no column the driver may report as
+    /// non-nullable. This pins that, so an edit cannot silently set `nullable:
     /// false` on TABLE_NAME or TABLE_TYPE.
     #[test]
     fn every_sqltables_column_is_nullable() {

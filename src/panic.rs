@@ -20,7 +20,7 @@ use crate::types::SqlReturn;
 /// scope holding no group.
 ///
 /// On an `Err`, the error is pushed onto the handle's diagnostic queue through
-/// the scope this function still holds — no second acquisition. On a panic,
+/// the scope this function still holds, with no second acquisition. On a panic,
 /// `catch_unwind` catches inside *this function's own frame*, so the unwind
 /// never reaches `_guard`: it is untouched by the panic and stays held while
 /// an [`OdbcError::Panic`] diagnostic is pushed through that same scope, then
@@ -78,18 +78,18 @@ where
 ///   [`panic_safe`] clears and pushes under a held group lock, per the spec's
 ///   own carve-out for cancelling a function running on another thread.
 /// - `config_dsn_w`, the `ConfigDSNW` installer entry point, which takes no
-///   ODBC handle at all — its arguments are a window handle, a request code and
+///   ODBC handle at all: its arguments are a window handle, a request code and
 ///   two strings. There is no token to lock a group by and no diagnostic queue
-///   to push to, so [`panic_safe`] is not merely unnecessary there but
-///   inapplicable. It is still an `extern "system"` boundary, and an unwind
-///   across it lands in the ODBC Administrator.
+///   to push to, so [`panic_safe`] cannot be applied there. It is still an
+///   `extern "system"` boundary, and an unwind across it lands in the ODBC
+///   Administrator.
 ///
 /// Generic over the return type for that second caller: `ConfigDSN` returns a
 /// `BOOL`, not a `SqlReturn`. `on_panic` is a closure rather than a value so a
-/// caller with its own error channel can use it — `config_dsn_w` posts an
+/// caller with its own error channel can use it. `config_dsn_w` posts an
 /// installer error there, which is the only way its FALSE says anything.
 ///
-/// Unlike `panic_safe`, a caught panic here pushes **no** diagnostic record —
+/// Unlike `panic_safe`, a caught panic here pushes **no** diagnostic record:
 /// it returns a bare `SQL_ERROR` and nothing else. `panic_safe` can push
 /// [`OdbcError::Panic`] because it always holds a scope to push it through;
 /// this function holds no lock at all on `sql_cancel`'s cross-thread branch,
@@ -115,8 +115,8 @@ where
 /// `SQLCopyDesc`'s phase one (`ffi::desc::sql_copy_desc`) calls this from
 /// inside `HandleScope::with_group` on the *source* descriptor's group,
 /// before phase two's [`panic_safe`] ever runs on the *target*. `with_group`
-/// carries no `catch_unwind` of its own — it is a plain lock-then-call, not an
-/// FFI-boundary guard — so a panic reaching `describe_col` through
+/// carries no `catch_unwind` of its own, being a plain lock-then-call rather
+/// than an FFI-boundary guard, so a panic reaching `describe_col` through
 /// `snapshot_ird` (driver-author code, the same surface every other
 /// `Backend` call runs under a guard for) would otherwise unwind straight
 /// through it, past `sql_copy_desc`, and across the `extern "system"`
@@ -126,13 +126,13 @@ where
 /// it exists so phase one's panic can be turned into the *same* `Err` shape
 /// phase one already returns for a non-panicking failure (`HY007`, an
 /// unpopulated IRD), rather than becoming a second, cruder failure mode. Both
-/// flow through phase two's `panic_safe` unchanged, via the `?` on the
-/// snapshot [`sql_copy_desc`] already had — so the panic is posted as `HY000`
+/// flow through phase two's `panic_safe` unchanged, via the `?` [`sql_copy_desc`]
+/// applies to the snapshot, so the panic is posted as `HY000`
 /// to the *target*'s diagnostic queue, exactly where the spec says this
-/// call's diagnostics belong (and where `HY007` was already posted). There is
-/// no handle to push a diagnostic through at the point this function runs —
-/// the same reason [`panic_safe_unlocked`] posts none on its own two call
-/// sites — so it returns a plain `Result` for its caller to route onward
+/// call's diagnostics belong (and where `HY007` is posted). There is
+/// no handle to push a diagnostic through at the point this function runs,
+/// which is the same reason [`panic_safe_unlocked`] posts none on its own two
+/// call sites, so it returns a plain `Result` for its caller to route onward
 /// instead of trying.
 ///
 /// [`panic_safe`]: crate::panic::panic_safe

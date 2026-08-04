@@ -48,7 +48,7 @@ fn compare_values(a: &ColumnValue, b: &ColumnValue, null_collation: u16) -> Orde
     }
 }
 
-/// Sort `rows` in place by `keys` — zero-based column indices, most
+/// Sort `rows` in place by `keys`, which are zero-based column indices, most
 /// significant first.
 ///
 /// `sort_by` is stable, which matters: rows equal on every spec key keep the
@@ -84,7 +84,7 @@ mod tests {
     #[test]
     fn sorts_by_each_key_in_order() {
         // Spec, SQLTables: "ordered by TABLE_TYPE, TABLE_CAT, TABLE_SCHEM,
-        // and TABLE_NAME" — so TABLE_TYPE (index 3) dominates TABLE_NAME
+        // and TABLE_NAME", so TABLE_TYPE (index 3) dominates TABLE_NAME
         // (index 2), which is the whole point of a multi-key sort.
         let mut rows = vec![
             vec![s("c"), s("s"), s("z_table"), s("TABLE")],

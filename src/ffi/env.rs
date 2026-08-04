@@ -36,14 +36,14 @@ use crate::types::{
 /// - 01S02: Option value changed. The row carries no `(DM)` marker: not returned, because
 ///   core substitutes no environment attribute value; an attribute it cannot honour is
 ///   refused rather than quietly changed.
-/// - HY000: General error — returned for unexpected internal failures.
+/// - HY000: General error, returned for unexpected internal failures.
 /// - HY001: Memory allocation failure (not returned here; Rust panics on
 ///   allocation failure).
 /// - HY009: Returns `SQL_ERROR` if `value_ptr` is null for a string-valued attribute.
-///   Not applicable — all supported attributes are integer-valued.
-/// - HY010: Function sequence error. **Both** clauses of this row carry `(DM)` —
+///   Not applicable, because all supported attributes are integer-valued.
+/// - HY010: Function sequence error. **Both** clauses of this row carry `(DM)`:
 ///   "**(DM)** A connection handle has been allocated on *EnvironmentHandle*"
-///   and "**(DM)** SQL_ATTR_ODBC_VERSION has not been set" — so neither is the
+///   and "**(DM)** SQL_ATTR_ODBC_VERSION has not been set", so neither is the
 ///   driver's by the spec's own marking. The first is nevertheless checked here
 ///   as defence-in-depth for a caller that linked this driver directly: the
 ///   spec's Comments section states the rule with no marker at all ("An
@@ -54,23 +54,23 @@ use crate::types::{
 ///   Driver Manager this branch never fires. The second clause is not checked
 ///   here at all.
 /// - HY013: Memory management error (not returned here).
-/// - HY024: Returns `SQL_ERROR` for an invalid attribute value — for
-///   `SQL_ATTR_ODBC_VERSION`, anything that is not one of the three `SQL_OV_*`
-///   values the spec defines. `SQL_OV_ODBC2` is one of them: unixODBC forwards
-///   it to the driver verbatim at connect time
+/// - HY024: Returns `SQL_ERROR` for an invalid attribute value. For
+///   `SQL_ATTR_ODBC_VERSION`, that is anything which is not one of the three
+///   `SQL_OV_*` values the spec defines. `SQL_OV_ODBC2` is one of them:
+///   unixODBC forwards it to the driver verbatim at connect time
 ///   (`DriverManager/SQLConnect.c`), and a driver that refuses it is recorded
 ///   by that Driver Manager as an ODBC 2.x driver.
 /// - HY090: Returns `SQL_ERROR` if string length is invalid for a string attribute.
-///   Not applicable — all supported attributes are integer-valued.
+///   Not applicable, because all supported attributes are integer-valued.
 /// - HY092: Invalid attribute/option identifier (driver-manager-handled; unsupported
 ///   attributes return `HYC00` rather than `HY092`).
 /// - HY117: Connection suspended state (driver-manager-handled; not returned here).
 /// - HYC00: Returns `SQL_ERROR` for `SQL_ATTR_OUTPUT_NTS = SQL_FALSE`, which is the row's
 ///   second clause and is `(DM)`-marked; it is guarded defensively here. The first clause
-///   carries no marker and is the driver's — an attribute that is a valid ODBC environment
-///   attribute for the driver's ODBC version but is not supported by the driver — and core
-///   returns it for any unrecognised attribute identifier (see the implementation comment;
-///   this is deliberate for DM compatibility).
+///   carries no marker and is the driver's: an attribute that is a valid ODBC environment
+///   attribute for the driver's ODBC version but is not supported by the driver. Core
+///   returns it for any unrecognised attribute identifier, for Driver Manager
+///   compatibility (see the implementation comment).
 ///
 /// # Safety
 ///
@@ -142,13 +142,14 @@ pub unsafe fn sql_set_env_attr<B: Backend>(
                     Ok(SqlReturn::SUCCESS)
                 }
                 Some(EnvironmentAttribute::OutputNts) => {
-                    // Spec: SQL_ATTR_OUTPUT_NTS — SQL_TRUE is always supported,
-                    // SQL_FALSE returns HYC00 (optional feature not implemented).
+                    // Spec: for SQL_ATTR_OUTPUT_NTS, SQL_TRUE is always
+                    // supported and SQL_FALSE returns HYC00 (optional feature
+                    // not implemented).
                     // ODBC convention: integer-valued attributes are passed as (SQLPOINTER)(SQLUINTEGER)value.
                     // SQL_TRUE = 1, SQL_FALSE = 0; recover by casting pointer to integer.
                     let nts_value = value_ptr as usize as i32;
                     if nts_value == SQL_TRUE as i32 {
-                        // SQL_TRUE — this is the default and only supported value.
+                        // SQL_TRUE is the default and only supported value.
                         Ok(SqlReturn::SUCCESS)
                     } else {
                         Err(OdbcError::NotImplemented {
@@ -191,18 +192,18 @@ pub unsafe fn sql_set_env_attr<B: Backend>(
 ///
 /// - 01000: General warning. The row carries no `(DM)` marker: not returned, because core
 ///   emits no driver-specific informational message from this function.
-/// - 01004: String data right truncated — not returned here, and the row carries no `(DM)`
+/// - 01004: String data right truncated, not returned here, and the row carries no `(DM)`
 ///   marker: reporting truncation through the output buffer is the driver's duty. It
 ///   cannot arise because every environment attribute core supports is integer-valued, so
 ///   nothing is written that a short buffer could truncate.
-/// - HY000: General error — returned for unexpected internal failures.
+/// - HY000: General error, returned for unexpected internal failures.
 /// - HY001: Memory allocation failure (not returned here; Rust panics on
 ///   allocation failure).
-/// - HY010: Function sequence error — `SQL_ATTR_ODBC_VERSION` not yet set
+/// - HY010: Function sequence error, `SQL_ATTR_ODBC_VERSION` not yet set
 ///   (driver-manager-handled; not returned here).
 /// - HY013: Memory management error (not returned here).
 /// - HY092: Returns `SQL_ERROR` for unrecognised attribute identifiers; `HYC00` is returned
-///   instead (see implementation comment; this is deliberate for DM compatibility).
+///   instead, for Driver Manager compatibility (see the implementation comment).
 /// - HY117: Connection suspended state (driver-manager-handled; not returned here).
 /// - HYC00: Returns `SQL_ERROR` for valid ODBC attributes that are not supported.
 /// - IM001: Driver does not support this function (driver-manager-handled; not returned
@@ -372,9 +373,9 @@ mod tests {
     /// makes the check itself (`DriverManager/SQLSetEnvAttr.c` posts
     /// `ERROR_S1010` when `environment->connection_count > 0`, without calling
     /// the driver at all). The spec's Comments section states the rule with no
-    /// marker — "An application can call SQLSetEnvAttr only if no connection
-    /// handle is allocated on the environment" — so it is kept, and pinned here
-    /// so a future reader deletes it deliberately or not at all.
+    /// marker ("An application can call SQLSetEnvAttr only if no connection
+    /// handle is allocated on the environment"), so the check is kept and
+    /// pinned here rather than dropped by accident.
     #[test]
     fn setting_an_environment_attribute_with_a_connection_allocated_is_hy010() {
         unsafe {
@@ -418,7 +419,7 @@ mod tests {
     /// `environment->requested_version` to the driver's `SQLSetEnvAttr`
     /// whenever the driver exports `SQLAllocHandle`). Rejecting it makes that
     /// DM record the driver as `SQL_OV_ODBC2` and take its 2.x handle-allocation
-    /// path — the opposite of what a 3.x driver wants.
+    /// path, the opposite of what a 3.x driver wants.
     #[test]
     fn sql_ov_odbc2_is_accepted_and_reads_back_unchanged() {
         unsafe {

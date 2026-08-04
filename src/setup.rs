@@ -8,13 +8,13 @@
 //!
 //! Nothing here is `#[cfg(windows)]`. The `ConfigDSNW` export and the `odbccp32`
 //! calls are, but a driver writes its hook once and core's own tests reach these
-//! decisions on any platform — the same reason `dsn_section_attributes` is
+//! decisions on any platform, which is also why `dsn_section_attributes` is
 //! un-gated in [`crate::ffi::setup`].
 
 // `SQLConfigDataSource` request flags, from `odbcinst.h`. Only the first three
 // are `ConfigDSN`'s. The rest are named so the guard test can reject them by
 // name rather than by literal, since they are the values a Driver Manager can
-// plausibly forward here and `ConfigDSN` must refuse — its diagnostics table
+// plausibly forward here and `ConfigDSN` must refuse. Its diagnostics table
 // names the condition exactly: "The *fRequest* argument was not one of the
 // following: ODBC_ADD_DSN ODBC_CONFIG_DSN ODBC_REMOVE_DSN."
 const ODBC_ADD_DSN: u16 = 1;
@@ -22,17 +22,17 @@ const ODBC_CONFIG_DSN: u16 = 2;
 const ODBC_REMOVE_DSN: u16 = 3;
 // The four below are named only so the guard test can reject them by name
 // rather than by literal, so they have no non-test user by design.
-/// `ODBC_ADD_SYS_DSN` (4) — `SQLConfigDataSource`'s system-DSN request, which
+/// `ODBC_ADD_SYS_DSN` (4): `SQLConfigDataSource`'s system-DSN request, which
 /// `ConfigDSN` does not accept.
 #[allow(dead_code)]
 const ODBC_ADD_SYS_DSN: u16 = 4;
-/// `ODBC_CONFIG_SYS_DSN` (5) — likewise.
+/// `ODBC_CONFIG_SYS_DSN` (5): likewise.
 #[allow(dead_code)]
 const ODBC_CONFIG_SYS_DSN: u16 = 5;
-/// `ODBC_REMOVE_SYS_DSN` (6) — likewise.
+/// `ODBC_REMOVE_SYS_DSN` (6): likewise.
 #[allow(dead_code)]
 const ODBC_REMOVE_SYS_DSN: u16 = 6;
-/// `ODBC_REMOVE_DEFAULT_DSN` (7) — likewise.
+/// `ODBC_REMOVE_DEFAULT_DSN` (7): likewise.
 #[allow(dead_code)]
 const ODBC_REMOVE_DEFAULT_DSN: u16 = 7;
 
@@ -40,17 +40,16 @@ const ODBC_REMOVE_DEFAULT_DSN: u16 = 7;
 /// defines.
 ///
 /// A typed enum because the crate converts raw ABI integers at the boundary
-/// rather than passing them through, and because the alternative — a `_` arm at
-/// the bottom of a `match f_request` — is what put the request check *after* the
-/// attribute checks, so an unrecognised request was diagnosed as a bad attribute
-/// list.
+/// rather than passing them through. The alternative, a `_` arm at the bottom of
+/// a `match f_request`, puts the request check *after* the attribute checks, so
+/// an unrecognised request gets diagnosed as a bad attribute list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfigRequest {
-    /// `ODBC_ADD_DSN` (1) — add a new data source.
+    /// `ODBC_ADD_DSN` (1): add a new data source.
     Add,
-    /// `ODBC_CONFIG_DSN` (2) — configure (modify) an existing data source.
+    /// `ODBC_CONFIG_DSN` (2): configure (modify) an existing data source.
     Config,
-    /// `ODBC_REMOVE_DSN` (3) — remove an existing data source.
+    /// `ODBC_REMOVE_DSN` (3): remove an existing data source.
     Remove,
 }
 
@@ -73,9 +72,9 @@ pub fn config_request_from_raw(raw: u16) -> Option<ConfigRequest> {
 // diagnostics table lists are defined here; the header carries seventeen more
 // that belong to other installer entry points.
 //
-// `ODBC_ERROR_DRIVER_SPECIFIC` is deliberately absent, and **not** because the
-// value was unavailable. `ConfigDSN`'s spec diagnostics table names it, but no
-// header defines it — including Microsoft's own. Checked against the Windows
+// `ODBC_ERROR_DRIVER_SPECIFIC` is absent, and **not** because the value was
+// unavailable. `ConfigDSN`'s spec diagnostics table names it, but no header
+// defines it, Microsoft's own included. Checked against the Windows
 // SDK 10.0.22621.0 `um/odbcinst.h` (from the `Microsoft.Windows.SDK.CPP` NuGet
 // package, which needs no Windows host), plus unixODBC's, mingw-w64's and
 // ReactOS's psdk mirror. All four agree exactly, and the SDK's list ends:
@@ -84,10 +83,9 @@ pub fn config_request_from_raw(raw: u16) -> Option<ConfigRequest> {
 //     #define ODBC_ERROR_NOTRANINFO               23
 //     #define ODBC_ERROR_MAX                      ODBC_ERROR_NOTRANINFO
 //
-// So 23 is `ODBC_ERROR_NOTRANINFO` and is also the maximum defined code. An
-// earlier draft of this module was going to write `DriverSpecific = 23` on the
-// strength of the spec page naming it; that would have posted "no transaction
-// info" to the ODBC Administrator.
+// So 23 is `ODBC_ERROR_NOTRANINFO` and is also the maximum defined code.
+// Writing `DriverSpecific = 23` on the strength of the spec page naming it would
+// post "no transaction info" to the ODBC Administrator.
 //
 // A driver's setup failure therefore posts `ODBC_ERROR_REQUEST_FAILED`, whose
 // description covers it exactly: "Could not perform the operation requested by
@@ -112,21 +110,21 @@ const ODBC_ERROR_REQUEST_FAILED: u32 = 11;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum InstallerError {
-    /// `ODBC_ERROR_INVALID_HWND` — the *hwndParent* argument was invalid.
+    /// `ODBC_ERROR_INVALID_HWND`: the *hwndParent* argument was invalid.
     ///
     /// Core never posts this: it is headless and never dereferences the window
     /// handle. A driver whose setup hook validates the handle before using it
     /// is where one would originate.
     InvalidHwnd,
-    /// `ODBC_ERROR_INVALID_REQUEST_TYPE` — *fRequest* was not one of
+    /// `ODBC_ERROR_INVALID_REQUEST_TYPE`: *fRequest* was not one of
     /// `ODBC_ADD_DSN`, `ODBC_CONFIG_DSN`, `ODBC_REMOVE_DSN`.
     InvalidRequestType,
-    /// `ODBC_ERROR_INVALID_NAME` — the *lpszDriver* argument was invalid.
+    /// `ODBC_ERROR_INVALID_NAME`: the *lpszDriver* argument was invalid.
     InvalidName,
-    /// `ODBC_ERROR_INVALID_KEYWORD_VALUE` — *lpszAttributes* contained a syntax
+    /// `ODBC_ERROR_INVALID_KEYWORD_VALUE`: *lpszAttributes* contained a syntax
     /// error.
     InvalidKeywordValue,
-    /// `ODBC_ERROR_REQUEST_FAILED` — the operation *fRequest* asked for could
+    /// `ODBC_ERROR_REQUEST_FAILED`: the operation *fRequest* asked for could
     /// not be performed. This is also what a driver's setup hook reports; see
     /// [`SetupError::request_failed`].
     RequestFailed,
@@ -148,12 +146,12 @@ impl InstallerError {
 
 /// Why a driver's setup hook could not complete.
 ///
-/// Deliberately not [`OdbcError`](crate::errors::OdbcError): that type is
-/// SQLSTATE-shaped and `ConfigDSN` defines no SQLSTATEs at all. Carrying an
-/// installer code instead is what lets a driver's own reason reach the ODBC
-/// Administrator rather than being flattened into a generic failure.
+/// Not [`OdbcError`](crate::errors::OdbcError): that type is SQLSTATE-shaped
+/// and `ConfigDSN` defines no SQLSTATEs at all. Carrying an installer code
+/// instead is what lets a driver's own reason reach the ODBC Administrator
+/// rather than being flattened into a generic failure.
 ///
-/// A cancelled dialog is **not** a `SetupError` — it is `Ok(None)` from
+/// A cancelled dialog is **not** a `SetupError`; it is `Ok(None)` from
 /// [`Backend::configure_dsn`](crate::backend::Backend::configure_dsn).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SetupError {
@@ -175,7 +173,7 @@ impl SetupError {
         }
     }
 
-    /// A setup hook that could not complete — the usual case.
+    /// A setup hook that could not complete, which is the usual case.
     ///
     /// Posts `ODBC_ERROR_REQUEST_FAILED`: "Could not perform the operation
     /// requested by the *fRequest* argument." See the note on the constants

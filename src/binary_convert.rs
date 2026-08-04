@@ -1,7 +1,7 @@
 //! Conversion of `SQL_C_BINARY` parameter data to the SQL type the application
 //! declared at `SQLBindParameter`.
 //!
-//! This module is the [C to SQL: Binary] table, transcribed — the sibling of
+//! This module is the [C to SQL: Binary] table, transcribed, and the sibling of
 //! [`crate::param_convert`], which is the [C to SQL: Character] one. It exists
 //! for the same reason: [`crate::backend::Backend::execute`] receives only
 //! `&[ColumnValue]`, so the declared `ParameterType` never reaches the backend.
@@ -11,9 +11,9 @@
 //! # Byte order is native, and that is a ruling
 //!
 //! Native is chosen on evidence rather than derived. AWS's Redshift
-//! ODBC driver v2.2.0 — whose changelog calls this work "fully ODBC-compliant"
-//! and "Added missing SQL_C_BINARY conversion support for all SQL types" — reads
-//! these targets with a plain `memcpy` into the C type, no swapping. A
+//! ODBC driver v2.2.0 reads these targets with a plain `memcpy` into the C type,
+//! with no swapping. Its changelog calls that work "fully ODBC-compliant" and
+//! "Added missing SQL_C_BINARY conversion support for all SQL types". A
 //! round-trip test per target pins the expectation, so a big-endian port fails
 //! loudly rather than silently swapping.
 //!
@@ -32,14 +32,14 @@
 //!   decoded into a plausible, wrong decimal with no diagnostic.
 //! - **Every character target.** Rows 1 and 2 need an encoding, and ODBC
 //!   specifies none for these bytes. Row 1's test is plain byte length rather
-//!   than doubled — unlike the character table's binary row, which explicitly
-//!   halves — so the conversion is a byte pass-through into the data source's
+//!   than doubled, unlike the character table's binary row, which explicitly
+//!   halves, so the conversion is a byte pass-through into the data source's
 //!   own encoding, not a hex expansion. Core does not know that encoding.
 //!   Guessing UTF-8 would make acceptance depend on the value's contents, so
 //!   the same bind would succeed or fail with the data.
 //!
 //! Both refusals are `07006`, and both are raised by `SQLBindParameter` rather
-//! than at execute time — see [`binary_target_is_supported`].
+//! than at execute time; see [`binary_target_is_supported`].
 //!
 //! [C to SQL: Character]: https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/c-to-sql-character
 //! [C to SQL: Binary]: https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/c-to-sql-binary
@@ -75,7 +75,7 @@ pub(crate) fn is_binary_sql_type(sql_type: SqlDataType) -> bool {
 /// exactly as [`crate::param_convert`] and [`crate::types::col_attr`] group
 /// them. Note that `odbc_sys` names 9 `DATETIME`, after the *verbose*
 /// `SQL_DATETIME`, but `ParameterType` is a **concise** type where 9 is
-/// `SQL_DATE` — so it belongs with date.
+/// `SQL_DATE`, so it belongs with date.
 fn fixed_width(sql_type: SqlDataType) -> Option<usize> {
     use std::mem::size_of;
 
@@ -115,9 +115,9 @@ fn fixed_width(sql_type: SqlDataType) -> Option<usize> {
 /// Whether core converts `SQL_C_BINARY` to this target at all.
 ///
 /// `SQLBindParameter` calls this and refuses the pairing with 07006 when it is
-/// false. Bind time rather than execute time is deliberate: the pairing is
-/// fixed at bind, needs no backend metadata, and never depends on the data — so
-/// the application fails before running its query, and the `SQLPutData` path is
+/// false. Bind time rather than execute time, because the pairing is fixed at
+/// bind, needs no backend metadata, and never depends on the data. So the
+/// application fails before running its query, and the `SQLPutData` path is
 /// covered by the same single check.
 ///
 /// Anything this admits, [`binary_to_sql_type`] handles; a test pins both
@@ -126,7 +126,7 @@ pub(crate) fn binary_target_is_supported(sql_type: SqlDataType) -> bool {
     is_binary_sql_type(sql_type) || fixed_width(sql_type).is_some()
 }
 
-/// "Byte length of data <> SQL data length" — row 3's only failure outcome.
+/// "Byte length of data <> SQL data length": row 3's only failure outcome.
 fn wrong_width(actual: usize, expected: usize, sql_type: SqlDataType) -> OdbcError {
     OdbcError::general(
         format!(
@@ -216,7 +216,7 @@ pub(crate) fn binary_to_sql_type(
     // specifies field by field. SAFETY for all three reads: the width check
     // above guarantees `bytes` is exactly `size_of` the struct, and
     // `read_unaligned` imposes no alignment requirement on the `u8` pointer it
-    // reads through — which matters, because a bound parameter buffer inside a
+    // reads through, which matters because a bound parameter buffer inside a
     // packed row-wise structure has no guaranteed alignment.
     if sql_type == SqlDataType::DATE || sql_type == SqlDataType::DATETIME {
         let d = unsafe { std::ptr::read_unaligned(bytes.as_ptr().cast::<odbc_sys::Date>()) };
@@ -273,7 +273,7 @@ mod tests {
             .to_owned()
     }
 
-    // -- round trips: the native byte-order ruling, pinned -------------------
+    // round trips: the native byte-order ruling, pinned -------------------
 
     #[test]
     fn a_tinyint_target_decodes_one_native_byte() {
@@ -350,7 +350,7 @@ mod tests {
         );
     }
 
-    // -- the width test: "=" and not ">=" -----------------------------------
+    // the width test: "=" and not ">=" -----------------------------------
 
     #[test]
     fn a_value_narrower_than_the_target_is_22003() {
@@ -372,7 +372,7 @@ mod tests {
         assert_eq!(state_of(convert(&[], SqlDataType::EXT_TINY_INT)), "22003");
     }
 
-    // -- refusals -----------------------------------------------------------
+    // refusals -----------------------------------------------------------
 
     #[test]
     fn a_decimal_target_is_07006() {
@@ -395,7 +395,7 @@ mod tests {
         assert_eq!(state_of(convert(&[0], SqlDataType(4242))), "07006");
     }
 
-    // -- the binary family: unchanged behaviour, now owned here -------------
+    // the binary family: unchanged behaviour, now owned here -------------
 
     #[test]
     fn a_binary_target_passes_the_bytes_through_at_any_width() {
@@ -416,7 +416,7 @@ mod tests {
         );
     }
 
-    // -- temporal targets ---------------------------------------------------
+    // temporal targets ---------------------------------------------------
 
     /// The bytes are a `SQL_DATE_STRUCT`, whose fields the C Data Types
     /// appendix specifies. Built here from the struct so the test states the
@@ -511,7 +511,7 @@ mod tests {
 
     /// `DATETIME` is 9, which is both the 3.x *verbose* datetime identifier and
     /// the ODBC 2.0 *concise* `SQL_DATE`. `ParameterType` is a concise type, so
-    /// 9 is a date. AWS's Redshift ODBC driver reads it the same way — its
+    /// 9 is a date. AWS's Redshift ODBC driver reads it the same way: its
     /// parameter conversion opens that branch `case SQL_TYPE_DATE: case
     /// SQL_DATE:`. `param_convert` and `col_attr` agree.
     #[test]
@@ -549,7 +549,7 @@ mod tests {
         assert_eq!(state_of(convert(&[0; 15], SqlDataType::TIMESTAMP)), "22003");
     }
 
-    // -- the bind-time gate agrees with the converter ------------------------
+    // the bind-time gate agrees with the converter ------------------------
 
     /// The two must not drift: anything the gate admits, the converter handles.
     #[test]

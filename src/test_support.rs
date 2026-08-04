@@ -12,8 +12,8 @@
 //! connection handle without going through `SQLDriverConnectW`.
 //!
 //! The `handles` module is `pub(crate)`, so there is no way to do that from
-//! outside — deliberately, because a `SQLHANDLE` is an opaque token and the
-//! handle layout must stay changeable. These functions are the supported
+//! outside, because a `SQLHANDLE` is an opaque token and the handle layout must
+//! stay changeable. These functions are the supported
 //! alternative: they take the same token an application holds, validate it the
 //! same way every FFI entry point does, and never expose the handle type.
 
@@ -28,8 +28,8 @@ use crate::types::SqlReturn;
 /// `SQLDriverConnectW` had succeeded.
 ///
 /// The backend's `connect` is not called, so the connection may be one that
-/// never talked to a data source — which is the point: it lets a driver test
-/// core's connected-path behaviour offline.
+/// never talked to a data source, which is what lets a driver test core's
+/// connected-path behaviour offline.
 ///
 /// An already-attached connection is dropped and replaced rather than reported
 /// as `08002`, so one handle can be re-armed across cases.
@@ -37,10 +37,10 @@ use crate::types::SqlReturn;
 /// # Teardown
 ///
 /// `SQLFreeHandle` refuses a connection handle that still holds a connection
-/// (spec `HY010`), so a test must either call `SQLDisconnect` — which invokes
-/// `Backend::disconnect`, and may not be meaningful for a connection that was
-/// never opened — or [`detach_connection`], which takes it back out without
-/// involving the backend at all. The second is usually what an offline test
+/// (spec `HY010`), so a test must call one of two things. `SQLDisconnect`
+/// invokes `Backend::disconnect`, which may not be meaningful for a connection
+/// that was never opened. [`detach_connection`] takes the connection back out
+/// without involving the backend at all, and is usually what an offline test
 /// wants.
 ///
 /// Holds `connection_handle`'s group lock for the duration, exactly as an FFI
@@ -71,8 +71,8 @@ pub unsafe fn attach_connection<B: Backend>(
         // The closure above never returns anything but `Ok(SqlReturn::SUCCESS)`,
         // so a non-`SUCCESS` result with no `error` set means `panic_safe`
         // caught a panic instead of running the closure to completion. The
-        // panic's unwind never reaches this caller — that is the entire
-        // point of `panic_safe` — so this return value is the only signal
+        // panic's unwind never reaches this caller, which is the entire
+        // point of `panic_safe`, so this return value is the only signal
         // left that the attach did not happen; discarding it here would
         // silently report success while `connection` (and any previously
         // attached connection this call replaced) is dropped.
@@ -114,8 +114,8 @@ pub unsafe fn detach_connection<B: Backend>(
         Some(err) => Err(err),
         // Same reasoning as `attach_connection`: a non-`SUCCESS` result with
         // no `error` set is the only remaining evidence of a caught panic,
-        // and discarding it would report `Ok(None)` — "nothing was attached"
-        // — when the true outcome is unknown.
+        // and discarding it would report `Ok(None)`, meaning "nothing was
+        // attached", when the true outcome is unknown.
         None if ret != SqlReturn::SUCCESS => Err(OdbcError::Panic {
             message: "panic while detaching a connection".into(),
         }),

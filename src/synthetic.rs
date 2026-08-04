@@ -29,9 +29,9 @@ impl SyntheticStatement {
     /// Create a new synthetic statement with the given column descriptors and rows.
     ///
     /// Every row must have exactly one value per column. The descriptors and the
-    /// row values are built by separate functions for each catalog result set --
+    /// row values are built by separate functions for each catalog result set:
     /// `type_info_columns` against `TypeInfoRow::to_column_values`, and each
-    /// `*ResultCol` enum against its `all_descriptors` — so nothing but this
+    /// `*ResultCol` enum against its `all_descriptors`. Nothing but this
     /// check makes the two agree. A row that is short or long here surfaces much
     /// later as `SQLGetData` reading the wrong column, or as `07009` for a
     /// column the descriptor says exists.

@@ -24,7 +24,8 @@ pub use odbc_sys::{
 // exist for *drivers* to build the values that `Backend`'s required capability
 // methods return as bare integers (`alter_table_support(conn) -> u32` and its
 // neighbours). Core never constructs those values, so an unreferenced constant
-// here is the expected state, not a dead one — do not prune by reference count.
+// here is the expected state, not a dead one, so do not prune by reference
+// count.
 //
 // Leaving a new constant out of this list is caught rather than missed: an
 // unexported, internally-unused `pub const` in a private module is `dead_code`,

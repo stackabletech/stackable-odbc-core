@@ -2,33 +2,34 @@
 //!
 //! # Threat model
 //!
-//! Recorded because the audit raised the log file as a finding, and the answer is
-//! mostly about *who already has what* rather than about this code.
+//! A log file is a disclosure surface, so what reaches it and who controls its
+//! path are stated here rather than left to be re-derived.
 //!
-//! **What a log can contain.** Connection parameters other than credentials —
-//! host, port, database, user — plus the catalog functions' filter arguments,
-//! which are schema, table and column names. Passwords are not among them:
-//! `ConnectParams` implements `Debug` by hand to redact credential keywords, and
-//! `debug_redacts_password_key` and
+//! **What a log can contain.** Connection parameters other than credentials,
+//! meaning host, port, database and user, plus the catalog functions' filter
+//! arguments, which are schema, table and column names. Passwords are not among
+//! them: `ConnectParams` implements `Debug` by hand to redact credential
+//! keywords, and `debug_redacts_password_key` and
 //! `debug_redacts_credential_keywords_beyond_password_and_pwd` pin it. Neither
 //! statement text nor parameter or column *values* are logged at any level, so a
 //! log is schema-revealing and not data-revealing.
 //!
 //! **Who chooses the path.** Whoever can set `ODBC_LOG_FILE` in the environment
-//! of the process the driver is loaded into — which is the application itself, or
+//! of the process the driver is loaded into, which is the application itself, or
 //! someone who can already run code as that user and therefore read anything the
 //! driver can. The variable is not a privilege boundary, and enabling logging is
 //! a decision by the process rather than an attacker-reachable toggle.
 //!
-//! **Symlinks are followed, deliberately.** The file is opened with `create(true)`
+//! **Symlinks are followed.** The file is opened with `create(true)`
 //! and `append(true)` and no `O_NOFOLLOW`, so a pre-existing symlink at the
 //! configured path is followed and a pre-existing regular file is appended to.
 //! Given the paragraph above that is not a privilege escalation; what remains is
-//! the classic world-writable-directory case — a legitimate user configures a path
-//! under `/tmp` and another user pre-creates a link there. The mitigation is
-//! operational: do not configure a log path in a world-writable directory. Core
-//! does not refuse one, because it cannot tell a shared directory from an
-//! intended one, and a driver that declines to log is its own denial of service.
+//! the classic world-writable-directory case, where a legitimate user configures
+//! a path under `/tmp` and another user pre-creates a link there. The
+//! mitigation is operational: do not configure a log path in a world-writable
+//! directory. Core does not refuse one, because it cannot tell a shared
+//! directory from an intended one, and a driver that declines to log is its own
+//! denial of service.
 //!
 //! **Mode `0o600` applies at creation only.** An existing file keeps whatever
 //! mode it already has, which the comment at the `open` call repeats where it is
@@ -52,8 +53,8 @@ static INIT: Once = Once::new();
 /// silently rather than failing.
 ///
 /// It must not panic. `SQLAllocHandle(SQL_HANDLE_ENV, ...)` is the first call
-/// every ODBC application makes, and it runs this before entering `panic_safe` —
-/// a panic here would unwind across the `extern "system"` boundary, which is
+/// every ODBC application makes, and it runs this before entering `panic_safe`.
+/// A panic here would unwind across the `extern "system"` boundary, which is
 /// undefined behaviour, and would poison the `Once` so that every later call
 /// panics too.
 ///

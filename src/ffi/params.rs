@@ -62,69 +62,68 @@ use crate::{
 ///
 /// Diagnostics from the ODBC spec Diagnostics table:
 ///
-/// - `01000` General warning — not returned here; core emits no driver-specific
+/// - `01000` General warning: not returned here; core emits no driver-specific
 ///   informational message from this function. The row carries no `(DM)` marker.
-/// - `07006` Restricted data type attribute violation — returned here when `value_type` is
+/// - `07006` Restricted data type attribute violation: returned here when `value_type` is
 ///   `SQL_C_BINARY` and `parameter_type` is a target core cannot convert it to: the
 ///   `DECIMAL`/`NUMERIC` and character rows of the "C to SQL: Binary" table, whose byte
 ///   layout or encoding ODBC leaves unspecified (`crate::binary_convert`). That pairing is
 ///   fixed at bind and needs no backend metadata, so it is refused before the query runs.
 ///   Every other incompatibility is still detected at execute time by the data source, the
 ///   binding being stored without validating it here.
-/// - `07009` Invalid descriptor index — the spec annotates this `(DM)`, and its single
+/// - `07009` Invalid descriptor index: the spec annotates this `(DM)`, and its single
 ///   clause is a `ParameterNumber` less than 1; it is guarded defensively here, because
 ///   parameter numbering is 1-based throughout `ParamRecords` and a zero would key a
 ///   record no execution can find.
-/// - `HY000` General error — returned for unexpected failures
-/// - `HY001` Memory allocation error — not applicable: Rust's allocator aborts on OOM
-///   rather than returning an error, and `panic_safe` contains any unwind. The row
+/// - `HY000` General error: returned for unexpected failures
+/// - `HY001` Memory allocation error: not applicable, because Rust's allocator aborts on
+///   OOM rather than returning an error, and `panic_safe` contains any unwind. The row
 ///   carries no `(DM)` marker.
-/// - `HY003` Invalid application buffer type — returned when `value_type` is not a valid
+/// - `HY003` Invalid application buffer type: returned when `value_type` is not a valid
 ///   C data type (`c_data_type_from_raw` returns `None`)
-/// - `HY004` Invalid SQL data type — a driver-returned code; the row carries no `(DM)`
+/// - `HY004` Invalid SQL data type: a driver-returned code; the row carries no `(DM)`
 ///   marker, so the driver is responsible for rejecting a `parameter_type` that is neither a
 ///   valid ODBC SQL type nor a driver-specific type it supports. Here `parameter_type` is accepted as-is
 ///   and any incompatibility surfaces at execute time (`07006`), because the backend exposes no
 ///   bind-time SQL-type metadata to validate against. Validation is intentionally deferred.
-/// - `HY009` Invalid argument value — (driver-manager-handled; not returned here)
-/// - `HY010` Function sequence error — (driver-manager-handled; not returned here)
-/// - `HY013` Memory management error — not applicable, for the same reason as `HY001`.
+/// - `HY009` Invalid argument value (driver-manager-handled; not returned here)
+/// - `HY010` Function sequence error (driver-manager-handled; not returned here)
+/// - `HY013` Memory management error: not applicable, for the same reason as `HY001`.
 ///   The row carries no `(DM)` marker.
-/// - `HY021` Inconsistent descriptor information — **returned by this driver**. The row
+/// - `HY021` Inconsistent descriptor information: **returned by this driver**. The row
 ///   carries no `(DM)` marker, and `SQLSetDescRec`'s "Consistency Checks" section says when
 ///   the check runs: "This check is always performed when **SQLBindParameter** or
 ///   **SQLBindCol** is called". Both halves of the binding are checked before either
 ///   descriptor is written, so a rejected bind leaves neither changed
 ///   (`crate::descriptor::consistency_check`).
-/// - `HY090` Invalid string or buffer length — (driver-manager-handled; not returned here)
-/// - `HY104` Invalid precision or scale value — a driver-returned code; the row carries no
+/// - `HY090` Invalid string or buffer length (driver-manager-handled; not returned here)
+/// - `HY104` Invalid precision or scale value: a driver-returned code; the row carries no
 ///   `(DM)` marker. `column_size` and `decimal_digits` are stored verbatim without range
 ///   validation.
 ///   This row is about a precision or scale "outside the range of values supported by the data
 ///   source", which needs backend metadata not available at bind time, so it is not returned.
 ///   The values are not merely stored, though: at execute time the value is checked against
-///   them and reports `22001` if it does not fit — a `SQL_DECIMAL` or `SQL_NUMERIC` parameter
+///   them and reports `22001` if it does not fit: a `SQL_DECIMAL` or `SQL_NUMERIC` parameter
 ///   whose conversion would truncate, a character parameter longer than `column_size`
 ///   characters, or a binary one longer than `column_size` bytes (`crate::param_convert`).
-///   That is a different question — whether *this value* fits *this declaration* — and a
+///   That is a different question (whether *this value* fits *this declaration*) and a
 ///   different SQLSTATE.
-/// - `HY105` Invalid parameter type — the spec annotates this `(DM)`, and its single clause
+/// - `HY105` Invalid parameter type: the spec annotates this `(DM)`, and its single clause
 ///   is "the value specified for the argument *InputOutputType* was invalid"; it is guarded
 ///   defensively here, on the same grounds as `07009` above. `param_type_from_raw` declining
 ///   a value is exactly that clause, and core cannot proceed without knowing whether the
-///   parameter is an input or an output — unlike `SQLDriverConnect`'s `DriverCompletion`,
-///   where an unrecognised value has a defensible most-permissive fallback, defaulting here
-///   would silently mis-bind an output parameter as an input. This was `HY024` until
-///   2026-08-03, a state that appears nowhere on this function's page.
-/// - `HY117` Connection is suspended — (driver-manager-handled; not returned here)
-/// - `HYC00` Optional feature not implemented — not returned here, and the row carries no
+///   parameter is an input or an output. `SQLDriverConnect`'s `DriverCompletion` has a
+///   defensible most-permissive fallback for an unrecognised value; defaulting here would
+///   silently mis-bind an output parameter as an input.
+/// - `HY117` Connection is suspended (driver-manager-handled; not returned here)
+/// - `HYC00` Optional feature not implemented: not returned here, and the row carries no
 ///   `(DM)` marker. Core refuses a C-type/SQL-type pairing its three conversion tables do
 ///   not define with `07006` ("restricted data type attribute violation") at bind time
 ///   instead, which is the state those tables' own rows name. See
 ///   `numeric_convert::numeric_pairing_is_supported`.
-/// - `HYT01` Connection timeout expired — not returned here; core implements no connection
+/// - `HYT01` Connection timeout expired: not returned here; core implements no connection
 ///   timeout, so no deadline exists to expire. The row carries no `(DM)` marker.
-/// - `IM001` Driver does not support this function — (driver-manager-handled; not returned
+/// - `IM001` Driver does not support this function (driver-manager-handled; not returned
 ///   here)
 ///
 /// # Safety
@@ -198,7 +197,7 @@ pub unsafe fn sql_bind_parameter<B: Backend>(
                 )
             })?;
 
-            // Null value pointer AND null indicator removes the binding — from
+            // Null value pointer AND null indicator removes the binding, from
             // both descriptors, or the next read finds one half of a parameter.
             if parameter_value_ptr.is_null() && str_len_or_ind_ptr.is_null() {
                 scope
@@ -210,7 +209,7 @@ pub unsafe fn sql_bind_parameter<B: Backend>(
                     .records
                     .remove(&parameter_number);
             } else {
-                // "C to SQL: Binary" — core converts SQL_C_BINARY only to the
+                // "C to SQL: Binary": core converts SQL_C_BINARY only to the
                 // targets whose byte layout ODBC defines. Refused here rather
                 // than at execute time because the pairing is fixed at bind,
                 // needs no backend metadata and never depends on the data: the
@@ -221,7 +220,7 @@ pub unsafe fn sql_bind_parameter<B: Backend>(
                 {
                     return Err(crate::binary_convert::unsupported_target(sql_type));
                 }
-                // "C to SQL: Numeric" — the same reasoning as the binary
+                // "C to SQL: Numeric": the same reasoning as the binary
                 // refusal above and the same timing. This one is asked of the
                 // *pairing* rather than of the target alone, because the
                 // table's interval footnote is a statement about both: an
@@ -308,34 +307,34 @@ pub unsafe fn sql_bind_parameter<B: Backend>(
 ///
 /// Diagnostics from the ODBC spec Diagnostics table:
 ///
-/// - `01000` General warning — not returned here; core emits no driver-specific
+/// - `01000` General warning: not returned here; core emits no driver-specific
 ///   informational message from this function. The row carries no `(DM)` marker.
-/// - `08S01` Communication link failure — not applicable; parameter count is evaluated
+/// - `08S01` Communication link failure: not applicable; parameter count is evaluated
 ///   locally without a round-trip to the data source
-/// - `HY000` General error — returned for unexpected failures
-/// - `HY001` Memory allocation error — not applicable: Rust's allocator aborts on OOM
-///   rather than returning an error, and `panic_safe` contains any unwind. The row
+/// - `HY000` General error: returned for unexpected failures
+/// - `HY001` Memory allocation error: not applicable, because Rust's allocator aborts on
+///   OOM rather than returning an error, and `panic_safe` contains any unwind. The row
 ///   carries no `(DM)` marker.
-/// - HY008: Operation canceled; not returned here. This call makes no fallible backend call —
-///   `SQLNumParams` reads the parameter count cached at prepare time — so there is no error for a
-///   cancellation to be reported through. The asynchronous clause is inapplicable: core never
-///   returns `SQL_STILL_EXECUTING`.
-/// - `HY010` Function sequence error — every clause of this row is `(DM)`, including
+/// - HY008: Operation canceled; not returned here. This call makes no fallible backend call,
+///   since `SQLNumParams` reads the parameter count cached at prepare time, so there is no
+///   error for a cancellation to be reported through. The asynchronous clause is
+///   inapplicable: core never returns `SQL_STILL_EXECUTING`.
+/// - `HY010` Function sequence error: every clause of this row is `(DM)`, including
 ///   "called prior to calling **SQLPrepare** or **SQLExecDirect**". That check is
 ///   unavoidable and stays: without a prepared statement there is no parameter count to
 ///   report, so the alternative is answering a question about nothing. It fires when
 ///   `stmt.param_count` is `None`.
-/// - `HY013` Memory management error — not applicable: Rust's allocator aborts on OOM
-///   rather than returning an error. The row carries no `(DM)` marker.
-/// - `HY117` Connection is suspended — (driver-manager-handled; not returned here)
-/// - `HYT01` Connection timeout expired — not returned here; core implements no connection
+/// - `HY013` Memory management error: not applicable, because Rust's allocator aborts on
+///   OOM rather than returning an error. The row carries no `(DM)` marker.
+/// - `HY117` Connection is suspended (driver-manager-handled; not returned here)
+/// - `HYT01` Connection timeout expired: not returned here; core implements no connection
 ///   timeout, so no deadline exists to expire. The row carries no `(DM)` marker.
-/// - `IM001` Driver does not support this function — (driver-manager-handled; not returned
+/// - `IM001` Driver does not support this function (driver-manager-handled; not returned
 ///   here)
 /// - `IM017` Polling disabled; not returned here (the asynchronous notification model is
-///   not supported — not DM-annotated in the spec).
+///   not supported, and not DM-annotated in the spec).
 /// - `IM018` SQLCompleteAsync not called; not returned here (the asynchronous notification
-///   model is not supported — not DM-annotated in the spec).
+///   model is not supported, and not DM-annotated in the spec).
 ///
 /// # Safety
 ///
@@ -400,44 +399,45 @@ pub unsafe fn sql_num_params<B: Backend>(
 ///
 /// Diagnostics from the ODBC spec Diagnostics table:
 ///
-/// - 01000: General warning — not returned here; core emits no driver-specific
+/// - 01000: General warning. Not returned here; core emits no driver-specific
 ///   informational message from this function. The row carries no `(DM)` marker.
-/// - 07009: Invalid descriptor index — only the "less than 1" clause is `(DM)`-marked,
+/// - 07009: Invalid descriptor index. Only the "less than 1" clause is `(DM)`-marked,
 ///   and it is guarded defensively here. The three that follow carry no marker and are
 ///   the driver's; core returns the first of them, a `ParameterNumber` greater than the
 ///   number of parameters in the associated SQL statement, from the `?` markers
-///   `count_params` found. The other two — a parameter marker in a non-DML statement or
-///   in a **SELECT** list — need the data source's own parse and are left to the
+///   `count_params` found. The other two (a parameter marker in a non-DML statement or
+///   in a **SELECT** list) need the data source's own parse and are left to the
 ///   backend.
-/// - 21S01: Insert value list does not match column list — not returned here. The row is
+/// - 21S01: Insert value list does not match column list. Not returned here. The row is
 ///   about an `INSERT` whose parameter count differs from the target table's column count,
 ///   which needs the data source's catalog: core parses the statement only far enough to
 ///   count `?` markers (`count_params`) and never resolves a table. A backend that describes
 ///   parameters itself is where this would originate.
-/// - 08S01: Communication link failure — propagated from the backend unchanged.
+/// - 08S01: Communication link failure. Propagated from the backend unchanged.
 ///   `Backend::describe_param` is a real, fallible call to the data source, so a failing
 ///   link surfaces here.
-/// - HY000: General error — returned for unexpected failures.
-/// - HY001: Memory allocation error — not applicable; Rust allocation panics are caught by `panic_safe`.
-/// - HY008: Operation canceled. The row's first clause — asynchronous processing, then the
-///   function called again — is not applicable: core implements no asynchronous execution and
+/// - HY000: General error. Returned for unexpected failures.
+/// - HY001: Memory allocation error. Not applicable; Rust allocation panics are caught
+///   by `panic_safe`.
+/// - HY008: Operation canceled. The row's first clause (asynchronous processing, then the
+///   function called again) is not applicable: core implements no asynchronous execution and
 ///   never returns `SQL_STILL_EXECUTING`. The second clause, `SQLCancel` called on the
 ///   statement "from a different thread in a multithread application", **is returned by this
 ///   driver**: the row carries no `(DM)` marker, and when a backend call fails with
 ///   `Backend::is_cancelled` reporting its token signalled, core reports `HY008` in place of
 ///   the backend's own SQLSTATE.
-/// - HY010: Function sequence error — every clause of this row is `(DM)`, including
+/// - HY010: Function sequence error. Every clause of this row is `(DM)`, including
 ///   "called before calling **SQLPrepare** or **SQLExecDirect**". The check is
 ///   unavoidable and stays: with no prepared statement there is no parameter to describe.
-/// - HY013: Memory management error — not applicable.
-/// - HY117: Connection suspended — (DM) (driver-manager-handled; not returned here).
-/// - HYT01: Connection timeout expired — propagated from the backend unchanged, for the
+/// - HY013: Memory management error. Not applicable.
+/// - HY117: Connection suspended (DM) (driver-manager-handled; not returned here).
+/// - HYT01: Connection timeout expired. Propagated from the backend unchanged, for the
 ///   same reason as `08S01`. The row carries no `(DM)` marker.
-/// - IM001: Driver does not support this function — (DM) (driver-manager-handled; not returned here).
+/// - IM001: Driver does not support this function (DM) (driver-manager-handled; not returned here).
 /// - IM017: Polling disabled; not returned here (the asynchronous notification model is
-///   not supported — not DM-annotated in the spec).
+///   not supported, and not DM-annotated in the spec).
 /// - IM018: SQLCompleteAsync not called; not returned here (the asynchronous notification
-///   model is not supported — not DM-annotated in the spec).
+///   model is not supported, and not DM-annotated in the spec).
 ///
 /// # Safety
 ///
@@ -463,7 +463,7 @@ pub unsafe fn sql_describe_param<B: Backend>(
             let (stmt, conn) = scope.stmt_with_parent::<B>(statement_handle)?;
             stmt.diagnostics.clear();
 
-            // Spec: HY010 — no SQL has been prepared.
+            // Spec HY010: no SQL has been prepared.
             let param_count = stmt.param_count.ok_or_else(|| {
                 OdbcError::general(
                     "No SQL has been prepared (call SQLPrepare first)",
@@ -471,7 +471,7 @@ pub unsafe fn sql_describe_param<B: Backend>(
                 )
             })?;
 
-            // Spec: 07009 — parameter_number is 0 or exceeds param_count.
+            // Spec 07009: parameter_number is 0 or exceeds param_count.
             if parameter_number == 0 || parameter_number > param_count {
                 return Err(OdbcError::general(
                     format!(
@@ -481,14 +481,14 @@ pub unsafe fn sql_describe_param<B: Backend>(
                 ));
             }
 
-            // Ask the backend first. `None` — and a backend that never
-            // overrides the hook — falls back to a generic VARCHAR, which is
-            // usable but wrong for any parameter that is not a string.
+            // Ask the backend first. `None`, and a backend that never overrides
+            // the hook, falls back to a generic VARCHAR, which is usable but
+            // wrong for any parameter that is not a string.
             // Like `SQLFetch`, this runs against a statement an earlier
             // `SQLPrepare` set up, so it observes that call's token rather than
-            // minting one. `B::describe_param` takes no token itself — it is a
-            // metadata lookup, not a query — but a backend that answers it over
-            // the wire can still be cancelled mid-lookup.
+            // minting one. `B::describe_param` takes no token itself, being a
+            // metadata lookup rather than a query, but a backend that answers it
+            // over the wire can still be cancelled mid-lookup.
             let cancel_token = crate::handles::current_cancel_token(statement_handle);
             let cancel = cancel_token
                 .as_ref()
@@ -501,8 +501,8 @@ pub unsafe fn sql_describe_param<B: Backend>(
                     cancel,
                 )?,
                 // No connection or no stored text: nothing to ask with. Not an
-                // error — `param_count` above already established the statement
-                // is prepared, and the fallback still answers the call.
+                // error, because `param_count` above already established the
+                // statement is prepared, and the fallback still answers the call.
                 _ => None,
             };
 
@@ -551,7 +551,7 @@ pub unsafe fn sql_describe_param<B: Backend>(
 ///
 /// Miscounting is not a cosmetic problem. The count is what `SQLNumParams`
 /// reports, what bounds [`collect_params`]'s `1..=param_count` walk, and what
-/// the value list handed to `Backend::execute` is sized by — so a `?` inside
+/// the value list handed to `Backend::execute` is sized by, so a `?` inside
 /// `"a?b"` counted as a marker makes the driver ask for a value that the
 /// statement has no place for.
 ///
@@ -735,8 +735,8 @@ impl From<ColumnValue> for ParamValue {
 ///
 /// `binding.value_ptr` and `binding.str_len_or_ind_ptr` must point to valid
 /// memory of the appropriate type and size, at the offset
-/// `SQL_ATTR_PARAM_BIND_OFFSET_PTR` names as well as at the bound address —
-/// which is the application's undertaking, the spec making the sum its
+/// `SQL_ATTR_PARAM_BIND_OFFSET_PTR` names as well as at the bound address.
+/// That is the application's undertaking, the spec making the sum its
 /// responsibility to keep in bounds exactly as the unoffset pointer is.
 /// `HY090` for a bound *StrLen_or_Ind* whose negative value names none of the
 /// ones `SQLBindParameter` defines.
@@ -777,8 +777,8 @@ pub(crate) unsafe fn read_param_value(rec: ParamRecord<'_>) -> Result<ParamValue
     // *procedure* parameter's default, and `crate::escape` refuses `{call ...}`
     // with `HYC00`, so no statement core executes has one. Handling it at the
     // top rather than per-arm is what lets the character arms below treat every
-    // remaining negative as undefined — it is a defined value, and would
-    // otherwise be refused by the `HY090` check they now make.
+    // remaining negative as undefined: it is a defined value, and would
+    // otherwise be refused by the `HY090` check they make.
     if !indicator_ptr.is_null() {
         // SAFETY: str_len_or_ind_ptr is non-null and the caller guarantees it points to a valid isize.
         let indicator = unsafe { std::ptr::read_unaligned(indicator_ptr) };
@@ -834,11 +834,11 @@ pub(crate) unsafe fn read_param_value(rec: ParamRecord<'_>) -> Result<ParamValue
                 } else if l < 0 {
                     // Every other negative names none of the values
                     // `SQLBindParameter`'s *StrLen_or_IndPtr* defines. Folding
-                    // them into `SQL_NTS` bound the whole null-terminated
-                    // string and answered SUCCESS, so an application that
-                    // passed `SQL_NO_TOTAL` -- or a stale -42 -- sent a value it
-                    // never asked to send. `SQLPutData` already refused the
-                    // same class with `HY090`.
+                    // them into `SQL_NTS` would bind the whole null-terminated
+                    // string and answer SUCCESS, so an application that passed
+                    // `SQL_NO_TOTAL`, or a stale -42, would send a value it
+                    // never asked to send. `SQLPutData` refuses the same class
+                    // with `HY090`.
                     //
                     // The two legal negatives that are not `SQL_NTS` cannot be
                     // here: `SQL_NULL_DATA` and `SQL_DEFAULT_PARAM` return at
@@ -854,12 +854,11 @@ pub(crate) unsafe fn read_param_value(rec: ParamRecord<'_>) -> Result<ParamValue
                 Some(n) => n,
                 None => {
                     // Indicator is SQL_NTS or absent: the string is
-                    // null-terminated. `CStr::from_ptr` used to resolve it and
-                    // is **unbounded**, so a buffer whose terminator the
-                    // application forgot was read past its own allocation —
-                    // the one NTS scan in the crate that had no bound at all,
-                    // while the `SQL_C_WCHAR` arm below shared `MAX_NTS_SCAN`.
-                    // Same helper, same `HY090`, same limit for both arms now.
+                    // null-terminated. The scan is bounded by `MAX_NTS_SCAN`,
+                    // because an unbounded one (`CStr::from_ptr`) reads past the
+                    // allocation when the application forgot the terminator.
+                    // The `SQL_C_WCHAR` arm below shares the same helper, the
+                    // same `HY090` and the same limit.
                     //
                     // SAFETY: `ptr` is non-null (the null `data_ptr` case
                     // returns above) and the caller guarantees it is
@@ -868,7 +867,7 @@ pub(crate) unsafe fn read_param_value(rec: ParamRecord<'_>) -> Result<ParamValue
                 }
             };
             // SAFETY: value_ptr is non-null and the caller guarantees it points to at
-            // least `n` valid bytes — as indicated by str_len_or_ind_ptr, or as
+            // least `n` valid bytes, as indicated by str_len_or_ind_ptr, or as
             // counted by the terminator scan above.
             let bytes = unsafe { std::slice::from_raw_parts(ptr, n) };
             return crate::param_convert::text_to_sql_type(
@@ -1097,7 +1096,7 @@ pub(crate) fn unbound_parameter(number: u16) -> OdbcError {
 /// Collect bound parameter values in order 1..=param_count.
 ///
 /// A marker with no binding is 07002 (see [`unbound_parameter`]). Padding the
-/// gap with NULL, as an earlier revision did, runs a statement the application
+/// gap with NULL instead would run a statement the application
 /// never wrote: `WHERE x = ?` with nothing bound becomes `WHERE x = NULL`,
 /// which matches no row and reports success, so the application sees an empty
 /// result set rather than its own mistake.
@@ -1105,7 +1104,7 @@ pub(crate) fn unbound_parameter(number: u16) -> OdbcError {
 /// A `SQL_PARAM_OUTPUT` binding *is* emitted as `ColumnValue::Null`, and that
 /// is not the same case: an output-only parameter has no input value, and its
 /// buffer is where the *driver* is expected to put something. Reading it is not
-/// merely meaningless, it is unsound — the application never had to initialise
+/// merely meaningless, it is unsound: the application never had to initialise
 /// it, so for `SQL_C_CHAR` with an absent or `SQL_NTS` indicator
 /// [`read_param_value`] would scan uninitialised memory for a terminator that
 /// need not be inside the buffer at all.
@@ -1117,7 +1116,7 @@ pub(crate) fn unbound_parameter(number: u16) -> OdbcError {
 ///
 /// All APD value and indicator pointers must point to valid memory.
 /// Returns the values alongside any warnings the conversions raised. A warning
-/// is not a failure — the value it accompanies is in the `Vec` and is sent —
+/// is not a failure (the value it accompanies is in the `Vec` and is sent),
 /// so the caller posts each to the statement's diagnostic queue and returns
 /// `SQL_SUCCESS_WITH_INFO`. See [`ParamValue`].
 pub(crate) unsafe fn collect_params(
@@ -1184,15 +1183,15 @@ pub(crate) unsafe fn collect_params(
 /// (`ffi/stmt_attr.rs` substitutes anything else back with `01S02`), so an
 /// execution processes exactly one parameter set and the application's status
 /// array is required to be at least that long. The count is written for every
-/// execution, including one with no bound parameters — the set count is a
-/// property of `SQL_ATTR_PARAMSET_SIZE`, not of how many parameters are in the
-/// set.
+/// execution, including one with no bound parameters, because the set count is
+/// a property of `SQL_ATTR_PARAMSET_SIZE` rather than of how many parameters
+/// are in the set.
 ///
 /// # Safety
 ///
 /// Each stored attribute must be null or a pointer to a valid, writable
-/// `usize` / `u16` respectively — the application's undertaking when it set
-/// them.
+/// `usize` / `u16` respectively, which is the application's undertaking when it
+/// set them.
 pub(crate) unsafe fn report_params_processed<B: Backend>(stmt: &StatementHandle<B>, status: u16) {
     let processed = stmt
         .attrs
@@ -1240,7 +1239,7 @@ pub(crate) unsafe fn write_output_params(
             // No buffer to write into. `ParamRecords::get` counts a record
             // with an indicator but no data pointer as a binding, because
             // `SQLBindParameter` allows a null `ParameterValuePtr` alongside
-            // `SQL_NULL_DATA` — but that allowance is scoped: "(This applies
+            // `SQL_NULL_DATA`. That allowance is scoped, though: "(This applies
             // only to input or input/output parameters.)" Writing needs a real
             // buffer, and `write_column_value` declines the null target while
             // still writing the length indicator, so a record admitted here
@@ -1365,7 +1364,7 @@ pub(crate) unsafe fn find_data_at_exec_params(
             // `read_param_value` will: `SQL_ATTR_PARAM_BIND_OFFSET_PTR` decides
             // *which* indicator says data-at-execution, and reading the
             // unoffset one here would let the two disagree about the same
-            // parameter — executing immediately on a parameter the application
+            // parameter, executing immediately on a parameter the application
             // asked to stream, or the reverse.
             let indicator_ptr = rec.indicator_ptr();
             let is_dae = if !indicator_ptr.is_null() {
@@ -1403,8 +1402,8 @@ pub(crate) unsafe fn find_data_at_exec_params(
 /// `SQL_C_WCHAR` parameter's terminator is a zero *code unit*, not a zero byte.
 /// Scanning it byte-wise stops inside the first character of any ASCII text and
 /// `dae_buffer_to_value`'s `chunks_exact(2)` then has nothing to pair, so the
-/// parameter arrives empty with no diagnostic — the bound-parameter path has
-/// always got this right, via `utf16_to_string`.
+/// parameter arrives empty with no diagnostic. The bound-parameter path gets
+/// this right through `utf16_to_string`.
 ///
 /// A C type that is neither known nor `SQL_C_WCHAR` scans bytes, which is what
 /// every single-byte C type wants and what `SQL_C_BINARY` gets by default. A
@@ -1458,38 +1457,38 @@ unsafe fn dae_nts_byte_count(
 ///
 /// # Spec compliance
 ///
-/// - 01000: General warning — not returned here; core emits no driver-specific
+/// - 01000: General warning. Not returned here; core emits no driver-specific
 ///   informational message from this function. The row carries no `(DM)` marker.
-/// - 01004: String data, right truncated — not applicable; data is accumulated without
+/// - 01004: String data, right truncated. Not applicable; data is accumulated without
 ///   truncation.
-/// - 07006: Restricted data type attribute violation — not returned here. The pairing is
+/// - 07006: Restricted data type attribute violation. Not returned here. The pairing is
 ///   fixed at `SQLBindParameter`, which refuses the C-to-SQL combinations core cannot convert
 ///   before the query runs (`crate::binary_convert`, `crate::numeric_convert`), so a chunk
 ///   arriving here is already of a pairing that was accepted.
-/// - 08S01: Communication link failure — not returned here. `SQLPutData` accumulates into a
+/// - 08S01: Communication link failure. Not returned here. `SQLPutData` accumulates into a
 ///   buffer on the statement handle and makes no backend call at all; the link is next touched
 ///   by the `SQLParamData` that completes the execution, which is where this arrives.
-/// - 22001: String data, right truncation — not applicable; no target column size check
+/// - 22001: String data, right truncation. Not applicable; no target column size check
 ///   at this stage.
-/// - 22003: Numeric value out of range — not applicable; type conversion happens at execute
+/// - 22003: Numeric value out of range. Not applicable; type conversion happens at execute
 ///   time.
-/// - 22007: Invalid datetime format — not applicable; type conversion happens at execute
+/// - 22007: Invalid datetime format. Not applicable; type conversion happens at execute
 ///   time.
-/// - 22008: Datetime field overflow — not applicable; type conversion happens at execute
+/// - 22008: Datetime field overflow. Not applicable; type conversion happens at execute
 ///   time.
-/// - 22012: Division by zero — not applicable.
-/// - 22015: Interval field overflow — not applicable.
-/// - 22018: Invalid character value for cast specification — not applicable; type conversion
+/// - 22012: Division by zero. Not applicable.
+/// - 22015: Interval field overflow. Not applicable.
+/// - 22018: Invalid character value for cast specification. Not applicable; type conversion
 ///   happens at execute time.
-/// - HY000: General error — returned for unexpected failures.
-/// - HY001: Memory allocation error — not applicable; Rust allocation panics are caught by
+/// - HY000: General error. Returned for unexpected failures.
+/// - HY001: Memory allocation error. Not applicable; Rust allocation panics are caught by
 ///   `panic_safe`.
-/// - HY008: Operation canceled — not returned here. This call makes no fallible backend call,
+/// - HY008: Operation canceled. Not returned here. This call makes no fallible backend call,
 ///   so there is no error for a cancellation to be reported through, and the asynchronous
 ///   clause is inapplicable: core never returns `SQL_STILL_EXECUTING`. A `SQLCancel` during a
 ///   data-at-execution sequence discards the sequence; the following `SQLParamData` is what
 ///   reports it.
-/// - HY009: Invalid use of null pointer — (DM) the row is driver-manager-marked. Core keeps a
+/// - HY009: Invalid use of null pointer. (DM) The row is driver-manager-marked. Core keeps a
 ///   guard anyway, because the alternative is dereferencing a null pointer, and because core
 ///   is also linked with no Driver Manager in front of it. Not because unixODBC skips the
 ///   check: it runs exactly this one, at `DriverManager/SQLPutData.c`'s
@@ -1498,14 +1497,14 @@ unsafe fn dae_nts_byte_count(
 ///   argument DataPtr was a null pointer, and the argument StrLen_or_Ind was not 0,
 ///   SQL_DEFAULT_PARAM, or SQL_NULL_DATA." A null pointer with a length of 0 is a legal
 ///   zero-length put and is accepted.
-/// - HY010: Function sequence error — returned when no data-at-execution is in progress
+/// - HY010: Function sequence error. Returned when no data-at-execution is in progress
 ///   (no prior `SQL_NEED_DATA` from `SQLExecute`/`SQLExecDirectW`), or when
 ///   `SQLParamData` has not yet been called to identify the current parameter.
 ///   (DM cases for async/NEED_DATA: driver-manager-handled; not returned here.)
-/// - HY013: Memory management error — not applicable.
-/// - HY019: Non-character and non-binary data sent in pieces — not applicable; we accept
+/// - HY013: Memory management error. Not applicable.
+/// - HY019: Non-character and non-binary data sent in pieces. Not applicable; core accepts
 ///   all data types in pieces.
-/// - HY020: Attempt to concatenate a null value — **returned by this driver**. The row
+/// - HY020: Attempt to concatenate a null value. **Returned by this driver**. The row
 ///   carries no `(DM)` marker: "SQLPutData was called more than once since the call that
 ///   returned SQL_NEED_DATA, and in one of those calls, the StrLen_or_Ind argument contained
 ///   SQL_NULL_DATA or SQL_DEFAULT_PARAM." A NULL is the whole value of a parameter, so
@@ -1513,7 +1512,7 @@ unsafe fn dae_nts_byte_count(
 ///   both refused, and `SQL_DEFAULT_PARAM` is treated the same because the row names it too.
 ///   Two calls both carrying data are not: the spec's objection is to the null, not to the
 ///   concatenation.
-/// - 07S01: Invalid use of default parameter — (not returned here). `SQL_DEFAULT_PARAM` is
+/// - 07S01: Invalid use of default parameter (not returned here). `SQL_DEFAULT_PARAM` is
 ///   **accepted**, following psqlODBC, whose `PGAPI_PutData` pairs it with `SQL_NULL_DATA`
 ///   and answers `SQL_SUCCESS` while raising "Invalid string or buffer length" for every
 ///   other negative value; MySQL Connector/ODBC does not recognise the constant at all. The
@@ -1521,25 +1520,25 @@ unsafe fn dae_nts_byte_count(
 ///   returns it here. It resolves to NULL, which is the only value it can take in core:
 ///   `SQL_DEFAULT_PARAM` names a *procedure* parameter's default and `crate::escape` refuses
 ///   `{call ...}` with `HYC00`, so no statement core executes has one.
-/// - HY090: Invalid string or buffer length — returned for two conditions, which are the
+/// - HY090: Invalid string or buffer length. Returned for two conditions, which are the
 ///   complete set. (1) `str_len_or_ind` is negative and none of `SQL_NTS`, `SQL_NULL_DATA`
 ///   or `SQL_DEFAULT_PARAM`, which are the three the spec's *StrLen_or_Ind* description
 ///   lists. (2) `str_len_or_ind` **is** `SQL_NTS` and the chunk at `DataPtr` has no
-///   terminator within `MAX_NTS_SCAN` (1 048 576) units — code units for a `SQL_C_WCHAR`
-///   parameter, bytes for every other C type, per `dae_nts_byte_count` — which is a length
+///   terminator within `MAX_NTS_SCAN` (1 048 576) units (code units for a `SQL_C_WCHAR`
+///   parameter, bytes for every other C type, per `dae_nts_byte_count`), which is a length
 ///   the driver cannot determine. The second is not stated by the row; `HY090` is the state
-///   the condition names. It previously took the capped length, which truncated the
-///   *middle* of a long data-at-execution value with nothing said. See
+///   the condition names. Taking the capped length instead would truncate the *middle* of a
+///   long data-at-execution value with nothing said. See
 ///   `put_data_refuses_an_nts_chunk_that_runs_to_the_scan_cap`.
-/// - HY117: Connection suspended — (driver-manager-handled; not returned here).
-/// - HYT01: Connection timeout expired — not returned here; core implements no connection
+/// - HY117: Connection suspended (driver-manager-handled; not returned here).
+/// - HYT01: Connection timeout expired. Not returned here; core implements no connection
 ///   timeout, so no deadline exists to expire. The row carries no `(DM)` marker.
-/// - IM001: Driver does not support this function — (driver-manager-handled; not returned
+/// - IM001: Driver does not support this function (driver-manager-handled; not returned
 ///   here).
 /// - IM017: Polling disabled; not returned here (the asynchronous notification model is
-///   not supported — not DM-annotated in the spec).
+///   not supported, and not DM-annotated in the spec).
 /// - IM018: SQLCompleteAsync not called; not returned here (the asynchronous notification
-///   model is not supported — not DM-annotated in the spec).
+///   model is not supported, and not DM-annotated in the spec).
 ///
 /// # Safety
 ///
@@ -1602,9 +1601,8 @@ pub unsafe fn sql_put_data<B: Backend>(
             // of those calls, the StrLen_or_Ind argument contained
             // SQL_NULL_DATA or SQL_DEFAULT_PARAM." A NULL is the whole value of
             // a parameter, so it can neither follow data nor be followed by it.
-            // Both orderings used to succeed: the first discarded what the
-            // application had already sent, the second concatenated onto a
-            // value it had declared NULL.
+            // Admitting either ordering would discard what the application had
+            // already sent, or concatenate onto a value it had declared NULL.
             //
             // The row names `SQL_DEFAULT_PARAM` alongside `SQL_NULL_DATA`, so
             // accepting that value below does not exempt it from this rule.
@@ -1623,15 +1621,14 @@ pub unsafe fn sql_put_data<B: Backend>(
             // buffer, and `SQL_DEFAULT_PARAM` joins it.
             //
             // The spec's *StrLen_or_Ind* description lists `SQL_DEFAULT_PARAM`
-            // as a value the argument may carry — "is SQL_NTS, SQL_NULL_DATA,
-            // or SQL_DEFAULT_PARAM" — so reporting `HY090` for it, as core did
-            // while the constant was unknown, told the application its length
-            // was malformed when it was not.
+            // as a value the argument may carry: "is SQL_NTS, SQL_NULL_DATA, or
+            // SQL_DEFAULT_PARAM". Reporting `HY090` for it would tell the
+            // application its length was malformed when it was not.
             //
             // Accepted rather than refused, following psqlODBC, which pairs the
             // two constants in `PGAPI_PutData` and answers `SQL_SUCCESS` for
             // both, while raising "Invalid string or buffer length" for every
-            // other negative value — so the exemption is deliberate there.
+            // other negative value, so the exemption is explicit there.
             // MySQL Connector/ODBC does not recognise the constant at all.
             // `SQLPutData`'s `07S01` row was considered and not taken: it
             // describes a parameter that "did not have a default value", and no
@@ -1652,14 +1649,13 @@ pub unsafe fn sql_put_data<B: Backend>(
             // A refusal to dereference a null pointer, not a spec check: the
             // row is `(DM)`-marked and belongs to the Driver Manager. It is
             // kept because core is also linked with no Driver Manager in front
-            // of it — unixODBC does run this exact check, at
-            // `DriverManager/SQLPutData.c` — and it is written
-            // to match the clause exactly — "(DM) The argument DataPtr was a
-            // null pointer, and the argument StrLen_or_Ind was not 0,
-            // SQL_DEFAULT_PARAM, or SQL_NULL_DATA". The other two values are
-            // handled above, so only the zero remains, and a null pointer with
-            // a length of zero is a legal zero-length put that this guard used
-            // to refuse.
+            // of it (unixODBC does run this exact check, at
+            // `DriverManager/SQLPutData.c`), and it is written to match the
+            // clause exactly: "(DM) The argument DataPtr was a null pointer,
+            // and the argument StrLen_or_Ind was not 0, SQL_DEFAULT_PARAM, or
+            // SQL_NULL_DATA". The other two values are handled above, so only
+            // the zero remains, and a null pointer with a length of zero is a
+            // legal zero-length put this guard must admit.
             if data_ptr.is_null() && str_len_or_ind != 0 {
                 return Err(OdbcError::general(
                     "DataPtr is null",
@@ -1675,14 +1671,13 @@ pub unsafe fn sql_put_data<B: Backend>(
                 //
                 // A chunk running to `MAX_NTS_SCAN` with no terminator is
                 // `HY090` rather than a `MAX_NTS_SCAN`-unit chunk: a capped
-                // length is the same silent truncation the text paths had, and
-                // here it would corrupt the *middle* of a long value with
-                // nothing said.
+                // length is a silent truncation, and here it would corrupt the
+                // *middle* of a long value with nothing said.
                 dae_nts_byte_count(c_type, data_ptr.cast::<u8>())?
             } else if str_len_or_ind < 0 {
                 // Spec HY090: a negative length that is none of the three the
-                // *StrLen_or_Ind* description lists — SQL_NTS, SQL_NULL_DATA
-                // and SQL_DEFAULT_PARAM, the last two handled above.
+                // *StrLen_or_Ind* description lists (SQL_NTS, SQL_NULL_DATA and
+                // SQL_DEFAULT_PARAM, the last two handled above).
                 return Err(OdbcError::general(
                     format!("Invalid string or buffer length: {str_len_or_ind}"),
                     SqlState::invalid_string_or_buffer_length(),
@@ -1736,11 +1731,12 @@ pub unsafe fn sql_put_data<B: Backend>(
 /// returned by the function called to execute the statement (**SQLExecute** or
 /// **SQLExecDirect**)." Each is marked where it appears.
 ///
-/// - 01000: General warning — propagated from backend (during final execution).
-/// - 01004: String data, right truncated — propagated from backend. **Absent from this function's diagnostics table**; inherited, as above.
-/// - 07006: Restricted data type attribute violation — propagated from backend.
-/// - 08S01: Communication link failure — propagated from backend.
-/// - 22001: String data, right truncation — **absent from this function's diagnostics
+/// - 01000: General warning. Propagated from backend (during final execution).
+/// - 01004: String data, right truncated. Propagated from backend.
+///   **Absent from this function's diagnostics table**; inherited, as above.
+/// - 07006: Restricted data type attribute violation. Propagated from backend.
+/// - 08S01: Communication link failure. Propagated from backend.
+/// - 22001: String data, right truncation. **Absent from this function's diagnostics
 ///   table**, inherited as above. Returned here when the accumulated
 ///   data-at-execution value does not survive conversion to the declared SQL type: text
 ///   truncated by an exact-numeric target, or a value longer than the declared
@@ -1748,45 +1744,51 @@ pub unsafe fn sql_put_data<B: Backend>(
 ///   applies to a value delivered in one piece (`crate::param_convert`), because
 ///   `SQLPutData` is only a different way to hand over the same parameter. Also
 ///   propagated from backend.
-/// - 22003: Numeric value out of range — **absent from this function's diagnostics
+/// - 22003: Numeric value out of range. **Absent from this function's diagnostics
 ///   table**, inherited as above. Returned here when that text falls outside the
 ///   range of the declared numeric type (`crate::param_convert`). Also propagated from
 ///   backend.
-/// - 22007: Invalid datetime format — **absent from this function's diagnostics table**,
+/// - 22007: Invalid datetime format. **Absent from this function's diagnostics table**,
 ///   inherited as above. Returned here for a datetime literal with an
 ///   out-of-range field (`crate::param_convert`). Also propagated from backend.
-/// - 22008: Datetime field overflow — **absent from this function's diagnostics table**,
+/// - 22008: Datetime field overflow. **Absent from this function's diagnostics table**,
 ///   inherited as above. Returned here when that text carries a datetime
 ///   component the declared type cannot hold (`crate::param_convert`). Also propagated from
 ///   backend.
-/// - 22012: Division by zero — propagated from backend. **Absent from this function's diagnostics table**; inherited, as above.
-/// - 22015: Interval field overflow — propagated from backend. **Absent from this function's diagnostics table**; inherited, as above.
-/// - 22018: Invalid character value for cast specification — **absent from this function's
+/// - 22012: Division by zero. Propagated from backend.
+///   **Absent from this function's diagnostics table**; inherited, as above.
+/// - 22015: Interval field overflow. Propagated from backend.
+///   **Absent from this function's diagnostics table**; inherited, as above.
+/// - 22018: Invalid character value for cast specification. **Absent from this function's
 ///   diagnostics table**, inherited as above. Returned here when the
 ///   accumulated data-at-execution text is not a valid literal of the SQL type declared for
 ///   the parameter at `SQLBindParameter` (`crate::param_convert`). Also propagated from
 ///   backend.
-/// - 23000: Integrity constraint violation — propagated from backend. **Absent from this function's diagnostics table**; inherited, as above.
-/// - 24000: Invalid cursor state — propagated from backend. **Absent from this function's diagnostics table**; inherited, as above.
-/// - 22026: String data, length mismatch — not returned here. The row's condition opens with
+/// - 23000: Integrity constraint violation. Propagated from backend.
+///   **Absent from this function's diagnostics table**; inherited, as above.
+/// - 24000: Invalid cursor state. Propagated from backend.
+///   **Absent from this function's diagnostics table**; inherited, as above.
+/// - 22026: String data, length mismatch. Not returned here. The row's condition opens with
 ///   "The SQL_NEED_LONG_DATA_LEN information type in `SQLGetInfo` was 'Y'", and core answers
 ///   `"N"` for it (`default_get_info`), so the driver never asked the application to declare a
 ///   long parameter's length in advance and has nothing to compare against.
-/// - 40001: Serialization failure — propagated from backend.
-/// - 40003: Statement completion unknown — propagated from backend.
-/// - 42000: Syntax error or access violation — propagated from backend. **Absent from this function's diagnostics table**; inherited, as above.
-/// - 44000: WITH CHECK OPTION violation — propagated from backend. **Absent from this function's diagnostics table**; inherited, as above.
-/// - HY000: General error — propagated from backend.
-/// - HY001: Memory allocation error — not applicable; Rust allocation panics are caught by
+/// - 40001: Serialization failure. Propagated from backend.
+/// - 40003: Statement completion unknown. Propagated from backend.
+/// - 42000: Syntax error or access violation. Propagated from backend.
+///   **Absent from this function's diagnostics table**; inherited, as above.
+/// - 44000: WITH CHECK OPTION violation. Propagated from backend.
+///   **Absent from this function's diagnostics table**; inherited, as above.
+/// - HY000: General error. Propagated from backend.
+/// - HY001: Memory allocation error. Not applicable; Rust allocation panics are caught by
 ///   `panic_safe`.
-/// - HY008: Operation canceled. The row's first clause — asynchronous processing, then the
-///   function called again — is not applicable: core implements no asynchronous execution and
+/// - HY008: Operation canceled. The row's first clause (asynchronous processing, then the
+///   function called again) is not applicable: core implements no asynchronous execution and
 ///   never returns `SQL_STILL_EXECUTING`. The second clause, `SQLCancel` called on the
 ///   statement "from a different thread in a multithread application", **is returned by this
 ///   driver**: the row carries no `(DM)` marker, and when a backend call fails with
 ///   `Backend::is_cancelled` reporting its token signalled, core reports `HY008` in place of
 ///   the backend's own SQLSTATE.
-/// - HY010: Function sequence error — returned when no data-at-execution operation is in
+/// - HY010: Function sequence error. Returned when no data-at-execution operation is in
 ///   progress, and, per the row's unmarked sentence "The previous function call was a call to
 ///   SQLParamData", when this call would finalise a parameter for which `SQLPutData` was never
 ///   called. The data-at-execution state survives that error, so the application recovers by
@@ -1794,19 +1796,23 @@ pub unsafe fn sql_put_data<B: Backend>(
 ///   five clauses are `(DM)`-marked and not returned here; the other unmarked one is the
 ///   case where SQLCancel was called before data was sent for all data-at-execution
 ///   parameters, which core reports as `HY008` instead.
-/// - HY013: Memory management error — not applicable.
-/// - HY090: Invalid string or buffer length — propagated from backend. **Absent from this function's diagnostics table**; inherited, as above.
-/// - HY105: Invalid parameter type — propagated from backend. **Absent from this function's diagnostics table**; inherited, as above.
-/// - HY117: Connection suspended — (driver-manager-handled; not returned here).
-/// - HYC00: Optional feature not implemented — propagated from backend. **Absent from this function's diagnostics table**; inherited, as above.
-/// - HYT00: Timeout expired — propagated from backend. **Absent from this function's diagnostics table**; inherited, as above.
-/// - HYT01: Connection timeout expired — propagated from backend.
-/// - IM001: Driver does not support this function — (driver-manager-handled; not returned
+/// - HY013: Memory management error. Not applicable.
+/// - HY090: Invalid string or buffer length. Propagated from backend.
+///   **Absent from this function's diagnostics table**; inherited, as above.
+/// - HY105: Invalid parameter type. Propagated from backend.
+///   **Absent from this function's diagnostics table**; inherited, as above.
+/// - HY117: Connection suspended (driver-manager-handled; not returned here).
+/// - HYC00: Optional feature not implemented. Propagated from backend.
+///   **Absent from this function's diagnostics table**; inherited, as above.
+/// - HYT00: Timeout expired. Propagated from backend.
+///   **Absent from this function's diagnostics table**; inherited, as above.
+/// - HYT01: Connection timeout expired. Propagated from backend.
+/// - IM001: Driver does not support this function (driver-manager-handled; not returned
 ///   here).
 /// - IM017: Polling disabled; not returned here (the asynchronous notification model is
-///   not supported — not DM-annotated in the spec).
+///   not supported, and not DM-annotated in the spec).
 /// - IM018: SQLCompleteAsync not called; not returned here (the asynchronous notification
-///   model is not supported — not DM-annotated in the spec).
+///   model is not supported, and not DM-annotated in the spec).
 ///
 /// # Safety
 ///
@@ -1842,10 +1848,10 @@ pub unsafe fn sql_param_data<B: Backend>(
 
             // Spec HY010, the sentence after the `(DM)` clause and itself
             // unmarked: "The previous function call was a call to
-            // SQLParamData." An empty buffer cannot stand in for that check —
-            // `SQLPutData(ptr, 0)` sends a zero-length value and produces the
-            // same empty buffer — so two SQLParamData calls in a row used to
-            // send NULL for the parameter and move on.
+            // SQLParamData." An empty buffer cannot stand in for that check,
+            // because `SQLPutData(ptr, 0)` sends a zero-length value and
+            // produces the same empty buffer. Without the explicit state, two
+            // SQLParamData calls in a row would send NULL and move on.
             //
             // The state goes back on the statement first: an HY010 does not
             // cancel the data-at-execution sequence, and the application
@@ -1866,9 +1872,10 @@ pub unsafe fn sql_param_data<B: Backend>(
                 } else {
                     let rec = records.get(param_num)?;
                     let c_type = rec.map(|r| r.apd.c_type()).transpose()?;
-                    // An absent binding cannot reach here — `SQLParamData` only
-                    // offers a parameter that `find_data_at_exec_params` found
-                    // a data-at-execution indicator on, which requires one.
+                    // An absent binding cannot reach here, because
+                    // `SQLParamData` only offers a parameter that
+                    // `find_data_at_exec_params` found a data-at-execution
+                    // indicator on, which requires one.
                     let sql_type = rec.map_or(SqlDataType::UNKNOWN_TYPE, |r| r.ipd.sql_type());
                     let col_size = rec.map_or(0, |r| r.ipd.length);
                     let decimal_digits = rec.map_or(0, |r| r.ipd.scale);
@@ -1898,16 +1905,16 @@ pub unsafe fn sql_param_data<B: Backend>(
                 // - The spec's *ValuePtrPtr* argument description says the
                 //   driver returns "the address of the *ParameterValuePtr*
                 //   buffer specified in **SQLBindParameter** ... **as contained
-                //   in the SQL_DESC_DATA_PTR descriptor record field**" — that
-                //   field, before any offset. The offset is a separate header
-                //   field the spec is explicit is never folded into it: "The new
-                //   offset is not added to the field value plus any earlier
-                //   offsets."
+                //   in the SQL_DESC_DATA_PTR descriptor record field**", which
+                //   is that field before any offset. The offset is a separate
+                //   header field the spec is explicit is never folded into it:
+                //   "The new offset is not added to the field value plus any
+                //   earlier offsets."
                 // - Its Comments section gives the arithmetic
                 //   `Bound Address + Binding Offset + ((Row Number - 1) x
                 //   Element Size)` only for the **column** case
                 //   (`SQLBulkOperations`/`SQLSetPos`), and defines *Binding
-                //   Offset* there as `SQL_ATTR_ROW_BIND_OFFSET_PTR` — the row
+                //   Offset* there as `SQL_ATTR_ROW_BIND_OFFSET_PTR`, the row
                 //   attribute, not this one. For the parameter case the same
                 //   paragraph says only that the driver returns "the value that
                 //   the application put in the rowset buffer".
@@ -1932,17 +1939,17 @@ pub unsafe fn sql_param_data<B: Backend>(
                         std::ptr::write_unaligned(value_ptr_ptr, std::ptr::null_mut());
                     }
                 }
-                // Put the state back — more params still pending.
+                // Put the state back, since more params are still pending.
                 stmt.data_at_exec = Some(dae);
                 return Ok(SqlReturn::NEED_DATA);
             }
 
-            // All parameters collected — execute the statement.
+            // All parameters collected, so execute the statement.
             let param_count = stmt.param_count.unwrap_or(0);
             let sql = dae.sql.clone();
             // The conversions ran at the call that returned SQL_NEED_DATA, and
-            // their warnings travelled here rather than being posted there —
-            // see `DataAtExecState::warnings`. This is the call that sends the
+            // their warnings travelled here rather than being posted there
+            // (see `DataAtExecState::warnings`). This is the call that sends the
             // values, so this is the call that reports them.
             let converted_with_info = !dae.warnings.is_empty();
             for warning in &dae.warnings {
@@ -2048,7 +2055,7 @@ mod tests {
     /// The conversion tests below are about what
     /// [`read_param_value`] does with a C buffer and a declared SQL type, not
     /// about which descriptor each field ends up in. Writing them against two
-    /// structs would restate the split forty times without testing it once —
+    /// structs would restate the split many times over without testing it once,
     /// so they keep the single shape and this converts. The split itself is
     /// pinned by `a_bound_parameter_splits_across_the_apd_and_the_ipd`, which
     /// goes through the real `SQLBindParameter` and reads the two descriptors
@@ -2284,10 +2291,10 @@ mod tests {
     /// "The data must be in the C data type specified in the ValueType argument
     /// of SQLBindParameter."
     ///
-    /// A byte-wise scan stops inside the first character of any ASCII text —
-    /// "Hello" in UTF-16LE carries a zero byte at index 1 — and
+    /// A byte-wise scan stops inside the first character of any ASCII text,
+    /// because "Hello" in UTF-16LE carries a zero byte at index 1, and
     /// `dae_buffer_to_value`'s `chunks_exact(2)` then has nothing to pair, so
-    /// the parameter arrived as an empty string with no diagnostic at all.
+    /// the parameter would arrive as an empty string with no diagnostic at all.
     /// The first SQLSTATE on a statement handle, so a test can assert the state
     /// its name claims rather than only the return code. Same six-line shape as
     /// the helper in `ffi/execute.rs`.
@@ -2529,10 +2536,10 @@ mod tests {
 
     /// `SQLPutData(ptr, 0)` sends a zero-length value; `SQLPutData(_,
     /// SQL_NULL_DATA)` sends NULL. Reading an empty accumulated buffer as NULL
-    /// collapsed the two, so an empty string could not be sent at all.
+    /// would collapse the two, leaving no way to send an empty string.
     ///
     /// Two parameters, because a finalised value is only observable while the
-    /// loop is still open — the second `SQLParamData` finalises the first
+    /// loop is still open: the second `SQLParamData` finalises the first
     /// parameter and then asks for the second.
     #[test]
     fn param_data_keeps_a_zero_length_value_distinct_from_null() {
@@ -2672,9 +2679,8 @@ mod tests {
     }
 
     /// `SQL_DEFAULT_PARAM` is a value the spec's own *StrLen_or_Ind*
-    /// description lists — "is SQL_NTS, SQL_NULL_DATA, or SQL_DEFAULT_PARAM" —
-    /// so it must not be reported as a malformed length. It was `HY090` only
-    /// because the constant was unknown to core.
+    /// description lists ("is SQL_NTS, SQL_NULL_DATA, or SQL_DEFAULT_PARAM"),
+    /// so it must not be reported as a malformed length.
     ///
     /// Accepted rather than refused, following psqlODBC, whose `PGAPI_PutData`
     /// pairs it with `SQL_NULL_DATA` in both directions: `if (cbValue ==
@@ -2719,9 +2725,9 @@ mod tests {
         }
     }
 
-    /// The spec's `HY020` row names `SQL_DEFAULT_PARAM` beside `SQL_NULL_DATA`
-    /// — "in one of those calls, the StrLen_or_Ind argument contained
-    /// SQL_NULL_DATA or SQL_DEFAULT_PARAM" — so accepting the value must not
+    /// The spec's `HY020` row names `SQL_DEFAULT_PARAM` beside `SQL_NULL_DATA`:
+    /// "in one of those calls, the StrLen_or_Ind argument contained
+    /// SQL_NULL_DATA or SQL_DEFAULT_PARAM". So accepting the value must not
     /// exempt it from the concatenation rule.
     #[test]
     fn put_data_default_param_after_data_reports_hy020() {
@@ -2787,9 +2793,9 @@ mod tests {
     /// The spec's clause, read as written: "(DM) The argument DataPtr was a
     /// null pointer, and the argument StrLen_or_Ind was **not** 0,
     /// SQL_DEFAULT_PARAM, or SQL_NULL_DATA." A null pointer with a length of
-    /// zero is therefore a legal zero-length put, and core's own guard — which
+    /// zero is therefore a legal zero-length put, and core's own guard (which
     /// exists to avoid dereferencing a null pointer, not to enforce a `(DM)`
-    /// row — must not be stricter than the clause it stands in for.
+    /// row) must not be stricter than the clause it stands in for.
     #[test]
     fn put_data_accepts_a_null_pointer_with_a_zero_length() {
         unsafe {
@@ -2845,11 +2851,9 @@ mod tests {
     /// A `SQL_NTS` chunk running to `MAX_NTS_SCAN` with no terminator is
     /// `HY090`, and nothing is appended to the accumulated value.
     ///
-    /// This test used to assert the opposite — `SQL_SUCCESS` with a cap-length
-    /// chunk — on the grounds that the bound was the point
-    /// and the length was merely its consequence. The bound *is* the point and
-    /// stays; what changed is that reaching it is now reported. A capped length
-    /// silently truncated the middle of a long data-at-execution value.
+    /// The bound is the point, and reaching it is reported rather than absorbed:
+    /// answering `SQL_SUCCESS` with a cap-length chunk would silently truncate
+    /// the middle of a long data-at-execution value.
     ///
     /// The buffer is exactly the cap, so a correctly bounded scan stops on its
     /// last byte and reads nothing beyond it. One byte further and Miri reports
@@ -3069,10 +3073,10 @@ mod tests {
     /// fields are an APD record and the declared SQL type is an IPD record.
     ///
     /// Keeping both halves in a single struct is what would make
-    /// `SQLSetDescField` unimplementable — setting `SQL_DESC_DATA_PTR` on the
-    /// APD would have to reach into a record that also claims to be the IPD's —
-    /// so the split is pinned here rather than left to the descriptor accessors to
-    /// discover.
+    /// `SQLSetDescField` unimplementable, since setting `SQL_DESC_DATA_PTR` on
+    /// the APD would have to reach into a record that also claims to be the
+    /// IPD's. The split is pinned here rather than left to the descriptor
+    /// accessors to discover.
     #[test]
     fn a_bound_parameter_splits_across_the_apd_and_the_ipd() {
         unsafe {
@@ -3357,7 +3361,7 @@ mod tests {
         }
     }
 
-    /// A numeric source paired with a target this table does not list at all —
+    /// A numeric source paired with a target this table does not list at all:
     /// `SQL_GUID` is absent from every one of its six rows.
     #[test]
     fn bind_parameter_refuses_a_numeric_source_to_a_guid_with_07006() {
@@ -3438,10 +3442,9 @@ mod tests {
     /// argument *InputOutputType* was invalid."
     ///
     /// It carries `(DM)`, and is checked anyway on the same grounds as the
-    /// `07009` above it — core is linked directly by its own tests and by an
+    /// `07009` above it: core is linked directly by its own tests and by an
     /// embedder with no Driver Manager in front of it, so a value the DM would
-    /// have caught still has to be refused with something. It used to be
-    /// `HY024`, which appears nowhere on the page.
+    /// have caught still has to be refused with something.
     #[test]
     fn bind_parameter_with_an_unknown_input_output_type_returns_hy105() {
         unsafe {
@@ -3488,8 +3491,8 @@ mod tests {
 
     /// A parameter ordinal at `u16::MAX` is **accepted**, and unlike
     /// `SQLBindCol`'s equivalent that is not a deferral: this function's `07009`
-    /// row has exactly one clause — "(DM) The value specified for the argument
-    /// *ParameterNumber* was less than 1" — so there is no upper bound for the
+    /// row has exactly one clause, "(DM) The value specified for the argument
+    /// *ParameterNumber* was less than 1", so there is no upper bound for the
     /// driver to enforce. A parameter count is not known until the statement is
     /// prepared, and binding precedes that.
     #[test]
@@ -3525,7 +3528,7 @@ mod tests {
             let mut val: i32 = 0;
             let ret = sql_bind_parameter::<MockBackend>(
                 stmt,
-                0, // invalid — must be >= 1
+                0, // invalid, must be >= 1
                 1,
                 -16,
                 4,
@@ -3783,7 +3786,7 @@ mod tests {
     }
 
     /// A backend that declines to describe one parameter still gets core's
-    /// generic answer for it, rather than an error — the call is supported
+    /// generic answer for it, rather than an error. The call is supported
     /// either way, which is what `SQL_DESCRIBE_PARAMETER` = "Y" states.
     #[test]
     fn describe_param_falls_back_when_the_backend_declines() {
@@ -4005,7 +4008,7 @@ mod tests {
     ///
     /// The application binds a buffer for the *driver* to fill; it never had to
     /// put anything in it. Reading it is meaningless for `SQL_C_SLONG` and
-    /// unsound for `SQL_C_CHAR` — see the next test.
+    /// unsound for `SQL_C_CHAR` (see the next test).
     #[test]
     fn collect_params_does_not_read_an_output_only_binding() {
         let mut buf: i32 = 1234;
@@ -4058,7 +4061,7 @@ mod tests {
 
     /// Build an `SQL_C_CHAR` input binding over `text`.
     ///
-    /// `col_size` is 0 — no declared size — because these tests are about the
+    /// `col_size` is 0 (no declared size) because these tests are about the
     /// declared *type*. `crate::param_convert`'s own tests cover the declared
     /// size, and a `col_size` invented here would silently size-check them.
     fn char_binding(text: &'static [u8], sql_type: SqlDataType) -> BoundParam {
@@ -4139,16 +4142,11 @@ mod tests {
         assert_eq!(err.sqlstate().as_str(), "22018");
     }
 
-    /// **Inverted, deliberately.** This test used to assert that a binding
-    /// whose C type already fixes the value's shape is untouched, on the
-    /// premise that "the declared SQL type only decides how *text* is read".
-    /// The *C to SQL: Numeric* table is exactly the repeal of that premise: its
-    /// third row converts an integer source to a `DECIMAL` target, and the
-    /// declared type reaches the backend as the value's shape rather than being
-    /// discarded.
-    ///
-    /// Kept rather than deleted so the change of contract is visible in the
-    /// history at the point it happened.
+    /// **The declared SQL type is not confined to deciding how *text* is read.**
+    /// The *C to SQL: Numeric* table's third row converts an integer source to a
+    /// `DECIMAL` target, so a binding whose C type already fixes the value's
+    /// shape is still converted, and the declared type reaches the backend as
+    /// the value's shape rather than being discarded.
     #[test]
     fn read_param_value_converts_an_integer_to_the_declared_decimal_type() {
         let mut v: i32 = 42;
@@ -4360,7 +4358,7 @@ mod tests {
     }
 
     /// Data-at-execution delivers the same text by another route, so it gets
-    /// the same conversion — otherwise `SQLPutData` becomes a way to smuggle a
+    /// the same conversion, or `SQLPutData` becomes a way to smuggle a
     /// decimal to the backend as a string.
     #[test]
     fn dae_buffer_to_value_converts_char_to_the_declared_decimal_type() {
@@ -4392,7 +4390,7 @@ mod tests {
     /// `(DM)` marker: "The number of parameters specified in
     /// **SQLBindParameter** was less than the number of parameters in the SQL
     /// statement". Padding the gap with NULL instead runs a statement the
-    /// application never asked for — `WHERE x = ?` with nothing bound silently
+    /// application never asked for: `WHERE x = ?` with nothing bound silently
     /// becomes `WHERE x = NULL`, which matches no row and reports success.
     #[test]
     fn collect_params_rejects_a_marker_with_no_binding() {
@@ -4469,8 +4467,8 @@ mod tests {
     ///
     /// This is how every client binds a NULL: pyodbc sends
     /// `value_ptr=NULL, ind=SQL_NULL_DATA` for `None`. Reporting `07002` here
-    /// made `WHERE col = ?` with a NULL — an ordinary optional BI filter —
-    /// impossible to express, and the diagnostic blamed the application for
+    /// would make `WHERE col = ?` with a NULL (an ordinary optional BI filter)
+    /// impossible to express, with a diagnostic blaming the application for
     /// failing to bind a parameter it had bound.
     #[test]
     fn collect_params_accepts_a_null_data_pointer_with_a_null_data_indicator() {
@@ -4497,7 +4495,7 @@ mod tests {
     }
 
     /// The data-at-execution route walks the same `1..=param_count` range, so
-    /// it must agree that this is a binding — otherwise a NULL parameter is
+    /// it must agree that this is a binding, or a NULL parameter is
     /// accepted by one path and rejected by the other.
     #[test]
     fn find_data_at_exec_params_accepts_a_null_data_pointer_with_an_indicator() {
@@ -4589,17 +4587,17 @@ mod tests {
     /// The unsound case, and the reason this is a fix rather than a tidy-up.
     ///
     /// An output-only `SQL_C_CHAR` buffer with no indicator is read as a
-    /// null-terminated C string. The application never wrote a terminator —
-    /// it bound the buffer for the driver to fill — so the scan walks off the
+    /// null-terminated C string. The application never wrote a terminator,
+    /// having bound the buffer for the driver to fill, so the scan walks off the
     /// end looking for one. Here the buffer holds no zero byte at all and is
     /// followed by a guard region that also holds none, so the scan must leave
     /// the allocation to terminate.
     ///
-    /// The scan is `crate::utf16::nts_byte_len` now and is bounded at
-    /// `MAX_NTS_SCAN`, which turns the over-read into a bounded one — a megabyte
-    /// rather than however far the first stray zero is. That is a smaller hole,
-    /// not a closed one, and this test pins the thing that actually closes it:
-    /// `collect_params` never reads an output-only binding at all.
+    /// `crate::utf16::nts_byte_len` bounds the scan at `MAX_NTS_SCAN`, which
+    /// caps the over-read at a megabyte rather than at however far the first
+    /// stray zero is. That is a smaller hole, not a closed one, and this test
+    /// pins the thing that closes it: `collect_params` never reads an
+    /// output-only binding at all.
     ///
     /// Under Miri this test is the check: reading out of bounds is reported
     /// rather than merely producing a wrong string.
@@ -4726,10 +4724,10 @@ mod tests {
     ///
     /// `SQLBindParameter`'s *StrLen_or_IndPtr* takes `SQL_NTS`, `SQL_NULL_DATA`,
     /// `SQL_DEFAULT_PARAM`, `SQL_DATA_AT_EXEC` or `SQL_LEN_DATA_AT_EXEC(n)`.
-    /// Both character arms folded *every* negative into `SQL_NTS`, so
-    /// `SQL_NO_TOTAL` (-4), -5's neighbours and -42 all bound the whole
-    /// null-terminated string and answered `SUCCESS` — the application asked
-    /// for something undefined and got a value with no diagnostic.
+    /// A character arm that folded *every* negative into `SQL_NTS` would let
+    /// `SQL_NO_TOTAL` (-4), -5's neighbours and -42 all bind the whole
+    /// null-terminated string and answer `SUCCESS`, so an application asking
+    /// for something undefined would get a value with no diagnostic.
     ///
     /// `SQLPutData` already refused the same class: its doc records `HY090` for
     /// "negative and none of `SQL_NTS`, `SQL_NULL_DATA` or
@@ -4799,10 +4797,9 @@ mod tests {
     /// A bound `SQL_C_CHAR` parameter whose `SQL_NTS` buffer runs to
     /// `MAX_NTS_SCAN` is `HY090`.
     ///
-    /// This arm resolved its terminator with `CStr::from_ptr`, which is
-    /// **unbounded** — the only NTS scan in the crate that had no limit at all,
-    /// so a buffer whose terminator the application forgot was read past its own
-    /// allocation. The buffer here is exactly the cap, so the bounded scan stops
+    /// Resolving the terminator with an **unbounded** scan (`CStr::from_ptr`)
+    /// reads past the allocation whenever the application forgot the
+    /// terminator. The buffer here is exactly the cap, so the bounded scan stops
     /// on its last byte and Miri reports any over-read.
     #[test]
     fn read_param_value_refuses_a_char_nts_buffer_that_runs_to_the_scan_cap() {
@@ -4825,10 +4822,11 @@ mod tests {
         );
     }
 
-    /// The `SQL_C_WCHAR` counterpart. This arm *was* bounded, but read the scan
-    /// through `unwrap_or_default`, so an over-long value was sent to the data
-    /// source as the **empty string** with no diagnostic — worse than the
-    /// truncation, because `''` is a legal value the backend cannot question.
+    /// The `SQL_C_WCHAR` counterpart. This arm is bounded, and it must also
+    /// propagate the failure: reading the scan through `unwrap_or_default` would
+    /// send an over-long value to the data source as the **empty string** with
+    /// no diagnostic, which is worse than truncation because `''` is a legal
+    /// value the backend cannot question.
     /// Delete either `?` in `read_param_value`'s `WChar` arm and this fails.
     #[test]
     fn read_param_value_refuses_a_wchar_nts_buffer_that_runs_to_the_scan_cap() {
@@ -4875,7 +4873,7 @@ mod tests {
 
     #[test]
     fn read_param_value_wchar_nts_indicator() {
-        // Buffer: 'h', 'i', 0 (null terminator), 'X' — proves scan stops at null, not at length
+        // Buffer: 'h', 'i', 0 (null terminator), 'X': proves scan stops at null, not at length
         let s: Vec<u16> = vec!['h' as u16, 'i' as u16, 0u16, 'X' as u16];
         let mut indicator: isize = SQL_NTS as isize;
         let binding = BoundParam {
@@ -4894,7 +4892,7 @@ mod tests {
 
     #[test]
     fn read_param_value_wchar_explicit_length() {
-        // Buffer: 'a', 'b', 'c' — indicator says 4 bytes (2 code units = "ab")
+        // Buffer: 'a', 'b', 'c', with the indicator saying 4 bytes (2 code units = "ab")
         let s: Vec<u16> = vec!['a' as u16, 'b' as u16, 'c' as u16];
         let mut indicator: isize = 4; // 4 bytes = 2 u16 code units
         let binding = BoundParam {
@@ -5358,7 +5356,7 @@ mod tests {
     }
 
     /// "C to SQL: Binary"'s binary row: "Length of data > column length" is
-    /// 22001. `read_param_value_binary` above is the accepting half — four
+    /// 22001. `read_param_value_binary` above is the accepting half, with four
     /// bytes into a `col_size` of 4.
     #[test]
     fn read_param_value_binary_over_the_declared_size_is_22001() {
@@ -5379,12 +5377,9 @@ mod tests {
         assert_eq!(err.sqlstate().as_str(), "22001");
     }
 
-    /// Was `read_param_value_binary_ignores_the_declared_size_for_a_non_binary_target`,
-    /// which pinned the deferral this change closes: a non-binary target used
-    /// to skip the size check and pass raw bytes through. It now converts, so
-    /// what is worth pinning is that `ColumnSize` is not consulted for a
-    /// non-binary target — its width comes from the SQL type, not the
-    /// application's declaration.
+    /// A non-binary target converts rather than passing raw bytes through, and
+    /// `ColumnSize` is not consulted for it: its width comes from the SQL type,
+    /// not from the application's declaration.
     #[test]
     fn read_param_value_binary_takes_its_width_from_the_sql_type_not_column_size() {
         let bytes = 1_i32.to_ne_bytes();
@@ -5405,8 +5400,8 @@ mod tests {
         );
     }
 
-    /// The defect this module's new sibling exists to fix: a SQL_C_BINARY
-    /// parameter declared SQL_INTEGER used to reach the backend as raw bytes.
+    /// A `SQL_C_BINARY` parameter declared `SQL_INTEGER` reaches the backend as
+    /// an integer, not as raw bytes.
     #[test]
     fn read_param_value_binary_converts_to_the_declared_integer_type() {
         let bytes = (-123_456_i32).to_ne_bytes();
@@ -5573,10 +5568,10 @@ mod tests {
     /// stay a whole number of `isize` slots wide.
     const PARAM_BIND_OFFSET: usize = 16;
 
-    /// The value at the base of the arena — what a driver ignoring the offset
-    /// sends.
+    /// The value at the base of the arena, which is what a driver ignoring the
+    /// offset sends.
     const BASE_VALUE: i64 = -1;
-    /// The value at `PARAM_BIND_OFFSET` — what the application asked for.
+    /// The value at `PARAM_BIND_OFFSET`, which is what the application asked for.
     const OFFSET_VALUE: i64 = 4242;
 
     /// Bind parameter 1 as a `SQL_C_SBIGINT` / `SQL_BIGINT` at `data`, with
@@ -5626,8 +5621,8 @@ mod tests {
     /// handed.
     ///
     /// Read out of the statement's cancel token, which is where
-    /// [`MockRecordingBackend::execute`] puts them — see
-    /// [`MockCancelToken::executed_params`].
+    /// [`MockRecordingBackend::execute`] puts them (see
+    /// [`MockCancelToken::executed_params`]).
     ///
     /// # Safety
     ///
@@ -5657,15 +5652,14 @@ mod tests {
             .clone()
     }
 
-    /// B3: the offset moves the address a bound parameter's value is read
-    /// from.
+    /// The offset moves the address a bound parameter's value is read from.
     ///
-    /// The whole point of the attribute: an application binds `&row.field`
-    /// once and moves between parameter rows by writing a new offset, without
-    /// calling `SQLBindParameter` again. Before the fix the attribute was
-    /// stored on the APD header and never read, so every execution sent the
-    /// value at the base address and the application's second row silently
-    /// repeated its first.
+    /// That is the whole point of the attribute: an application binds
+    /// `&row.field` once and moves between parameter rows by writing a new
+    /// offset, without calling `SQLBindParameter` again. An offset stored on
+    /// the APD header but never read would send the value at the base address
+    /// every time, so the application's second row would silently repeat its
+    /// first.
     #[test]
     fn param_bind_offset_moves_the_read_address() {
         unsafe {
@@ -5706,11 +5700,11 @@ mod tests {
         }
     }
 
-    /// B3: the offset moves the indicator address too, not only the data
+    /// The offset moves the indicator address too, not only the data
     /// address.
     ///
     /// The spec names `SQL_DESC_INDICATOR_PTR` alongside `SQL_DESC_DATA_PTR`,
-    /// and an application moving between rows moves both together — its
+    /// and an application moving between rows moves both together, because its
     /// indicator lives in the same row structure. Pinned through `SQL_NULL_DATA`
     /// because that is the one indicator value whose effect is visible in what
     /// the backend receives: the base slot carries an ordinary length, so a
@@ -5748,7 +5742,7 @@ mod tests {
         }
     }
 
-    /// B3: the offset reaches the indicator `find_data_at_exec_params` reads to
+    /// The offset reaches the indicator `find_data_at_exec_params` reads to
     /// decide whether a parameter is data-at-execution.
     ///
     /// A second reader of the same APD pointers, and the one whose omission is
@@ -5825,7 +5819,7 @@ mod tests {
 
             bind_bigint_with_offset(stmt, base, indicators.as_mut_ptr(), &mut offset);
 
-            // A live offset that the *value* reads do honour — the preceding
+            // A live offset that the *value* reads do honour: the preceding
             // test pins that the SQL_DATA_AT_EXEC at the offset is what puts
             // this statement into the data-at-execution state at all. So the
             // echo below is unoffset while an offset is genuinely in force,
@@ -5870,7 +5864,7 @@ mod tests {
     /// `null + offset`.
     ///
     /// The rule `SQLFetch` already follows on the row side, and the spec states
-    /// it for the parameter side in as many words — "if none of the values in
+    /// it for the parameter side in as many words: "if none of the values in
     /// the SQL_DESC_DATA_PTR, SQL_DESC_INDICATOR_PTR, and
     /// SQL_DESC_OCTET_LENGTH_PTR fields is a null pointer, adds the
     /// dereferenced value". The offset shifts a *buffer*, and a null pointer
@@ -5916,7 +5910,7 @@ mod tests {
     /// `SQL_DESC_INDICATOR_PTR` must not become `null + offset`.
     ///
     /// A parameter bound with no indicator at all is the commonest binding
-    /// there is for a fixed-width C type — `SQLBindParameter`'s
+    /// there is for a fixed-width C type: `SQLBindParameter`'s
     /// *StrLen_or_IndPtr* may be a null pointer, and the spec then says the
     /// driver "assumes that all input parameter values are non-NULL". The data
     /// pointer must still move, so this also pins that the null rule is

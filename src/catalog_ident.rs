@@ -20,7 +20,7 @@
 //! be quoted when passed as catalog function arguments, because quote characters
 //! passed to catalog functions are interpreted literally", with a worked example
 //! in which `SQLTables` given `"\"Accounts Payable\""` looks for a table whose
-//! name *includes* the quotation marks — "which is probably not what was
+//! name *includes* the quotation marks, "which is probably not what was
 //! intended".
 //!
 //! The two implementing drivers are on the side of the second paragraph, or
@@ -30,7 +30,7 @@
 //! recognising a delimiter pair is a deviation from both of them, taken from the
 //! page's first paragraph.
 //!
-//! It is left as it stands deliberately, not by default: [`normalise_identifier`]
+//! Core keeps that reading because [`normalise_identifier`]
 //! is the only reason a `SQL_IC_UPPER` data source can be asked about a
 //! mixed-case name at all, and the fourth paragraph of the same page depends on
 //! quoting being significant ("Quoted identifiers are used to distinguish a true
@@ -42,8 +42,8 @@ use crate::types::{SQL_IC_LOWER, SQL_IC_UPPER};
 
 /// Turn an identifier-valued catalog argument into a literal pattern.
 ///
-/// Delimiters are stripped first, and a delimited identifier is **not**
-/// folded — delimiting is how an application says its case is significant.
+/// Delimiters are stripped first, and a delimited identifier is **not** folded,
+/// because delimiting is how an application says its case is significant.
 ///
 /// `quotes` comes from `EscapeDialect::identifier_quotes` and `escape` from
 /// `Backend::search_pattern_escape`, so every input is a fact the backend
@@ -80,12 +80,11 @@ pub(crate) fn normalise_identifier(
 /// # A doubled delimiter inside the identifier is not collapsed
 ///
 /// `"a""b"` yields `a""b`, not `a"b`, so a table actually named `a"b` is not
-/// found by that spelling. This was investigated rather than overlooked, and
-/// the finding is that **nothing corroborates a doubling convention here**:
+/// found by that spelling. **Nothing corroborates a doubling convention here**:
 ///
 /// - *Quoted Identifiers* defines a quoted identifier as SQL-92's delimited
-///   identifier but says nothing about escaping a delimiter inside one, and
-///   *Identifier Arguments* — the page that governs `SQL_ATTR_METADATA_ID` —
+///   identifier but says nothing about escaping a delimiter inside one.
+///   *Identifier Arguments*, the page that governs `SQL_ATTR_METADATA_ID`,
 ///   does not mention it either.
 /// - psqlODBC does not implement `SQL_ATTR_METADATA_ID` at all: it is absent
 ///   from `options.c`, whose `default` arm answers "Unknown statement option",
@@ -118,7 +117,7 @@ fn strip_delimiters(value: &str, quotes: &[(char, char)]) -> (String, bool) {
 
 /// Escape `%` and `_` so the value matches literally.
 ///
-/// The escape character is escaped too, and in the same pass — doing it as a
+/// The escape character is escaped too, and in the same pass, because a
 /// separate earlier or later step would either miss the escapes this pass
 /// inserts or double them.
 fn escape_pattern_metacharacters(value: &str, escape: &str) -> String {
@@ -143,8 +142,8 @@ fn escape_pattern_metacharacters(value: &str, escape: &str) -> String {
 /// Spec: "a list of comma-separated values for the types of interest; each
 /// value can be enclosed in single quotation marks (') or unquoted".
 ///
-/// `METADATA_ID` never applies here — the spec is explicit that `TableType`
-/// "is a value list argument, regardless of the setting of
+/// `METADATA_ID` never applies here, because the spec is explicit that
+/// `TableType` "is a value list argument, regardless of the setting of
 /// SQL_ATTR_METADATA_ID".
 pub(crate) fn parse_table_type_list(value: &str) -> Vec<String> {
     value
@@ -203,7 +202,7 @@ mod tests {
     fn pattern_metacharacters_are_escaped() {
         // Under METADATA_ID the value is an identifier, so % and _ are
         // literal. Without escaping, a table actually named "a_b" would also
-        // match "axb" — the backend still matches with LIKE.
+        // match "axb", because the backend still matches with LIKE.
         assert_eq!(
             normalise_identifier("a_b%c", SQL_IC_SENSITIVE, QUOTES, "\\"),
             "a\\_b\\%c"

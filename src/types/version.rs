@@ -38,8 +38,8 @@ pub fn format_odbc_version(major: u32, minor: u32, release: u32) -> String {
 /// - **Major**: `.parse().ok()?` propagates the parse failure, so the whole
 ///   function returns `None`.
 /// - **Minor / release**: `.and_then(|p| p.parse().ok()).unwrap_or(0)`
-///   silently substitutes `0` — indistinguishable from that component being
-///   genuinely absent. `"3.99999999999.1"` therefore parses as
+///   silently substitutes `0`, which is indistinguishable from that component
+///   being genuinely absent. `"3.99999999999.1"` therefore parses as
 ///   `Some((3, 0, 1))`, not `None` and not a truncated/wrapped value.
 ///
 /// This is intentional, not a bug: no real version string this driver ever
@@ -95,8 +95,8 @@ mod tests {
     }
 
     /// A three-digit major version does not fit the spec's two-digit major
-    /// field. Widening is the only lossless option — truncating "467" to "67"
-    /// would report a different server.
+    /// field. Widening is the only lossless option, because truncating "467" to
+    /// "67" would report a different server.
     #[test]
     fn widens_rather_than_truncates_an_oversized_major() {
         assert_eq!(format_odbc_version(467, 0, 0), "467.00.0000");

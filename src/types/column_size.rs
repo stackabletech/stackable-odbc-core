@@ -4,28 +4,27 @@
 //! and its "Column Size" sub-page:
 //! <https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/column-size>
 //!
-//! ODBC defines two genuinely different "column size" quantities, and this
-//! module deliberately gives them different names so a caller cannot use one
-//! where the other belongs — that exact confusion (using a data source's
-//! *maximum* supported precision where one column's own *declared* precision
-//! was meant, or vice versa) must not recur:
+//! ODBC defines two genuinely different "column size" quantities. They carry
+//! different names here so a caller cannot use one where the other belongs,
+//! which is the confusion of passing a data source's *maximum* supported
+//! precision where one column's own *declared* precision was meant:
 //!
-//! - [`column_size`] — the quantity `SQLColumns`, `SQLDescribeCol`, and
+//! - **[`column_size`]**, the quantity `SQLColumns`, `SQLDescribeCol` and
 //!   `SQLColAttributeW` report for one already-declared, concrete column,
 //!   computed from *that column's own* precision/scale.
-//! - [`catalog_column_size`] — the quantity `SQLGetTypeInfo` reports: per its
-//!   own spec text, "the maximum column size that the server supports for
-//!   this data type" — computed from the *data source's maximum supported*
-//!   precision/scale, which is a backend property the caller must supply.
-//!   [`MaxPrecision`]/[`MaxScale`] are newtypes specifically so this maximum
-//!   can never be passed as a plain, easily-confused `i32`/`i16`.
+//! - **[`catalog_column_size`]**, the quantity `SQLGetTypeInfo` reports. Its
+//!   own spec text calls it "the maximum column size that the server supports
+//!   for this data type", so it is computed from the *data source's maximum
+//!   supported* precision/scale, a backend property the caller must supply.
+//!   [`MaxPrecision`] and [`MaxScale`] are newtypes so that maximum can never
+//!   be passed as a plain, easily-confused `i32`/`i16`.
 //!
 //! Both public functions forward to the same private formula
-//! ([`column_size_formula`]) — the only difference between them is which
-//! quantity the caller is obligated to supply. `stackable-odbc-core` has no notion of
-//! any particular backend's actual maximum precision (e.g. a backend's
-//! fractional-seconds digits, or a DECIMAL type's maximum precision) — that
-//! is always supplied by the caller, never hardcoded here.
+//! ([`column_size_formula`]), so the only difference between them is which
+//! quantity the caller is obligated to supply. `stackable-odbc-core` has no
+//! notion of any particular backend's maximum precision (a backend's
+//! fractional-seconds digits, say, or a DECIMAL type's maximum precision).
+//! That is always supplied by the caller, never hardcoded here.
 
 use crate::types::SqlDataType;
 use odbc_sys::NO_TOTAL;
@@ -44,10 +43,10 @@ use odbc_sys::NO_TOTAL;
 /// for the pointer-width descriptor fields that carry it
 /// (`SQL_DESC_LENGTH`/`SQL_DESC_DISPLAY_SIZE` via `SQLColAttributeW`).
 /// [`resolve_precision_ulen`] translates it to `0`, which is what
-/// `SQLDescribeCol`'s `ColumnSizePtr` requires instead — see that function's
+/// `SQLDescribeCol`'s `ColumnSizePtr` requires instead; see that function's
 /// doc comment.
 ///
-/// Deliberately `u32::MAX`, not `i32::MAX`: `i32::MAX` is already an
+/// `u32::MAX`, not `i32::MAX`, because `i32::MAX` is already an
 /// established, different convention in the driver crates for "unbounded but
 /// reportable as a literal number" (an undeclared BLOB/VARCHAR's default
 /// column size). That value must keep being reported as the literal
@@ -74,7 +73,7 @@ pub fn resolve_precision_isize(precision: u32) -> isize {
 /// difference is load-bearing.** Two pieces of spec text govern column size,
 /// and which one applies depends on the destination field:
 ///
-/// - `SQLDescribeCol`'s own argument text — this function's only caller —
+/// - `SQLDescribeCol`'s own argument text, from this function's only caller,
 ///   says: "If the column size cannot be determined, the driver returns **0**."
 /// - The Column Size appendix's footnote (b) and the Display Size appendix's
 ///   footnote (a) say `SQL_NO_TOTAL`, and they govern `SQL_DESC_LENGTH` and
@@ -82,10 +81,10 @@ pub fn resolve_precision_isize(precision: u32) -> isize {
 ///   [`resolve_precision_isize`], which is correct as written.
 ///
 /// The function-specific text wins for `SQLDescribeCol`. Returning
-/// `SQL_NO_TOTAL` here instead put -4 into a `SQLULEN`, so every column whose
-/// length a backend could not determine reported a size of
-/// `18_446_744_073_709_551_612` and an application sizing a buffer from it
-/// asked for 18 exabytes.
+/// `SQL_NO_TOTAL` here would put -4 into a `SQLULEN`, so every column whose
+/// length a backend could not determine would report a size of
+/// `18_446_744_073_709_551_612`, and an application sizing a buffer from it
+/// would ask for 18 exabytes.
 pub fn resolve_precision_ulen(precision: u32) -> odbc_sys::ULen {
     if precision == PRECISION_UNDETERMINABLE {
         0
@@ -120,7 +119,7 @@ pub const fn column_size(sql_type: SqlDataType, precision: i32, scale: i16) -> i
     column_size_formula(sql_type, precision, scale)
 }
 
-/// Catalog `COLUMN_SIZE` — the quantity reported by `SQLGetTypeInfo`:
+/// Catalog `COLUMN_SIZE`, the quantity reported by `SQLGetTypeInfo`:
 /// "the maximum column size that the server supports for this data type",
 /// evaluated at the data source's maximum supported precision/scale. That
 /// maximum is a backend property and must be supplied by the caller; it is
@@ -336,11 +335,11 @@ mod tests {
     #[test]
     fn resolve_precision_ulen_reports_zero_for_the_sentinel() {
         // Spec, SQLDescribeCol ColumnSizePtr: "If the column size cannot be
-        // determined, the driver returns 0." This is deliberately NOT
-        // `SQL_NO_TOTAL`: the Column Size appendix's footnote (b) governs
+        // determined, the driver returns 0." This is NOT `SQL_NO_TOTAL`: the
+        // Column Size appendix's footnote (b) governs
         // `SQL_DESC_LENGTH`/`SQL_DESC_DISPLAY_SIZE` via SQLColAttributeW,
         // which is `resolve_precision_isize`. Writing -4 into a `SQLULEN`
-        // made an unbounded VARCHAR report a column size of 2^64-4, and an
+        // makes an unbounded VARCHAR report a column size of 2^64-4, and an
         // application sizing a buffer from it asks for 18 exabytes.
         assert_eq!(resolve_precision_ulen(PRECISION_UNDETERMINABLE), 0);
     }

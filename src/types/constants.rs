@@ -5,7 +5,7 @@
 //! values that `odbc-sys` does not expose as constants.
 //!
 //! Where `odbc-sys` *does* carry the value, derive from it rather than
-//! restating the literal — `SQL_DATETIME` and the `InfoType`-backed constants
+//! restating the literal. `SQL_DATETIME` and the `InfoType`-backed constants
 //! below are written that way. A restated literal is a second place for the
 //! value to be wrong, and a value that only one of the two places corrects is
 //! how a spec-compliance fix silently fails to take effect.
@@ -15,9 +15,9 @@ use odbc_sys::{AttrOdbcVersion, InfoType, SqlDataType};
 /// `SQL_ATTR_ODBC_VERSION` value `SQL_OV_ODBC2`: the application declares ODBC
 /// 2.x behaviour.
 ///
-/// Written out rather than derived, because `odbc-sys` deliberately has no
-/// variant for it — its `attributes.rs` carries `// Not supported by this crate`
-/// above a commented-out `SQL_OV_ODBC2 = 2`. The value is in `sqlext.h` and in
+/// Written out rather than derived, because `odbc-sys` has no variant for it:
+/// its `attributes.rs` carries `// Not supported by this crate` above a
+/// commented-out `SQL_OV_ODBC2 = 2`. The value is in `sqlext.h` and in
 /// `SQLSetEnvAttr`'s own attribute table.
 pub const SQL_OV_ODBC2: i32 = 2;
 
@@ -28,12 +28,12 @@ pub const SQL_OV_ODBC3: i32 = AttrOdbcVersion::Odbc3 as i32;
 /// `SQL_ATTR_ODBC_VERSION` value `SQL_OV_ODBC3_80`. Derived from `odbc-sys`.
 pub const SQL_OV_ODBC3_80: i32 = AttrOdbcVersion::Odbc3_80 as i32;
 
-/// SQL_ATTR_AUTOCOMMIT: manual-commit mode — the application commits or rolls
-/// back explicitly with `SQLEndTran`.
+/// SQL_ATTR_AUTOCOMMIT: manual-commit mode, where the application commits or
+/// rolls back explicitly with `SQLEndTran`.
 pub const SQL_AUTOCOMMIT_OFF: usize = 0;
 
-/// SQL_ATTR_AUTOCOMMIT: autocommit mode (the ODBC default) — each statement is
-/// committed as it completes.
+/// SQL_ATTR_AUTOCOMMIT: autocommit mode (the ODBC default), where each
+/// statement is committed as it completes.
 pub const SQL_AUTOCOMMIT_ON: usize = 1;
 /// Sentinel string length meaning "null-terminated string" (SQL_NTS).
 pub const SQL_NTS: i32 = -3;
@@ -54,37 +54,37 @@ pub const SQL_NULL_DATA: isize = -1;
 /// but the Windows DM passes it through directly, so drivers must handle it explicitly.
 pub const SQL_DROP: u16 = 1;
 
-/// `SQL_GD_ANY_COLUMN` — `SQLGetData` can retrieve any column, not just unbound ones after bound ones.
+/// `SQL_GD_ANY_COLUMN`: `SQLGetData` can retrieve any column, not just unbound ones after bound ones.
 pub const SQL_GD_ANY_COLUMN: u32 = 0x0001;
-/// `SQL_GD_ANY_ORDER` — `SQLGetData` can be called for columns in any order.
+/// `SQL_GD_ANY_ORDER`: `SQLGetData` can be called for columns in any order.
 pub const SQL_GD_ANY_ORDER: u32 = 0x0002;
-/// `SQL_GD_BLOCK` — `SQLGetData` can be called for a row in a block cursor after a bulk fetch.
+/// `SQL_GD_BLOCK`: `SQLGetData` can be called for a row in a block cursor after a bulk fetch.
 pub const SQL_GD_BLOCK: u32 = 0x0004;
-/// `SQL_GD_BOUND` — `SQLGetData` can be called for bound columns in addition to unbound ones.
+/// `SQL_GD_BOUND`: `SQLGetData` can be called for bound columns in addition to unbound ones.
 pub const SQL_GD_BOUND: u32 = 0x0008;
 
-/// `SQL_TC_NONE` — transactions are not supported.
+/// `SQL_TC_NONE`: transactions are not supported.
 pub const SQL_TC_NONE: u32 = 0;
-/// `SQL_TC_DML` — transactions are supported for DML statements (`SELECT`, `INSERT`, `UPDATE`, `DELETE`) only.
+/// `SQL_TC_DML`: transactions are supported for DML statements (`SELECT`, `INSERT`, `UPDATE`, `DELETE`) only.
 pub const SQL_TC_DML: u32 = 1;
-/// `SQL_TC_ALL` — transactions are supported for all statements including DDL.
+/// `SQL_TC_ALL`: transactions are supported for all statements including DDL.
 pub const SQL_TC_ALL: u32 = 2;
-/// `SQL_TC_DDL_COMMIT` — transactions supported; DDL statements cause a commit.
+/// `SQL_TC_DDL_COMMIT`: transactions supported; DDL statements cause a commit.
 pub const SQL_TC_DDL_COMMIT: u32 = 3;
-/// `SQL_TC_DDL_IGNORE` — transactions supported; DDL statements are ignored within transactions.
+/// `SQL_TC_DDL_IGNORE`: transactions supported; DDL statements are ignored within transactions.
 pub const SQL_TC_DDL_IGNORE: u32 = 4;
 
-/// `SQL_DATETIME` — the *verbose* type of every datetime SQL type, which is
+/// `SQL_DATETIME`: the *verbose* type of every datetime SQL type, which is
 /// what `SQL_DESC_TYPE` reports where `SQL_DESC_CONCISE_TYPE` reports
 /// `SQL_TYPE_DATE` / `SQL_TYPE_TIME` / `SQL_TYPE_TIMESTAMP`.
 ///
 /// Derived from `odbc-sys` rather than restated, per the module doc.
 pub const SQL_DATETIME: i16 = SqlDataType::DATETIME.0;
-/// `SQL_INTERVAL` — the *verbose* type of every interval SQL type, the
+/// `SQL_INTERVAL`: the *verbose* type of every interval SQL type, the
 /// counterpart of [`SQL_DATETIME`] for the `SQL_INTERVAL_*` concise types.
 ///
 /// Stated as a literal because `odbc-sys` has no `SqlDataType::INTERVAL`, and
-/// no concise interval codes either — the `SQL_INTERVAL_*` constants below are
+/// no concise interval codes either. The `SQL_INTERVAL_*` constants below are
 /// core's own for the same reason. This is the asymmetry the module doc's
 /// rule permits: derive where `odbc-sys` carries the value, state it where it
 /// does not.
@@ -95,7 +95,7 @@ pub const SQL_INTERVAL: i16 = 10;
 // `odbc-sys` provides the C-side codes as `CDataType::Interval*` and the
 // `SQL_IS_*` subcodes as `odbc_sys::Interval`, but no `SqlDataType` constants
 // for the concise SQL types. Each is `100 + SQL_CODE_*`, which is why these
-// values are `odbc_sys::Interval`'s discriminants offset by 100 —
+// values are `odbc_sys::Interval`'s discriminants offset by 100, and
 // `single_field_interval_code` converts between them by subtracting it.
 //
 // Note that the concise *C* types share these numbers: `SQL_C_INTERVAL_YEAR`
@@ -134,156 +134,156 @@ pub const SQL_INTERVAL_MINUTE_TO_SECOND: SqlDataType = SqlDataType(113);
 /// A general fact about the type family rather than any one table's rule, which
 /// is why it lives here: the *C to SQL: Numeric* conversion's interval row and
 /// the descriptor consistency check's fifth clause both ask it. Its sibling
-/// predicate — whether an interval's precision is a *single field* — stays with
+/// predicate, whether an interval's precision is a *single field*, stays with
 /// that conversion, because it is that table's footnote rather than a fact
 /// about the types.
 pub fn is_interval_sql_type(t: SqlDataType) -> bool {
     (SQL_INTERVAL_YEAR.0..=SQL_INTERVAL_MINUTE_TO_SECOND.0).contains(&t.0)
 }
 
-/// `SQL_PARC_BATCH` — each parameter set in an array produces its own row count.
+/// `SQL_PARC_BATCH`: each parameter set in an array produces its own row count.
 pub const SQL_PARC_BATCH: u32 = 1;
-/// `SQL_PARC_NO_BATCH` — one row count covers the whole parameter array.
+/// `SQL_PARC_NO_BATCH`: one row count covers the whole parameter array.
 pub const SQL_PARC_NO_BATCH: u32 = 2;
 
-/// `SQL_PAS_BATCH` — each parameter set in an array produces its own result set.
+/// `SQL_PAS_BATCH`: each parameter set in an array produces its own result set.
 pub const SQL_PAS_BATCH: u32 = 1;
-/// `SQL_PAS_NO_BATCH` — one result set covers the whole parameter array.
+/// `SQL_PAS_NO_BATCH`: one result set covers the whole parameter array.
 pub const SQL_PAS_NO_BATCH: u32 = 2;
-/// `SQL_PAS_NO_SELECT` — a result-set-generating statement cannot be executed
+/// `SQL_PAS_NO_SELECT`: a result-set-generating statement cannot be executed
 /// with an array of parameters.
 pub const SQL_PAS_NO_SELECT: u32 = 3;
 
-/// `SQL_ASYNC_NOTIFICATION_NOT_CAPABLE` — the driver does not support
+/// `SQL_ASYNC_NOTIFICATION_NOT_CAPABLE`: the driver does not support
 /// asynchronous execution notification.
 pub const SQL_ASYNC_NOTIFICATION_NOT_CAPABLE: u32 = 0x0000_0000;
-/// `SQL_ASYNC_NOTIFICATION_CAPABLE` — the driver supports asynchronous
+/// `SQL_ASYNC_NOTIFICATION_CAPABLE`: the driver supports asynchronous
 /// execution notification.
 pub const SQL_ASYNC_NOTIFICATION_CAPABLE: u32 = 0x0000_0001;
 
-/// `SQL_ASYNC_DBC_NOT_CAPABLE` — the driver cannot execute connection
+/// `SQL_ASYNC_DBC_NOT_CAPABLE`: the driver cannot execute connection
 /// functions asynchronously (`SQL_ASYNC_DBC_FUNCTIONS`).
 pub const SQL_ASYNC_DBC_NOT_CAPABLE: u32 = 0x0000_0000;
-/// `SQL_ASYNC_DBC_CAPABLE` — the driver can execute connection functions
+/// `SQL_ASYNC_DBC_CAPABLE`: the driver can execute connection functions
 /// asynchronously.
 pub const SQL_ASYNC_DBC_CAPABLE: u32 = 0x0000_0001;
 
-/// `SQL_PRED_NONE` / `SQL_UNSEARCHABLE` — column is not usable in a `WHERE` clause.
+/// `SQL_PRED_NONE` / `SQL_UNSEARCHABLE`: column is not usable in a `WHERE` clause.
 /// Used in the `SEARCHABLE` column of `SQLGetTypeInfo` and `SQLColAttribute`.
 pub const SQL_PRED_NONE: i16 = 0;
-/// `SQL_PRED_CHAR` / `SQL_LIKE_ONLY` — column is usable in a `WHERE` clause only with the `LIKE` predicate.
+/// `SQL_PRED_CHAR` / `SQL_LIKE_ONLY`: column is usable in a `WHERE` clause only with the `LIKE` predicate.
 pub const SQL_PRED_CHAR: i16 = 1;
-/// `SQL_PRED_BASIC` / `SQL_ALL_EXCEPT_LIKE` — column is usable in a `WHERE` clause with all comparison
+/// `SQL_PRED_BASIC` / `SQL_ALL_EXCEPT_LIKE`: column is usable in a `WHERE` clause with all comparison
 /// operators except `LIKE`.
 pub const SQL_PRED_BASIC: i16 = 2;
-/// `SQL_SEARCHABLE` / `SQL_PRED_SEARCHABLE` — column is usable in a `WHERE` clause with any predicate.
+/// `SQL_SEARCHABLE` / `SQL_PRED_SEARCHABLE`: column is usable in a `WHERE` clause with any predicate.
 pub const SQL_SEARCHABLE: i16 = 3;
 
-/// `SQL_CODE_DATE` — `SQL_DATETIME_SUB` subtype for `SQL_TYPE_DATE` (91).
+/// `SQL_CODE_DATE`: `SQL_DATETIME_SUB` subtype for `SQL_TYPE_DATE` (91).
 pub const SQL_CODE_DATE: i16 = 1;
-/// `SQL_CODE_TIME` — `SQL_DATETIME_SUB` subtype for `SQL_TYPE_TIME` (92).
+/// `SQL_CODE_TIME`: `SQL_DATETIME_SUB` subtype for `SQL_TYPE_TIME` (92).
 pub const SQL_CODE_TIME: i16 = 2;
-/// `SQL_CODE_TIMESTAMP` — `SQL_DATETIME_SUB` subtype for `SQL_TYPE_TIMESTAMP` (93).
+/// `SQL_CODE_TIMESTAMP`: `SQL_DATETIME_SUB` subtype for `SQL_TYPE_TIMESTAMP` (93).
 pub const SQL_CODE_TIMESTAMP: i16 = 3;
 
-/// `SQL_DESC_ALLOC_AUTO` — the `SQL_DESC_ALLOC_TYPE` of a descriptor the driver
+/// `SQL_DESC_ALLOC_AUTO`: the `SQL_DESC_ALLOC_TYPE` of a descriptor the driver
 /// allocated automatically with its statement.
 ///
 /// The value for all four of a statement's own descriptors.
 pub const SQL_DESC_ALLOC_AUTO: isize = 1;
 
-/// `SQL_DESC_ALLOC_USER` — the `SQL_DESC_ALLOC_TYPE` of a descriptor the
+/// `SQL_DESC_ALLOC_USER`: the `SQL_DESC_ALLOC_TYPE` of a descriptor the
 /// application allocated with `SQLAllocHandle(SQL_HANDLE_DESC)`.
 ///
 /// Read-only on every role, and the one field `SQLCopyDesc` never copies: the
 /// answer belongs to the allocation rather than to its contents.
 pub const SQL_DESC_ALLOC_USER: isize = 2;
 
-/// `SQL_CASCADE` — referential action: propagate the change to dependent rows.
+/// `SQL_CASCADE`: referential action: propagate the change to dependent rows.
 /// Used in `UPDATE_RULE` / `DELETE_RULE` columns of `SQLForeignKeys`.
 pub const SQL_CASCADE: i16 = 0;
-/// `SQL_RESTRICT` — referential action: reject the change if dependent rows exist.
+/// `SQL_RESTRICT`: referential action: reject the change if dependent rows exist.
 pub const SQL_RESTRICT: i16 = 1;
-/// `SQL_SET_NULL` — referential action: set dependent foreign key columns to `NULL`.
+/// `SQL_SET_NULL`: referential action: set dependent foreign key columns to `NULL`.
 pub const SQL_SET_NULL: i16 = 2;
-/// `SQL_NO_ACTION` — referential action: no action (error raised by DBMS if dependents exist).
+/// `SQL_NO_ACTION`: referential action: no action (error raised by DBMS if dependents exist).
 pub const SQL_NO_ACTION: i16 = 3;
-/// `SQL_SET_DEFAULT` — referential action: set dependent foreign key columns to their default value.
+/// `SQL_SET_DEFAULT`: referential action: set dependent foreign key columns to their default value.
 pub const SQL_SET_DEFAULT: i16 = 4;
 
-/// `SQL_NOT_DEFERRABLE` — constraint deferrability: the constraint is not deferrable.
+/// `SQL_NOT_DEFERRABLE`: constraint deferrability: the constraint is not deferrable.
 /// Used in the `DEFERRABILITY` column of `SQLForeignKeys`.
 pub const SQL_NOT_DEFERRABLE: i16 = 7;
 
-/// `SQL_ATTR_READONLY` — column is not updateable (`SQL_DESC_UPDATABLE`).
+/// `SQL_ATTR_READONLY`: column is not updateable (`SQL_DESC_UPDATABLE`).
 pub const SQL_ATTR_READONLY: i16 = 0;
-/// `SQL_ATTR_WRITE` — column is updateable (`SQL_DESC_UPDATABLE`).
+/// `SQL_ATTR_WRITE`: column is updateable (`SQL_DESC_UPDATABLE`).
 pub const SQL_ATTR_WRITE: i16 = 1;
-/// `SQL_ATTR_READWRITE_UNKNOWN` — it is unknown whether the column is updateable (`SQL_DESC_UPDATABLE`).
+/// `SQL_ATTR_READWRITE_UNKNOWN`: it is unknown whether the column is updateable (`SQL_DESC_UPDATABLE`).
 pub const SQL_ATTR_READWRITE_UNKNOWN: i16 = 2;
 
-/// `SQL_GB_NOT_SUPPORTED` — `GROUP BY` is not supported.
+/// `SQL_GB_NOT_SUPPORTED`: `GROUP BY` is not supported.
 pub const SQL_GB_NOT_SUPPORTED: u16 = 0;
-/// `SQL_GB_GROUP_BY_EQUALS_SELECT` — all non-aggregated `SELECT` columns must appear in `GROUP BY`.
+/// `SQL_GB_GROUP_BY_EQUALS_SELECT`: all non-aggregated `SELECT` columns must appear in `GROUP BY`.
 pub const SQL_GB_GROUP_BY_EQUALS_SELECT: u16 = 1;
-/// `SQL_GB_GROUP_BY_CONTAINS_SELECT` — `GROUP BY` must contain all non-aggregated `SELECT` columns but may include additional ones.
+/// `SQL_GB_GROUP_BY_CONTAINS_SELECT`: `GROUP BY` must contain all non-aggregated `SELECT` columns but may include additional ones.
 pub const SQL_GB_GROUP_BY_CONTAINS_SELECT: u16 = 2;
-/// `SQL_GB_NO_RELATION` — `GROUP BY` and `SELECT` are independent; extra or missing columns are allowed in either.
+/// `SQL_GB_NO_RELATION`: `GROUP BY` and `SELECT` are independent; extra or missing columns are allowed in either.
 pub const SQL_GB_NO_RELATION: u16 = 3;
-/// `SQL_GB_COLLATE` — a `COLLATE` clause may be specified at the end of each
+/// `SQL_GB_COLLATE`: a `COLLATE` clause may be specified at the end of each
 /// grouping column. Returned by a SQL-92 Full level-conformant driver.
 pub const SQL_GB_COLLATE: u16 = 4;
 
 // --- SQL_CONCAT_NULL_BEHAVIOR (22) values ---
 
-/// `SQL_CB_NULL` — concatenating a NULL character column with a non-NULL one
+/// `SQL_CB_NULL`: concatenating a NULL character column with a non-NULL one
 /// yields NULL. Returned by a SQL-92 Entry level-conformant driver.
 pub const SQL_CB_NULL: u16 = 0x0000;
-/// `SQL_CB_NON_NULL` — the result is the concatenation of the non-NULL
+/// `SQL_CB_NON_NULL`: the result is the concatenation of the non-NULL
 /// column or columns.
 pub const SQL_CB_NON_NULL: u16 = 0x0001;
 
 // --- SQL_CORRELATION_NAME (74) values ---
 
-/// `SQL_CN_NONE` — table correlation names are not supported.
+/// `SQL_CN_NONE`: table correlation names are not supported.
 pub const SQL_CN_NONE: u16 = 0x0000;
-/// `SQL_CN_DIFFERENT` — correlation names are supported but must differ from
+/// `SQL_CN_DIFFERENT`: correlation names are supported but must differ from
 /// the names of the tables they represent.
 pub const SQL_CN_DIFFERENT: u16 = 0x0001;
-/// `SQL_CN_ANY` — correlation names are supported and may be any valid
+/// `SQL_CN_ANY`: correlation names are supported and may be any valid
 /// user-defined name. Returned by a SQL-92 Entry level-conformant driver.
 pub const SQL_CN_ANY: u16 = 0x0002;
 
 // --- SQL_NON_NULLABLE_COLUMNS (75) values ---
 
-/// `SQL_NNC_NULL` — all columns must be nullable; the data source does not
+/// `SQL_NNC_NULL`: all columns must be nullable; the data source does not
 /// support the `NOT NULL` column constraint.
 pub const SQL_NNC_NULL: u16 = 0x0000;
-/// `SQL_NNC_NON_NULL` — the data source supports the `NOT NULL` column
+/// `SQL_NNC_NON_NULL`: the data source supports the `NOT NULL` column
 /// constraint in `CREATE TABLE`. Returned by a SQL-92 Entry level-conformant
 /// driver.
 pub const SQL_NNC_NON_NULL: u16 = 0x0001;
 
-/// `SQL_IC_UPPER` — identifiers are case-insensitive and stored in upper case.
+/// `SQL_IC_UPPER`: identifiers are case-insensitive and stored in upper case.
 pub const SQL_IC_UPPER: u16 = 1;
-/// `SQL_IC_LOWER` — identifiers are case-insensitive and stored in lower case.
+/// `SQL_IC_LOWER`: identifiers are case-insensitive and stored in lower case.
 pub const SQL_IC_LOWER: u16 = 2;
-/// `SQL_IC_SENSITIVE` — identifiers are case-sensitive and stored in mixed case.
+/// `SQL_IC_SENSITIVE`: identifiers are case-sensitive and stored in mixed case.
 pub const SQL_IC_SENSITIVE: u16 = 3;
-/// `SQL_IC_MIXED` — identifiers are case-insensitive and stored in mixed case.
+/// `SQL_IC_MIXED`: identifiers are case-insensitive and stored in mixed case.
 pub const SQL_IC_MIXED: u16 = 4;
 // SQL_NULL_COLLATION (85) values. HIGH/LOW are defined in sql.h, START/END in
 // sqlext.h; all four are values of the same info type. HIGH and LOW depend on
 // the ASC/DESC keywords, START and END override them.
 
-/// `SQL_NC_HIGH` — NULL values sort at the high end of the result set (last in ASC order).
+/// `SQL_NC_HIGH`: NULL values sort at the high end of the result set (last in ASC order).
 pub const SQL_NC_HIGH: u16 = 0;
-/// `SQL_NC_LOW` — NULL values sort at the low end of the result set (first in ASC order).
+/// `SQL_NC_LOW`: NULL values sort at the low end of the result set (first in ASC order).
 pub const SQL_NC_LOW: u16 = 1;
-/// `SQL_NC_START` — NULL values sort at the start of the result set, regardless
+/// `SQL_NC_START`: NULL values sort at the start of the result set, regardless
 /// of the `ASC` / `DESC` keywords.
 pub const SQL_NC_START: u16 = 0x0002;
-/// `SQL_NC_END` — NULL values sort at the end of the result set, regardless of
+/// `SQL_NC_END`: NULL values sort at the end of the result set, regardless of
 /// the `ASC` / `DESC` keywords.
 pub const SQL_NC_END: u16 = 0x0004;
 
@@ -292,49 +292,49 @@ pub const SQL_NC_END: u16 = 0x0004;
 /// processed. Absent from `odbc-sys`, and public here because a driver
 /// asserting what its own executions wrote needs to name them.
 ///
-/// `SQL_PARAM_SUCCESS` — the set was processed without a diagnostic.
+/// `SQL_PARAM_SUCCESS`: the set was processed without a diagnostic.
 pub const SQL_PARAM_SUCCESS: u16 = 0;
-/// `SQL_PARAM_DIAG_UNAVAILABLE` — the set produced a diagnostic the driver
+/// `SQL_PARAM_DIAG_UNAVAILABLE`: the set produced a diagnostic the driver
 /// cannot attribute to it individually.
 pub const SQL_PARAM_DIAG_UNAVAILABLE: u16 = 1;
-/// `SQL_PARAM_ERROR` — the set's execution failed.
+/// `SQL_PARAM_ERROR`: the set's execution failed.
 pub const SQL_PARAM_ERROR: u16 = 5;
-/// `SQL_PARAM_SUCCESS_WITH_INFO` — processed, with a diagnostic raised for it.
+/// `SQL_PARAM_SUCCESS_WITH_INFO`: processed, with a diagnostic raised for it.
 pub const SQL_PARAM_SUCCESS_WITH_INFO: u16 = 6;
-/// `SQL_PARAM_UNUSED` — not processed, because an earlier set's failure ended
+/// `SQL_PARAM_UNUSED`: not processed, because an earlier set's failure ended
 /// the execution.
 pub const SQL_PARAM_UNUSED: u16 = 7;
 
-/// `SQL_UNSPECIFIED` — it is unspecified whether cursors make visible the
+/// `SQL_UNSPECIFIED`: it is unspecified whether cursors make visible the
 /// changes another cursor made to a result set; they "may make visible none,
 /// some, or all such changes". The spec's default for the
 /// `SQL_ATTR_CURSOR_SENSITIVITY` statement attribute, and what a SQL-92
 /// Entry-level-conformant driver reports for the `SQL_CURSOR_SENSITIVITY`
 /// info type.
 pub const SQL_UNSPECIFIED: u16 = 0;
-/// `SQL_INSENSITIVE` — cursors are insensitive to changes made by any other transaction or cursor.
+/// `SQL_INSENSITIVE`: cursors are insensitive to changes made by any other transaction or cursor.
 pub const SQL_INSENSITIVE: u16 = 1;
-/// `SQL_SENSITIVE` — cursors reflect changes made by other transactions or other cursors.
+/// `SQL_SENSITIVE`: cursors reflect changes made by other transactions or other cursors.
 pub const SQL_SENSITIVE: u16 = 2;
 
-/// `SQL_TXN_READ_UNCOMMITTED` — dirty reads, non-repeatable reads, and phantoms are possible.
+/// `SQL_TXN_READ_UNCOMMITTED`: dirty reads, non-repeatable reads, and phantoms are possible.
 pub const SQL_TXN_READ_UNCOMMITTED: u32 = 0x0000_0001;
-/// `SQL_TXN_READ_COMMITTED` — dirty reads are not possible; non-repeatable reads and phantoms are possible.
+/// `SQL_TXN_READ_COMMITTED`: dirty reads are not possible; non-repeatable reads and phantoms are possible.
 pub const SQL_TXN_READ_COMMITTED: u32 = 0x0000_0002;
-/// `SQL_TXN_REPEATABLE_READ` — dirty reads and non-repeatable reads are not possible; phantoms are possible.
+/// `SQL_TXN_REPEATABLE_READ`: dirty reads and non-repeatable reads are not possible; phantoms are possible.
 pub const SQL_TXN_REPEATABLE_READ: u32 = 0x0000_0004;
-/// `SQL_TXN_SERIALIZABLE` — transactions are serializable; dirty reads, non-repeatable reads, and phantoms are not possible.
+/// `SQL_TXN_SERIALIZABLE`: transactions are serializable; dirty reads, non-repeatable reads, and phantoms are not possible.
 pub const SQL_TXN_SERIALIZABLE: u32 = 0x0000_0008;
 
-/// `SQL_SO_FORWARD_ONLY` — only forward-scrolling cursors are supported.
+/// `SQL_SO_FORWARD_ONLY`: only forward-scrolling cursors are supported.
 pub const SQL_SO_FORWARD_ONLY: u32 = 0x0000_0001;
 
-/// `SQL_FN_CVT_CONVERT` — the `CONVERT` scalar function is supported.
+/// `SQL_FN_CVT_CONVERT`: the `CONVERT` scalar function is supported.
 pub const SQL_FN_CVT_CONVERT: u32 = 0x0000_0001;
-/// `SQL_FN_CVT_CAST` — the `CAST` expression is supported.
+/// `SQL_FN_CVT_CAST`: the `CAST` expression is supported.
 pub const SQL_FN_CVT_CAST: u32 = 0x0000_0002;
 
-/// `SQL_CONVERT_BIGINT` — the first `SQL_CONVERT_*` info type in the
+/// `SQL_CONVERT_BIGINT`: the first `SQL_CONVERT_*` info type in the
 /// contiguous per-source-type conversion-support block (`sqlext.h`: 53
 /// through 71, `SQL_CONVERT_BIGINT` .. `SQL_CONVERT_LONGVARBINARY`). Each
 /// info type in this block is a bitmask of which *other* SQL types a source
@@ -347,7 +347,7 @@ pub const SQL_FN_CVT_CAST: u32 = 0x0000_0002;
 /// all and must be matched as raw `u16` values via
 /// [`crate::backend::Backend::get_info_raw`].
 ///
-/// This is deliberately distinct from `SQL_CONVERT_FUNCTIONS` (48,
+/// This is distinct from `SQL_CONVERT_FUNCTIONS` (48,
 /// `InfoType::ConvertFunctions`, a bitmask of `SQL_FN_CVT_*`) and from
 /// `SQL_NUMERIC_FUNCTIONS`/`SQL_STRING_FUNCTIONS`/`SQL_SYSTEM_FUNCTIONS`/
 /// `SQL_TIMEDATE_FUNCTIONS` (49-52, scalar-function bitmasks unrelated to
@@ -356,18 +356,18 @@ pub const SQL_FN_CVT_CAST: u32 = 0x0000_0002;
 /// individually, not as one homogeneous "all conversions supported" 48-73
 /// block.
 pub const SQL_CONVERT_FUNCTIONS_FIRST: u16 = 53;
-/// `SQL_CONVERT_LONGVARBINARY` — the last info type in the contiguous
+/// `SQL_CONVERT_LONGVARBINARY`: the last info type in the contiguous
 /// per-source-type conversion-support block. See
 /// [`SQL_CONVERT_FUNCTIONS_FIRST`] for the full explanation.
 pub const SQL_CONVERT_FUNCTIONS_LAST: u16 = 71;
-/// `SQL_CONVERT_GUID` (173) — a genuine per-source-type conversion-support
+/// `SQL_CONVERT_GUID` (173): a genuine per-source-type conversion-support
 /// info type (see [`SQL_CONVERT_FUNCTIONS_FIRST`]), but numbered outside the
 /// contiguous 53-71 block (`sqlext.h` places it far later, alongside
 /// `SQL_ODBC_SQL_OPT_IEF`/`SQL_INTEGRITY`'s renumbering history) rather than
 /// immediately after `SQL_CONVERT_LONGVARBINARY`.
 pub const SQL_CONVERT_GUID: u16 = 173;
 
-/// `SQL_CONVERT_WCHAR` — the first info type in a *second* contiguous
+/// `SQL_CONVERT_WCHAR`: the first info type in a *second* contiguous
 /// per-source-type conversion-support block (`sqlext.h`: 122 through 126,
 /// `SQL_CONVERT_WCHAR` .. `SQL_CONVERT_WVARCHAR`). Same shape and meaning as
 /// [`SQL_CONVERT_FUNCTIONS_FIRST`]'s block (a bitmask of which *other* SQL
@@ -384,17 +384,17 @@ pub const SQL_CONVERT_GUID: u16 = 173;
 /// Driver Manager blocks `SQLGetData` with `HYC00` (`AGENTS.md`'s Windows
 /// Driver Manager compatibility checklist).
 pub const SQL_CONVERT_WCHAR: u16 = 122;
-/// `SQL_CONVERT_WVARCHAR` — the last info type in the 122-126 block. See
+/// `SQL_CONVERT_WVARCHAR`: the last info type in the 122-126 block. See
 /// [`SQL_CONVERT_WCHAR`] for the full explanation.
 pub const SQL_CONVERT_WVARCHAR: u16 = 126;
 
-/// `SQL_SC_SQL92_ENTRY` — entry level SQL-92 conformance.
+/// `SQL_SC_SQL92_ENTRY`: entry level SQL-92 conformance.
 pub const SQL_SC_SQL92_ENTRY: u32 = 0x0000_0001;
-/// `SQL_SC_FIPS127_2_TRANSITIONAL` — FIPS 127-2 transitional level conformance.
+/// `SQL_SC_FIPS127_2_TRANSITIONAL`: FIPS 127-2 transitional level conformance.
 pub const SQL_SC_FIPS127_2_TRANSITIONAL: u32 = 0x0000_0002;
-/// `SQL_SC_SQL92_INTERMEDIATE` — intermediate level SQL-92 conformance.
+/// `SQL_SC_SQL92_INTERMEDIATE`: intermediate level SQL-92 conformance.
 pub const SQL_SC_SQL92_INTERMEDIATE: u32 = 0x0000_0004;
-/// `SQL_SC_SQL92_FULL` — full level SQL-92 conformance.
+/// `SQL_SC_SQL92_FULL`: full level SQL-92 conformance.
 pub const SQL_SC_SQL92_FULL: u32 = 0x0000_0008;
 
 // --- SQL_TIMEDATE_ADD_INTERVALS (109) / SQL_TIMEDATE_DIFF_INTERVALS (110) ---
@@ -403,45 +403,45 @@ pub const SQL_SC_SQL92_FULL: u32 = 0x0000_0008;
 // `SQL_FN_TD_TIMESTAMPDIFF` in `SQL_TIMEDATE_FUNCTIONS` must also name the
 // units here; see `Backend::timedate_add_intervals`.
 
-/// `SQL_FN_TSI_FRAC_SECOND` — the `SQL_TSI_FRAC_SECOND` interval is supported.
+/// `SQL_FN_TSI_FRAC_SECOND`: the `SQL_TSI_FRAC_SECOND` interval is supported.
 pub const SQL_FN_TSI_FRAC_SECOND: u32 = 0x0000_0001;
-/// `SQL_FN_TSI_SECOND` — the `SQL_TSI_SECOND` interval is supported.
+/// `SQL_FN_TSI_SECOND`: the `SQL_TSI_SECOND` interval is supported.
 pub const SQL_FN_TSI_SECOND: u32 = 0x0000_0002;
-/// `SQL_FN_TSI_MINUTE` — the `SQL_TSI_MINUTE` interval is supported.
+/// `SQL_FN_TSI_MINUTE`: the `SQL_TSI_MINUTE` interval is supported.
 pub const SQL_FN_TSI_MINUTE: u32 = 0x0000_0004;
-/// `SQL_FN_TSI_HOUR` — the `SQL_TSI_HOUR` interval is supported.
+/// `SQL_FN_TSI_HOUR`: the `SQL_TSI_HOUR` interval is supported.
 pub const SQL_FN_TSI_HOUR: u32 = 0x0000_0008;
-/// `SQL_FN_TSI_DAY` — the `SQL_TSI_DAY` interval is supported.
+/// `SQL_FN_TSI_DAY`: the `SQL_TSI_DAY` interval is supported.
 pub const SQL_FN_TSI_DAY: u32 = 0x0000_0010;
-/// `SQL_FN_TSI_WEEK` — the `SQL_TSI_WEEK` interval is supported.
+/// `SQL_FN_TSI_WEEK`: the `SQL_TSI_WEEK` interval is supported.
 pub const SQL_FN_TSI_WEEK: u32 = 0x0000_0020;
-/// `SQL_FN_TSI_MONTH` — the `SQL_TSI_MONTH` interval is supported.
+/// `SQL_FN_TSI_MONTH`: the `SQL_TSI_MONTH` interval is supported.
 pub const SQL_FN_TSI_MONTH: u32 = 0x0000_0040;
-/// `SQL_FN_TSI_QUARTER` — the `SQL_TSI_QUARTER` interval is supported.
+/// `SQL_FN_TSI_QUARTER`: the `SQL_TSI_QUARTER` interval is supported.
 pub const SQL_FN_TSI_QUARTER: u32 = 0x0000_0080;
-/// `SQL_FN_TSI_YEAR` — the `SQL_TSI_YEAR` interval is supported.
+/// `SQL_FN_TSI_YEAR`: the `SQL_TSI_YEAR` interval is supported.
 pub const SQL_FN_TSI_YEAR: u32 = 0x0000_0100;
 
-/// `SQL_OIC_CORE` — ODBC 3.x core interface conformance.
+/// `SQL_OIC_CORE`: ODBC 3.x core interface conformance.
 pub const SQL_OIC_CORE: u32 = 1;
 
-/// `SQL_AM_NONE` — asynchronous execution is not supported.
+/// `SQL_AM_NONE`: asynchronous execution is not supported.
 pub const SQL_AM_NONE: u32 = 0;
-/// `SQL_AM_CONNECTION` — connection-level asynchronous execution is supported (`SQLSetConnectAttr SQL_ATTR_ASYNC_ENABLE`).
+/// `SQL_AM_CONNECTION`: connection-level asynchronous execution is supported (`SQLSetConnectAttr SQL_ATTR_ASYNC_ENABLE`).
 pub const SQL_AM_CONNECTION: u32 = 1;
-/// `SQL_AM_STATEMENT` — statement-level asynchronous execution is supported (`SQLSetStmtAttr SQL_ATTR_ASYNC_ENABLE`).
+/// `SQL_AM_STATEMENT`: statement-level asynchronous execution is supported (`SQLSetStmtAttr SQL_ATTR_ASYNC_ENABLE`).
 pub const SQL_AM_STATEMENT: u32 = 2;
 
-/// `SQL_CA1_NEXT` — `SQL_FETCH_NEXT` orientation is supported in `SQLFetchScroll`.
+/// `SQL_CA1_NEXT`: `SQL_FETCH_NEXT` orientation is supported in `SQLFetchScroll`.
 pub const SQL_CA1_NEXT: u32 = 0x0000_0001;
 
-/// `SQL_CA2_READ_ONLY_CONCURRENCY` — a read-only cursor, in which no updates
+/// `SQL_CA2_READ_ONLY_CONCURRENCY`: a read-only cursor, in which no updates
 /// are allowed, is supported: the `SQL_ATTR_CONCURRENCY` statement attribute
 /// can be `SQL_CONCUR_READ_ONLY` for a cursor of the kind the enclosing
 /// `SQL_*_CURSOR_ATTRIBUTES2` info type describes.
 pub const SQL_CA2_READ_ONLY_CONCURRENCY: u32 = 0x0000_0001;
 
-/// `SQL_CA2_CRC_EXACT` — the cursor of the kind the enclosing
+/// `SQL_CA2_CRC_EXACT`: the cursor of the kind the enclosing
 /// `SQL_*_CURSOR_ATTRIBUTES2` info type describes reports an *exact* row count
 /// in `SQL_DIAG_CURSOR_ROW_COUNT`.
 ///
@@ -451,24 +451,24 @@ pub const SQL_CA2_READ_ONLY_CONCURRENCY: u32 = 0x0000_0001;
 /// count is available.
 pub const SQL_CA2_CRC_EXACT: u32 = 0x0000_1000;
 
-/// `SQL_CA2_CRC_APPROXIMATE` — the same cursor reports an *approximate* row
+/// `SQL_CA2_CRC_APPROXIMATE`: the same cursor reports an *approximate* row
 /// count in `SQL_DIAG_CURSOR_ROW_COUNT`. See [`SQL_CA2_CRC_EXACT`].
 pub const SQL_CA2_CRC_APPROXIMATE: u32 = 0x0000_2000;
 
-/// `SQL_ROWSET_SIZE` (9) — the ODBC 2.x statement option giving the rowset size
+/// `SQL_ROWSET_SIZE` (9): the ODBC 2.x statement option giving the rowset size
 /// `SQLExtendedFetch` uses.
 ///
 /// Not in `odbc-sys`: its `StatementAttribute` models only the ODBC 3.x
 /// `SQL_ATTR_ROW_ARRAY_SIZE` (27), which is a different value with a different
 /// number, set through a different call, and read by different functions. The
-/// spec keeps them apart deliberately — `SQLSetScrollOptions` "cannot be used by
+/// spec keeps them apart: `SQLSetScrollOptions` "cannot be used by
 /// an application when fetching multiple rows by a call to **SQLFetch** or
 /// **SQLFetchScroll**. It can be used only when fetching multiple rows by a call
-/// to **SQLExtendedFetch**" — and the Driver Manager's `SQLSetScrollOptions`
+/// to **SQLExtendedFetch**", and the Driver Manager's `SQLSetScrollOptions`
 /// mapping sets this one.
 pub const SQL_ROWSET_SIZE: i32 = 9;
 
-/// `SQL_FETCH_BOOKMARK` (8) — fetch the rowset at a bookmark.
+/// `SQL_FETCH_BOOKMARK` (8): fetch the rowset at a bookmark.
 ///
 /// Not in `odbc-sys`: its `FetchOrientation` stops at `Relative = 6` and jumps to
 /// the `SQLDataSources` directions, so the bookmark orientation has no variant.
@@ -477,20 +477,20 @@ pub const SQL_ROWSET_SIZE: i32 = 9;
 /// driver has to have a name for what it is rejecting.
 pub const SQL_FETCH_BOOKMARK: i16 = 8;
 
-/// `SQL_SQ_COMPARISON` — subqueries are supported in comparison predicates.
+/// `SQL_SQ_COMPARISON`: subqueries are supported in comparison predicates.
 pub const SQL_SQ_COMPARISON: u32 = 0x0000_0001;
-/// `SQL_SQ_EXISTS` — subqueries are supported in `EXISTS` predicates.
+/// `SQL_SQ_EXISTS`: subqueries are supported in `EXISTS` predicates.
 pub const SQL_SQ_EXISTS: u32 = 0x0000_0002;
-/// `SQL_SQ_IN` — subqueries are supported in `IN` predicates.
+/// `SQL_SQ_IN`: subqueries are supported in `IN` predicates.
 pub const SQL_SQ_IN: u32 = 0x0000_0004;
-/// `SQL_SQ_QUANTIFIED` — subqueries are supported in quantified predicates (`ANY`, `ALL`).
+/// `SQL_SQ_QUANTIFIED`: subqueries are supported in quantified predicates (`ANY`, `ALL`).
 pub const SQL_SQ_QUANTIFIED: u32 = 0x0000_0008;
-/// `SQL_SQ_CORRELATED_SUBQUERIES` — correlated subqueries are supported.
+/// `SQL_SQ_CORRELATED_SUBQUERIES`: correlated subqueries are supported.
 pub const SQL_SQ_CORRELATED_SUBQUERIES: u32 = 0x0000_0010;
 
-/// `SQL_U_UNION` — the `UNION` clause is supported.
+/// `SQL_U_UNION`: the `UNION` clause is supported.
 pub const SQL_U_UNION: u32 = 0x0000_0001;
-/// `SQL_U_UNION_ALL` — the `UNION ALL` clause is supported.
+/// `SQL_U_UNION_ALL`: the `UNION ALL` clause is supported.
 pub const SQL_U_UNION_ALL: u32 = 0x0000_0002;
 
 // --- SQL_ALTER_TABLE (86) flags ---
@@ -499,21 +499,21 @@ pub const SQL_U_UNION_ALL: u32 = 0x0000_0002;
 //
 // Only two of the three are ODBC 2.x leftovers. `SQL_AT_ADD_COLUMN` and
 // `SQL_AT_DROP_COLUMN` do not appear in the ODBC 3.0 SQL_ALTER_TABLE value
-// list at all — the 3.x replacements are `SQL_AT_ADD_COLUMN_SINGLE` and the
+// list at all. The 3.x replacements are `SQL_AT_ADD_COLUMN_SINGLE` and the
 // `SQL_AT_DROP_COLUMN_*` pair. `SQL_AT_ADD_CONSTRAINT` is *not* deprecated:
 // the 3.0 list carries it, and a data source that accepts
 // `ADD COLUMN f integer NOT NULL` needs exactly that bit.
 
-/// `SQL_AT_ADD_COLUMN` — the `<add column>` clause is supported (sql.h).
+/// `SQL_AT_ADD_COLUMN`: the `<add column>` clause is supported (sql.h).
 /// An ODBC 2.x name, absent from the ODBC 3.0 `SQL_ALTER_TABLE` value list;
 /// a 3.x driver reports [`SQL_AT_ADD_COLUMN_SINGLE`] instead.
 pub const SQL_AT_ADD_COLUMN: u32 = 0x0000_0001;
-/// `SQL_AT_DROP_COLUMN` — the `<drop column>` clause is supported (sql.h).
+/// `SQL_AT_DROP_COLUMN`: the `<drop column>` clause is supported (sql.h).
 /// An ODBC 2.x name, absent from the ODBC 3.0 `SQL_ALTER_TABLE` value list; a
 /// 3.x driver reports [`SQL_AT_DROP_COLUMN_CASCADE`] or
 /// [`SQL_AT_DROP_COLUMN_RESTRICT`] instead.
 pub const SQL_AT_DROP_COLUMN: u32 = 0x0000_0002;
-/// `SQL_AT_ADD_CONSTRAINT` — the `<add column>` clause is supported with the
+/// `SQL_AT_ADD_CONSTRAINT`: the `<add column>` clause is supported with the
 /// facility to specify column constraints (FIPS Transitional level, sql.h).
 ///
 /// Live in ODBC 3.0, unlike the two above: the 3.0 `SQL_ALTER_TABLE` value
@@ -522,134 +522,134 @@ pub const SQL_AT_DROP_COLUMN: u32 = 0x0000_0002;
 /// `SQL_AT_CONSTRAINT_*` deferrability bits below meaningful.
 pub const SQL_AT_ADD_CONSTRAINT: u32 = 0x0000_0008;
 
-/// `SQL_AT_ADD_COLUMN_SINGLE` — `ALTER TABLE ... ADD COLUMN` is supported for
+/// `SQL_AT_ADD_COLUMN_SINGLE`: `ALTER TABLE ... ADD COLUMN` is supported for
 /// a single column (FIPS Transitional level).
 pub const SQL_AT_ADD_COLUMN_SINGLE: u32 = 0x0000_0020;
-/// `SQL_AT_ADD_COLUMN_DEFAULT` — the `<default value>` clause is supported on
+/// `SQL_AT_ADD_COLUMN_DEFAULT`: the `<default value>` clause is supported on
 /// `ADD COLUMN` (FIPS Transitional level).
 pub const SQL_AT_ADD_COLUMN_DEFAULT: u32 = 0x0000_0040;
-/// `SQL_AT_ADD_COLUMN_COLLATION` — the `<column collation>` clause is supported
+/// `SQL_AT_ADD_COLUMN_COLLATION`: the `<column collation>` clause is supported
 /// on `ADD COLUMN` (FIPS Full level).
 pub const SQL_AT_ADD_COLUMN_COLLATION: u32 = 0x0000_0080;
-/// `SQL_AT_SET_COLUMN_DEFAULT` — the `<alter column> <set column default>`
+/// `SQL_AT_SET_COLUMN_DEFAULT`: the `<alter column> <set column default>`
 /// clause is supported (FIPS Intermediate level).
 pub const SQL_AT_SET_COLUMN_DEFAULT: u32 = 0x0000_0100;
-/// `SQL_AT_DROP_COLUMN_DEFAULT` — the `<alter column> <drop column default>`
+/// `SQL_AT_DROP_COLUMN_DEFAULT`: the `<alter column> <drop column default>`
 /// clause is supported (FIPS Intermediate level).
 pub const SQL_AT_DROP_COLUMN_DEFAULT: u32 = 0x0000_0200;
-/// `SQL_AT_DROP_COLUMN_CASCADE` — the `<drop column> CASCADE` clause is
+/// `SQL_AT_DROP_COLUMN_CASCADE`: the `<drop column> CASCADE` clause is
 /// supported (FIPS Transitional level).
 pub const SQL_AT_DROP_COLUMN_CASCADE: u32 = 0x0000_0400;
-/// `SQL_AT_DROP_COLUMN_RESTRICT` — the `<drop column> RESTRICT` clause is
+/// `SQL_AT_DROP_COLUMN_RESTRICT`: the `<drop column> RESTRICT` clause is
 /// supported (FIPS Transitional level).
 pub const SQL_AT_DROP_COLUMN_RESTRICT: u32 = 0x0000_0800;
-/// `SQL_AT_ADD_TABLE_CONSTRAINT` — the `<add table constraint>` clause is
+/// `SQL_AT_ADD_TABLE_CONSTRAINT`: the `<add table constraint>` clause is
 /// supported (FIPS Transitional level).
 pub const SQL_AT_ADD_TABLE_CONSTRAINT: u32 = 0x0000_1000;
-/// `SQL_AT_DROP_TABLE_CONSTRAINT_CASCADE` — the
+/// `SQL_AT_DROP_TABLE_CONSTRAINT_CASCADE`: the
 /// `<drop table constraint> CASCADE` clause is supported (FIPS Transitional
 /// level).
 pub const SQL_AT_DROP_TABLE_CONSTRAINT_CASCADE: u32 = 0x0000_2000;
-/// `SQL_AT_DROP_TABLE_CONSTRAINT_RESTRICT` — the
+/// `SQL_AT_DROP_TABLE_CONSTRAINT_RESTRICT`: the
 /// `<drop table constraint> RESTRICT` clause is supported (FIPS Transitional
 /// level).
 pub const SQL_AT_DROP_TABLE_CONSTRAINT_RESTRICT: u32 = 0x0000_4000;
-/// `SQL_AT_CONSTRAINT_NAME_DEFINITION` — the `<constraint name definition>`
+/// `SQL_AT_CONSTRAINT_NAME_DEFINITION`: the `<constraint name definition>`
 /// clause is supported for naming column and table constraints (FIPS
 /// Intermediate level).
 pub const SQL_AT_CONSTRAINT_NAME_DEFINITION: u32 = 0x0000_8000;
-/// `SQL_AT_CONSTRAINT_INITIALLY_DEFERRED` — the `INITIALLY DEFERRED`
+/// `SQL_AT_CONSTRAINT_INITIALLY_DEFERRED`: the `INITIALLY DEFERRED`
 /// constraint attribute is supported (FIPS Full level). Only meaningful when
 /// [`SQL_AT_ADD_CONSTRAINT`] is also set.
 pub const SQL_AT_CONSTRAINT_INITIALLY_DEFERRED: u32 = 0x0001_0000;
-/// `SQL_AT_CONSTRAINT_INITIALLY_IMMEDIATE` — the `INITIALLY IMMEDIATE`
+/// `SQL_AT_CONSTRAINT_INITIALLY_IMMEDIATE`: the `INITIALLY IMMEDIATE`
 /// constraint attribute is supported (FIPS Full level). Only meaningful when
 /// [`SQL_AT_ADD_CONSTRAINT`] is also set.
 pub const SQL_AT_CONSTRAINT_INITIALLY_IMMEDIATE: u32 = 0x0002_0000;
-/// `SQL_AT_CONSTRAINT_DEFERRABLE` — the `DEFERRABLE` constraint attribute is
+/// `SQL_AT_CONSTRAINT_DEFERRABLE`: the `DEFERRABLE` constraint attribute is
 /// supported (FIPS Full level). Only meaningful when
 /// [`SQL_AT_ADD_CONSTRAINT`] is also set.
 pub const SQL_AT_CONSTRAINT_DEFERRABLE: u32 = 0x0004_0000;
-/// `SQL_AT_CONSTRAINT_NON_DEFERRABLE` — the `NOT DEFERRABLE` constraint
+/// `SQL_AT_CONSTRAINT_NON_DEFERRABLE`: the `NOT DEFERRABLE` constraint
 /// attribute is supported (FIPS Full level). Only meaningful when
 /// [`SQL_AT_ADD_CONSTRAINT`] is also set.
 pub const SQL_AT_CONSTRAINT_NON_DEFERRABLE: u32 = 0x0008_0000;
 
 // --- SQL_SCHEMA_USAGE (91) flags (sqlext.h: aliases of SQL_OU_*) ---
-/// `SQL_SU_DML_STATEMENTS` — a schema name can be used in a DML statement
+/// `SQL_SU_DML_STATEMENTS`: a schema name can be used in a DML statement
 /// (`SELECT`/`INSERT`/`UPDATE`/`DELETE`).
 pub const SQL_SU_DML_STATEMENTS: u32 = 0x0000_0001;
-/// `SQL_SU_PROCEDURE_INVOCATION` — a schema name can be used in a procedure
+/// `SQL_SU_PROCEDURE_INVOCATION`: a schema name can be used in a procedure
 /// invocation (the `{CALL ...}` escape / `CALL` statement).
 pub const SQL_SU_PROCEDURE_INVOCATION: u32 = 0x0000_0002;
-/// `SQL_SU_TABLE_DEFINITION` — a schema name can be used in a table
+/// `SQL_SU_TABLE_DEFINITION`: a schema name can be used in a table
 /// definition statement (`CREATE`/`ALTER`/`DROP TABLE`).
 pub const SQL_SU_TABLE_DEFINITION: u32 = 0x0000_0004;
-/// `SQL_SU_INDEX_DEFINITION` — a schema name can be used in an index
+/// `SQL_SU_INDEX_DEFINITION`: a schema name can be used in an index
 /// definition statement (`CREATE`/`DROP INDEX`).
 pub const SQL_SU_INDEX_DEFINITION: u32 = 0x0000_0008;
-/// `SQL_SU_PRIVILEGE_DEFINITION` — a schema name can be used in a privilege
+/// `SQL_SU_PRIVILEGE_DEFINITION`: a schema name can be used in a privilege
 /// definition statement (`GRANT`/`REVOKE`).
 pub const SQL_SU_PRIVILEGE_DEFINITION: u32 = 0x0000_0010;
 
 // --- SQL_CATALOG_USAGE (92) flags (sqlext.h: aliases of SQL_QU_*) ---
-/// `SQL_CU_DML_STATEMENTS` — a catalog name can be used in a DML statement.
+/// `SQL_CU_DML_STATEMENTS`: a catalog name can be used in a DML statement.
 pub const SQL_CU_DML_STATEMENTS: u32 = 0x0000_0001;
-/// `SQL_CU_PROCEDURE_INVOCATION` — a catalog name can be used in a procedure
+/// `SQL_CU_PROCEDURE_INVOCATION`: a catalog name can be used in a procedure
 /// invocation.
 pub const SQL_CU_PROCEDURE_INVOCATION: u32 = 0x0000_0002;
-/// `SQL_CU_TABLE_DEFINITION` — a catalog name can be used in a table
+/// `SQL_CU_TABLE_DEFINITION`: a catalog name can be used in a table
 /// definition statement.
 pub const SQL_CU_TABLE_DEFINITION: u32 = 0x0000_0004;
-/// `SQL_CU_INDEX_DEFINITION` — a catalog name can be used in an index
+/// `SQL_CU_INDEX_DEFINITION`: a catalog name can be used in an index
 /// definition statement.
 pub const SQL_CU_INDEX_DEFINITION: u32 = 0x0000_0008;
-/// `SQL_CU_PRIVILEGE_DEFINITION` — a catalog name can be used in a privilege
+/// `SQL_CU_PRIVILEGE_DEFINITION`: a catalog name can be used in a privilege
 /// definition statement.
 pub const SQL_CU_PRIVILEGE_DEFINITION: u32 = 0x0000_0010;
 
 // --- SQL_CATALOG_LOCATION (114) values (sqlext.h: aliases of SQL_QL_*) ---
-/// `SQL_CL_START` — the catalog name appears at the start of a qualified
+/// `SQL_CL_START`: the catalog name appears at the start of a qualified
 /// table name (e.g. `catalog.schema.table`).
 pub const SQL_CL_START: u16 = 0x0001;
-/// `SQL_CL_END` — the catalog name appears at the end of a qualified table
+/// `SQL_CL_END`: the catalog name appears at the end of a qualified table
 /// name (e.g. `table.catalog`).
 pub const SQL_CL_END: u16 = 0x0002;
 
 // --- SQL_OJ_CAPABILITIES (115) flags (sql.h) ---
-/// `SQL_OJ_LEFT` — `LEFT OUTER JOIN` is supported.
+/// `SQL_OJ_LEFT`: `LEFT OUTER JOIN` is supported.
 pub const SQL_OJ_LEFT: u32 = 0x0000_0001;
-/// `SQL_OJ_RIGHT` — `RIGHT OUTER JOIN` is supported.
+/// `SQL_OJ_RIGHT`: `RIGHT OUTER JOIN` is supported.
 pub const SQL_OJ_RIGHT: u32 = 0x0000_0002;
-/// `SQL_OJ_FULL` — `FULL OUTER JOIN` is supported.
+/// `SQL_OJ_FULL`: `FULL OUTER JOIN` is supported.
 pub const SQL_OJ_FULL: u32 = 0x0000_0004;
-/// `SQL_OJ_NESTED` — nested outer joins are supported.
+/// `SQL_OJ_NESTED`: nested outer joins are supported.
 pub const SQL_OJ_NESTED: u32 = 0x0000_0008;
-/// `SQL_OJ_NOT_ORDERED` — the columns in the `ON` clause of an outer join do
+/// `SQL_OJ_NOT_ORDERED`: the columns in the `ON` clause of an outer join do
 /// not have to be in the same order as their respective table names.
 pub const SQL_OJ_NOT_ORDERED: u32 = 0x0000_0010;
-/// `SQL_OJ_INNER` — the inner table (the one that does not have every row
+/// `SQL_OJ_INNER`: the inner table (the one that does not have every row
 /// returned) can also be used in an inner join.
 pub const SQL_OJ_INNER: u32 = 0x0000_0020;
-/// `SQL_OJ_ALL_COMPARISON_OPS` — the comparison operator in the `ON` clause
+/// `SQL_OJ_ALL_COMPARISON_OPS`: the comparison operator in the `ON` clause
 /// can be any of the ODBC comparison operators, not just `=`.
 pub const SQL_OJ_ALL_COMPARISON_OPS: u32 = 0x0000_0040;
 
-/// `SQL_MAX_CURSOR_NAME_LEN` (`SQLGetInfo` `InfoType::MaxCursorNameLen`) —
-/// the maximum length of a cursor name the driver itself assigns
+/// `SQL_MAX_CURSOR_NAME_LEN` (`SQLGetInfo` `InfoType::MaxCursorNameLen`): the
+/// maximum length of a cursor name the driver itself assigns
 /// (`SQLSetCursorName`/`SQLGetCursorName`).
 ///
-/// Deliberately **not** one of [`crate::types::CatalogResultColumnWidths`]'s
-/// widths: every other `SQL_MAX_*_NAME_LEN` info type (column, schema,
-/// catalog, table, plain identifier) bounds a *data-source* identifier,
-/// something the backend's catalog actually stores and could, in principle,
-/// impose a shorter limit on (see `CatalogResultColumnWidths::identifier_len`'s
-/// own doc for PostgreSQL's 63-character example). A cursor name is not a
-/// data-source object at all (the ODBC application invents it, and the
-/// Driver Manager/driver only need to remember it for the lifetime of the
-/// statement), so it is an ODBC-level convention rather than a per-backend
-/// catalog limit, and 128 (the spec's own suggested default) is used
-/// unconditionally instead of being threaded through the widths struct.
+/// This is **not** one of [`crate::types::CatalogResultColumnWidths`]'s widths.
+/// Every other `SQL_MAX_*_NAME_LEN` info type (column, schema, catalog, table,
+/// plain identifier) bounds a *data-source* identifier, something the backend's
+/// catalog actually stores and could impose a shorter limit on (see
+/// `CatalogResultColumnWidths::identifier_len`'s own doc for PostgreSQL's
+/// 63-character example). A cursor name is not a data-source object at all: the
+/// ODBC application invents it, and the Driver Manager and driver only need to
+/// remember it for the lifetime of the statement. It is therefore an ODBC-level
+/// convention rather than a per-backend catalog limit, so 128 (the spec's own
+/// suggested default) is used unconditionally instead of being threaded through
+/// the widths struct.
 pub const SQL_MAX_CURSOR_NAME_LEN: u16 = 128;
 
 /// Default column size reported by `SQLDescribeParam` when the driver cannot determine
@@ -657,15 +657,14 @@ pub const SQL_MAX_CURSOR_NAME_LEN: u16 = 128;
 /// large enough for practical VARCHAR values without implying unlimited length.
 pub const SQL_DEFAULT_PARAM_SIZE: u32 = 4000;
 
-// `SQL_MAX_OPTION_STRING_LENGTH` (256) is deliberately absent. It bounded the
-// string a deprecated `SQLGetConnectOption` / `SQLGetStmtOption` could return,
-// since the ODBC 2.x ABI carries no buffer-length argument. Core no longer
-// exports either function — the Driver Manager maps both — so nothing in the
-// crate needs the value, and it was spelled `..._VALUE` here against the
-// header's `..._LENGTH` (`sqlext.h:58`). Reintroduce it under the header's name
-// if a caller ever appears.
+// `SQL_MAX_OPTION_STRING_LENGTH` (256) is absent. It bounds the string a
+// deprecated `SQLGetConnectOption` / `SQLGetStmtOption` can return, since the
+// ODBC 2.x ABI carries no buffer-length argument. Core exports neither
+// function, because the Driver Manager maps both, so nothing in the crate needs
+// the value. Reintroduce it under the header's own name, `..._LENGTH`
+// (`sqlext.h:58`), if a caller ever appears.
 
-/// `SQL_DATA_AT_EXEC` — indicator value signalling that parameter data will be
+/// `SQL_DATA_AT_EXEC`: indicator value signalling that parameter data will be
 /// sent via `SQLPutData` at execution time.
 pub const SQL_DATA_AT_EXEC: isize = -2;
 
@@ -673,7 +672,7 @@ pub const SQL_DATA_AT_EXEC: isize = -2;
 /// `SQL_LEN_DATA_AT_EXEC(len)` = `-(len) + SQL_LEN_DATA_AT_EXEC_OFFSET`.
 pub const SQL_LEN_DATA_AT_EXEC_OFFSET: isize = -100;
 
-/// `SQL_DEFAULT_PARAM` — indicator value meaning "use the procedure parameter's
+/// `SQL_DEFAULT_PARAM`: indicator value meaning "use the procedure parameter's
 /// own default value" (`sqlext.h`).
 pub const SQL_DEFAULT_PARAM: isize = -5;
 
@@ -690,24 +689,24 @@ pub const SQL_DEFAULT_PARAM: isize = -5;
 // receive cannot be produced from, or recovered out of, either type. Until
 // odbc-sys exposes the inner value these are the only usable spelling.
 
-/// `SQL_POSITION` — position the cursor on the specified row.
+/// `SQL_POSITION`: position the cursor on the specified row.
 pub const SQL_POSITION: u16 = 0;
-/// `SQL_REFRESH` — refresh the current row from the data source.
+/// `SQL_REFRESH`: refresh the current row from the data source.
 pub const SQL_REFRESH: u16 = 1;
-/// `SQL_UPDATE` — update the current row with values from bound buffers.
+/// `SQL_UPDATE`: update the current row with values from bound buffers.
 pub const SQL_UPDATE: u16 = 2;
-/// `SQL_DELETE` — delete the current row.
+/// `SQL_DELETE`: delete the current row.
 pub const SQL_DELETE: u16 = 3;
 
-/// `SQL_LOCK_NO_CHANGE` — leave the lock state unchanged.
+/// `SQL_LOCK_NO_CHANGE`: leave the lock state unchanged.
 pub const SQL_LOCK_NO_CHANGE: u16 = 0;
-/// `SQL_LOCK_EXCLUSIVE` — lock the row exclusively.
+/// `SQL_LOCK_EXCLUSIVE`: lock the row exclusively.
 pub const SQL_LOCK_EXCLUSIVE: u16 = 1;
-/// `SQL_LOCK_UNLOCK` — unlock the row.
+/// `SQL_LOCK_UNLOCK`: unlock the row.
 pub const SQL_LOCK_UNLOCK: u16 = 2;
 
-// `SQLBulkOperations`'s operation codes are deliberately absent, unlike the two
-// groups above: `odbc_sys::BulkOperation` is a `#[repr(u16)]` enum, so it casts
+// `SQLBulkOperations`'s operation codes are absent, unlike the two groups
+// above: `odbc_sys::BulkOperation` is a `#[repr(u16)]` enum, so it casts
 // to the ABI width and is usable end to end. Convert with
 // `bulk_operation_from_raw`; name a value with `BulkOperation::Add as i16`.
 //
@@ -718,11 +717,11 @@ pub const SQL_LOCK_UNLOCK: u16 = 2;
 // SQLColAttribute SQL_DESC_UNNAMED values (sql.h)
 // ---------------------------------------------------------------------------
 
-/// `SQL_NAMED` — the `SQL_DESC_UNNAMED` descriptor field value meaning the
+/// `SQL_NAMED`: the `SQL_DESC_UNNAMED` descriptor field value meaning the
 /// column has a name. Spec: `SQLColAttribute`, `SQL_DESC_UNNAMED`.
 pub const SQL_NAMED: isize = 0;
 
-/// `SQL_UNNAMED` — the `SQL_DESC_UNNAMED` descriptor field value meaning the
+/// `SQL_UNNAMED`: the `SQL_DESC_UNNAMED` descriptor field value meaning the
 /// column has no name (`SQL_DESC_NAME` is the empty string).
 pub const SQL_UNNAMED: isize = 1;
 
@@ -739,24 +738,24 @@ pub const SQL_UNNAMED: isize = 1;
 // They are **defined** identifiers, which is the only fact `SQLColAttributeW`
 // needs from them today: it separates `HYC00` ("not supported by the driver")
 // from `HY091` ("not one of the defined values"), and these take the first.
-// They are deliberately *not* in `desc_from_raw`, which is shared with
-// `SQLGetDescField`/`SQLSetDescField` — descriptor handles are an ODBC 3.0
-// feature and the 2.x spellings never name a descriptor field there.
+// They are *not* in `desc_from_raw`, which is shared with
+// `SQLGetDescField`/`SQLSetDescField`, because descriptor handles are an ODBC
+// 3.0 feature and the 2.x spellings never name a descriptor field there.
 //
 // The same section requires a 3.x driver to *support* all three
 // ("An ODBC 3.x driver must support both 'SQL_COLUMN' and 'SQL_DESC' values for
 // these three FieldIdentifiers"). Core does not yet; see
 // `col_attribute_odbc_2x_column_field_identifiers_are_hyc00_not_hy091`.
 
-/// `SQL_COLUMN_LENGTH` — the ODBC 2.x `FieldIdentifier` whose ODBC 3.x
+/// `SQL_COLUMN_LENGTH`: the ODBC 2.x `FieldIdentifier` whose ODBC 3.x
 /// counterpart is `SQL_DESC_OCTET_LENGTH` (transfer octet length).
 pub const SQL_COLUMN_LENGTH: u16 = 3;
 
-/// `SQL_COLUMN_PRECISION` — the ODBC 2.x `FieldIdentifier` whose ODBC 3.x
+/// `SQL_COLUMN_PRECISION`: the ODBC 2.x `FieldIdentifier` whose ODBC 3.x
 /// counterpart is `SQL_DESC_LENGTH` (column size).
 pub const SQL_COLUMN_PRECISION: u16 = 4;
 
-/// `SQL_COLUMN_SCALE` — the ODBC 2.x `FieldIdentifier` whose ODBC 3.x
+/// `SQL_COLUMN_SCALE`: the ODBC 2.x `FieldIdentifier` whose ODBC 3.x
 /// counterpart is `SQL_DESC_SCALE` (decimal digits).
 pub const SQL_COLUMN_SCALE: u16 = 5;
 
@@ -764,19 +763,19 @@ pub const SQL_COLUMN_SCALE: u16 = 5;
 // SQL_CURSOR_COMMIT_BEHAVIOR / SQL_CURSOR_ROLLBACK_BEHAVIOR values (sql.h)
 // ---------------------------------------------------------------------------
 
-/// `SQL_CB_DELETE` (0) — `SQLEndTran` closes and deletes all open cursors on
+/// `SQL_CB_DELETE` (0): `SQLEndTran` closes and deletes all open cursors on
 /// the connection and discards the access plans of all prepared statements,
 /// leaving each statement in the allocated (unprepared) state.
 ///
 /// Not modelled by `odbc-sys`, which has no cursor-behaviour enum.
 pub const SQL_CB_DELETE: u16 = 0;
 
-/// `SQL_CB_CLOSE` (1) — `SQLEndTran` closes all open cursors on the connection
+/// `SQL_CB_CLOSE` (1): `SQLEndTran` closes all open cursors on the connection
 /// but leaves prepared statements prepared, so `SQLExecute` can be called
 /// again without re-preparing.
 pub const SQL_CB_CLOSE: u16 = 1;
 
-/// `SQL_CB_PRESERVE` (2) — `SQLEndTran` leaves open cursors untouched. Cursors
+/// `SQL_CB_PRESERVE` (2): `SQLEndTran` leaves open cursors untouched. Cursors
 /// remain positioned on the row they pointed at before the call.
 pub const SQL_CB_PRESERVE: u16 = 2;
 
@@ -784,7 +783,7 @@ pub const SQL_CB_PRESERVE: u16 = 2;
 // SQLGetInfo info types (sql.h / sqlext.h)
 // ---------------------------------------------------------------------------
 
-/// `SQL_CURSOR_COMMIT_BEHAVIOR` (23) — `SQLGetInfo` type describing what
+/// `SQL_CURSOR_COMMIT_BEHAVIOR` (23): `SQLGetInfo` type describing what
 /// happens to open cursors when a transaction is committed.
 ///
 /// Derived from `odbc_sys::InfoType` rather than restating the number; see
@@ -792,57 +791,57 @@ pub const SQL_CB_PRESERVE: u16 = 2;
 /// `info_type_default_response` matches on the raw value.
 pub const SQL_CURSOR_COMMIT_BEHAVIOR: u16 = InfoType::CursorCommitBehaviour as u16;
 
-/// `SQL_CURSOR_ROLLBACK_BEHAVIOR` (24) — `SQLGetInfo` type describing what
+/// `SQL_CURSOR_ROLLBACK_BEHAVIOR` (24): `SQLGetInfo` type describing what
 /// happens to open cursors when a transaction is rolled back. Not modelled by
 /// `odbc_sys::InfoType`, which has `CursorCommitBehaviour` but no rollback
 /// counterpart.
 pub const SQL_CURSOR_ROLLBACK_BEHAVIOR: u16 = 24;
 
-/// `SQL_ROW_UPDATES` (11) — `SQLGetInfo` type reporting whether the data
+/// `SQL_ROW_UPDATES` (11): `SQLGetInfo` type reporting whether the data
 /// source supports row updates such as positioned update statements. A `"Y"` /
 /// `"N"` character string. Not modelled by `odbc_sys::InfoType`, so it can only
 /// be answered through the raw-`u16` path.
 pub const SQL_ROW_UPDATES: u16 = 11;
 
-/// `SQL_PROCEDURES` (21) — `SQLGetInfo` type reporting whether the data source
+/// `SQL_PROCEDURES` (21): `SQLGetInfo` type reporting whether the data source
 /// supports procedures *and* the driver supports the ODBC procedure invocation
 /// syntax. A `"Y"` / `"N"` character string. Not modelled by
 /// `odbc_sys::InfoType`; see [`SQL_ROW_UPDATES`].
 pub const SQL_PROCEDURES: u16 = 21;
 
-/// `SQL_MULTIPLE_ACTIVE_TXN` (37) — `SQLGetInfo` type reporting whether the
+/// `SQL_MULTIPLE_ACTIVE_TXN` (37): `SQLGetInfo` type reporting whether the
 /// driver supports more than one active transaction at a time. A `"Y"` /
 /// `"N"` character string. Not modelled by `odbc_sys::InfoType`; see
 /// [`SQL_ROW_UPDATES`].
 pub const SQL_MULTIPLE_ACTIVE_TXN: u16 = 37;
 
-/// `SQL_DATABASE_NAME` (16) — `SQLGetInfo` type carrying the name of the
+/// `SQL_DATABASE_NAME` (16): `SQLGetInfo` type carrying the name of the
 /// database currently in use, where the data source has a named object called
 /// a "database". A character string. Superseded in ODBC 3.x by
 /// `SQLGetConnectAttr(SQL_ATTR_CURRENT_CATALOG)`, but still queried. Not
 /// modelled by `odbc_sys::InfoType`; see [`SQL_ROW_UPDATES`].
 pub const SQL_DATABASE_NAME: u16 = 16;
 
-/// `SQL_PROCEDURE_TERM` (40) — `SQLGetInfo` type carrying the data source
+/// `SQL_PROCEDURE_TERM` (40): `SQLGetInfo` type carrying the data source
 /// vendor's name for a procedure. A character string, empty when the data
 /// source has no procedures. Not modelled by `odbc_sys::InfoType`; see
 /// [`SQL_ROW_UPDATES`].
 pub const SQL_PROCEDURE_TERM: u16 = 40;
 
-/// `SQL_TABLE_TERM` (45) — `SQLGetInfo` type carrying the data source vendor's
+/// `SQL_TABLE_TERM` (45): `SQLGetInfo` type carrying the data source vendor's
 /// name for a table (e.g. `"table"` or `"file"`). A character string. Unlike
 /// the catalog, schema and procedure terms it has no "empty if unsupported"
 /// case, because every data source has tables. Not modelled by
 /// `odbc_sys::InfoType`; see [`SQL_ROW_UPDATES`].
 pub const SQL_TABLE_TERM: u16 = 45;
 
-/// `SQL_KEYWORDS` (89) — `SQLGetInfo` type carrying a comma-separated list of
+/// `SQL_KEYWORDS` (89): `SQLGetInfo` type carrying a comma-separated list of
 /// the data source's own reserved keywords, excluding those it shares with
 /// ODBC. A character string; an empty list is valid. Not modelled by
 /// `odbc_sys::InfoType`; see [`SQL_ROW_UPDATES`].
 pub const SQL_KEYWORDS: u16 = 89;
 
-/// `SQL_FILE_USAGE` (84) — `SQLGetInfo` type describing how a single-tier
+/// `SQL_FILE_USAGE` (84): `SQLGetInfo` type describing how a single-tier
 /// driver treats files in the data source.
 ///
 /// Derived from `odbc_sys::InfoType` rather than restating the number:
@@ -850,7 +849,7 @@ pub const SQL_KEYWORDS: u16 = 89;
 /// odbc-sys stays the single source of truth for the value.
 pub const SQL_FILE_USAGE: u16 = InfoType::SqlFileUsage as u16;
 
-/// `SQL_QUOTED_IDENTIFIER_CASE` (93) — `SQLGetInfo` type describing how the
+/// `SQL_QUOTED_IDENTIFIER_CASE` (93): `SQLGetInfo` type describing how the
 /// data source treats the case of quoted identifiers.
 ///
 /// Derived from `odbc_sys::InfoType` rather than restating the number; see
@@ -861,35 +860,35 @@ pub const SQL_QUOTED_IDENTIFIER_CASE: u16 = InfoType::SqlQuotedIdentifierCase as
 // SQLUSMALLINT info types that odbc-sys does not model
 // ---------------------------------------------------------------------------
 //
-// These four matter beyond naming. `SQLGetInfo`'s `BufferLength` is *ignored*
-// for a non-string value — the spec has the driver assume the buffer matches
-// the type it declares for that info type — so returning a `SQLUINTEGER` where
-// the spec declares `SQLUSMALLINT` writes four bytes into the two an
-// application correctly allocated. Being absent from `odbc_sys::InfoType`,
-// they have no variant for the shape-aware fallback in
-// `info_type_default_response` to consult, which is exactly how they reached
-// the `U32(0)` default. `SMALLINT_SHAPED_UNMODELLED_INFO_TYPES` there lists
-// them; keep the two in step.
+// These matter beyond naming. `SQLGetInfo`'s `BufferLength` is *ignored* for a
+// non-string value, because the spec has the driver assume the buffer matches
+// the type it declares for that info type. Returning a `SQLUINTEGER` where the
+// spec declares `SQLUSMALLINT` therefore writes four bytes into the two an
+// application correctly allocated. Being absent from `odbc_sys::InfoType`, they
+// have no variant for the shape-aware fallback in `info_type_default_response`
+// to consult, so they would otherwise take the `U32(0)` default.
+// `SMALLINT_SHAPED_UNMODELLED_INFO_TYPES` there lists them; keep the two in
+// step.
 
-/// `SQL_ODBC_API_CONFORMANCE` (9) — the ODBC API conformance level
+/// `SQL_ODBC_API_CONFORMANCE` (9): the ODBC API conformance level
 /// (`SQL_OAC_*`). ODBC 2.x; still queried. `SQLUSMALLINT`.
 pub const SQL_ODBC_API_CONFORMANCE: u16 = 9;
 
-/// `SQL_ODBC_SAG_CLI_CONFORMANCE` (12) — whether the driver conforms to the SAG
+/// `SQL_ODBC_SAG_CLI_CONFORMANCE` (12): whether the driver conforms to the SAG
 /// CLI specification (`SQL_OSCC_*`). ODBC 2.x. `SQLUSMALLINT`.
 pub const SQL_ODBC_SAG_CLI_CONFORMANCE: u16 = 12;
 
-/// `SQL_ODBC_SQL_CONFORMANCE` (15) — the ODBC SQL grammar conformance level
+/// `SQL_ODBC_SQL_CONFORMANCE` (15): the ODBC SQL grammar conformance level
 /// (`SQL_OSC_*`). ODBC 2.x, superseded by `SQL_SQL_CONFORMANCE` (118) but still
 /// queried by 2.x-era clients. `SQLUSMALLINT`.
 pub const SQL_ODBC_SQL_CONFORMANCE: u16 = 15;
 
-/// `SQL_MAX_PROCEDURE_NAME_LEN` (33) — the maximum length of a procedure name,
+/// `SQL_MAX_PROCEDURE_NAME_LEN` (33): the maximum length of a procedure name,
 /// `0` for "no limit or unknown". `SQLUSMALLINT`, like every other
 /// `SQL_MAX_*_NAME_LEN`, all of which odbc-sys does model.
 pub const SQL_MAX_PROCEDURE_NAME_LEN: u16 = 33;
 
-/// `SQL_DRIVER_ODBC_VER` — the ODBC version this driver conforms to, in the
+/// `SQL_DRIVER_ODBC_VER`: the ODBC version this driver conforms to, in the
 /// spec's `##.##` form. Reported identically by the driver crates, and read
 /// by the Windows Driver Manager *before* `SQLDriverConnectW` to decide
 /// whether to allow ODBC 3.x features such as `SQL_C_SBIGINT` (see AGENTS.md,
@@ -907,259 +906,259 @@ pub const SQL_DRIVER_ODBC_VER_STRING: &str = "03.80";
 // them. See [`SQL_FILE_USAGE`] for why the value is derived rather than
 // restated.
 
-/// `SQL_OUTER_JOINS` (38) — "Y" if the data source supports outer joins.
+/// `SQL_OUTER_JOINS` (38): "Y" if the data source supports outer joins.
 pub const SQL_OUTER_JOINS: u16 = InfoType::OuterJoins as u16;
-/// `SQL_NUMERIC_FUNCTIONS` (49) — bitmap of supported numeric scalar functions.
+/// `SQL_NUMERIC_FUNCTIONS` (49): bitmap of supported numeric scalar functions.
 pub const SQL_NUMERIC_FUNCTIONS: u16 = InfoType::NumericFunctions as u16;
-/// `SQL_STRING_FUNCTIONS` (50) — bitmap of supported string scalar functions.
+/// `SQL_STRING_FUNCTIONS` (50): bitmap of supported string scalar functions.
 pub const SQL_STRING_FUNCTIONS: u16 = InfoType::StringFunctions as u16;
-/// `SQL_SYSTEM_FUNCTIONS` (51) — bitmap of supported system scalar functions.
+/// `SQL_SYSTEM_FUNCTIONS` (51): bitmap of supported system scalar functions.
 pub const SQL_SYSTEM_FUNCTIONS: u16 = InfoType::SystemFunctions as u16;
-/// `SQL_TIMEDATE_FUNCTIONS` (52) — bitmap of supported date/time scalar functions.
+/// `SQL_TIMEDATE_FUNCTIONS` (52): bitmap of supported date/time scalar functions.
 pub const SQL_TIMEDATE_FUNCTIONS: u16 = InfoType::TimedateFunctions as u16;
-/// `SQL_LIKE_ESCAPE_CLAUSE` (113) — "Y" if `LIKE ... ESCAPE` is supported.
+/// `SQL_LIKE_ESCAPE_CLAUSE` (113): "Y" if `LIKE ... ESCAPE` is supported.
 pub const SQL_LIKE_ESCAPE_CLAUSE: u16 = InfoType::LikeEscapeClause as u16;
-/// `SQL_SQL92_PREDICATES` (160) — bitmap of supported SQL-92 predicates.
+/// `SQL_SQL92_PREDICATES` (160): bitmap of supported SQL-92 predicates.
 pub const SQL_SQL92_PREDICATES: u16 = InfoType::Sql92Predicates as u16;
-/// `SQL_SQL92_RELATIONAL_JOIN_OPERATORS` (161) — bitmap of supported SQL-92 join operators.
+/// `SQL_SQL92_RELATIONAL_JOIN_OPERATORS` (161): bitmap of supported SQL-92 join operators.
 pub const SQL_SQL92_RELATIONAL_JOIN_OPERATORS: u16 = InfoType::Sql92RelationalJoinOperators as u16;
-/// `SQL_SQL92_VALUE_EXPRESSIONS` (165) — bitmap of supported SQL-92 value expressions.
+/// `SQL_SQL92_VALUE_EXPRESSIONS` (165): bitmap of supported SQL-92 value expressions.
 pub const SQL_SQL92_VALUE_EXPRESSIONS: u16 = InfoType::Sql92ValueExpressions as u16;
-/// `SQL_AGGREGATE_FUNCTIONS` (169) — bitmap of supported aggregate functions.
+/// `SQL_AGGREGATE_FUNCTIONS` (169): bitmap of supported aggregate functions.
 pub const SQL_AGGREGATE_FUNCTIONS: u16 = InfoType::AggregateFunctions as u16;
 
 // --- SQL_AGGREGATE_FUNCTIONS (169) flags ---
-/// `SQL_AF_AVG` — the `AVG` aggregate.
+/// `SQL_AF_AVG`: the `AVG` aggregate.
 pub const SQL_AF_AVG: u32 = 0x0000_0001;
-/// `SQL_AF_COUNT` — the `COUNT` aggregate.
+/// `SQL_AF_COUNT`: the `COUNT` aggregate.
 pub const SQL_AF_COUNT: u32 = 0x0000_0002;
-/// `SQL_AF_MAX` — the `MAX` aggregate.
+/// `SQL_AF_MAX`: the `MAX` aggregate.
 pub const SQL_AF_MAX: u32 = 0x0000_0004;
-/// `SQL_AF_MIN` — the `MIN` aggregate.
+/// `SQL_AF_MIN`: the `MIN` aggregate.
 pub const SQL_AF_MIN: u32 = 0x0000_0008;
-/// `SQL_AF_SUM` — the `SUM` aggregate.
+/// `SQL_AF_SUM`: the `SUM` aggregate.
 pub const SQL_AF_SUM: u32 = 0x0000_0010;
-/// `SQL_AF_DISTINCT` — the `DISTINCT` set quantifier in an aggregate.
+/// `SQL_AF_DISTINCT`: the `DISTINCT` set quantifier in an aggregate.
 pub const SQL_AF_DISTINCT: u32 = 0x0000_0020;
-/// `SQL_AF_ALL` — the `ALL` set quantifier in an aggregate.
+/// `SQL_AF_ALL`: the `ALL` set quantifier in an aggregate.
 pub const SQL_AF_ALL: u32 = 0x0000_0040;
 
 // --- SQL_SQL92_PREDICATES (160) flags ---
-/// `SQL_SP_EXISTS` — the `EXISTS` predicate.
+/// `SQL_SP_EXISTS`: the `EXISTS` predicate.
 pub const SQL_SP_EXISTS: u32 = 0x0000_0001;
-/// `SQL_SP_ISNOTNULL` — the `IS NOT NULL` predicate.
+/// `SQL_SP_ISNOTNULL`: the `IS NOT NULL` predicate.
 pub const SQL_SP_ISNOTNULL: u32 = 0x0000_0002;
-/// `SQL_SP_ISNULL` — the `IS NULL` predicate.
+/// `SQL_SP_ISNULL`: the `IS NULL` predicate.
 pub const SQL_SP_ISNULL: u32 = 0x0000_0004;
-/// `SQL_SP_MATCH_FULL` — the SQL-92 `MATCH FULL` predicate.
+/// `SQL_SP_MATCH_FULL`: the SQL-92 `MATCH FULL` predicate.
 pub const SQL_SP_MATCH_FULL: u32 = 0x0000_0008;
-/// `SQL_SP_MATCH_PARTIAL` — the SQL-92 `MATCH PARTIAL` predicate.
+/// `SQL_SP_MATCH_PARTIAL`: the SQL-92 `MATCH PARTIAL` predicate.
 pub const SQL_SP_MATCH_PARTIAL: u32 = 0x0000_0010;
-/// `SQL_SP_MATCH_UNIQUE_FULL` — the SQL-92 `MATCH UNIQUE FULL` predicate.
+/// `SQL_SP_MATCH_UNIQUE_FULL`: the SQL-92 `MATCH UNIQUE FULL` predicate.
 pub const SQL_SP_MATCH_UNIQUE_FULL: u32 = 0x0000_0020;
-/// `SQL_SP_MATCH_UNIQUE_PARTIAL` — the SQL-92 `MATCH UNIQUE PARTIAL` predicate.
+/// `SQL_SP_MATCH_UNIQUE_PARTIAL`: the SQL-92 `MATCH UNIQUE PARTIAL` predicate.
 pub const SQL_SP_MATCH_UNIQUE_PARTIAL: u32 = 0x0000_0040;
-/// `SQL_SP_OVERLAPS` — the SQL-92 temporal `OVERLAPS` predicate.
+/// `SQL_SP_OVERLAPS`: the SQL-92 temporal `OVERLAPS` predicate.
 pub const SQL_SP_OVERLAPS: u32 = 0x0000_0080;
-/// `SQL_SP_UNIQUE` — the SQL-92 `UNIQUE` predicate.
+/// `SQL_SP_UNIQUE`: the SQL-92 `UNIQUE` predicate.
 pub const SQL_SP_UNIQUE: u32 = 0x0000_0100;
-/// `SQL_SP_LIKE` — the `LIKE` predicate.
+/// `SQL_SP_LIKE`: the `LIKE` predicate.
 pub const SQL_SP_LIKE: u32 = 0x0000_0200;
-/// `SQL_SP_IN` — the `IN` predicate.
+/// `SQL_SP_IN`: the `IN` predicate.
 pub const SQL_SP_IN: u32 = 0x0000_0400;
-/// `SQL_SP_BETWEEN` — the `BETWEEN` predicate.
+/// `SQL_SP_BETWEEN`: the `BETWEEN` predicate.
 pub const SQL_SP_BETWEEN: u32 = 0x0000_0800;
-/// `SQL_SP_COMPARISON` — the comparison predicates (`=`, `<>`, `<`, `>`, `<=`, `>=`).
+/// `SQL_SP_COMPARISON`: the comparison predicates (`=`, `<>`, `<`, `>`, `<=`, `>=`).
 pub const SQL_SP_COMPARISON: u32 = 0x0000_1000;
-/// `SQL_SP_QUANTIFIED_COMPARISON` — the quantified comparison predicates (`ALL`, `ANY`, `SOME`).
+/// `SQL_SP_QUANTIFIED_COMPARISON`: the quantified comparison predicates (`ALL`, `ANY`, `SOME`).
 pub const SQL_SP_QUANTIFIED_COMPARISON: u32 = 0x0000_2000;
 
 // --- SQL_SQL92_RELATIONAL_JOIN_OPERATORS (161) flags ---
-/// `SQL_SRJO_CORRESPONDING_CLAUSE` — the `CORRESPONDING` clause on a set operation.
+/// `SQL_SRJO_CORRESPONDING_CLAUSE`: the `CORRESPONDING` clause on a set operation.
 pub const SQL_SRJO_CORRESPONDING_CLAUSE: u32 = 0x0000_0001;
-/// `SQL_SRJO_CROSS_JOIN` — `CROSS JOIN`.
+/// `SQL_SRJO_CROSS_JOIN`: `CROSS JOIN`.
 pub const SQL_SRJO_CROSS_JOIN: u32 = 0x0000_0002;
-/// `SQL_SRJO_EXCEPT_JOIN` — the `EXCEPT` set operator.
+/// `SQL_SRJO_EXCEPT_JOIN`: the `EXCEPT` set operator.
 pub const SQL_SRJO_EXCEPT_JOIN: u32 = 0x0000_0004;
-/// `SQL_SRJO_FULL_OUTER_JOIN` — `FULL OUTER JOIN`.
+/// `SQL_SRJO_FULL_OUTER_JOIN`: `FULL OUTER JOIN`.
 pub const SQL_SRJO_FULL_OUTER_JOIN: u32 = 0x0000_0008;
-/// `SQL_SRJO_INNER_JOIN` — `INNER JOIN`.
+/// `SQL_SRJO_INNER_JOIN`: `INNER JOIN`.
 pub const SQL_SRJO_INNER_JOIN: u32 = 0x0000_0010;
-/// `SQL_SRJO_INTERSECT_JOIN` — the `INTERSECT` set operator.
+/// `SQL_SRJO_INTERSECT_JOIN`: the `INTERSECT` set operator.
 pub const SQL_SRJO_INTERSECT_JOIN: u32 = 0x0000_0020;
-/// `SQL_SRJO_LEFT_OUTER_JOIN` — `LEFT OUTER JOIN`.
+/// `SQL_SRJO_LEFT_OUTER_JOIN`: `LEFT OUTER JOIN`.
 pub const SQL_SRJO_LEFT_OUTER_JOIN: u32 = 0x0000_0040;
-/// `SQL_SRJO_NATURAL_JOIN` — `NATURAL JOIN`.
+/// `SQL_SRJO_NATURAL_JOIN`: `NATURAL JOIN`.
 pub const SQL_SRJO_NATURAL_JOIN: u32 = 0x0000_0080;
-/// `SQL_SRJO_RIGHT_OUTER_JOIN` — `RIGHT OUTER JOIN`.
+/// `SQL_SRJO_RIGHT_OUTER_JOIN`: `RIGHT OUTER JOIN`.
 pub const SQL_SRJO_RIGHT_OUTER_JOIN: u32 = 0x0000_0100;
-/// `SQL_SRJO_UNION_JOIN` — the SQL-92 `UNION JOIN`.
+/// `SQL_SRJO_UNION_JOIN`: the SQL-92 `UNION JOIN`.
 pub const SQL_SRJO_UNION_JOIN: u32 = 0x0000_0200;
 
 // --- SQL_SQL92_VALUE_EXPRESSIONS (165) flags ---
-/// `SQL_SVE_CASE` — the `CASE` expression.
+/// `SQL_SVE_CASE`: the `CASE` expression.
 pub const SQL_SVE_CASE: u32 = 0x0000_0001;
-/// `SQL_SVE_CAST` — the `CAST` expression.
+/// `SQL_SVE_CAST`: the `CAST` expression.
 pub const SQL_SVE_CAST: u32 = 0x0000_0002;
-/// `SQL_SVE_COALESCE` — the `COALESCE` expression.
+/// `SQL_SVE_COALESCE`: the `COALESCE` expression.
 pub const SQL_SVE_COALESCE: u32 = 0x0000_0004;
-/// `SQL_SVE_NULLIF` — the `NULLIF` expression.
+/// `SQL_SVE_NULLIF`: the `NULLIF` expression.
 pub const SQL_SVE_NULLIF: u32 = 0x0000_0008;
 
 // --- SQL_NUMERIC_FUNCTIONS (49) flags ---
-/// `SQL_FN_NUM_ABS` — the `ABS` scalar function.
+/// `SQL_FN_NUM_ABS`: the `ABS` scalar function.
 pub const SQL_FN_NUM_ABS: u32 = 0x0000_0001;
-/// `SQL_FN_NUM_ACOS` — the `ACOS` scalar function.
+/// `SQL_FN_NUM_ACOS`: the `ACOS` scalar function.
 pub const SQL_FN_NUM_ACOS: u32 = 0x0000_0002;
-/// `SQL_FN_NUM_ASIN` — the `ASIN` scalar function.
+/// `SQL_FN_NUM_ASIN`: the `ASIN` scalar function.
 pub const SQL_FN_NUM_ASIN: u32 = 0x0000_0004;
-/// `SQL_FN_NUM_ATAN` — the `ATAN` scalar function.
+/// `SQL_FN_NUM_ATAN`: the `ATAN` scalar function.
 pub const SQL_FN_NUM_ATAN: u32 = 0x0000_0008;
-/// `SQL_FN_NUM_ATAN2` — the `ATAN2` scalar function.
+/// `SQL_FN_NUM_ATAN2`: the `ATAN2` scalar function.
 pub const SQL_FN_NUM_ATAN2: u32 = 0x0000_0010;
-/// `SQL_FN_NUM_CEILING` — the `CEILING` scalar function.
+/// `SQL_FN_NUM_CEILING`: the `CEILING` scalar function.
 pub const SQL_FN_NUM_CEILING: u32 = 0x0000_0020;
-/// `SQL_FN_NUM_COS` — the `COS` scalar function.
+/// `SQL_FN_NUM_COS`: the `COS` scalar function.
 pub const SQL_FN_NUM_COS: u32 = 0x0000_0040;
-/// `SQL_FN_NUM_COT` — the `COT` scalar function.
+/// `SQL_FN_NUM_COT`: the `COT` scalar function.
 pub const SQL_FN_NUM_COT: u32 = 0x0000_0080;
-/// `SQL_FN_NUM_EXP` — the `EXP` scalar function.
+/// `SQL_FN_NUM_EXP`: the `EXP` scalar function.
 pub const SQL_FN_NUM_EXP: u32 = 0x0000_0100;
-/// `SQL_FN_NUM_FLOOR` — the `FLOOR` scalar function.
+/// `SQL_FN_NUM_FLOOR`: the `FLOOR` scalar function.
 pub const SQL_FN_NUM_FLOOR: u32 = 0x0000_0200;
-/// `SQL_FN_NUM_LOG` — the `LOG` scalar function (natural logarithm).
+/// `SQL_FN_NUM_LOG`: the `LOG` scalar function (natural logarithm).
 pub const SQL_FN_NUM_LOG: u32 = 0x0000_0400;
-/// `SQL_FN_NUM_MOD` — the `MOD` scalar function.
+/// `SQL_FN_NUM_MOD`: the `MOD` scalar function.
 pub const SQL_FN_NUM_MOD: u32 = 0x0000_0800;
-/// `SQL_FN_NUM_SIGN` — the `SIGN` scalar function.
+/// `SQL_FN_NUM_SIGN`: the `SIGN` scalar function.
 pub const SQL_FN_NUM_SIGN: u32 = 0x0000_1000;
-/// `SQL_FN_NUM_SIN` — the `SIN` scalar function.
+/// `SQL_FN_NUM_SIN`: the `SIN` scalar function.
 pub const SQL_FN_NUM_SIN: u32 = 0x0000_2000;
-/// `SQL_FN_NUM_SQRT` — the `SQRT` scalar function.
+/// `SQL_FN_NUM_SQRT`: the `SQRT` scalar function.
 pub const SQL_FN_NUM_SQRT: u32 = 0x0000_4000;
-/// `SQL_FN_NUM_TAN` — the `TAN` scalar function.
+/// `SQL_FN_NUM_TAN`: the `TAN` scalar function.
 pub const SQL_FN_NUM_TAN: u32 = 0x0000_8000;
-/// `SQL_FN_NUM_PI` — the `PI` scalar function.
+/// `SQL_FN_NUM_PI`: the `PI` scalar function.
 pub const SQL_FN_NUM_PI: u32 = 0x0001_0000;
-/// `SQL_FN_NUM_RAND` — the `RAND` scalar function.
+/// `SQL_FN_NUM_RAND`: the `RAND` scalar function.
 pub const SQL_FN_NUM_RAND: u32 = 0x0002_0000;
-/// `SQL_FN_NUM_DEGREES` — the `DEGREES` scalar function.
+/// `SQL_FN_NUM_DEGREES`: the `DEGREES` scalar function.
 pub const SQL_FN_NUM_DEGREES: u32 = 0x0004_0000;
-/// `SQL_FN_NUM_LOG10` — the `LOG10` scalar function.
+/// `SQL_FN_NUM_LOG10`: the `LOG10` scalar function.
 pub const SQL_FN_NUM_LOG10: u32 = 0x0008_0000;
-/// `SQL_FN_NUM_POWER` — the `POWER` scalar function.
+/// `SQL_FN_NUM_POWER`: the `POWER` scalar function.
 pub const SQL_FN_NUM_POWER: u32 = 0x0010_0000;
-/// `SQL_FN_NUM_RADIANS` — the `RADIANS` scalar function.
+/// `SQL_FN_NUM_RADIANS`: the `RADIANS` scalar function.
 pub const SQL_FN_NUM_RADIANS: u32 = 0x0020_0000;
-/// `SQL_FN_NUM_ROUND` — the `ROUND` scalar function.
+/// `SQL_FN_NUM_ROUND`: the `ROUND` scalar function.
 pub const SQL_FN_NUM_ROUND: u32 = 0x0040_0000;
-/// `SQL_FN_NUM_TRUNCATE` — the `TRUNCATE` scalar function.
+/// `SQL_FN_NUM_TRUNCATE`: the `TRUNCATE` scalar function.
 pub const SQL_FN_NUM_TRUNCATE: u32 = 0x0080_0000;
 
 // --- SQL_STRING_FUNCTIONS (50) flags ---
-/// `SQL_FN_STR_CONCAT` — the `CONCAT` scalar function.
+/// `SQL_FN_STR_CONCAT`: the `CONCAT` scalar function.
 pub const SQL_FN_STR_CONCAT: u32 = 0x0000_0001;
-/// `SQL_FN_STR_INSERT` — the `INSERT` scalar function.
+/// `SQL_FN_STR_INSERT`: the `INSERT` scalar function.
 pub const SQL_FN_STR_INSERT: u32 = 0x0000_0002;
-/// `SQL_FN_STR_LEFT` — the `LEFT` scalar function.
+/// `SQL_FN_STR_LEFT`: the `LEFT` scalar function.
 pub const SQL_FN_STR_LEFT: u32 = 0x0000_0004;
-/// `SQL_FN_STR_LTRIM` — the `LTRIM` scalar function.
+/// `SQL_FN_STR_LTRIM`: the `LTRIM` scalar function.
 pub const SQL_FN_STR_LTRIM: u32 = 0x0000_0008;
-/// `SQL_FN_STR_LENGTH` — the `LENGTH` scalar function.
+/// `SQL_FN_STR_LENGTH`: the `LENGTH` scalar function.
 pub const SQL_FN_STR_LENGTH: u32 = 0x0000_0010;
-/// `SQL_FN_STR_LOCATE` — the two-argument `LOCATE` scalar function.
+/// `SQL_FN_STR_LOCATE`: the two-argument `LOCATE` scalar function.
 pub const SQL_FN_STR_LOCATE: u32 = 0x0000_0020;
-/// `SQL_FN_STR_LCASE` — the `LCASE` scalar function.
+/// `SQL_FN_STR_LCASE`: the `LCASE` scalar function.
 pub const SQL_FN_STR_LCASE: u32 = 0x0000_0040;
-/// `SQL_FN_STR_REPEAT` — the `REPEAT` scalar function.
+/// `SQL_FN_STR_REPEAT`: the `REPEAT` scalar function.
 pub const SQL_FN_STR_REPEAT: u32 = 0x0000_0080;
-/// `SQL_FN_STR_REPLACE` — the `REPLACE` scalar function.
+/// `SQL_FN_STR_REPLACE`: the `REPLACE` scalar function.
 pub const SQL_FN_STR_REPLACE: u32 = 0x0000_0100;
-/// `SQL_FN_STR_RIGHT` — the `RIGHT` scalar function.
+/// `SQL_FN_STR_RIGHT`: the `RIGHT` scalar function.
 pub const SQL_FN_STR_RIGHT: u32 = 0x0000_0200;
-/// `SQL_FN_STR_RTRIM` — the `RTRIM` scalar function.
+/// `SQL_FN_STR_RTRIM`: the `RTRIM` scalar function.
 pub const SQL_FN_STR_RTRIM: u32 = 0x0000_0400;
-/// `SQL_FN_STR_SUBSTRING` — the `SUBSTRING` scalar function.
+/// `SQL_FN_STR_SUBSTRING`: the `SUBSTRING` scalar function.
 pub const SQL_FN_STR_SUBSTRING: u32 = 0x0000_0800;
-/// `SQL_FN_STR_UCASE` — the `UCASE` scalar function.
+/// `SQL_FN_STR_UCASE`: the `UCASE` scalar function.
 pub const SQL_FN_STR_UCASE: u32 = 0x0000_1000;
-/// `SQL_FN_STR_ASCII` — the `ASCII` scalar function.
+/// `SQL_FN_STR_ASCII`: the `ASCII` scalar function.
 pub const SQL_FN_STR_ASCII: u32 = 0x0000_2000;
-/// `SQL_FN_STR_CHAR` — the `CHAR` scalar function.
+/// `SQL_FN_STR_CHAR`: the `CHAR` scalar function.
 pub const SQL_FN_STR_CHAR: u32 = 0x0000_4000;
-/// `SQL_FN_STR_DIFFERENCE` — the `DIFFERENCE` scalar function.
+/// `SQL_FN_STR_DIFFERENCE`: the `DIFFERENCE` scalar function.
 pub const SQL_FN_STR_DIFFERENCE: u32 = 0x0000_8000;
-/// `SQL_FN_STR_LOCATE_2` — the three-argument `LOCATE` scalar function.
+/// `SQL_FN_STR_LOCATE_2`: the three-argument `LOCATE` scalar function.
 pub const SQL_FN_STR_LOCATE_2: u32 = 0x0001_0000;
-/// `SQL_FN_STR_SOUNDEX` — the `SOUNDEX` scalar function.
+/// `SQL_FN_STR_SOUNDEX`: the `SOUNDEX` scalar function.
 pub const SQL_FN_STR_SOUNDEX: u32 = 0x0002_0000;
-/// `SQL_FN_STR_SPACE` — the `SPACE` scalar function.
+/// `SQL_FN_STR_SPACE`: the `SPACE` scalar function.
 pub const SQL_FN_STR_SPACE: u32 = 0x0004_0000;
-/// `SQL_FN_STR_BIT_LENGTH` — the `BIT_LENGTH` scalar function.
+/// `SQL_FN_STR_BIT_LENGTH`: the `BIT_LENGTH` scalar function.
 pub const SQL_FN_STR_BIT_LENGTH: u32 = 0x0008_0000;
-/// `SQL_FN_STR_CHAR_LENGTH` — the `CHAR_LENGTH` scalar function.
+/// `SQL_FN_STR_CHAR_LENGTH`: the `CHAR_LENGTH` scalar function.
 pub const SQL_FN_STR_CHAR_LENGTH: u32 = 0x0010_0000;
-/// `SQL_FN_STR_CHARACTER_LENGTH` — the `CHARACTER_LENGTH` scalar function.
+/// `SQL_FN_STR_CHARACTER_LENGTH`: the `CHARACTER_LENGTH` scalar function.
 pub const SQL_FN_STR_CHARACTER_LENGTH: u32 = 0x0020_0000;
-/// `SQL_FN_STR_OCTET_LENGTH` — the `OCTET_LENGTH` scalar function.
+/// `SQL_FN_STR_OCTET_LENGTH`: the `OCTET_LENGTH` scalar function.
 pub const SQL_FN_STR_OCTET_LENGTH: u32 = 0x0040_0000;
-/// `SQL_FN_STR_POSITION` — the `POSITION` scalar function.
+/// `SQL_FN_STR_POSITION`: the `POSITION` scalar function.
 pub const SQL_FN_STR_POSITION: u32 = 0x0080_0000;
 
 // --- SQL_SYSTEM_FUNCTIONS (51) flags ---
-/// `SQL_FN_SYS_USERNAME` — the `USERNAME` scalar function.
+/// `SQL_FN_SYS_USERNAME`: the `USERNAME` scalar function.
 pub const SQL_FN_SYS_USERNAME: u32 = 0x0000_0001;
-/// `SQL_FN_SYS_DBNAME` — the `DBNAME` scalar function.
+/// `SQL_FN_SYS_DBNAME`: the `DBNAME` scalar function.
 pub const SQL_FN_SYS_DBNAME: u32 = 0x0000_0002;
-/// `SQL_FN_SYS_IFNULL` — the `IFNULL` scalar function.
+/// `SQL_FN_SYS_IFNULL`: the `IFNULL` scalar function.
 pub const SQL_FN_SYS_IFNULL: u32 = 0x0000_0004;
 
 // --- SQL_TIMEDATE_FUNCTIONS (52) flags ---
-/// `SQL_FN_TD_NOW` — the `NOW` scalar function.
+/// `SQL_FN_TD_NOW`: the `NOW` scalar function.
 pub const SQL_FN_TD_NOW: u32 = 0x0000_0001;
-/// `SQL_FN_TD_CURDATE` — the `CURDATE` scalar function.
+/// `SQL_FN_TD_CURDATE`: the `CURDATE` scalar function.
 pub const SQL_FN_TD_CURDATE: u32 = 0x0000_0002;
-/// `SQL_FN_TD_DAYOFMONTH` — the `DAYOFMONTH` scalar function.
+/// `SQL_FN_TD_DAYOFMONTH`: the `DAYOFMONTH` scalar function.
 pub const SQL_FN_TD_DAYOFMONTH: u32 = 0x0000_0004;
-/// `SQL_FN_TD_DAYOFWEEK` — the `DAYOFWEEK` scalar function.
+/// `SQL_FN_TD_DAYOFWEEK`: the `DAYOFWEEK` scalar function.
 pub const SQL_FN_TD_DAYOFWEEK: u32 = 0x0000_0008;
-/// `SQL_FN_TD_DAYOFYEAR` — the `DAYOFYEAR` scalar function.
+/// `SQL_FN_TD_DAYOFYEAR`: the `DAYOFYEAR` scalar function.
 pub const SQL_FN_TD_DAYOFYEAR: u32 = 0x0000_0010;
-/// `SQL_FN_TD_MONTH` — the `MONTH` scalar function.
+/// `SQL_FN_TD_MONTH`: the `MONTH` scalar function.
 pub const SQL_FN_TD_MONTH: u32 = 0x0000_0020;
-/// `SQL_FN_TD_QUARTER` — the `QUARTER` scalar function.
+/// `SQL_FN_TD_QUARTER`: the `QUARTER` scalar function.
 pub const SQL_FN_TD_QUARTER: u32 = 0x0000_0040;
-/// `SQL_FN_TD_WEEK` — the `WEEK` scalar function.
+/// `SQL_FN_TD_WEEK`: the `WEEK` scalar function.
 pub const SQL_FN_TD_WEEK: u32 = 0x0000_0080;
-/// `SQL_FN_TD_YEAR` — the `YEAR` scalar function.
+/// `SQL_FN_TD_YEAR`: the `YEAR` scalar function.
 pub const SQL_FN_TD_YEAR: u32 = 0x0000_0100;
-/// `SQL_FN_TD_CURTIME` — the `CURTIME` scalar function.
+/// `SQL_FN_TD_CURTIME`: the `CURTIME` scalar function.
 pub const SQL_FN_TD_CURTIME: u32 = 0x0000_0200;
-/// `SQL_FN_TD_HOUR` — the `HOUR` scalar function.
+/// `SQL_FN_TD_HOUR`: the `HOUR` scalar function.
 pub const SQL_FN_TD_HOUR: u32 = 0x0000_0400;
-/// `SQL_FN_TD_MINUTE` — the `MINUTE` scalar function.
+/// `SQL_FN_TD_MINUTE`: the `MINUTE` scalar function.
 pub const SQL_FN_TD_MINUTE: u32 = 0x0000_0800;
-/// `SQL_FN_TD_SECOND` — the `SECOND` scalar function.
+/// `SQL_FN_TD_SECOND`: the `SECOND` scalar function.
 pub const SQL_FN_TD_SECOND: u32 = 0x0000_1000;
-/// `SQL_FN_TD_TIMESTAMPADD` — the `TIMESTAMPADD` scalar function.
+/// `SQL_FN_TD_TIMESTAMPADD`: the `TIMESTAMPADD` scalar function.
 pub const SQL_FN_TD_TIMESTAMPADD: u32 = 0x0000_2000;
-/// `SQL_FN_TD_TIMESTAMPDIFF` — the `TIMESTAMPDIFF` scalar function.
+/// `SQL_FN_TD_TIMESTAMPDIFF`: the `TIMESTAMPDIFF` scalar function.
 pub const SQL_FN_TD_TIMESTAMPDIFF: u32 = 0x0000_4000;
-/// `SQL_FN_TD_DAYNAME` — the `DAYNAME` scalar function.
+/// `SQL_FN_TD_DAYNAME`: the `DAYNAME` scalar function.
 pub const SQL_FN_TD_DAYNAME: u32 = 0x0000_8000;
-/// `SQL_FN_TD_MONTHNAME` — the `MONTHNAME` scalar function.
+/// `SQL_FN_TD_MONTHNAME`: the `MONTHNAME` scalar function.
 pub const SQL_FN_TD_MONTHNAME: u32 = 0x0001_0000;
-/// `SQL_FN_TD_CURRENT_DATE` — the `CURRENT_DATE` scalar function.
+/// `SQL_FN_TD_CURRENT_DATE`: the `CURRENT_DATE` scalar function.
 pub const SQL_FN_TD_CURRENT_DATE: u32 = 0x0002_0000;
-/// `SQL_FN_TD_CURRENT_TIME` — the `CURRENT_TIME` scalar function.
+/// `SQL_FN_TD_CURRENT_TIME`: the `CURRENT_TIME` scalar function.
 pub const SQL_FN_TD_CURRENT_TIME: u32 = 0x0004_0000;
-/// `SQL_FN_TD_CURRENT_TIMESTAMP` — the `CURRENT_TIMESTAMP` scalar function.
+/// `SQL_FN_TD_CURRENT_TIMESTAMP`: the `CURRENT_TIMESTAMP` scalar function.
 pub const SQL_FN_TD_CURRENT_TIMESTAMP: u32 = 0x0008_0000;
-/// `SQL_FN_TD_EXTRACT` — the `EXTRACT` scalar function.
+/// `SQL_FN_TD_EXTRACT`: the `EXTRACT` scalar function.
 pub const SQL_FN_TD_EXTRACT: u32 = 0x0010_0000;
 
 // --- SQLTables: the SQL_ALL_* enumeration sentinels (sqlext.h) ---
-/// `SQL_ALL_CATALOGS` — `SQLTables`' catalog-enumeration sentinel.
+/// `SQL_ALL_CATALOGS`: `SQLTables`' catalog-enumeration sentinel.
 ///
 /// All three `SQL_ALL_*` sentinels are the same string, `"%"`. Which
 /// enumeration is meant depends on **which argument carries it while the
@@ -1167,11 +1166,11 @@ pub const SQL_FN_TD_EXTRACT: u32 = 0x0010_0000;
 /// `SQLTables("%", "%", "%")` is an ordinary match-everything query, not an
 /// enumeration.
 pub const SQL_ALL_CATALOGS: &str = "%";
-/// `SQL_ALL_SCHEMAS` — `SQLTables`' schema-enumeration sentinel. See
+/// `SQL_ALL_SCHEMAS`: `SQLTables`' schema-enumeration sentinel. See
 /// [`SQL_ALL_CATALOGS`] for the disambiguation rule; the two constants are the
 /// same string.
 pub const SQL_ALL_SCHEMAS: &str = "%";
-/// `SQL_ALL_TABLE_TYPES` — `SQLTables`' table-type-enumeration sentinel. See
+/// `SQL_ALL_TABLE_TYPES`: `SQLTables`' table-type-enumeration sentinel. See
 /// [`SQL_ALL_CATALOGS`] for the disambiguation rule; the two constants are the
 /// same string.
 pub const SQL_ALL_TABLE_TYPES: &str = "%";
@@ -1199,10 +1198,10 @@ pub const SQL_CURSOR_FORWARD_ONLY: usize = 0;
 /// `SQL_ATTR_APP_ROW_DESC` / `SQL_ATTR_APP_PARAM_DESC`: revert to the
 /// descriptor implicitly allocated with the statement (`SQL_NULL_DESC = 0`).
 ///
-/// The same numeric value as `SQL_NULL_HANDLE`, and deliberately its own name:
+/// The same numeric value as `SQL_NULL_HANDLE`, but its own name:
 /// `SQLSetStmtAttr`'s description of these two attributes calls it
-/// `SQL_NULL_DESC` and gives it a meaning a null handle does not have — not
-/// "no descriptor", but "the one this statement started with".
+/// `SQL_NULL_DESC` and gives it a meaning a null handle does not have. It says
+/// "the one this statement started with", not "no descriptor".
 pub const SQL_NULL_DESC: usize = 0;
 
 // --- SQL_ATTR_CONNECTION_DEAD values (sqlext.h) ---
@@ -1272,7 +1271,7 @@ pub const SQL_PT_FUNCTION: i16 = 2;
 ///
 /// Written in the order the specification page lists them rather than sorted,
 /// so a reviewer can diff it against the source. Nothing here depends on the
-/// order — the subtraction in `common_get_info_raw` does a linear membership
+/// order: the subtraction in `common_get_info_raw` does a linear membership
 /// test, and `odbc_reserved_keywords_are_unique` guards the one property that
 /// matters.
 ///
@@ -1525,7 +1524,7 @@ mod tests {
     /// a constant checked against the expression that defines it cannot fail.
     ///
     /// `sqlext.h` defines each as `100 + SQL_CODE_*`, and the `SQL_CODE_*`
-    /// subcodes run 1..=13 in the order below — which is also
+    /// subcodes run 1..=13 in the order below. That is also
     /// `odbc_sys::Interval`'s discriminant order, the relationship
     /// `single_field_interval_code` relies on.
     #[test]
@@ -1632,7 +1631,7 @@ mod tests {
     /// `SQL_OJ_*` is defined directly in `sql.h`, not `sqlext.h`.
     #[test]
     fn capability_flag_constants_match_sqlext_h() {
-        // SQL_SCHEMA_USAGE (91) flags — sqlext.h aliases of SQL_OU_* (0x00000001..0x00000010)
+        // SQL_SCHEMA_USAGE (91) flags: sqlext.h aliases of SQL_OU_* (0x00000001..0x00000010)
         assert_eq!(
             SQL_SU_DML_STATEMENTS, 0x0000_0001,
             "SQL_SU_DML_STATEMENTS (sqlext.h, alias of SQL_OU_DML_STATEMENTS)"
@@ -1654,7 +1653,7 @@ mod tests {
             "SQL_SU_PRIVILEGE_DEFINITION (sqlext.h, alias of SQL_OU_PRIVILEGE_DEFINITION)"
         );
 
-        // SQL_CATALOG_USAGE (92) flags — sqlext.h aliases of SQL_QU_* (0x00000001..0x00000010)
+        // SQL_CATALOG_USAGE (92) flags: sqlext.h aliases of SQL_QU_* (0x00000001..0x00000010)
         assert_eq!(
             SQL_CU_DML_STATEMENTS, 0x0000_0001,
             "SQL_CU_DML_STATEMENTS (sqlext.h, alias of SQL_QU_DML_STATEMENTS)"
@@ -1676,7 +1675,7 @@ mod tests {
             "SQL_CU_PRIVILEGE_DEFINITION (sqlext.h, alias of SQL_QU_PRIVILEGE_DEFINITION)"
         );
 
-        // SQL_CATALOG_LOCATION (114) values — sqlext.h aliases of SQL_QL_*
+        // SQL_CATALOG_LOCATION (114) values: sqlext.h aliases of SQL_QL_*
         assert_eq!(
             SQL_CL_START, 0x0001,
             "SQL_CL_START (sqlext.h, alias of SQL_QL_START)"
@@ -1686,7 +1685,7 @@ mod tests {
             "SQL_CL_END (sqlext.h, alias of SQL_QL_END)"
         );
 
-        // SQL_OJ_CAPABILITIES (115) flags — sql.h (not sqlext.h)
+        // SQL_OJ_CAPABILITIES (115) flags: sql.h (not sqlext.h)
         assert_eq!(SQL_OJ_LEFT, 0x0000_0001, "SQL_OJ_LEFT (sql.h)");
         assert_eq!(SQL_OJ_RIGHT, 0x0000_0002, "SQL_OJ_RIGHT (sql.h)");
         assert_eq!(SQL_OJ_FULL, 0x0000_0004, "SQL_OJ_FULL (sql.h)");
@@ -1791,7 +1790,7 @@ mod tests {
         );
     }
 
-    /// The enum values behind the info types that `Backend` now requires a
+    /// The enum values behind the info types that `Backend` requires a
     /// backend to state (`SQL_NULL_COLLATION`, `SQL_CORRELATION_NAME`,
     /// `SQL_NON_NULLABLE_COLUMNS`, `SQL_GROUP_BY`, `SQL_SQL_CONFORMANCE`) plus
     /// the `SQL_TIMEDATE_*_INTERVALS` bitmaps, asserted against the C headers.
@@ -1799,40 +1798,40 @@ mod tests {
     /// These are the values where **zero is a substantive answer**, not
     /// "unknown": `SQL_NC_HIGH`, `SQL_CN_NONE` and `SQL_NNC_NULL` are all `0`.
     /// A typo in one of them therefore cannot show up as an obviously-empty
-    /// value the way a wrong bitmask flag would — it shows up as a different,
+    /// value the way a wrong bitmask flag would. It shows up as a different,
     /// equally plausible claim. Same rationale as
     /// [`capability_flag_constants_match_sqlext_h`]: the literal is the only
     /// independent check tying the named constant to the specification's own
     /// source.
     #[test]
     fn info_type_value_constants_match_sql_headers() {
-        // SQL_NULL_COLLATION (85) — SQL_NC_HIGH/LOW are sql.h, START/END sqlext.h
+        // SQL_NULL_COLLATION (85): SQL_NC_HIGH/LOW are sql.h, START/END sqlext.h
         assert_eq!(SQL_NC_HIGH, 0, "SQL_NC_HIGH (sql.h)");
         assert_eq!(SQL_NC_LOW, 1, "SQL_NC_LOW (sql.h)");
         assert_eq!(SQL_NC_START, 0x0002, "SQL_NC_START (sqlext.h)");
         assert_eq!(SQL_NC_END, 0x0004, "SQL_NC_END (sqlext.h)");
 
-        // SQL_CONCAT_NULL_BEHAVIOR (22) values — sqlext.h
+        // SQL_CONCAT_NULL_BEHAVIOR (22) values: sqlext.h
         assert_eq!(SQL_CB_NULL, 0x0000, "SQL_CB_NULL (sqlext.h)");
         assert_eq!(SQL_CB_NON_NULL, 0x0001, "SQL_CB_NON_NULL (sqlext.h)");
 
-        // SQL_CONVERT_FUNCTIONS (48) values — sqlext.h
+        // SQL_CONVERT_FUNCTIONS (48) values: sqlext.h
         assert_eq!(
             SQL_FN_CVT_CONVERT, 0x0000_0001,
             "SQL_FN_CVT_CONVERT (sqlext.h)"
         );
         assert_eq!(SQL_FN_CVT_CAST, 0x0000_0002, "SQL_FN_CVT_CAST (sqlext.h)");
 
-        // SQL_CORRELATION_NAME (74) values — sqlext.h
+        // SQL_CORRELATION_NAME (74) values: sqlext.h
         assert_eq!(SQL_CN_NONE, 0x0000, "SQL_CN_NONE (sqlext.h)");
         assert_eq!(SQL_CN_DIFFERENT, 0x0001, "SQL_CN_DIFFERENT (sqlext.h)");
         assert_eq!(SQL_CN_ANY, 0x0002, "SQL_CN_ANY (sqlext.h)");
 
-        // SQL_NON_NULLABLE_COLUMNS (75) values — sqlext.h
+        // SQL_NON_NULLABLE_COLUMNS (75) values: sqlext.h
         assert_eq!(SQL_NNC_NULL, 0x0000, "SQL_NNC_NULL (sqlext.h)");
         assert_eq!(SQL_NNC_NON_NULL, 0x0001, "SQL_NNC_NON_NULL (sqlext.h)");
 
-        // SQL_GROUP_BY (88) values — sqlext.h
+        // SQL_GROUP_BY (88) values: sqlext.h
         assert_eq!(
             SQL_GB_NOT_SUPPORTED, 0x0000,
             "SQL_GB_NOT_SUPPORTED (sqlext.h)"
@@ -1848,7 +1847,7 @@ mod tests {
         assert_eq!(SQL_GB_NO_RELATION, 0x0003, "SQL_GB_NO_RELATION (sqlext.h)");
         assert_eq!(SQL_GB_COLLATE, 0x0004, "SQL_GB_COLLATE (sqlext.h)");
 
-        // SQL_SQL_CONFORMANCE (118) values — sqlext.h
+        // SQL_SQL_CONFORMANCE (118) values: sqlext.h
         assert_eq!(
             SQL_SC_SQL92_ENTRY, 0x0000_0001,
             "SQL_SC_SQL92_ENTRY (sqlext.h)"
@@ -1867,7 +1866,7 @@ mod tests {
         );
 
         // SQL_TIMEDATE_ADD_INTERVALS (109) / SQL_TIMEDATE_DIFF_INTERVALS (110)
-        // flags — sqlext.h. Both info types use this one set of values.
+        // flags: sqlext.h. Both info types use this one set of values.
         assert_eq!(
             SQL_FN_TSI_FRAC_SECOND, 0x0000_0001,
             "SQL_FN_TSI_FRAC_SECOND (sqlext.h)"
@@ -1890,7 +1889,7 @@ mod tests {
         );
         assert_eq!(SQL_FN_TSI_YEAR, 0x0000_0100, "SQL_FN_TSI_YEAR (sqlext.h)");
 
-        // Info type numbers with no odbc_sys::InfoType variant — sqlext.h.
+        // Info type numbers with no odbc_sys::InfoType variant: sqlext.h.
         // Everything else in this file derives its number from odbc-sys; these
         // two restate it, so they need the same header check as the values.
         assert_eq!(SQL_ROW_UPDATES, 11, "SQL_ROW_UPDATES (sqlext.h)");
@@ -1907,9 +1906,8 @@ mod tests {
 
     /// A duplicate in [`ODBC_RESERVED_KEYWORDS`] is invisible at a glance in a
     /// list this long and harmless to the subtraction itself, but it means the
-    /// list was transcribed with an error — and the next error may be a
-    /// *missing* entry, which silently leaks an ODBC keyword into
-    /// `SQL_KEYWORDS`.
+    /// list was transcribed with an error. The next error may be a *missing*
+    /// entry, which silently leaks an ODBC keyword into `SQL_KEYWORDS`.
     #[test]
     fn odbc_reserved_keywords_are_unique() {
         let mut seen = std::collections::HashSet::new();

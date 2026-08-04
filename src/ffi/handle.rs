@@ -27,7 +27,7 @@ fn registry_exhausted() -> OdbcError {
 /// Turn an `alloc_*` outcome into this function's return value.
 ///
 /// The exhaustion arm becomes an `Err`, so `panic_safe` posts `HY014` to
-/// `InputHandle` — the queue the spec names as this call's output channel.
+/// `InputHandle`, the queue the spec names as this call's output channel.
 /// `SQL_HANDLE_ENV` is the one arm where that posts nothing, because its
 /// `InputHandle` is `SQL_NULL_HANDLE` and the handle the diagnostic would be
 /// read from does not exist yet; it still fails with `SQL_ERROR`.
@@ -44,12 +44,12 @@ fn finish_alloc(outcome: Result<(), AllocFailure>) -> Result<SqlReturn, OdbcErro
 /// Spec: <https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlallochandle-function>
 ///
 /// Dispatches based on `handle_type`:
-/// - `SQL_HANDLE_ENV` (1) — allocate an environment handle (`input_handle` must be null)
-/// - `SQL_HANDLE_DBC` (2) — allocate a connection handle (`input_handle` must be a valid env)
-/// - `SQL_HANDLE_STMT` (3) — allocate a statement handle (`input_handle` must be a valid conn)
-/// - `SQL_HANDLE_DESC` (4) — allocate an explicit descriptor handle
+/// - `SQL_HANDLE_ENV` (1): allocate an environment handle (`input_handle` must be null)
+/// - `SQL_HANDLE_DBC` (2): allocate a connection handle (`input_handle` must be a valid env)
+/// - `SQL_HANDLE_STMT` (3): allocate a statement handle (`input_handle` must be a valid conn)
+/// - `SQL_HANDLE_DESC` (4): allocate an explicit descriptor handle
 ///   (`input_handle` must be a valid connection)
-/// - `SQL_HANDLE_DBC_INFO_TOKEN` — not implemented; returns `SQL_ERROR` with HYC00
+/// - `SQL_HANDLE_DBC_INFO_TOKEN`: not implemented; returns `SQL_ERROR` with HYC00
 ///
 /// # Spec compliance
 ///
@@ -64,7 +64,7 @@ fn finish_alloc(outcome: Result<(), AllocFailure>) -> Result<SqlReturn, OdbcErro
 ///   first carries `(DM)`, the Driver Manager's own allocation failure. The
 ///   second is unmarked and is the driver's: "the driver was unable to allocate
 ///   memory for the specified handle". Core still does not return it, because
-///   allocation here is an infallible `Box` — Rust's allocator aborts on OOM
+///   allocation here is an infallible `Box`: Rust's allocator aborts on OOM
 ///   rather than returning an error.
 /// - HY009: Returns `SQL_ERROR` if `output_handle_ptr` is null. The spec
 ///   annotates this (DM); it is guarded defensively here.
@@ -75,8 +75,8 @@ fn finish_alloc(outcome: Result<(), AllocFailure>) -> Result<SqlReturn, OdbcErro
 ///   when the handle registry has no slot left. A token packs a slot index into
 ///   half a `usize`, so the ceiling is `MAX_SLOT_INDEX` live handles
 ///   (`handles/registry.rs`): `2^32 - 1` on a 64-bit target, but **65 535 on a
-///   32-bit one**, which ODBC still very much has — Excel and Access are 32-bit
-///   on Windows — so a handle-leaking application can reach it. The diagnostic
+///   32-bit one**, which ODBC still very much has (Excel and Access are 32-bit
+///   on Windows), so a handle-leaking application can reach it. The diagnostic
 ///   goes to `InputHandle`, this call's output channel: the environment for a
 ///   connection, the connection for a statement or an explicit descriptor.
 ///   `SQL_HANDLE_ENV` is the one arm that cannot carry it, because its
@@ -93,10 +93,11 @@ fn finish_alloc(outcome: Result<(), AllocFailure>) -> Result<SqlReturn, OdbcErro
 ///   it is the driver's to return, and it is. Returned, with this SQLSTATE
 ///   posted, for `SQL_HANDLE_DBC_INFO_TOKEN` allocation. This is the only
 ///   un-annotated code in this function's table covering an unimplemented handle
-///   type; `IM001`, the alternative, is the Driver Manager's. The spec's own description of the
-///   row names `SQL_HANDLE_DESC`, which core no longer refuses. Note
-///   `SQLFreeHandle` answers `HY000` for an unimplemented type, because its
-///   table has no `HYC00` row at all — the asymmetry is what the two tables say.
+///   type; `IM001`, the alternative, is the Driver Manager's. The spec's own
+///   description of the row names `SQL_HANDLE_DESC`, which core allocates
+///   rather than refuses. `SQLFreeHandle` answers `HY000` for an unimplemented
+///   type, because its table has no `HYC00` row at all; the asymmetry is what
+///   the two tables say.
 /// - HYT01: Connection timeout expired (not returned here; allocation performs
 ///   no network I/O).
 /// - IM001: Driver does not support this function (driver-manager-handled; not
@@ -107,7 +108,7 @@ fn finish_alloc(outcome: Result<(), AllocFailure>) -> Result<SqlReturn, OdbcErro
 /// - For Dbc/Stmt: `input_handle` must be non-null and a valid parent handle.
 /// - For Desc: `input_handle` must be a valid **connection**. An explicit
 ///   descriptor belongs to a connection, not a statement, and joins that
-///   connection's lock group — the one every statement on it already shares, so
+///   connection's lock group, the one every statement on it already shares, so
 ///   a descriptor an application later associates with several statements adds no
 ///   lock. A token that does not name a live connection is
 ///   `SQL_INVALID_HANDLE`; `08003` ("connection not open") is (DM), so core does
@@ -146,7 +147,7 @@ pub unsafe fn sql_alloc_handle<B: Backend>(
     // also the group the child joins. For SQL_HANDLE_DBC it is not: a connection
     // starts a fresh `GroupLock` of its own, which is what makes it the unit every
     // statement and descriptor under it shares. Either way nothing nests, so there
-    // is no ordering to get wrong here — the crate's one nested-lock site is
+    // is no ordering to get wrong here; the crate's one nested-lock site is
     // SQLEndTran(SQL_HANDLE_ENV). The output pointer is set to SQL_NULL_HANDLE up front so every
     // error path, including a caught panic, leaves it null, and only the
     // success paths overwrite it.
@@ -213,7 +214,7 @@ pub unsafe fn sql_alloc_handle<B: Backend>(
                         return Ok(SqlReturn::ERROR);
                     }
                     // The connection's `SQL_ATTR_METADATA_ID`, which the new
-                    // statement starts from — see `alloc_statement`'s doc
+                    // statement starts from. See `alloc_statement`'s doc
                     // comment for why this attribute and no other. Read
                     // through the scope, so the value comes from a validated
                     // handle under the group lock this call already holds.
@@ -244,13 +245,13 @@ pub unsafe fn sql_alloc_handle<B: Backend>(
                 }
                 HandleType::Desc => {
                     // An explicit descriptor belongs to a **connection**, not a
-                    // statement, and joins that connection's lock group — which
+                    // statement, and joins that connection's lock group, which
                     // every statement on it already shares, so a descriptor an
                     // application later associates with several statements adds
                     // no lock and no ordering rule.
                     //
                     // `08003` ("connection not open") is (DM), so core does not
-                    // check that the connection is open — only that `input_handle`
+                    // check that the connection is open, only that `input_handle`
                     // really names one, which `group_of_kind` answers without
                     // dereferencing it. The `*output_handle_ptr =
                     // SQL_NULL_HANDLE` write above already ran, so the spec's
@@ -299,16 +300,16 @@ pub unsafe fn sql_alloc_handle<B: Backend>(
 ///
 /// Frees resources associated with a specific environment, connection, statement, or descriptor
 /// handle. Dispatches based on `handle_type`:
-/// - `SQL_HANDLE_ENV` (1) — free an environment handle
-/// - `SQL_HANDLE_DBC` (2) — free a connection handle
-/// - `SQL_HANDLE_STMT` (3) — free a statement handle
-/// - `SQL_HANDLE_DESC` (4) — free an explicit descriptor handle, i.e. one this
+/// - `SQL_HANDLE_ENV` (1): free an environment handle
+/// - `SQL_HANDLE_DBC` (2): free a connection handle
+/// - `SQL_HANDLE_STMT` (3): free a statement handle
+/// - `SQL_HANDLE_DESC` (4): free an explicit descriptor handle, i.e. one this
 ///   driver allocated against a **connection**. A statement's own descriptor is
 ///   refused with `HY000`; see that SQLSTATE below
-/// - `SQL_HANDLE_DBC_INFO_TOKEN` — not implemented; returns `SQL_ERROR` with HY000
+/// - `SQL_HANDLE_DBC_INFO_TOKEN`: not implemented; returns `SQL_ERROR` with HY000
 ///
-/// Returns `SQL_INVALID_HANDLE` for unrecognized handle types — a value outside
-/// the five the spec defines, which is what the spec prescribes for that case.
+/// Returns `SQL_INVALID_HANDLE` for unrecognized handle types, meaning a value
+/// outside the five the spec defines, which is what the spec prescribes for that case.
 /// If `SQL_ERROR` is returned the handle is still valid.
 ///
 /// # Parameters
@@ -321,7 +322,7 @@ pub unsafe fn sql_alloc_handle<B: Backend>(
 ///
 /// - HY000: General error. The row carries no `(DM)` marker, so it is the driver's
 ///   to return, and it is. Returns `SQL_ERROR` with this SQLSTATE in two cases. First, when
-///   `handle_type` is `SQL_HANDLE_DBC_INFO_TOKEN` — a valid handle type this
+///   `handle_type` is `SQL_HANDLE_DBC_INFO_TOKEN`, a valid handle type this
 ///   driver does not implement. The spec's table for this function lists no
 ///   `HYC00`, so the catch-all is the correct code even though `SQLAllocHandle`
 ///   answers `HYC00` for the same condition. Second, when `handle` names one of
@@ -329,7 +330,7 @@ pub unsafe fn sql_alloc_handle<B: Backend>(
 ///   allocated only the descriptors whose parent is a connection, and retiring a
 ///   statement's own slot would leave that statement pointing at nothing. The
 ///   refusal is expressed as ownership rather than as a spec check, and borrows no
-///   Driver-Manager-only code to say so — `HY017` is the spec's name for the
+///   Driver-Manager-only code to say so: `HY017` is the spec's name for the
 ///   condition, and the spec annotates it for the Driver Manager, so core does not
 ///   return it (see below). Under a real Driver Manager that branch never fires,
 ///   since the Driver Manager blocks the call first; its observers
@@ -340,13 +341,13 @@ pub unsafe fn sql_alloc_handle<B: Backend>(
 /// - HY001: Memory allocation error. The row carries no `(DM)` marker here, unlike
 ///   `SQLAllocHandle`'s: not returned, because Rust's allocator aborts on OOM rather
 ///   than returning an error.
-/// - HY010: Function sequence error — every clause of this row is `(DM)`. Two of them are
+/// - HY010: Function sequence error, and every clause of this row is `(DM)`. Two of them are
 ///   guarded defensively here anyway, because they are load-bearing for memory safety
 ///   rather than for the spec: freeing an environment that still has connections, or a
 ///   connection that is still open or still has children registered under it, would leave
 ///   live handles pointing at a retired parent. The children counted are every handle
-///   registered under that connection — statements and any explicitly allocated
-///   descriptors — not statements alone. The remaining clauses (async in progress,
+///   registered under that connection (statements and any explicitly allocated
+///   descriptors), not statements alone. The remaining clauses (async in progress,
 ///   data-at-execution pending) are driver-manager-handled; not returned here.
 /// - HY013: Memory management error. The row carries no `(DM)` marker: not returned, for
 ///   the same reason as `HY001`.
@@ -381,14 +382,14 @@ pub unsafe fn sql_free_handle<B: Backend>(handle_type: i16, handle: *mut c_void)
     // not unwind across the extern "system" boundary (undefined behaviour). `handle`
     // itself is passed to panic_safe (rather than null), because `handle` names its
     // own lock group regardless of whether it turns out to be an environment, a
-    // connection or a statement — resolving that group is exactly what
+    // connection or a statement. Resolving that group is what
     // `free_environment`/`free_connection` need `scope` for, and what holds the lock
     // for the duration of `free_statement`'s registry unregister and `Box::from_raw`.
     let ret = unsafe {
         panic_safe::<B, _>(handle, |scope| {
             // Spec: clear at the start of the call. This matters when the free
-            // fails and the handle survives — a connection with live
-            // statements, or an unimplemented handle type — because that is
+            // fails and the handle survives (a connection with live
+            // statements, or an unimplemented handle type), because that is
             // exactly when an application reads diagnostics, and a stale record
             // from the previous call would be served as record 1.
             if let Some(queue) = scope.diagnostics::<B>(handle) {
@@ -408,7 +409,7 @@ pub unsafe fn sql_free_handle<B: Backend>(handle_type: i16, handle: *mut c_void)
                     // Routed by ownership, not by inspecting the alloc type: this
                     // function allocated the descriptors whose parent is a
                     // connection, and only those. A statement's own descriptor
-                    // reaching here is a call core cannot perform — retiring that
+                    // reaching here is a call core cannot perform: retiring that
                     // slot would leave the owning statement pointing at nothing.
                     //
                     // HY000, not HY017: the spec's name for this condition is
@@ -446,15 +447,15 @@ pub unsafe fn sql_free_handle<B: Backend>(handle_type: i16, handle: *mut c_void)
                     // HYC00 row, while HY000 is listed and is the spec's catch-all
                     // for a condition with no specific SQLSTATE. (SQLAllocHandle's
                     // table *does* list HYC00 un-annotated, which is why its
-                    // equivalent arm differs — the asymmetry is what the two
+                    // equivalent arm differs; the asymmetry is what the two
                     // tables say, not an oversight.) Not SQL_INVALID_HANDLE
                     // either: the spec reserves that for a HandleType outside the
                     // five valid values, and this one is valid.
                     //
                     // Returned as an error rather than logged so the record
                     // reaches the queue; `panic_safe` posts it and converts it to
-                    // SQL_ERROR. No `tracing::error!` alongside it — an OdbcError
-                    // already logs, and pairing the two double-logs.
+                    // SQL_ERROR. No `tracing::error!` alongside it, because an
+                    // OdbcError already logs and pairing the two double-logs.
                     return Err(OdbcError::general(
                         format!("SQLFreeHandle: handle type {ht:?} is not implemented"),
                         crate::types::SqlState::general_error(),
@@ -478,13 +479,13 @@ pub unsafe fn sql_free_handle<B: Backend>(handle_type: i16, handle: *mut c_void)
 ///
 /// - `statement_handle`: The statement handle to operate on.
 /// - `option`: One of the following option values:
-///   - `SQL_CLOSE` (0) — closes any open cursor and discards pending results; no error if
+///   - `SQL_CLOSE` (0): closes any open cursor and discards pending results; no error if
 ///     no cursor is open.
-///   - `SQL_DROP` (1) — deprecated; the Driver Manager maps this to `SQLFreeHandle`
+///   - `SQL_DROP` (1): deprecated; the Driver Manager maps this to `SQLFreeHandle`
 ///     before it reaches the driver. If received directly, `SQL_ERROR` is returned
 ///     (HY092: option type out of range).
-///   - `SQL_UNBIND` (2) — releases all column bindings set by `SQLBindCol`.
-///   - `SQL_RESET_PARAMS` (3) — releases all parameter bindings set by `SQLBindParameter`.
+///   - `SQL_UNBIND` (2): releases all column bindings set by `SQLBindCol`.
+///   - `SQL_RESET_PARAMS` (3): releases all parameter bindings set by `SQLBindParameter`.
 ///
 /// # Spec compliance
 ///
@@ -495,7 +496,7 @@ pub unsafe fn sql_free_handle<B: Backend>(handle_type: i16, handle: *mut c_void)
 /// - HY001: Memory allocation error. The row carries no `(DM)` marker: not returned,
 ///   because Rust's allocator aborts on OOM rather than returning an error.
 /// - HY010: Function sequence error (async execution in progress, data-at-execution pending,
-///   etc.) — driver-manager-handled; not returned here.
+///   etc.): driver-manager-handled; not returned here.
 /// - HY013: Memory management error. The row carries no `(DM)` marker: not returned, for
 ///   the same reason as `HY001`.
 /// - HY092: Returns `SQL_ERROR` and posts this SQLSTATE if `option` is not one of
@@ -553,9 +554,9 @@ pub unsafe fn sql_free_stmt<B: Backend>(statement_handle: *mut c_void, option: u
             let ard_token = stmt.descriptor_token(DescriptorRole::Ard);
 
             // Parsed inside `panic_safe`, not before it: returning early out
-            // there left no HandleScope, so the SQL_ERROR reached the
+            // there leaves no HandleScope, so the SQL_ERROR reaches the
             // application with an empty diagnostic queue and SQLGetDiagRec
-            // answered SQL_NO_DATA — a failure with no SQLSTATE to branch on.
+            // answers SQL_NO_DATA, a failure with no SQLSTATE to branch on.
             //
             // The spec marks HY092 (DM) for this function, so a conforming
             // Driver Manager rejects the call before the driver sees it. The
@@ -577,7 +578,7 @@ pub unsafe fn sql_free_stmt<B: Backend>(statement_handle: *mut c_void, option: u
 
             match opt {
                 // Discard the result set so the handle is ready for a new
-                // statement, telling the backend first — the spec makes this
+                // statement, telling the backend first: the spec makes this
                 // option equivalent to `SQLCloseCursor` bar the `24000`, so it
                 // owes `StatementBackend::close_cursor` the same call. See
                 // `sql_close_cursor` for why the discard happens even on
@@ -781,7 +782,7 @@ mod tests {
     /// A statement's own descriptor is not this function's to free.
     ///
     /// `HY017` is the spec's name for the condition and is `(DM)`, so core
-    /// answers `HY000` instead — the same code this function already returns for
+    /// answers `HY000` instead, the same code this function already returns for
     /// an unimplemented handle type, whose table lists no `HYC00` either. The
     /// statement must be untouched afterwards.
     #[test]
@@ -828,8 +829,8 @@ mod tests {
     }
 
     /// `SQLDisconnect` "drops any statements or descriptors open on the
-    /// connection", so an explicit descriptor left behind is freed with it —
-    /// which Miri's leak check is what actually enforces.
+    /// connection", so an explicit descriptor left behind is freed with it,
+    /// which Miri's leak check enforces.
     #[test]
     fn disconnect_frees_the_connections_explicit_descriptors() {
         unsafe {
@@ -880,7 +881,7 @@ mod tests {
     }
 
     /// Registry exhaustion is `SQLAllocHandle`'s `HY014`, and the diagnostic
-    /// goes to `InputHandle` — the environment, for a connection.
+    /// goes to `InputHandle`, which for a connection is the environment.
     #[test]
     fn dbc_allocation_exhaustion_posts_hy014_on_the_environment() {
         let mut env: *mut c_void = std::ptr::null_mut();
@@ -990,7 +991,7 @@ mod tests {
     /// The environment is the one arm that cannot carry the diagnostic, and
     /// this pins that rather than leaving it to a comment. `InputHandle` is
     /// `SQL_NULL_HANDLE` for an environment allocation, so there is no queue
-    /// to post to — the spec's own `Handle` for this call's diagnostic does
+    /// to post to: the spec's own `Handle` for this call's diagnostic does
     /// not exist yet. It still fails.
     #[test]
     fn env_allocation_exhaustion_fails_with_no_diagnostic_to_post_to() {
@@ -1215,11 +1216,11 @@ mod tests {
     fn free_stmt_invalid_option_posts_hy092() {
         // The spec marks HY092 (DM) for this function, so a conforming Driver
         // Manager normally catches an unrecognised Option before the driver
-        // sees it. This driver keeps the check anyway — it must do something
-        // with an option it cannot parse — and the fix is only that the failure
-        // becomes reportable: returning SQL_ERROR before `panic_safe` left no
-        // HandleScope and no handle to post onto, so SQLGetDiagRec answered
-        // SQL_NO_DATA and the application saw a failure with no SQLSTATE it
+        // sees it. This driver keeps the check anyway, because it must do
+        // something with an option it cannot parse, and the failure has to be
+        // reportable: returning SQL_ERROR before `panic_safe` leaves no
+        // HandleScope and no handle to post onto, so SQLGetDiagRec answers
+        // SQL_NO_DATA and the application sees a failure with no SQLSTATE it
         // could branch on.
         const UNRECOGNISED_FREE_STMT_OPTION: u16 = 99;
         unsafe {
@@ -1242,8 +1243,8 @@ mod tests {
     fn free_handle_clears_diagnostics_on_entry() {
         // Spec: every function clears the handle's diagnostics at the start of
         // the call. It matters here precisely when the free FAILS and the
-        // handle survives — freeing a connection that still has live
-        // statements — because that is exactly when an application reads them.
+        // handle survives (freeing a connection that still has live
+        // statements), because that is exactly when an application reads them.
         // A stale record would otherwise be served as record 1, describing a
         // different call entirely.
         unsafe {
@@ -1288,9 +1289,9 @@ mod tests {
         // function's table, SQLAllocHandle's *does* list HYC00, un-annotated,
         // for an unimplemented handle type. IM001, the other candidate, is (DM).
         //
-        // SQL_HANDLE_DBC_INFO_TOKEN is the only type left on this arm now that
+        // SQL_HANDLE_DBC_INFO_TOKEN is the only type on this arm, because
         // SQL_HANDLE_DESC is implemented; the spec's own wording for the row
-        // names SQL_HANDLE_DESC, which core no longer refuses.
+        // names SQL_HANDLE_DESC, which core allocates rather than refuses.
         unsafe {
             let mut env: *mut c_void = std::ptr::null_mut();
             let _ = sql_alloc_handle::<MockBackend>(
@@ -1336,7 +1337,7 @@ mod tests {
         //
         // HY000, not HYC00: SQLFreeHandle's diagnostics table has no HYC00 row,
         // while HY000 is listed and is the spec's catch-all. Not
-        // SQL_INVALID_HANDLE either — the spec reserves that for a HandleType
+        // SQL_INVALID_HANDLE either: the spec reserves that for a HandleType
         // outside the five valid values, and this is one of them.
         unsafe {
             let (env, conn, stmt) = crate::test_utils::alloc_env_conn_stmt();
@@ -1374,7 +1375,7 @@ mod tests {
     #[test]
     fn alloc_handle_clears_input_handle_diagnostics_on_entry() {
         // Spec, SQLAllocHandle Diagnostics: the SQLSTATE is read "with Handle
-        // set to the value of InputHandle" — so InputHandle's queue is this
+        // set to the value of InputHandle", so InputHandle's queue is this
         // call's output channel, and must be cleared at entry like any other.
         unsafe {
             let mut env: *mut c_void = std::ptr::null_mut();
@@ -1466,8 +1467,9 @@ mod tests {
     /// A prepared-but-unexecuted statement (ODBC state S2/S3) holds a backend
     /// statement but has no cursor, and the spec says SQL_CLOSE "has no effect
     /// for the application" when no cursor is open. Calling `close_cursor` there
-    /// would drive the backend to tear down a cursor that was never opened —
-    /// against this mock, turning a call the spec says succeeds into an `08S01`.
+    /// would drive the backend to tear down a cursor that was never opened,
+    /// which against this mock turns a call the spec says succeeds into an
+    /// `08S01`.
     ///
     /// `SQLCloseCursor` needs no such gate: its `24000` guard has already
     /// established that a cursor is open by the time it reaches the backend.

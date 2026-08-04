@@ -35,13 +35,13 @@ const SQL_BIND_BY_COLUMN: usize = 0;
 // shared `SQL_UNSPECIFIED` from `types::constants`, which is what
 // `default_get_info` answers SQL_CURSOR_SENSITIVITY with. The two draw on the
 // same value set, so a local copy is a second place for the same statement to
-// describe its cursor — and `sql.h` puts SQL_INSENSITIVE at 1 and
+// describe its cursor, and `sql.h` puts SQL_INSENSITIVE at 1 and
 // SQL_SENSITIVE at 2, either side of it, which is what a copy would most
 // likely drift to.
 
 // SQL_ATTR_SIMULATE_CURSOR values. Named `SQL_SC_*` in `sqlext.h`, which
 // collides with the `SQL_SC_*` SQL-conformance family in `types::constants`
-// (`SQL_SC_SQL92_ENTRY` and friends) — an unrelated value set that happens to
+// (`SQL_SC_SQL92_ENTRY` and friends), an unrelated value set that happens to
 // share the prefix. Kept local for that reason, like the other value sets
 // above.
 const SQL_SC_NON_UNIQUE: usize = 0;
@@ -75,7 +75,7 @@ const SQL_QUERY_TIMEOUT_DEFAULT: usize = 0;
 /// are: SQL_ATTR_CONCURRENCY SQL_ATTR_CURSOR_TYPE SQL_ATTR_KEYSET_SIZE
 /// SQL_ATTR_MAX_LENGTH SQL_ATTR_MAX_ROWS SQL_ATTR_QUERY_TIMEOUT
 /// SQL_ATTR_ROW_ARRAY_SIZE SQL_ATTR_SIMULATE_CURSOR". An attribute outside
-/// that list must not be substituted — it takes `HYC00` instead — with the two
+/// that list must not be substituted (it takes `HYC00` instead), with the two
 /// documented exceptions noted at their call sites.
 fn substitute_stmt_attr<B: Backend>(
     scope: &mut HandleScope<'_>,
@@ -99,8 +99,8 @@ fn substitute_stmt_attr<B: Backend>(
 /// The diagnostic half of [`substitute_stmt_attr`], against an explicit queue.
 ///
 /// Split out because `SQLSetDescField` performs the same substitution on the
-/// same stored value through the other door — `SQL_DESC_ARRAY_SIZE` *is*
-/// `SQL_ATTR_ROW_ARRAY_SIZE` — but posts to the *descriptor's* queue rather
+/// same stored value through the other door (`SQL_DESC_ARRAY_SIZE` *is*
+/// `SQL_ATTR_ROW_ARRAY_SIZE`) but posts to the *descriptor's* queue rather
 /// than the statement's, since that is the handle the application named. A
 /// door that accepts what the other refuses is the disagreement single storage
 /// exists to remove, so the two share the substitution rather than restating it.
@@ -123,26 +123,6 @@ pub(crate) fn substitution_warning(
     SqlReturn::SUCCESS_WITH_INFO
 }
 
-/// Offer a "reduce load at the data source" attribute to the backend, falling
-/// back to the spec's `01S02` substitution when it cannot apply it.
-///
-/// Shared by `SQL_ATTR_QUERY_TIMEOUT`, `SQL_ATTR_MAX_ROWS` and
-/// `SQL_ATTR_MAX_LENGTH`, which the spec treats alike. All three exist to
-/// reduce work or traffic at the *data source* — the `MAX_ROWS` and
-/// `MAX_LENGTH` rows both say "this attribute is intended to reduce network
-/// traffic" in as many words — so core emulating any of them client-side would
-/// move the data anyway and discard it afterwards, achieving nothing the
-/// application asked for. The spec makes that explicit for both: "a driver
-/// should not emulate SQL_ATTR_MAX_ROWS behavior", and `MAX_LENGTH` "should be
-/// supported only when the data source (as opposed to the driver) ... can
-/// implement it".
-///
-/// So the only honest answers are "the data source is doing it" or "nobody is",
-/// and all three attributes sit on the spec's closed `01S02` list, which is how
-/// to say the second.
-///
-/// Returns `Some(value)` when the backend accepted — the caller stores it and
-/// may do extra bookkeeping — or `None` when the substitution was applied.
 /// The `01S02` substitution to fall back on, as one value.
 ///
 /// Grouped rather than passed as five loose arguments so the call sites read as
@@ -156,6 +136,26 @@ struct Substitution<'a> {
     fallback_display: &'a str,
 }
 
+/// Offer a "reduce load at the data source" attribute to the backend, falling
+/// back to the spec's `01S02` substitution when it cannot apply it.
+///
+/// Shared by `SQL_ATTR_QUERY_TIMEOUT`, `SQL_ATTR_MAX_ROWS` and
+/// `SQL_ATTR_MAX_LENGTH`, which the spec treats alike. All three exist to
+/// reduce work or traffic at the *data source*, and the `MAX_ROWS` and
+/// `MAX_LENGTH` rows both say "this attribute is intended to reduce network
+/// traffic" in as many words. Core emulating any of them client-side would
+/// move the data anyway and discard it afterwards, achieving nothing the
+/// application asked for. The spec makes that explicit for both: "a driver
+/// should not emulate SQL_ATTR_MAX_ROWS behavior", and `MAX_LENGTH` "should be
+/// supported only when the data source (as opposed to the driver) ... can
+/// implement it".
+///
+/// So the only honest answers are "the data source is doing it" or "nobody is",
+/// and all three attributes sit on the spec's closed `01S02` list, which is how
+/// to say the second.
+///
+/// Returns `Some(value)` when the backend accepted (the caller stores it and
+/// may do extra bookkeeping), or `None` when the substitution was applied.
 fn offer_to_data_source<B: Backend, T>(
     scope: &mut HandleScope<'_>,
     stmt_token: *mut c_void,
@@ -224,19 +224,19 @@ fn offer_to_data_source<B: Backend, T>(
 ///   already in the state being asked for.
 /// - **The value is always stored**, so `SQLGetStmtAttr` reports the default.
 ///
-/// Without this path the default reached the store-only arm at the bottom of
-/// the match instead, which calls nothing — so a data source told to cap a
-/// result set at ten rows was never told to stop, and `SQLGetStmtAttr`
-/// reported no limit for a connection still enforcing one.
+/// Without this path the default reaches the store-only arm at the bottom of
+/// the match instead, which calls nothing, so a data source told to cap a
+/// result set at ten rows is never told to stop and `SQLGetStmtAttr` reports
+/// no limit for a connection still enforcing one.
 ///
 /// A *real* backend failure propagates rather than being swallowed, for the
 /// reason [`offer_to_data_source`] gives: "the connection is broken" is a
 /// different claim from "this driver capped your value".
 ///
-/// Takes loose arguments rather than a [`Substitution`], deliberately: that
-/// struct exists because `requested` and `fallback` are both `usize` and
-/// swapping them compiles. There is one `usize` here — the default is the
-/// requested value — so there is nothing to transpose.
+/// Takes loose arguments rather than a [`Substitution`]: that struct exists
+/// because `requested` and `fallback` are both `usize` and swapping them
+/// compiles. There is one `usize` here, since the default is the requested
+/// value, so there is nothing to transpose.
 fn reset_at_data_source<B: Backend, T>(
     scope: &mut HandleScope<'_>,
     stmt_token: *mut c_void,
@@ -246,8 +246,8 @@ fn reset_at_data_source<B: Backend, T>(
     apply: impl FnOnce(&B::Connection) -> Result<T, OdbcError>,
 ) -> Result<SqlReturn, OdbcError> {
     // The backend call runs inside its own borrow of the connection, which
-    // ends before the attribute is stored — same shape, and same reason, as
-    // `offer_to_data_source`.
+    // ends before the attribute is stored, on the same shape and the same
+    // reason as `offer_to_data_source`.
     let outcome = {
         let (_stmt, conn) = scope.stmt_with_parent::<B>(stmt_token)?;
         conn.connection.as_ref().map(apply)
@@ -290,7 +290,7 @@ fn reset_at_data_source<B: Backend, T>(
 /// - `attribute`: the statement attribute to set (e.g. `SQL_ATTR_CURSOR_TYPE`).
 /// - `value_ptr`: the value to associate with `attribute`. Either an integer
 ///   cast to a pointer, or a pointer to a null-terminated UTF-16 string, or a
-///   descriptor handle — depending on the attribute.
+///   descriptor handle, depending on the attribute.
 /// - `_string_length`: byte length of `*value_ptr` when it is a string;
 ///   ignored for integer-valued attributes.
 ///
@@ -300,7 +300,7 @@ fn reset_at_data_source<B: Backend, T>(
 /// - 01S02 Option value changed: returned for `SQL_ATTR_CONCURRENCY`,
 ///   `SQL_ATTR_CURSOR_TYPE`, `SQL_ATTR_KEYSET_SIZE`, `SQL_ATTR_MAX_LENGTH`,
 ///   `SQL_ATTR_MAX_ROWS`, `SQL_ATTR_QUERY_TIMEOUT`, `SQL_ATTR_ROW_ARRAY_SIZE`
-///   and `SQL_ATTR_SIMULATE_CURSOR` — the eight the spec's `01S02` row names —
+///   and `SQL_ATTR_SIMULATE_CURSOR` (the eight the spec's `01S02` row names),
 ///   plus `SQL_ATTR_CURSOR_SCROLLABLE` and `SQL_ATTR_PARAMSET_SIZE`, two
 ///   deviations documented at their arms. Each has exactly one value core can
 ///   honour; the driver stores that value and `SQLGetStmtAttr` reports it back,
@@ -317,8 +317,8 @@ fn reset_at_data_source<B: Backend, T>(
 ///   stored. See `offer_to_data_source` for why all three go to the data source
 ///   rather than being emulated here.
 ///
-///   Their **default** values — `0` for each, meaning no timeout, no row limit
-///   and no length limit — take a separate path and are never substituted, for
+///   Their **default** values (`0` for each, meaning no timeout, no row limit
+///   and no length limit) take a separate path and are never substituted, for
 ///   the plain reason that the value core would substitute is the value the
 ///   application asked for. They are still offered to the same three hooks, so
 ///   a data source told to apply a limit is told to lift it; see
@@ -355,21 +355,21 @@ fn reset_at_data_source<B: Backend, T>(
 ///   allocated handle passed to `SQL_ATTR_APP_ROW_DESC` / `SQL_ATTR_APP_PARAM_DESC`
 ///   that is not the one originally allocated for that statement's ARD or APD. Both
 ///   therefore reach core unchecked, and the two implementation descriptors are
-///   accepted here. The second clause's wording — "other than the handle
-///   originally allocated" — implies the original *is* allowed, and core accepts
+///   accepted here. The second clause's wording, "other than the handle
+///   originally allocated", implies the original *is* allowed, and core accepts
 ///   it: the check it does make is the HY024 one below, which a statement's own
 ///   descriptor passes.
 /// - HY024 Invalid attribute value: returned when `SQL_ATTR_APP_ROW_DESC` or
 ///   `SQL_ATTR_APP_PARAM_DESC` is given a value that is not a descriptor on this
-///   statement's connection — a descriptor allocated on another connection, or a
+///   statement's connection: a descriptor allocated on another connection, or a
 ///   value that names no live descriptor at all. The row carries no `(DM)` marker: it
 ///   states the case verbatim, and closes with the general rule that makes it
 ///   core's, "For all other connection and statement attributes, the driver must
 ///   verify the value specified in *ValuePtr*". The check compares the parent
 ///   *chain*, so both an explicit descriptor of this connection and one of this
 ///   connection's statements' own four are accepted. For every *other* attribute,
-///   a value core cannot honour takes one of the two paths above — 01S02
-///   substitution on the spec's list, HYC00 off it — rather than being rejected
+///   a value core cannot honour takes one of the two paths above (01S02
+///   substitution on the spec's list, HYC00 off it) rather than being rejected
 ///   as invalid, since those are valid ODBC values this driver does not implement.
 /// - HY090 Invalid string or buffer length: (driver-manager-handled; not
 ///   returned here).
@@ -378,7 +378,7 @@ fn reset_at_data_source<B: Backend, T>(
 ///   identifier the driver does not recognise, and "the value specified for the
 ///   argument *Attribute* was a read-only attribute". Unrecognised attributes
 ///   are therefore accepted silently, and so are writes to the three read-only
-///   attributes that reach core — `SQL_ATTR_IMP_ROW_DESC`,
+///   attributes that reach core: `SQL_ATTR_IMP_ROW_DESC`,
 ///   `SQL_ATTR_IMP_PARAM_DESC` and `SQL_ATTR_ROW_NUMBER`. None of the three is
 ///   stored: accepting a write is not honouring it, and a stored
 ///   `SQL_ATTR_ROW_NUMBER` would be handed back by `SQLGetStmtAttr` as the
@@ -388,18 +388,18 @@ fn reset_at_data_source<B: Backend, T>(
 /// - HYC00 Optional feature not implemented: returned for
 ///   `SQL_ATTR_USE_BOOKMARKS` other than `SQL_UB_OFF`,
 ///   `SQL_ATTR_RETRIEVE_DATA` = `SQL_RD_OFF`, any
-///   `SQL_ATTR_CURSOR_SENSITIVITY` other than `SQL_UNSPECIFIED` — both
+///   `SQL_ATTR_CURSOR_SENSITIVITY` other than `SQL_UNSPECIFIED` (both
 ///   `SQL_INSENSITIVE` and `SQL_SENSITIVE`, since each is a promise a streaming
-///   forward-only cursor cannot keep — `SQL_ATTR_ENABLE_AUTO_IPD` = `SQL_TRUE`
+///   forward-only cursor cannot keep), `SQL_ATTR_ENABLE_AUTO_IPD` = `SQL_TRUE`
 ///   (a case the spec's own HYC00 row names), and `SQL_ATTR_ASYNC_ENABLE` =
 ///   `SQL_ASYNC_ENABLE_ON`. These are the unsupported values that the spec's
 ///   `01S02` row does not cover, so there is no substitution to report instead.
-/// - HYT01 Connection timeout expired: not raised by core. Since
+/// - HYT01 Connection timeout expired: not raised by core. Because
 ///   `SQL_ATTR_QUERY_TIMEOUT`, `SQL_ATTR_MAX_ROWS` and `SQL_ATTR_MAX_LENGTH`
-///   now reach the backend, this function *can* communicate with the data
-///   source, so a backend whose own connection timeout expires during one of
-///   those calls may report it — but core neither imposes nor recognises a
-///   connection timeout of its own.
+///   reach the backend, this function *can* communicate with the data source,
+///   so a backend whose own connection timeout expires during one of those
+///   calls may report it. Core neither imposes nor recognises a connection
+///   timeout of its own.
 /// - IM001 Driver does not support this function: (driver-manager-handled; not
 ///   returned here).
 /// - S1118 Driver does not support asynchronous notification: not returned here, and the
@@ -431,10 +431,10 @@ pub unsafe fn sql_set_stmt_attr_w<B: Backend>(
             // Resolved per arm rather than once up front. A header-field
             // attribute lives on a descriptor, which is a separate allocation
             // reached through this same scope, so holding the statement across
-            // the match would make every such write unreachable. The connection —
-            // needed by the one family of attributes that reaches the backend —
-            // is likewise taken inside `offer_to_data_source`, which is the only
-            // thing that wants it.
+            // the match would make every such write unreachable. The
+            // connection, needed by the one family of attributes that reaches
+            // the backend, is likewise taken inside `offer_to_data_source`,
+            // which is the only thing that wants it.
             scope
                 .get::<StatementHandle<B>>(statement_handle)?
                 .diagnostics
@@ -444,8 +444,8 @@ pub unsafe fn sql_set_stmt_attr_w<B: Backend>(
 
             // SQL_ROWSET_SIZE is the rowset SQLExtendedFetch reads, and this
             // driver's rowset is one row. It reaches this function as an
-            // *unrecognised* attribute -- odbc-sys models only the 3.x
-            // SQL_ATTR_ROW_ARRAY_SIZE -- so without this arm it falls to the
+            // *unrecognised* attribute, since odbc-sys models only the 3.x
+            // SQL_ATTR_ROW_ARRAY_SIZE, so without this arm it falls to the
             // catch-all below and is accepted silently, leaving an application
             // that asked for ten rows to receive one under SQL_SUCCESS.
             //
@@ -454,8 +454,8 @@ pub unsafe fn sql_set_stmt_attr_w<B: Backend>(
             // and SQL_DESC_ARRAY_SIZE in SQLSetDescField.
             //
             // The spec's 01S02 list is closed and names SQL_ATTR_ROW_ARRAY_SIZE
-            // rather than this ODBC 2.x spelling, so this is the same deliberate
-            // deviation already recorded for SQL_ATTR_PARAMSET_SIZE and
+            // rather than this ODBC 2.x spelling, so this is the same
+            // documented deviation as SQL_ATTR_PARAMSET_SIZE and
             // SQL_ATTR_CURSOR_SCROLLABLE below: substitution is the least-bad
             // answer, because the alternative is an undetectable short read.
             if attribute == crate::types::SQL_ROWSET_SIZE {
@@ -519,8 +519,8 @@ pub unsafe fn sql_set_stmt_attr_w<B: Backend>(
                             "SQL_CURSOR_FORWARD_ONLY",
                         );
                     }
-                    // Concurrency: core's cursor is read-only — nothing here
-                    // implements a positioned update or delete — and
+                    // Concurrency: core's cursor is read-only, since nothing
+                    // here implements a positioned update or delete, and
                     // `SQL_CONCUR_READ_ONLY` is the spec's own default. The
                     // spec uses this exact attribute as its worked example of
                     // the substitution rule: "if Attribute is
@@ -544,10 +544,10 @@ pub unsafe fn sql_set_stmt_attr_w<B: Backend>(
                     // Simulated positioned updates: core constructs no searched
                     // UPDATE or DELETE and so guarantees nothing about how many
                     // rows one would affect. `SQL_SC_NON_UNIQUE` is the value
-                    // that says exactly that — "the driver does not guarantee
+                    // that says exactly that: "the driver does not guarantee
                     // that simulated positioned update or delete statements
-                    // will affect only one row" — so claiming either of the
-                    // other two would be a promise core cannot keep.
+                    // will affect only one row". Claiming either of the other
+                    // two would be a promise core cannot keep.
                     if matches!(attr, Some(StatementAttribute::SimulateCursor))
                         && int_val != SQL_SC_NON_UNIQUE
                     {
@@ -564,7 +564,7 @@ pub unsafe fn sql_set_stmt_attr_w<B: Backend>(
                     // Bookmarks: core implements none, and nothing reads
                     // `SQL_ATTR_FETCH_BOOKMARK_PTR`. The attribute is *not* on
                     // the 01S02 list, so there is no substitution to offer;
-                    // `HYC00` is the row that fits — "a valid ODBC statement
+                    // `HYC00` is the row that fits: "a valid ODBC statement
                     // attribute for the version of ODBC supported by the driver
                     // but was not supported by the driver".
                     if matches!(attr, Some(StatementAttribute::UseBookmarks))
@@ -684,7 +684,7 @@ pub unsafe fn sql_set_stmt_attr_w<B: Backend>(
                     // allocated by SQLAllocHandle is parented to the connection,
                     // and one of a statement's own four is parented to that
                     // statement. Both are "on this connection", and the second is
-                    // legitimate — HY017's clause is "an implicitly allocated
+                    // legitimate: HY017's clause is "an implicitly allocated
                     // descriptor handle *other than the handle originally
                     // allocated*", which implies the original is allowed. That
                     // clause is (DM) in any case, so core does not check it.
@@ -743,12 +743,12 @@ pub unsafe fn sql_set_stmt_attr_w<B: Backend>(
                 // every parameter set past the first and cause an undetectable
                 // batch-insert data loss.
                 //
-                // The second deliberate deviation, alongside
+                // The second documented deviation, alongside
                 // SQL_ATTR_CURSOR_SCROLLABLE above: SQL_ATTR_PARAMSET_SIZE is
                 // not on the spec's closed 01S02 list either. Substitution is
                 // still the least-bad answer here, because the alternatives are
-                // to accept a size core will not honour — undetectable data
-                // loss — or to fail a call every parameter-array-capable tool
+                // to accept a size core will not honour (undetectable data
+                // loss) or to fail a call every parameter-array-capable tool
                 // makes.
                 Some(StatementAttribute::ParamsetSize) if int_val != SQL_PARAMSET_SIZE_DEFAULT => {
                     substitute_stmt_attr::<B>(
@@ -787,7 +787,7 @@ pub unsafe fn sql_set_stmt_attr_w<B: Backend>(
 
                 // The application withdrew the row limit. The backend that was
                 // told to apply it is the only party that can lift it, so the
-                // reset goes to the same hook the cap did — see
+                // reset goes to the same hook the cap did; see
                 // `reset_at_data_source` for why it carries no `01S02`.
                 Some(StatementAttribute::MaxRows) if int_val == SQL_MAX_ROWS_DEFAULT => {
                     reset_at_data_source::<B, _>(
@@ -803,8 +803,8 @@ pub unsafe fn sql_set_stmt_attr_w<B: Backend>(
                 // The counterpart of SQL_ATTR_MAX_ROWS, one column over: no
                 // character or binary value is truncated to this limit on the
                 // way out, since neither `sql_fetch` nor `sql_get_data`
-                // consults it. 0 — "the driver attempts to return all available
-                // data" — is therefore the only value core can report honestly,
+                // consults it. 0, "the driver attempts to return all available
+                // data", is therefore the only value core can report honestly,
                 // and SQL_ATTR_MAX_LENGTH is on the spec's 01S02 list, which
                 // says how to report it.
                 Some(StatementAttribute::MaxLength) if int_val != SQL_MAX_LENGTH_DEFAULT => {
@@ -861,9 +861,9 @@ pub unsafe fn sql_set_stmt_attr_w<B: Backend>(
                 //
                 // `Backend::set_query_timeout` defaults to `NotImplemented`, so
                 // a backend that has said nothing about timeouts still gets the
-                // substitution this arm has always applied — an application
-                // that sets 30 seconds and receives SQL_SUCCESS is entitled to
-                // believe a runaway query will be cut off, and none would be.
+                // substitution this arm applies: an application that sets 30
+                // seconds and receives SQL_SUCCESS is entitled to believe a
+                // runaway query will be cut off, and none would be.
                 // SQL_ATTR_QUERY_TIMEOUT is on the spec's own closed 01S02 list,
                 // which is what makes the substitution the right way to say so.
                 //
@@ -873,9 +873,9 @@ pub unsafe fn sql_set_stmt_attr_w<B: Backend>(
                 // and quietly reporting the first for the second sends it on to
                 // execute against a connection it has been told is fine.
                 //
-                // The spec's own 01S02 case for this attribute is clamping —
+                // The spec's own 01S02 case for this attribute is clamping:
                 // "if the specified timeout exceeds the maximum timeout in the
-                // data source ... SQLSetStmtAttr substitutes that value" — which
+                // data source ... SQLSetStmtAttr substitutes that value", which
                 // core cannot report, because `set_query_timeout` returns no
                 // clamped value. A backend that clamps returns `Ok` and core
                 // stores what was asked for. Reporting the clamped number needs
@@ -898,7 +898,7 @@ pub unsafe fn sql_set_stmt_attr_w<B: Backend>(
                     // The one member of the family with a core-side fallback:
                     // a backend that cannot set a server-side deadline but can
                     // be cancelled hands the deadline to core's timer. Recorded
-                    // only for `CoreCancels` — arming a timer for a deadline the
+                    // only for `CoreCancels`, since arming a timer for a deadline the
                     // data source is already managing would give the statement
                     // two independent cancellers racing the same query.
                     scope
@@ -911,17 +911,16 @@ pub unsafe fn sql_set_stmt_attr_w<B: Backend>(
                 }
 
                 // The application withdrew the deadline. The spec's row for
-                // this attribute is explicit — "if the value is 0, there is
-                // no timeout" — and there are two enforcers to tell, not one:
+                // this attribute is explicit ("if the value is 0, there is
+                // no timeout"), and there are two enforcers to tell, not one:
                 // the data source, which may be holding a server-side
                 // deadline, and core's own timer.
                 //
                 // Guarded on `==` rather than left to the store-only
-                // catch-all below, which is where this value used to land:
-                // that arm stores the attribute and touches nothing else, so
-                // an earlier non-zero deadline stayed armed and the next
-                // query was cancelled with an `HYT00` the application had
-                // just opted out of.
+                // catch-all below: that arm stores the attribute and touches
+                // nothing else, so an earlier non-zero deadline would stay
+                // armed and the next query would be cancelled with an `HYT00`
+                // the application had just opted out of.
                 Some(StatementAttribute::QueryTimeout) if int_val == SQL_QUERY_TIMEOUT_DEFAULT => {
                     let ret = reset_at_data_source::<B, _>(
                         scope,
@@ -943,8 +942,8 @@ pub unsafe fn sql_set_stmt_attr_w<B: Backend>(
                 }
 
                 // `sql_fetch` retrieves and writes bound columns
-                // unconditionally, so SQL_RD_OFF — "do not retrieve data into
-                // the bound buffers" — is not something core can honour. Not on
+                // unconditionally, so SQL_RD_OFF ("do not retrieve data into
+                // the bound buffers") is not something core can honour. Not on
                 // the 01S02 list, so HYC00 rather than a substitution.
                 Some(StatementAttribute::RetrieveData) if int_val != SQL_RD_ON => {
                     Err(OdbcError::NotImplemented {
@@ -990,7 +989,7 @@ pub unsafe fn sql_set_stmt_attr_w<B: Backend>(
                 }
 
                 // All other recognised attributes: store value, in whichever
-                // map owns it — see `HeaderOwner`. The six remaining
+                // map owns it; see `HeaderOwner`. The six remaining
                 // header-field attributes reach here, and land on the ARD or
                 // APD rather than on `stmt.attrs`.
                 //
@@ -1028,7 +1027,7 @@ pub unsafe fn sql_set_stmt_attr_w<B: Backend>(
 ///
 /// Spec: <https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlgetstmtattr-function>
 ///
-/// Returns integer attributes as an `SQLULEN` written to `*value_ptr` — the
+/// Returns integer attributes as an `SQLULEN` written to `*value_ptr`, the
 /// width every non-pointer attribute on the `SQLSetStmtAttr` page is declared
 /// at, and eight bytes on LP64 rather than four. Pointer attributes are
 /// returned as pointer-sized values. The `write_ulen` helper in the body
@@ -1043,7 +1042,7 @@ pub unsafe fn sql_set_stmt_attr_w<B: Backend>(
 ///   attributes this receives an `SQLULEN`; for pointer attributes a
 ///   pointer-sized value; for descriptor-handle attributes a pointer to the
 ///   descriptor handle.
-///   May be null — the driver still writes `*string_length_ptr` in that case.
+///   May be null, and the driver still writes `*string_length_ptr` in that case.
 /// - `_buffer_length`: maximum byte length of `*value_ptr` when it is a string;
 ///   ignored for integer and pointer attributes.
 /// - `string_length_ptr`: output pointer that receives the number of bytes
@@ -1058,9 +1057,9 @@ pub unsafe fn sql_set_stmt_attr_w<B: Backend>(
 /// - 24000 Invalid cursor state: returned when `SQL_ATTR_ROW_NUMBER` is
 ///   requested and no cursor is open (`stmt.cursor_open` is `false`), which
 ///   includes a statement that is only prepared and one whose cursor
-///   `SQLEndTran` closed under `SQL_CB_CLOSE`. The row's other clause — the
+///   `SQLEndTran` closed under `SQL_CB_CLOSE`. The row's other clause, the
 ///   cursor "was positioned before the start of the result set or after the end
-///   of the result set" — is deliberately answered with `0` instead, which the
+///   of the result set", is answered with `0` instead, which the
 ///   statement-attributes page sanctions in as many words: "If the number of
 ///   the current row cannot be determined or there is no current row, the driver
 ///   returns 0." Core tracks no row number at all and `SQLSetStmtAttr` discards
@@ -1122,10 +1121,10 @@ pub unsafe fn sql_get_stmt_attr_w<B: Backend>(
             // `BufferLength` is ignored for them, so the application's buffer
             // is SQLULEN-wide (8 bytes on LP64) and it is the driver's job to
             // fill it. `SQLGetStmtAttr`'s Comments describe the alternative as
-            // a defect to be worked around — "some drivers may only write the
+            // a defect to be worked around ("some drivers may only write the
             // lower 32-bit or 16-bit of a buffer and leave the higher-order bit
             // unchanged. Therefore, applications should use a buffer of SQLULEN
-            // and initialize the value to 0 before calling this function" — and
+            // and initialize the value to 0 before calling this function"), and
             // an application that does not zero its buffer reads a `MAX_ROWS`
             // of `0xFFFFFFFF00000000` where the driver means "no limit".
             //
@@ -1347,8 +1346,8 @@ pub unsafe fn sql_get_stmt_attr_w<B: Backend>(
                 // Descriptor handle attrs: return the descriptor handles in
                 // *effect*, which for the two application descriptors is an
                 // application-supplied one when it has set one and the implicit
-                // one otherwise — `desc_of` applies the override, so this needs no
-                // branch of its own. The Windows DM requires these to build its
+                // one otherwise. `desc_of` applies the override, so this needs
+                // no branch of its own. The Windows DM requires these to build its
                 // CLI dispatch table.
                 Some(StatementAttribute::AppRowDesc) => {
                     write_ptr(
@@ -1522,9 +1521,9 @@ mod tests {
     /// descriptor holds it, and `stmt.attrs` does *not*.
     ///
     /// The second half is the one that matters. Writing to both maps leaves
-    /// every other test green — a reader that finds the right value cannot tell
-    /// a duplicate write from a single one — so without it the guarantee here
-    /// would be structural only.
+    /// every other test green, because a reader that finds the right value
+    /// cannot tell a duplicate write from a single one, so without it the
+    /// guarantee here would be structural only.
     #[test]
     fn a_row_header_attribute_is_stored_on_the_ard() {
         unsafe {
@@ -1628,8 +1627,8 @@ mod tests {
     /// The substituted value goes to the descriptor too, not just the accepted
     /// one. `SQL_ATTR_ROW_ARRAY_SIZE` and `SQL_ATTR_PARAMSET_SIZE` are the two
     /// header-field attributes that take the `01S02` path, and that path writes
-    /// through `substitute_stmt_attr` rather than the catch-all arm — a second
-    /// write site, and so a second place for the routing to be missed.
+    /// through `substitute_stmt_attr` rather than the catch-all arm, a second
+    /// write site and so a second place for the routing to be missed.
     #[test]
     fn a_substituted_header_attribute_lands_on_the_descriptor() {
         unsafe {
@@ -1674,9 +1673,8 @@ mod tests {
 
     /// `SQL_NULL_DESC` means "revert to the descriptor implicitly allocated
     /// with this statement", and that implicit descriptor is the only state
-    /// core has — so this is a legitimate no-op success, not a refusal. The
-    /// regression guard against over-refusing once the arm below started
-    /// refusing anything.
+    /// core has, so this is a legitimate no-op success rather than a refusal.
+    /// This guards against the arm below over-refusing.
     #[test]
     fn setting_an_application_descriptor_to_null_desc_succeeds() {
         unsafe {
@@ -1762,8 +1760,8 @@ mod tests {
         }
     }
 
-    /// Two statements sharing one explicit ARD share one set of bindings — there
-    /// is one storage, so a bind through either is visible through both, and
+    /// Two statements sharing one explicit ARD share one set of bindings:
+    /// there is one storage, so a bind through either is visible through both, and
     /// `SQLFreeStmt(SQL_UNBIND)` on one clears the other's too.
     ///
     /// That last part is spec-correct rather than a wart: the spec makes the
@@ -1929,7 +1927,7 @@ mod tests {
         }
     }
 
-    /// A value that is not a descriptor token at all is `HY024` too — the
+    /// A value that is not a descriptor token at all is `HY024` too: the
     /// question core answers is "is this a descriptor on my connection", and a
     /// garbage value fails it for the same reason a foreign one does.
     #[test]
@@ -1960,7 +1958,7 @@ mod tests {
     ///
     /// `HY017`'s clause is "an implicitly allocated descriptor handle **other
     /// than the handle originally allocated** for the ARD or APD", which implies
-    /// the original is allowed — and that clause is (DM) anyway. So the check
+    /// the original is allowed, and that clause is (DM) anyway. So the check
     /// core does make compares the parent *chain*: a token whose parent is this
     /// connection, or whose parent is a statement on this connection, is on this
     /// connection either way.
@@ -2064,7 +2062,7 @@ mod tests {
                 "the state this test's name claims"
             );
 
-            // Checked before any call that *clears* them — every FFI function
+            // Checked before any call that *clears* them: every FFI function
             // clears the handle's diagnostics on entry, except the
             // diagnostic-reading ones, which is why the state assertion above
             // can precede this.
@@ -2113,8 +2111,8 @@ mod tests {
     }
 
     /// `SQL_ROWSET_SIZE` is the rowset `SQLExtendedFetch` reads, and this driver
-    /// produces exactly one row. It arrives as an *unrecognised* attribute —
-    /// `odbc-sys` models only the 3.x `SQL_ATTR_ROW_ARRAY_SIZE` (27) — so without
+    /// produces exactly one row. It arrives as an *unrecognised* attribute,
+    /// since `odbc-sys` models only the 3.x `SQL_ATTR_ROW_ARRAY_SIZE` (27), so without
     /// its own arm it falls to the catch-all that accepts unknown attributes
     /// silently, and an application asking for ten rows would receive one under
     /// `SQL_SUCCESS`. It is also where the Driver Manager's `SQLSetScrollOptions`
@@ -2373,13 +2371,13 @@ mod tests {
     ///
     /// `SQL_CA2_READ_ONLY_CONCURRENCY` in `SQL_FORWARD_ONLY_CURSOR_ATTRIBUTES2`
     /// asserts precisely that "the `SQL_ATTR_CONCURRENCY` statement attribute
-    /// can be `SQL_CONCUR_READ_ONLY`" for a forward-only cursor — which is the
-    /// arm below this test's subject: `SQL_CONCUR_READ_ONLY` is the one value
+    /// can be `SQL_CONCUR_READ_ONLY`" for a forward-only cursor, which is what
+    /// the arm under test does: `SQL_CONCUR_READ_ONLY` is the one value
     /// accepted unchanged, and every other is substituted back to it with
     /// `01S02`.
     ///
-    /// Reporting `0` for that bitmask, as core did, claimed no concurrency was
-    /// supported at all while the attribute setter accepted one. Both halves are
+    /// Reporting `0` for that bitmask would claim no concurrency is supported
+    /// at all while the attribute setter accepts one. Both halves are
     /// asserted here rather than in the `SQLGetInfo` snapshot alone, because a
     /// snapshot pins the number and this pins the *reason* the number is right.
     #[test]
@@ -2507,8 +2505,8 @@ mod tests {
 
     /// The other half of that rule. An attribute the `01S02` row does not name
     /// has no substitution to offer, so a value core cannot honour reports
-    /// `HYC00` — "a valid ODBC statement attribute for the version of ODBC
-    /// supported by the driver but was not supported by the driver" — rather
+    /// `HYC00` ("a valid ODBC statement attribute for the version of ODBC
+    /// supported by the driver but was not supported by the driver") rather
     /// than being stored and echoed back.
     #[test]
     fn unsupported_values_off_the_01s02_list_report_hyc00() {
@@ -2579,8 +2577,8 @@ mod tests {
     ///
     /// The spec is describing a defect and telling applications to work around
     /// it; a driver's job is not to be one of those drivers. Every non-pointer
-    /// attribute on the `SQLSetStmtAttr` page is declared `SQLULEN` — not one
-    /// is `SQLUINTEGER`, unlike the connection attributes — and `BufferLength`
+    /// attribute on the `SQLSetStmtAttr` page is declared `SQLULEN` (not one
+    /// is `SQLUINTEGER`, unlike the connection attributes) and `BufferLength`
     /// is ignored for them, so the application's buffer is `SQLULEN`-wide and a
     /// four-byte write leaves the top half holding whatever was there.
     ///
@@ -2678,9 +2676,9 @@ mod tests {
     /// `SQLGetStmtAttr` can only be one the application put in, reported to it as
     /// the number of a row nothing ever positioned on.
     ///
-    /// Refusing the *set* stays the Driver Manager's job — `SQLSetStmtAttr`'s
-    /// `HY092` row is `(DM)` for "the value specified for the argument Attribute
-    /// was a read-only attribute" — so the call is accepted, exactly as
+    /// Refusing the *set* stays the Driver Manager's job, since
+    /// `SQLSetStmtAttr`'s `HY092` row is `(DM)` for "the value specified for the
+    /// argument Attribute was a read-only attribute". So the call is accepted, exactly as
     /// `SQL_ATTR_IMP_ROW_DESC` and `SQL_ATTR_IMP_PARAM_DESC` are, and exactly as
     /// they are it is discarded.
     #[test]
@@ -2814,11 +2812,10 @@ mod tests {
 
     #[test]
     fn set_and_get_query_timeout() {
-        // This test previously asserted SUCCESS and a read-back of 30 — that is,
-        // it pinned the driver claiming to honour a timeout it never applies.
-        // An application told SUCCESS would wait forever on a runaway query, and
-        // SQL_ATTR_QUERY_TIMEOUT is named on the spec's own 01S02 substitution
-        // list for exactly this case.
+        // SUCCESS with a read-back of 30 would pin the driver claiming to
+        // honour a timeout it never applies. An application told SUCCESS would
+        // wait forever on a runaway query, and SQL_ATTR_QUERY_TIMEOUT is named
+        // on the spec's own 01S02 substitution list for exactly this case.
         //
         // `alloc_env_conn_stmt` does not connect, so this covers the branch
         // where there is no connection to offer the timeout to. The three tests
@@ -3250,8 +3247,8 @@ mod tests {
     /// source is the enforcer: `MockQueryTimeoutBackend` answers
     /// `QueryTimeout::DataSource`, so the deadline lives at the data source and
     /// only `Backend::set_query_timeout` can withdraw it. Asserting the recorded
-    /// value is 30 in between is what makes the final 0 proof the hook ran, rather
-    /// than proof it never did — the recorder starts at 0.
+    /// value is 30 in between is what makes the final 0 proof the hook ran,
+    /// rather than proof it never did, since the recorder starts at 0.
     #[test]
     fn withdrawing_a_query_timeout_reaches_the_data_source() {
         unsafe {

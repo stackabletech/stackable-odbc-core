@@ -6,10 +6,10 @@
 //! [`backend::StatementBackend`] traits, then calls the
 //! [`forward_ffi!`](macro@forward_ffi) macro to generate the C ABI entry points
 //! automatically: every `SQL*` function in
-//! [`function_id::CORE_EXPORTED_FUNCTIONS`], plus `ConfigDSNW` on Windows, where the
-//! installer library calls it to configure a DSN. That constant is the authoritative
-//! list and a guard test pins each entry to a symbol that exists, so it is the thing to
-//! read rather than a count written here — the count that used to be here was wrong.
+//! [`function_id::CORE_EXPORTED_FUNCTIONS`], plus `ConfigDSNW` on Windows, where
+//! the installer library calls it to configure a DSN. That constant is the
+//! authoritative list, and a guard test pins each of its entries to a symbol
+//! that exists.
 //!
 //! # Call flow
 //!
@@ -38,16 +38,16 @@
 //! threads. Drivers must therefore support safe, multithread access to this
 //! information."
 //!
-//! `SQLCancel` is the exception, deliberately: it may be called from another
-//! thread while a function is executing on the statement, and it never takes
-//! that lock. Taking it would make cancel wait for the query it was asked to
+//! `SQLCancel` is the one exception: it may be called from another thread while
+//! a function is executing on the statement, and it never takes that lock,
+//! because taking it would make cancel wait for the query it was asked to
 //! cancel. It signals the backend's [`backend::Backend::CancelToken`] instead
 //! and, per the spec, posts no diagnostic records in that case.
 //!
 //! A driver's own state is its own responsibility, with one bounded exception:
 //! whatever a backend puts in its `CancelToken` is the only thing core will
-//! touch concurrently with a connection. That type — and only that type — needs
-//! to be safe for concurrent use.
+//! touch concurrently with a connection. That type, and only that type, needs to
+//! be safe for concurrent use.
 //!
 //! On unixODBC, a driver built on this crate **must** declare `Threading = 2`
 //! in `odbcinst.ini` for cross-thread `SQLCancel` to work at all. unixODBC's
@@ -59,7 +59,7 @@
 //! # Unicode
 //!
 //! Every ODBC function that takes or returns a string is exported **only** in
-//! its Wide (`W`-suffix) form — `SQLDriverConnectW`, `SQLGetInfoW`,
+//! its Wide (`W`-suffix) form: `SQLDriverConnectW`, `SQLGetInfoW`,
 //! `SQLDescribeColW` and so on. The Driver Manager translates an ANSI
 //! application's calls into those automatically, so there is no ANSI variant to
 //! write.
@@ -68,19 +68,18 @@
 //! functions take no strings at all: `SQLAllocHandle`, `SQLFetch`,
 //! `SQLBindCol`, `SQLEndTran` and the rest of that kind have a single spelling
 //! that serves both. Which spelling a given function has is decided by its own
-//! signature and settled in [`function_id::CORE_EXPORTED_FUNCTIONS`]; the split is
-//! deliberately not stated as a pair of numbers here, because both of the numbers
-//! that were had drifted.
+//! signature, and [`function_id::CORE_EXPORTED_FUNCTIONS`] records the result
+//! for every entry point.
 
 /// The `odbc-sys` version this crate was built against.
 ///
 /// `odbc-sys` is a *public* dependency: its types appear in `Backend` and
 /// `StatementBackend` signatures, in `forward_ffi!`'s generated entry points and
-/// throughout [`types`]. A driver that declared its own `odbc-sys` dependency
-/// had nothing pinning it to the same version, and two different versions of a
-/// `#[repr(C)]` enum are two different types to the compiler — which surfaces as
-/// a trait-impl mismatch that names the same type twice. Depend on this
-/// re-export instead of adding the crate directly.
+/// throughout [`types`]. A driver that declares its own `odbc-sys` dependency
+/// has nothing pinning it to the same version, and two versions of a
+/// `#[repr(C)]` enum are two distinct types to the compiler, which surfaces as a
+/// trait-impl mismatch naming the same type twice. Depend on this re-export
+/// instead of adding the crate directly.
 ///
 /// Feature note: cargo unifies features across a dependency graph, so a driver
 /// enabling `odbc_version_4` turns it on for core's build too, adding

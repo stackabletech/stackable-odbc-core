@@ -6,9 +6,9 @@ use crate::types::{SQL_OV_ODBC2, SQL_OV_ODBC3, SQL_OV_ODBC3_80};
 /// The ODBC version an application declared for an environment.
 ///
 /// Core's own type rather than [`odbc_sys::AttrOdbcVersion`], for one reason:
-/// `odbc-sys` deliberately has no `SQL_OV_ODBC2` variant — its `attributes.rs`
-/// carries `// Not supported by this crate` above a commented-out
-/// `SQL_OV_ODBC2 = 2` — and core may not redefine one of its enums. The value
+/// `odbc-sys` has no `SQL_OV_ODBC2` variant, since its `attributes.rs` carries
+/// `// Not supported by this crate` above a commented-out `SQL_OV_ODBC2 = 2`,
+/// and core may not redefine one of its enums. The value
 /// has to be storable, because the Driver Manager both sets and reads it: unixODBC
 /// forwards `environment->requested_version` verbatim to the driver's
 /// `SQLSetEnvAttr` at connect time and then reads it straight back with
@@ -16,7 +16,7 @@ use crate::types::{SQL_OV_ODBC2, SQL_OV_ODBC3, SQL_OV_ODBC3_80};
 /// (`DriverManager/SQLConnect.c`).
 ///
 /// Declaring 2.x does **not** change how core answers anything else. The spec's
-/// 2.x behaviours — 2.x SQLSTATEs, the 2.x datetime type codes — are the Driver
+/// 2.x behaviours (2.x SQLSTATEs, the 2.x datetime type codes) are the Driver
 /// Manager's mapping, and unixODBC drives that mapping from the *application's*
 /// requested version rather than from the driver's
 /// (`DriverManager/SQLGetDiagRec.c`'s `__get_version`), so it happens whether

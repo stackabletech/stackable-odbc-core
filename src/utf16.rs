@@ -5,20 +5,20 @@ use crate::errors::OdbcError;
 use crate::types::SqlReturn;
 
 /// Maximum number of units to scan when searching for a null terminator
-/// (`SQL_NTS`) — UTF-16 code units or bytes, depending on the scan. This
-/// prevents unbounded reads on malformed input.
+/// (`SQL_NTS`), counted in UTF-16 code units or in bytes depending on the scan.
+/// This prevents unbounded reads on malformed input.
 ///
 /// `pub(crate)` because `SQLPutData` resolves `SQL_NTS` over an
 /// application-supplied buffer too. A second bound stated there would be a
-/// second answer to one question, and the answer that went missing is the one
-/// that let an unterminated buffer be read past its allocation.
+/// second answer to one question, and whichever of the two goes missing is the
+/// one that lets an unterminated buffer be read past its allocation.
 ///
 /// # This is a length limit on `SQL_NTS`, not a malformed-input check
 ///
 /// Reaching the bound means one of two things, and **no scan can tell them
 /// apart**: the buffer has no terminator at all, or it has one past the cap.
-/// Distinguishing them is precisely what the bound forbids. So the rule the
-/// crate enforces is the one that does not need the distinction — an `SQL_NTS`
+/// Distinguishing them is precisely what the bound forbids. So the crate
+/// enforces the rule that does not need the distinction: an `SQL_NTS`
 /// argument is limited to `MAX_NTS_SCAN` code units, and one that runs to the
 /// limit is refused with [`SqlState::invalid_string_or_buffer_length`]
 /// (`HY090`), whatever is in it.
@@ -30,20 +30,20 @@ use crate::types::SqlReturn;
 ///
 /// # Why 1 048 576, and not `i16::MAX`
 ///
-/// The value was `i16::MAX` (32 767), which is the width of ODBC's *name-length*
-/// arguments — `SQLDriverConnect`'s `StringLength1`, the catalog functions'
+/// `i16::MAX` (32 767) is the width of ODBC's *name-length* arguments, meaning
+/// `SQLDriverConnect`'s `StringLength1` and the catalog functions'
 /// `NameLength` group. It is **not** the width of the arguments this bound
 /// actually governs: `SQLExecDirect`'s and `SQLPrepare`'s `TextLength` and
-/// `SQLNativeSql`'s `TextLength1` are `SQLINTEGER`. Machine-generated SQL — a
-/// batched `INSERT … VALUES`, an `IN` list built from a key set — passes 32 767
-/// characters routinely, so the old value refused for **length** input that no
-/// other driver refuses for length.
+/// `SQLNativeSql`'s `TextLength1` are `SQLINTEGER`. Machine-generated SQL, such
+/// as a batched `INSERT … VALUES` or an `IN` list built from a key set, passes
+/// 32 767 characters routinely, so a cap there would refuse for **length** input
+/// that no other driver refuses for length.
 ///
-/// That is the whole of what the survey establishes, and it is narrower than
-/// "the other drivers execute these statements" — whether a given statement runs
-/// is the data source's answer, not the driver's, and none of the source below
-/// speaks to it. What the source shows is that no length threshold exists in
-/// these drivers at all: psqlODBC's `ucs2strlen` (`win_unicode.c:125-131`) and
+/// That is the whole of what the driver survey establishes, and it is narrower
+/// than "the other drivers execute these statements": whether a given statement
+/// runs is the data source's answer, not the driver's, and none of the source
+/// below speaks to it. What the source shows is that no length threshold exists
+/// in these drivers at all: psqlODBC's `ucs2strlen` (`win_unicode.c:125-131`) and
 /// `make_string` (`misc.c:105-116`), MySQL Connector/ODBC's `sqlwcharlen`
 /// (`util/stringutil.cc:713-719`) and FreeTDS's `strlen`/`wcslen`
 /// (`src/odbc/odbc_util.c:60-105`) are all unbounded, and `strnlen`/`wcsnlen`
@@ -51,10 +51,10 @@ use crate::types::SqlReturn;
 ///
 /// The survey's one counter-example, recorded rather than dropped: MySQL
 /// Connector/ODBC does have an `HY090` length limit, `GET_NAME_LEN`, at 192
-/// bytes. It does not bear on this bound — it is a post-hoc MySQL identifier
-/// check on the name arguments of the catalog functions, and is never applied
-/// to SQL text — but a survey that reported only the unbounded scans would be
-/// handing the next reader a filtered version of the evidence.
+/// bytes. It does not bear on this bound, being a post-hoc MySQL identifier
+/// check on the name arguments of the catalog functions that is never applied
+/// to SQL text. A survey reporting only the unbounded scans would hand the next
+/// reader a filtered version of the evidence.
 ///
 /// Nor is the refusal hypothetical behind a Driver Manager: unixODBC forwards
 /// `SQL_NTS` unchanged for a Unicode application talking to a Unicode driver
@@ -62,34 +62,33 @@ use crate::types::SqlReturn;
 /// length itself only on the ANSI-application path, so a W-only driver sees raw
 /// `SQL_NTS` from every Unicode application.
 ///
-/// **The ODBC spec fixes no maximum, deliberately.** The closest it comes is
+/// **The ODBC spec fixes no maximum.** The closest it comes is
 /// `SQL_MAX_STATEMENT_LEN`, "an SQLUINTEGER value that specifies the maximum
 /// length (number of characters, including white space) of a SQL statement. If
 /// there is no maximum length or the length is unknown, this value is set to
-/// zero" — a fact about the *data source*, and one `default_get_info`
-/// (`crate::backend`) answers as `0`. So core told every application it had no
-/// statement-length limit and then enforced one at 32 767. There is no
-/// spec-defined number to adopt, and the value is therefore core's own
-/// judgement rather than a transcription.
+/// zero". That is a fact about the *data source*, and one `default_get_info`
+/// (`crate::backend`) answers as `0`, so core tells every application it has no
+/// statement-length limit. There is no spec-defined number to adopt, and the
+/// value is therefore core's own judgement rather than a transcription.
 ///
 /// The judgement rests on who pays. For a correct application the cap costs
 /// nothing whatever its value: the scan stops at the terminator, having read
 /// exactly the string. It is paid only by a buffer that reaches the cap, which
 /// is an application bug, and there the read is already past the allocation and
-/// already undefined — a smaller cap makes that read *shorter*, not sound. So
-/// the bound trades a better-odds diagnosis of an unfixable case against
+/// already undefined, so a smaller cap makes that read *shorter*, not sound. The
+/// bound trades a better-odds diagnosis of an unfixable case against
 /// refusing input that is merely long, and the second is the one core can get
 /// right.
 ///
 /// Sizing follows from that, against a statement anyone can construct and count
 /// rather than against a remembered figure. A key-set `IN` list of UUIDs in
-/// canonical text form costs 39 code units per key — 36 for the UUID, two
-/// quotes, one comma — so ten thousand keys is **390 000 code units**, and a
+/// canonical text form costs 39 code units per key (36 for the UUID, two
+/// quotes, one comma), so ten thousand keys is **390 000 code units**, and a
 /// hundred thousand keys is 3 900 000. (Code units, not bytes: the buffer these
 /// bounds count is `u16`, so a byte figure would be twice the number compared
 /// against the cap.)
 ///
-/// `1 << 20` is 1 048 576 — the first power of two above 10^6, so the rule reads
+/// `1 << 20` is 1 048 576, the first power of two above 10^6, so the rule reads
 /// as "a million characters", and 2.7× the ten-thousand-key list. `1 << 19`
 /// (524 288) is only 1.34× it, which is inside the band the construction
 /// generates rather than above it, and would leave that class of statement
@@ -112,22 +111,22 @@ use crate::types::SqlReturn;
 /// | [`nts_utf16_len`] | 2 MiB of `u16` | nothing |
 /// | [`nts_byte_len`] | 1 MiB of `u8` | nothing |
 ///
-/// [^a]: a 2 MiB `Vec<u16>` either way, plus — only on the path that finds a
-/// terminator and goes on to decode — a `String` of up to 3 bytes per code unit.
+/// [^a]: a 2 MiB `Vec<u16>` either way, plus a `String` of up to 3 bytes per
+/// code unit, and that only on the path that finds a terminator and goes on to
+/// decode.
 ///
 /// [`SqlState::invalid_string_or_buffer_length`]: crate::types::SqlState::invalid_string_or_buffer_length
 #[cfg(not(miri))]
 pub(crate) const MAX_NTS_SCAN: usize = 1 << 20;
 
-/// **Under Miri the cap is 4096 units, not 1 Mi**, and the whole reason is cost.
+/// **Under Miri the cap is 4096 units, not 1 Mi**, and the reason is cost.
 ///
-/// The nineteen boundary tests allocate a buffer of exactly this size and scan
+/// The boundary tests allocate a buffer of exactly this size and scan
 /// it, which is what makes them able to catch an over-read at the cap: the
 /// buffer has no terminator, so reading one unit past it is a heap overflow Miri
-/// sees. Interpreted byte by byte at `1 << 20`, **one** of those tests takes
-/// **392 seconds** — measured on 2026-08-03 — so the eighteen that are not
-/// ignored would need about two hours against the `miri` job's
-/// `timeout-minutes: 30`.
+/// sees. Interpreted byte by byte at `1 << 20`, a single one of those tests runs
+/// for several minutes, so the set of them together overruns the `miri` job's
+/// `timeout-minutes: 30` many times over.
 ///
 /// Shrinking the constant rather than ignoring the tests keeps the property they
 /// exist for. What they assert is "the scan stops at the cap, and does not read
@@ -146,10 +145,6 @@ pub(crate) const MAX_NTS_SCAN: usize = 1 << 20;
 /// wants "large but under the cap" has nothing to ask for when the cap is 4096.
 /// Their property is correctness rather than memory safety, and `cargo test`
 /// covers it in full at the real cap.
-///
-/// This answers the question the constant's own history left open: raising the
-/// cap did make the boundary tests too expensive for Miri, and this is what to
-/// do about it.
 #[cfg(miri)]
 pub(crate) const MAX_NTS_SCAN: usize = 1 << 12;
 
@@ -187,10 +182,10 @@ fn nts_scan_overrun(what: &str) -> OdbcError {
 /// connection or statement had been corrupted.
 ///
 /// An `SQL_NTS` argument reaching `MAX_NTS_SCAN` units without a terminator
-/// yields `HY090` — see that constant for why the limit is stated as a length
-/// rather than as a malformed-input check. It used to return the scanned prefix
-/// instead, indistinguishably from a complete string, so `SQLExecDirectW`
-/// executed a cap-length prefix of a longer statement.
+/// yields `HY090`; see that constant for why the limit is stated as a length
+/// rather than as a malformed-input check. Returning the scanned prefix instead
+/// would be indistinguishable from a complete string, so `SQLExecDirectW` would
+/// execute a cap-length prefix of a longer statement.
 ///
 /// # Safety
 ///
@@ -206,7 +201,7 @@ pub unsafe fn utf16_to_string(ptr: *const u16, len: i32) -> Result<String, OdbcE
 /// [`utf16_to_string`], with the argument's name for the `HY090` diagnostic a
 /// scan overrun produces.
 ///
-/// Only the callers with more than one string argument need it — `SQLConnectW`
+/// Only the callers with more than one string argument need it: `SQLConnectW`
 /// takes three and `SQLForeignKeys` six, and "the string argument was too long"
 /// does not say which.
 ///
@@ -263,14 +258,14 @@ pub unsafe fn utf16_to_string_named(
 /// `MAX_NTS_SCAN`. The terminator itself is not counted.
 ///
 /// The counting half of [`utf16_to_string`]'s scan, for a caller that wants the
-/// length rather than the decoded text — `SQLPutData` accumulates raw bytes and
+/// length rather than the decoded text. `SQLPutData` accumulates raw bytes and
 /// decodes once, at the end, so decoding each chunk would be both wasteful and
 /// wrong across a split surrogate pair.
 ///
 /// Shares that function's contract exactly: reaching the bound is `HY090`, not
-/// a length of `MAX_NTS_SCAN`. A capped length was the same silent truncation
-/// in the other unit — the chunk arrived at the backend truncated to the cap
-/// and nothing said so.
+/// a length of `MAX_NTS_SCAN`. Returning a capped length would be the same
+/// silent truncation in the other unit, with the chunk reaching the backend cut
+/// to the cap and nothing saying so.
 ///
 /// # Safety
 ///
@@ -341,10 +336,10 @@ pub unsafe fn write_utf16(
     buf_len: i16,
     len_ptr: *mut i16,
 ) -> SqlReturn {
-    // Counted, not collected: a length probe — the `out_ptr.is_null()` branch
-    // below — needs only the number, and building the units to throw them away
-    // was the whole cost of the probe. The `Vec` is built after that branch, for
-    // the callers that have somewhere to write.
+    // Counted, not collected: a length probe, which is the `out_ptr.is_null()`
+    // branch below, needs only the number, so building the units to throw them
+    // away would be the whole cost of the probe. The `Vec` is built after that
+    // branch, for the callers that have somewhere to write.
     let unit_count = value.encode_utf16().count();
 
     // Always report the total length needed (without null terminator).
@@ -353,7 +348,7 @@ pub unsafe fn write_utf16(
         let reported_len = unit_count.min(i16::MAX as usize) as i16;
         // Unaligned: an application using row-wise binding hands out pointers
         // at arbitrary offsets into a packed buffer, so `*len_ptr = ..` would
-        // be undefined behaviour. In a debug build it is not even silent — the
+        // be undefined behaviour. In a debug build it is not even silent: the
         // standard library's precondition check fires a *non-unwinding* panic,
         // which `panic_safe` cannot catch, so the host process aborts.
         unsafe { std::ptr::write_unaligned(len_ptr, reported_len) };
@@ -650,9 +645,9 @@ mod tests {
     }
 
     /// An `SQL_NTS` buffer with no terminator inside the bound is an error, not
-    /// a [`MAX_NTS_SCAN`]-unit prefix. Reaching the cap used to return the prefix
-    /// as though the scan had found a terminator, so no caller could tell "this
-    /// is the whole string" from "I gave up looking".
+    /// a [`MAX_NTS_SCAN`]-unit prefix. Returning the prefix as though the scan
+    /// had found a terminator would leave no caller able to tell "this is the
+    /// whole string" from "I gave up looking".
     ///
     /// The allocation is exactly [`MAX_NTS_SCAN`] units with no zero in it, so
     /// it doubles as the bound's canary: reading one unit past the cap is a heap
@@ -733,7 +728,7 @@ mod tests {
 
     /// The cap governs the `SQL_NTS` scan only. An explicitly declared length
     /// is read in full, so a statement past the cap passed with its real length
-    /// is unaffected by any of the above — the change refuses input whose length
+    /// is unaffected by any of the above. The cap refuses input whose length
     /// the driver cannot determine, not input that is merely long.
     ///
     /// One unit past the cap rather than some larger multiple of it: that is the

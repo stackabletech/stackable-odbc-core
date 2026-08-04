@@ -26,7 +26,7 @@ unsafe fn report_param_set<B: Backend>(stmt: &StatementHandle<B>, succeeded: boo
 }
 
 /// Whether the execution that just completed was a searched DML statement that
-/// affected no rows — the spec's `SQL_NO_DATA` case.
+/// affected no rows, the spec's `SQL_NO_DATA` case.
 ///
 /// `SQLExecDirect`'s Comments, repeated verbatim on `SQLExecute`: "If
 /// SQLExecDirect executes a searched update, insert, or delete statement that
@@ -38,17 +38,16 @@ unsafe fn report_param_set<B: Backend>(stmt: &StatementHandle<B>, succeeded: boo
 /// Two facts decide it, and both are already on the statement:
 ///
 /// - **`column_count() == 0`** separates DML from a query. A `SELECT` matching
-///   nothing still declares its columns, and it is `SQL_SUCCESS` with an empty
-///   result set — reporting `SQL_NO_DATA` for it would send an application down
+///   nothing still declares its columns, so it is `SQL_SUCCESS` with an empty
+///   result set. Reporting `SQL_NO_DATA` for it would send an application down
 ///   its end-of-cursor path before it fetched anything.
 /// - **`row_count() == Some(0)`** is the backend saying it counted, and counted
 ///   zero. `None` means "not applicable to this statement" and
 ///   `Some(SQL_NO_TOTAL)` means "the driver cannot determine the count"; neither
 ///   asserts that nothing was affected, so both keep `SQL_SUCCESS`. A backend
-///   that reports no row counts therefore never reaches `SQL_NO_DATA`, which is
-///   the right direction to be wrong in: under-reporting leaves the application
-///   on the path it already takes, while over-reporting makes a successful
-///   `CREATE TABLE` look like a miss.
+///   that reports no row counts therefore never reaches `SQL_NO_DATA`.
+///   Under-reporting leaves the application on the path it already takes, while
+///   over-reporting would make a successful `CREATE TABLE` look like a miss.
 fn zero_row_searched_dml<B: Backend>(stmt: &StatementHandle<B>) -> bool {
     stmt.statement
         .as_ref()
@@ -65,8 +64,8 @@ fn zero_row_searched_dml<B: Backend>(stmt: &StatementHandle<B>) -> bool {
 /// `Backend::exec_direct` takes no parameters.
 ///
 /// On that path each bound buffer is read at its bound address plus
-/// `SQL_ATTR_PARAM_BIND_OFFSET_PTR`, dereferenced once per execution — the
-/// parameter-side counterpart of what `SQLFetch` does with
+/// `SQL_ATTR_PARAM_BIND_OFFSET_PTR`, dereferenced once per execution. That is
+/// the parameter-side counterpart of what `SQLFetch` does with
 /// `SQL_ATTR_ROW_BIND_OFFSET_PTR`, and identical to [`sql_execute`]'s handling.
 /// See `SQLBindParameter`'s "Rebinding with Offsets", and
 /// `descriptor::BindOffset` for why a null pointer is left unshifted.
@@ -80,8 +79,8 @@ fn zero_row_searched_dml<B: Backend>(stmt: &StatementHandle<B>) -> bool {
 ///
 /// # Return values
 ///
-/// `SQL_NO_DATA` is returned for a searched update, insert or delete that affected no rows
-/// — the Comments say so directly, and Appendix B's `[nf]` footnote carves this function out
+/// `SQL_NO_DATA` is returned for a searched update, insert or delete that affected no rows.
+/// The Comments say so directly, and Appendix B's `[nf]` footnote carves this function out
 /// of its own `SQL_NO_DATA` definition for that reason. Core decides it from
 /// `StatementBackend::column_count` and `StatementBackend::row_count`; see
 /// `zero_row_searched_dml` for why a backend that reports no row count keeps
@@ -89,129 +88,125 @@ fn zero_row_searched_dml<B: Backend>(stmt: &StatementHandle<B>) -> bool {
 ///
 /// # Spec compliance
 ///
-/// - 01000: General warning — propagated from backend.
-/// - 01001: Cursor operation conflict — propagated from backend.
-/// - 01003: NULL value eliminated in set function — propagated from backend.
-/// - 01004: String data, right truncated — propagated from backend.
-/// - 01006: Privilege not revoked — propagated from backend.
-/// - 01007: Privilege not granted — propagated from backend.
-/// - 01S02: Option value changed — propagated from backend.
-/// - 01S07: Fractional truncation — propagated from backend.
-/// - 07002: COUNT field incorrect — the row's first clause, "the number of parameters
+/// - 01000: General warning. Propagated from backend.
+/// - 01001: Cursor operation conflict. Propagated from backend.
+/// - 01003: NULL value eliminated in set function. Propagated from backend.
+/// - 01004: String data, right truncated. Propagated from backend.
+/// - 01006: Privilege not revoked. Propagated from backend.
+/// - 01007: Privilege not granted. Propagated from backend.
+/// - 01S02: Option value changed. Propagated from backend.
+/// - 01S07: Fractional truncation. Propagated from backend.
+/// - 07002: COUNT field incorrect. The row's first clause, "the number of parameters
 ///   specified in `SQLBindParameter` was less than the number of parameters in the SQL
 ///   statement", is **returned here**: a `?` marker with no binding is rejected rather than
 ///   padded with NULL (`ffi::params::collect_params`). The second clause, a binding whose
 ///   `ParameterValuePtr` is null with a non-`SQL_NULL_DATA`/`SQL_DATA_AT_EXEC` indicator, is
 ///   rejected by `SQLBindParameter` itself. Also propagated from backend.
-/// - 07006: Restricted data type attribute violation — `SQLBindParameter` refuses a
+/// - 07006: Restricted data type attribute violation. `SQLBindParameter` refuses a
 ///   `SQL_C_BINARY` parameter bound to a target core cannot convert it to, so it does not
 ///   reach execution (`crate::binary_convert`). Also propagated from backend.
-/// - 07007: Restricted parameter value violation — propagated from backend.
-/// - 07S01: Invalid use of default parameter — propagated from backend.
-/// - 08S01: Communication link failure — propagated from backend.
-/// - 21S01: Insert value list does not match column list — propagated from backend.
-/// - 21S02: Degree of derived table does not match column list — propagated from backend.
-/// - 22001: String data, right truncation — returned here when a parameter value does not
+/// - 07007: Restricted parameter value violation. Propagated from backend.
+/// - 07S01: Invalid use of default parameter. Propagated from backend.
+/// - 08S01: Communication link failure. Propagated from backend.
+/// - 21S01: Insert value list does not match column list. Propagated from backend.
+/// - 21S02: Degree of derived table does not match column list. Propagated from backend.
+/// - 22001: String data, right truncation. Returned here when a parameter value does not
 ///   fit the SQL type the application declared: fractional digits dropped or whole digits
 ///   lost for an exact-numeric target, or a value longer than the declared `ColumnSize` for
 ///   a character or binary target (`crate::param_convert`, the "C to SQL: Character" table,
 ///   and its "C to SQL: Binary" counterpart for a `SQL_C_BINARY` value bound to a binary
 ///   type). Also propagated from backend.
-/// - 22002: Indicator variable required but not supplied — propagated from backend.
-/// - 22003: Numeric value out of range — returned here when character parameter data falls
+/// - 22002: Indicator variable required but not supplied. Propagated from backend.
+/// - 22003: Numeric value out of range. Returned here when character parameter data falls
 ///   outside the range of the declared approximate-numeric or `SQL_BIT` type
 ///   (`crate::param_convert`), or when a `SQL_C_BINARY` parameter's byte count is not
 ///   exactly the declared SQL type's width (`crate::binary_convert`, the "C to SQL: Binary"
 ///   table). Also propagated from backend.
-/// - 22007: Invalid datetime format — returned here for character parameter data that is a
+/// - 22007: Invalid datetime format. Returned here for character parameter data that is a
 ///   datetime literal with an out-of-range field (`crate::param_convert`). Also propagated
 ///   from backend.
-/// - 22008: Datetime field overflow — returned here when character parameter data carries a
+/// - 22008: Datetime field overflow. Returned here when character parameter data carries a
 ///   datetime component the declared type cannot hold: a non-zero time for `SQL_TYPE_DATE`,
 ///   or non-zero fractional seconds for `SQL_TYPE_TIME` (`crate::param_convert`). Also
 ///   propagated from backend.
-/// - 22012: Division by zero — propagated from backend.
-/// - 22015: Interval field overflow — propagated from backend.
-/// - 22018: Invalid character value for cast specification — returned here when character
+/// - 22012: Division by zero. Propagated from backend.
+/// - 22015: Interval field overflow. Propagated from backend.
+/// - 22018: Invalid character value for cast specification. Returned here when character
 ///   parameter data is not a valid literal of the SQL type declared for it at
 ///   `SQLBindParameter` (`crate::param_convert`). Also propagated from backend.
-/// - 22019: Invalid escape character — propagated from backend.
-/// - 22025: Invalid escape sequence — propagated from backend.
-/// - 23000: Integrity constraint violation — propagated from backend.
-/// - 24000: Invalid cursor state — fails if a cursor is already open on this statement (checked
+/// - 22019: Invalid escape character. Propagated from backend.
+/// - 22025: Invalid escape sequence. Propagated from backend.
+/// - 23000: Integrity constraint violation. Propagated from backend.
+/// - 24000: Invalid cursor state. Fails if a cursor is already open on this statement (checked
 ///   here); also returned by backend for positioned-update/delete on improperly positioned cursor.
-/// - 34000: Invalid cursor name — propagated from backend.
-/// - 3D000: Invalid catalog name — propagated from backend.
-/// - 3F000: Invalid schema name — propagated from backend.
-/// - 40001: Serialization failure — propagated from backend.
-/// - 40003: Statement completion unknown — propagated from backend.
-/// - 42000: Syntax error or access violation — propagated from backend; also returned here
+/// - 34000: Invalid cursor name. Propagated from backend.
+/// - 3D000: Invalid catalog name. Propagated from backend.
+/// - 3F000: Invalid schema name. Propagated from backend.
+/// - 40001: Serialization failure. Propagated from backend.
+/// - 40003: Statement completion unknown. Propagated from backend.
+/// - 42000: Syntax error or access violation. Propagated from backend; also returned here
 ///   (checked before the backend is called) for an unterminated (malformed) ODBC escape
 ///   sequence when NOSCAN is off (`crate::escape::translate_escapes`).
-/// - 42S01: Base table or view already exists — propagated from backend.
-/// - 42S02: Base table or view not found — propagated from backend.
-/// - 42S11: Index already exists — propagated from backend.
-/// - 42S12: Index not found — propagated from backend.
-/// - 42S21: Column already exists — propagated from backend.
-/// - 42S22: Column not found — propagated from backend.
-/// - 44000: WITH CHECK OPTION violation — propagated from backend.
-/// - HY000: General error — propagated from backend.
-/// - HY001: Memory allocation error — propagated from backend.
-/// - HY008: Operation canceled. The row's first clause — asynchronous processing, then the
-///   function called again — is not applicable: core implements no asynchronous execution and
+/// - 42S01: Base table or view already exists. Propagated from backend.
+/// - 42S02: Base table or view not found. Propagated from backend.
+/// - 42S11: Index already exists. Propagated from backend.
+/// - 42S12: Index not found. Propagated from backend.
+/// - 42S21: Column already exists. Propagated from backend.
+/// - 42S22: Column not found. Propagated from backend.
+/// - 44000: WITH CHECK OPTION violation. Propagated from backend.
+/// - HY000: General error. Propagated from backend.
+/// - HY001: Memory allocation error. Propagated from backend.
+/// - HY008: Operation canceled. The row's first clause (asynchronous processing, then the
+///   function called again) is not applicable: core implements no asynchronous execution and
 ///   never returns `SQL_STILL_EXECUTING`. The second clause, `SQLCancel` called on the
 ///   statement "from a different thread in a multithread application", **is returned by this
 ///   driver**: the row carries no `(DM)` marker, and when a backend call fails with
 ///   `Backend::is_cancelled` reporting its token signalled, core reports `HY008` in place of
 ///   the backend's own SQLSTATE.
-/// - HY009: Invalid use of null pointer — the spec annotates the "`StatementText` was a null
+/// - HY009: Invalid use of null pointer. The spec annotates the "`StatementText` was a null
 ///   pointer" clause `(DM)`, and it is the row's only clause; it is guarded defensively here.
 ///   Core is also linked directly, by its own tests and by an embedder with no Driver Manager
 ///   in front of it, and a null pointer that reaches `utf16_to_string` is a soundness question
 ///   rather than a spec question.
-/// - HY010: Function sequence error — (DM cases for async/NEED_DATA: driver-manager-handled; not
+/// - HY010: Function sequence error (DM cases for async/NEED_DATA: driver-manager-handled; not
 ///   returned here); fails if the connection is not open (checked here).
-/// - HY013: Memory management error — propagated from backend.
-/// - HY090: Invalid string or buffer length — only the first sentence, `TextLength <= 0` and
+/// - HY013: Memory management error. Propagated from backend.
+/// - HY090: Invalid string or buffer length. Only the first sentence, `TextLength <= 0` and
 ///   `!= SQL_NTS`, is `(DM)`-marked; it is guarded defensively here. The three sentences that
 ///   follow it are not marked and are the driver's: each describes a parameter length value
 ///   set with `SQLBindParameter` that the row rules out. The sentence naming a non-null
 ///   parameter value "and the parameter length value was less than 0, but not equal to
 ///   `SQL_NTS`, `SQL_NULL_DATA`, `SQL_DATA_AT_EXEC`, `SQL_DEFAULT_PARAM`, or less than or equal
 ///   to `SQL_LEN_DATA_AT_EXEC_OFFSET`" is **returned by this driver**, from
-///   `ffi::params::read_param_value`. Every such negative used to be folded into `SQL_NTS`,
-///   which bound the whole null-terminated string and answered `SUCCESS`. The remaining
-///   sentences are propagated from the backend.
+///   `ffi::params::read_param_value`. The remaining sentences are propagated from the backend.
 ///
 ///   **Also returned here**, for a condition none of those four sentences states: an
 ///   `SQL_NTS` argument whose null terminator is not within `MAX_NTS_SCAN` (1 048 576) units,
-///   which is a length the driver cannot determine. Two arguments of this call can reach it
-///   — `StatementText` itself, and a `SQL_C_CHAR` or `SQL_C_WCHAR` parameter bound with an
-///   `SQL_NTS` (or absent) length indicator — and those are the complete set. Before this,
-///   `utf16_to_string` returned a cap-length prefix as though it were the whole
-///   string, so a longer statement was **executed truncated**: harmless when the prefix is a syntax
-///   error, and a different statement than the application wrote when it is not. An
-///   explicitly measured `TextLength` is not limited by this, at any size. See
-///   `nts_input_longer_than_the_scan_cap_is_hy090_not_a_truncated_statement` and
+///   which is a length the driver cannot determine. Exactly two arguments of this call can
+///   reach it: `StatementText` itself, and a `SQL_C_CHAR` or `SQL_C_WCHAR` parameter bound
+///   with an `SQL_NTS` (or absent) length indicator. Answering with the cap-length prefix
+///   instead would execute a statement the application never wrote, so the call fails rather
+///   than truncating. An explicitly measured `TextLength` is not limited by this, at any
+///   size. See `nts_input_longer_than_the_scan_cap_is_hy090_not_a_truncated_statement` and
 ///   `an_explicitly_measured_statement_past_the_scan_cap_still_executes`.
-/// - HY105: Invalid parameter type — propagated from backend.
-/// - HY109: Invalid cursor position — propagated from backend.
-/// - HY117: Connection suspended — (driver-manager-handled; not returned here).
-/// - HYC00: Optional feature not implemented — propagated from backend; also returned here
+/// - HY105: Invalid parameter type. Propagated from backend.
+/// - HY109: Invalid cursor position. Propagated from backend.
+/// - HY117: Connection suspended (driver-manager-handled; not returned here).
+/// - HYC00: Optional feature not implemented. Propagated from backend; also returned here
 ///   (checked before the backend is called) for a `{call ...}`/`{?= call ...}` stored-procedure
 ///   escape, which this driver does not support, when NOSCAN is off.
-/// - HYT00: Timeout expired — **returned by this driver**, not merely propagated. A backend
+/// - HYT00: Timeout expired. **Returned by this driver**, not merely propagated. A backend
 ///   whose `Backend::set_query_timeout` answered `QueryTimeout::CoreCancels` gets core's own
 ///   timer (`crate::query_timer`), armed here, and `QueryTimer::reclassify` replaces the
-///   failing call's SQLSTATE with `HYT00` when the deadline fired — deliberately after the
+///   failing call's SQLSTATE with `HYT00` when the deadline fired. That pass runs after the
 ///   cancel pass, so "my deadline passed" wins over "another thread cancelled me". A backend
 ///   enforcing its own timeout has its `HYT00` propagated unchanged.
-/// - HYT01: Connection timeout expired — propagated from backend.
-/// - IM001: Driver does not support this function — (driver-manager-handled; not returned here).
+/// - HYT01: Connection timeout expired. Propagated from backend.
+/// - IM001: Driver does not support this function (driver-manager-handled; not returned here).
 /// - IM017: Polling disabled; not returned here (the asynchronous notification model is not
-///   supported — not DM-annotated in the spec).
+///   supported, and not DM-annotated in the spec).
 /// - IM018: SQLCompleteAsync not called; not returned here (the asynchronous notification model
-///   is not supported — not DM-annotated in the spec).
+///   is not supported, and not DM-annotated in the spec).
 ///
 /// # Safety
 ///
@@ -419,74 +414,74 @@ pub unsafe fn sql_exec_direct_w<B: Backend>(
 ///
 /// # Spec compliance
 ///
-/// - 01000: General warning — propagated from backend.
-/// - 01S02: Option value changed — propagated from backend.
-/// - 08S01: Communication link failure — propagated from backend.
-/// - 21S01: Insert value list does not match column list — propagated from backend.
-/// - 21S02: Degree of derived table does not match column list — propagated from backend.
-/// - 22018: Invalid character value for cast specification — propagated from backend.
+/// - 01000: General warning. Propagated from backend.
+/// - 01S02: Option value changed. Propagated from backend.
+/// - 08S01: Communication link failure. Propagated from backend.
+/// - 21S01: Insert value list does not match column list. Propagated from backend.
+/// - 21S02: Degree of derived table does not match column list. Propagated from backend.
+/// - 22018: Invalid character value for cast specification. Propagated from backend.
 ///   `SQLPrepareW` reads no parameter values, so the character-to-SQL-type conversion that
 ///   raises this in `SQLExecute` and `SQLExecDirectW` does not run here.
-/// - 22019: Invalid escape character — propagated from backend.
-/// - 22025: Invalid escape sequence — propagated from backend.
-/// - 24000: Invalid cursor state — the row's first sentence, a cursor open on the statement
+/// - 22019: Invalid escape character. Propagated from backend.
+/// - 22025: Invalid escape sequence. Propagated from backend.
+/// - 24000: Invalid cursor state. The row's first sentence, a cursor open on the statement
 ///   where "`SQLFetch` or `SQLFetchScroll` had been called", is `(DM)`-marked and not returned
 ///   here. The second is unmarked and is the driver's: a cursor open on the statement but
 ///   where `SQLFetch` or `SQLFetchScroll` had not been called. Core does not return it either,
 ///   because re-preparing is allowed and simply replaces the current state.
-/// - 34000: Invalid cursor name — propagated from backend.
-/// - 3D000: Invalid catalog name — propagated from backend.
-/// - 3F000: Invalid schema name — propagated from backend.
-/// - 42000: Syntax error or access violation — propagated from backend; also returned here
+/// - 34000: Invalid cursor name. Propagated from backend.
+/// - 3D000: Invalid catalog name. Propagated from backend.
+/// - 3F000: Invalid schema name. Propagated from backend.
+/// - 42000: Syntax error or access violation. Propagated from backend; also returned here
 ///   (checked before the backend is called) for an unterminated (malformed) ODBC escape
 ///   sequence when NOSCAN is off (`crate::escape::translate_escapes`).
-/// - 42S01: Base table or view already exists — propagated from backend.
-/// - 42S02: Base table or view not found — propagated from backend.
-/// - 42S11: Index already exists — propagated from backend.
-/// - 42S12: Index not found — propagated from backend.
-/// - 42S21: Column already exists — propagated from backend.
-/// - 42S22: Column not found — propagated from backend.
-/// - HY000: General error — propagated from backend.
-/// - HY001: Memory allocation error — propagated from backend.
-/// - HY008: Operation canceled. The row's first clause — asynchronous processing, then the
-///   function called again — is not applicable: core implements no asynchronous execution and
+/// - 42S01: Base table or view already exists. Propagated from backend.
+/// - 42S02: Base table or view not found. Propagated from backend.
+/// - 42S11: Index already exists. Propagated from backend.
+/// - 42S12: Index not found. Propagated from backend.
+/// - 42S21: Column already exists. Propagated from backend.
+/// - 42S22: Column not found. Propagated from backend.
+/// - HY000: General error. Propagated from backend.
+/// - HY001: Memory allocation error. Propagated from backend.
+/// - HY008: Operation canceled. The row's first clause (asynchronous processing, then the
+///   function called again) is not applicable: core implements no asynchronous execution and
 ///   never returns `SQL_STILL_EXECUTING`. The second clause, `SQLCancel` called on the
 ///   statement "from a different thread in a multithread application", **is returned by this
 ///   driver**: the row carries no `(DM)` marker, and when a backend call fails with
 ///   `Backend::is_cancelled` reporting its token signalled, core reports `HY008` in place of
 ///   the backend's own SQLSTATE.
-/// - HY009: Invalid use of null pointer — the spec annotates the "`StatementText` was a null
+/// - HY009: Invalid use of null pointer. The spec annotates the "`StatementText` was a null
 ///   pointer" clause `(DM)`, and it is the row's only clause; it is guarded defensively here.
 ///   Core is also linked directly, by its own tests and by an embedder with no Driver Manager
 ///   in front of it, and a null pointer that reaches `utf16_to_string` is a soundness question
 ///   rather than a spec question.
-/// - HY010: Function sequence error — (DM cases for async/NEED_DATA: driver-manager-handled; not
+/// - HY010: Function sequence error (DM cases for async/NEED_DATA: driver-manager-handled; not
 ///   returned here); fails if the connection is not open (checked here).
-/// - HY013: Memory management error — propagated from backend.
-/// - HY090: Invalid string or buffer length — (DM case `TextLength <= 0 and != SQL_NTS`:
+/// - HY013: Memory management error. Propagated from backend.
+/// - HY090: Invalid string or buffer length (DM case `TextLength <= 0 and != SQL_NTS`:
 ///   driver-manager-handled); fails if `TextLength < 0` and `!= SQL_NTS` (checked here).
 ///   **Also returned here**, for the condition the row does not state: a `StatementText`
 ///   passed as `SQL_NTS` whose null terminator is not within `MAX_NTS_SCAN` (1 048 576) units.
-///   `StatementText` is this function's only `SQL_NTS` argument, so it is the whole set —
-///   parameters are bound but not read until `SQLExecute`. An explicitly measured
+///   `StatementText` is this function's only `SQL_NTS` argument, so it is the whole set,
+///   because parameters are bound but not read until `SQLExecute`. An explicitly measured
 ///   `TextLength` is not limited, at any size. See
 ///   `prepare_refuses_an_nts_statement_with_no_terminator_within_the_scan_cap`.
-/// - HY117: Connection suspended — (driver-manager-handled; not returned here).
-/// - HYC00: Optional feature not implemented — propagated from backend; also returned here
+/// - HY117: Connection suspended (driver-manager-handled; not returned here).
+/// - HYC00: Optional feature not implemented. Propagated from backend; also returned here
 ///   (checked before the backend is called) for a `{call ...}`/`{?= call ...}` stored-procedure
 ///   escape, which this driver does not support, when NOSCAN is off.
-/// - HYT00: Timeout expired — **returned by this driver**, not merely propagated. A backend
+/// - HYT00: Timeout expired. **Returned by this driver**, not merely propagated. A backend
 ///   whose `Backend::set_query_timeout` answered `QueryTimeout::CoreCancels` gets core's own
 ///   timer (`crate::query_timer`), armed here, and `QueryTimer::reclassify` replaces the
-///   failing call's SQLSTATE with `HYT00` when the deadline fired — deliberately after the
+///   failing call's SQLSTATE with `HYT00` when the deadline fired. That pass runs after the
 ///   cancel pass, so "my deadline passed" wins over "another thread cancelled me". A backend
 ///   enforcing its own timeout has its `HYT00` propagated unchanged.
-/// - HYT01: Connection timeout expired — propagated from backend.
-/// - IM001: Driver does not support this function — (driver-manager-handled; not returned here).
+/// - HYT01: Connection timeout expired. Propagated from backend.
+/// - IM001: Driver does not support this function (driver-manager-handled; not returned here).
 /// - IM017: Polling disabled; not returned here (the asynchronous notification model is not
-///   supported — not DM-annotated in the spec).
+///   supported, and not DM-annotated in the spec).
 /// - IM018: SQLCompleteAsync not called; not returned here (the asynchronous notification model
-///   is not supported — not DM-annotated in the spec).
+///   is not supported, and not DM-annotated in the spec).
 ///
 /// # Safety
 ///
@@ -579,10 +574,10 @@ pub unsafe fn sql_prepare_w<B: Backend>(
             stmt.set_prepared_statement(crate::handles::StatementData::Backend(prepared));
             stmt.prepared_sql = Some(sql);
             stmt.param_count = Some(param_count);
-            // Parameter bindings deliberately survive. SQLBindParameter's spec
-            // names the only three things that unbind a parameter — another
+            // Parameter bindings survive. SQLBindParameter's spec names the
+            // only three things that unbind a parameter (another
             // SQLBindParameter, SQLFreeStmt(SQL_RESET_PARAMS), and
-            // SQLSetDescField setting the APD's SQL_DESC_COUNT to 0 — and
+            // SQLSetDescField setting the APD's SQL_DESC_COUNT to 0), and
             // SQLPrepare is not among them. SQLPrepare's own Comments confirm
             // it from the other side: "an application should unbind all
             // parameters that applied to an old SQL statement before preparing
@@ -610,8 +605,8 @@ pub unsafe fn sql_prepare_w<B: Backend>(
 /// modifies the statement in-place to hold the resulting cursor or DML count.
 ///
 /// Each buffer is read at its bound address plus
-/// `SQL_ATTR_PARAM_BIND_OFFSET_PTR`, dereferenced once per execution — the
-/// parameter-side counterpart of what `SQLFetch` does with
+/// `SQL_ATTR_PARAM_BIND_OFFSET_PTR`, dereferenced once per execution. That is
+/// the parameter-side counterpart of what `SQLFetch` does with
 /// `SQL_ATTR_ROW_BIND_OFFSET_PTR`. See `SQLBindParameter`'s "Rebinding with
 /// Offsets", and `descriptor::BindOffset` for why a null pointer is left
 /// unshifted.
@@ -622,8 +617,8 @@ pub unsafe fn sql_prepare_w<B: Backend>(
 ///
 /// # Return values
 ///
-/// `SQL_NO_DATA` is returned for a searched update, insert or delete that affected no rows
-/// — the Comments say so directly, and Appendix B's `[nf]` footnote carves this function out
+/// `SQL_NO_DATA` is returned for a searched update, insert or delete that affected no rows.
+/// The Comments say so directly, and Appendix B's `[nf]` footnote carves this function out
 /// of its own `SQL_NO_DATA` definition for that reason. Core decides it from
 /// `StatementBackend::column_count` and `StatementBackend::row_count`; see
 /// `zero_row_searched_dml` for why a backend that reports no row count keeps
@@ -631,111 +626,109 @@ pub unsafe fn sql_prepare_w<B: Backend>(
 ///
 /// # Spec compliance
 ///
-/// - 01000: General warning — propagated from backend.
-/// - 01001: Cursor operation conflict — propagated from backend.
-/// - 01003: NULL value eliminated in set function — propagated from backend.
-/// - 01004: String data, right truncated — propagated from backend.
-/// - 01006: Privilege not revoked — propagated from backend.
-/// - 01007: Privilege not granted — propagated from backend.
-/// - 01S02: Option value changed — propagated from backend.
-/// - 01S07: Fractional truncation — propagated from backend.
-/// - 07002: COUNT field incorrect — the row's first clause, "the number of parameters
+/// - 01000: General warning. Propagated from backend.
+/// - 01001: Cursor operation conflict. Propagated from backend.
+/// - 01003: NULL value eliminated in set function. Propagated from backend.
+/// - 01004: String data, right truncated. Propagated from backend.
+/// - 01006: Privilege not revoked. Propagated from backend.
+/// - 01007: Privilege not granted. Propagated from backend.
+/// - 01S02: Option value changed. Propagated from backend.
+/// - 01S07: Fractional truncation. Propagated from backend.
+/// - 07002: COUNT field incorrect. The row's first clause, "the number of parameters
 ///   specified in `SQLBindParameter` was less than the number of parameters in the SQL
 ///   statement", is **returned here**: a `?` marker with no binding is rejected rather than
 ///   padded with NULL (`ffi::params::collect_params`). The second clause, a binding whose
 ///   `ParameterValuePtr` is null with a non-`SQL_NULL_DATA`/`SQL_DATA_AT_EXEC` indicator, is
 ///   rejected by `SQLBindParameter` itself. Also propagated from backend.
-/// - 07006: Restricted data type attribute violation — `SQLBindParameter` refuses a
+/// - 07006: Restricted data type attribute violation. `SQLBindParameter` refuses a
 ///   `SQL_C_BINARY` parameter bound to a target core cannot convert it to, so it does not
 ///   reach execution (`crate::binary_convert`). Also propagated from backend.
-/// - 07007: Restricted parameter value violation — propagated from backend.
-/// - 07S01: Invalid use of default parameter — propagated from backend.
-/// - 08S01: Communication link failure — propagated from backend.
-/// - 21S02: Degree of derived table does not match column list — propagated from backend.
-/// - 22001: String data, right truncation — returned here when a parameter value does not
+/// - 07007: Restricted parameter value violation. Propagated from backend.
+/// - 07S01: Invalid use of default parameter. Propagated from backend.
+/// - 08S01: Communication link failure. Propagated from backend.
+/// - 21S02: Degree of derived table does not match column list. Propagated from backend.
+/// - 22001: String data, right truncation. Returned here when a parameter value does not
 ///   fit the SQL type the application declared: fractional digits dropped or whole digits
 ///   lost for an exact-numeric target, or a value longer than the declared `ColumnSize` for
 ///   a character or binary target (`crate::param_convert`, the "C to SQL: Character" table,
 ///   and its "C to SQL: Binary" counterpart for a `SQL_C_BINARY` value bound to a binary
 ///   type). Also propagated from backend.
-/// - 22002: Indicator variable required but not supplied — propagated from backend.
-/// - 22003: Numeric value out of range — returned here when character parameter data falls
+/// - 22002: Indicator variable required but not supplied. Propagated from backend.
+/// - 22003: Numeric value out of range. Returned here when character parameter data falls
 ///   outside the range of the declared approximate-numeric or `SQL_BIT` type
 ///   (`crate::param_convert`), or when a `SQL_C_BINARY` parameter's byte count is not
 ///   exactly the declared SQL type's width (`crate::binary_convert`, the "C to SQL: Binary"
 ///   table). Also propagated from backend.
-/// - 22007: Invalid datetime format — returned here for character parameter data that is a
+/// - 22007: Invalid datetime format. Returned here for character parameter data that is a
 ///   datetime literal with an out-of-range field (`crate::param_convert`). Also propagated
 ///   from backend.
-/// - 22008: Datetime field overflow — returned here when character parameter data carries a
+/// - 22008: Datetime field overflow. Returned here when character parameter data carries a
 ///   datetime component the declared type cannot hold: a non-zero time for `SQL_TYPE_DATE`,
 ///   or non-zero fractional seconds for `SQL_TYPE_TIME` (`crate::param_convert`). Also
 ///   propagated from backend.
-/// - 22012: Division by zero — propagated from backend.
-/// - 22015: Interval field overflow — propagated from backend.
-/// - 22018: Invalid character value for cast specification — returned here when character
+/// - 22012: Division by zero. Propagated from backend.
+/// - 22015: Interval field overflow. Propagated from backend.
+/// - 22018: Invalid character value for cast specification. Returned here when character
 ///   parameter data is not a valid literal of the SQL type declared for it at
 ///   `SQLBindParameter` (`crate::param_convert`). Also propagated from backend.
-/// - 22019: Invalid escape character — propagated from backend.
-/// - 22025: Invalid escape sequence — propagated from backend.
-/// - 23000: Integrity constraint violation — propagated from backend.
-/// - 24000: Invalid cursor state — **returned here** when a cursor is already open on the
+/// - 22019: Invalid escape character. Propagated from backend.
+/// - 22025: Invalid escape sequence. Propagated from backend.
+/// - 23000: Integrity constraint violation. Propagated from backend.
+/// - 24000: Invalid cursor state. **Returned here** when a cursor is already open on the
 ///   statement, which the Comments require the application to close first: "to execute a
 ///   SELECT statement more than once, the application must call SQLCloseCursor before
 ///   reexecuting". The row's other clause is the Driver Manager's, and covers the case where
 ///   `SQLFetch` has not yet returned `SQL_NO_DATA`. Also propagated from the backend for a
 ///   positioned update or delete on an improperly positioned cursor.
-/// - 40001: Serialization failure — propagated from backend.
-/// - 40003: Statement completion unknown — propagated from backend.
-/// - 42000: Syntax error or access violation — propagated from backend.
-/// - 44000: WITH CHECK OPTION violation — propagated from backend.
-/// - HY000: General error — propagated from backend.
-/// - HY001: Memory allocation error — propagated from backend.
-/// - HY008: Operation canceled. The row's first clause — asynchronous processing, then the
-///   function called again — is not applicable: core implements no asynchronous execution and
+/// - 40001: Serialization failure. Propagated from backend.
+/// - 40003: Statement completion unknown. Propagated from backend.
+/// - 42000: Syntax error or access violation. Propagated from backend.
+/// - 44000: WITH CHECK OPTION violation. Propagated from backend.
+/// - HY000: General error. Propagated from backend.
+/// - HY001: Memory allocation error. Propagated from backend.
+/// - HY008: Operation canceled. The row's first clause (asynchronous processing, then the
+///   function called again) is not applicable: core implements no asynchronous execution and
 ///   never returns `SQL_STILL_EXECUTING`. The second clause, `SQLCancel` called on the
 ///   statement "from a different thread in a multithread application", **is returned by this
 ///   driver**: the row carries no `(DM)` marker, and when a backend call fails with
 ///   `Backend::is_cancelled` reporting its token signalled, core reports `HY008` in place of
 ///   the backend's own SQLSTATE.
-/// - HY010: Function sequence error — every clause of this row is `(DM)`, including
+/// - HY010: Function sequence error. Every clause of this row is `(DM)`, including
 ///   "the `StatementHandle` was not prepared", which this row carries and its two siblings do
 ///   not. The check is guarded defensively here: without it a backend would be asked to
 ///   execute a statement it was never given, which is an internal invariant violation rather
 ///   than a spec check the Driver Manager can be relied on to make. The connection-not-open
 ///   check is guarded here for the same reason.
-/// - HY013: Memory management error — propagated from backend.
-/// - HY090: Invalid string or buffer length — propagated from backend (parameter buffer length
+/// - HY013: Memory management error. Propagated from backend.
+/// - HY090: Invalid string or buffer length. Propagated from backend (parameter buffer length
 ///   validation). **Also returned here** for a bound parameter whose length indicator is
 ///   negative and names none of `SQL_NTS`, `SQL_NULL_DATA`, `SQL_DEFAULT_PARAM`,
-///   `SQL_DATA_AT_EXEC` or `SQL_LEN_DATA_AT_EXEC(n)` — the row's own third sentence. Such a
-///   value used to be folded into `SQL_NTS`, so `SQL_NO_TOTAL` and any stale negative bound
-///   the whole null-terminated string and answered `SUCCESS`. **And returned here**, for a
-///   bound `SQL_C_CHAR` or `SQL_C_WCHAR`
+///   `SQL_DATA_AT_EXEC` or `SQL_LEN_DATA_AT_EXEC(n)`, which is the row's own third sentence.
+///   Folding such a value into `SQL_NTS` would bind the whole null-terminated string and
+///   answer `SUCCESS` for a parameter length value the row rules out. **And returned here**,
+///   for a bound `SQL_C_CHAR` or `SQL_C_WCHAR`
 ///   parameter whose `SQL_NTS` (or absent) length indicator sends core scanning and whose
 ///   null terminator is not within `MAX_NTS_SCAN` (1 048 576) units. Those two C types are the
 ///   complete set: every other bound type has a fixed width or an explicit indicator, and
-///   this function takes no string argument of its own. The `SQL_C_WCHAR` arm previously
-///   sent the **empty string** in that case (`unwrap_or_default`) and the `SQL_C_CHAR` arm
-///   scanned unbounded (`CStr::from_ptr`). See
+///   this function takes no string argument of its own. See
 ///   `read_param_value_refuses_a_wchar_nts_buffer_that_runs_to_the_scan_cap` and
 ///   `read_param_value_refuses_a_char_nts_buffer_that_runs_to_the_scan_cap`.
-/// - HY105: Invalid parameter type — propagated from backend.
-/// - HY109: Invalid cursor position — propagated from backend.
-/// - HY117: Connection suspended — (driver-manager-handled; not returned here).
-/// - HYC00: Optional feature not implemented — propagated from backend.
-/// - HYT00: Timeout expired — **returned by this driver**, not merely propagated. A backend
+/// - HY105: Invalid parameter type. Propagated from backend.
+/// - HY109: Invalid cursor position. Propagated from backend.
+/// - HY117: Connection suspended (driver-manager-handled; not returned here).
+/// - HYC00: Optional feature not implemented. Propagated from backend.
+/// - HYT00: Timeout expired. **Returned by this driver**, not merely propagated. A backend
 ///   whose `Backend::set_query_timeout` answered `QueryTimeout::CoreCancels` gets core's own
 ///   timer (`crate::query_timer`), armed here, and `QueryTimer::reclassify` replaces the
-///   failing call's SQLSTATE with `HYT00` when the deadline fired — deliberately after the
+///   failing call's SQLSTATE with `HYT00` when the deadline fired. That pass runs after the
 ///   cancel pass, so "my deadline passed" wins over "another thread cancelled me". A backend
 ///   enforcing its own timeout has its `HYT00` propagated unchanged.
-/// - HYT01: Connection timeout expired — propagated from backend.
-/// - IM001: Driver does not support this function — (driver-manager-handled; not returned here).
+/// - HYT01: Connection timeout expired. Propagated from backend.
+/// - IM001: Driver does not support this function (driver-manager-handled; not returned here).
 /// - IM017: Polling disabled; not returned here (the asynchronous notification model is not
-///   supported — not DM-annotated in the spec).
+///   supported, and not DM-annotated in the spec).
 /// - IM018: SQLCompleteAsync not called; not returned here (the asynchronous notification model
-///   is not supported — not DM-annotated in the spec).
+///   is not supported, and not DM-annotated in the spec).
 ///
 /// # Safety
 ///
@@ -763,9 +756,9 @@ pub unsafe fn sql_execute<B: Backend>(statement_handle: *mut c_void) -> SqlRetur
             };
 
             // Spec 24000: "A cursor was open on the StatementHandle." The
-            // Comments say it plainly — "to execute a SELECT statement more than
+            // Comments say it plainly: "to execute a SELECT statement more than
             // once, the application must call SQLCloseCursor before
-            // reexecuting" — and the row's driver clause covers the case where
+            // reexecuting". The row's driver clause covers the case where
             // SQLFetch has already returned SQL_NO_DATA. `SQLExecDirectW`
             // carries the same check.
             //
@@ -775,8 +768,8 @@ pub unsafe fn sql_execute<B: Backend>(statement_handle: *mut c_void) -> SqlRetur
             // HY010 whatever its cursor state.
             //
             // Reads `cursor_open`, which is core-owned: the backend is never
-            // told a cursor is open, so this can never have been "propagated
-            // from backend" as the doc comment used to claim.
+            // told a cursor is open, so this state is returned here rather than
+            // propagated from the backend.
             if stmt.cursor_open {
                 return Err(OdbcError::general(
                     "A cursor is already open on this statement; call SQLCloseCursor first",
@@ -955,7 +948,7 @@ mod tests {
     ///
     /// Disconnects before freeing the connection, exactly as `cleanup` below
     /// does: `free_connection` refuses HY010 while `conn.connection.is_some()`
-    /// (spec-correct — `SQLDisconnect` must run first), so a caller that sets
+    /// (spec-correct, since `SQLDisconnect` must run first), so a caller that sets
     /// `connection` directly (as the cancel-token tests do, via
     /// `with_handle`) and skips this leaks the connection box, and then the
     /// environment box behind it, since `free_environment` also correctly
@@ -1004,7 +997,7 @@ mod tests {
     fn exec_direct_not_connected_returns_error() {
         unsafe {
             let (env, conn, stmt) = alloc_env_conn_stmt();
-            // Not connected — should fail with HY010.
+            // Not connected, so this must fail with HY010.
             let sql = "SELECT 1";
             let wide: Vec<u16> = sql.encode_utf16().collect();
             let ret = sql_exec_direct_w::<MockBackend>(stmt, wide.as_ptr(), wide.len() as i32);
@@ -1063,7 +1056,7 @@ mod tests {
     fn prepare_not_connected_returns_error() {
         unsafe {
             let (env, conn, stmt) = alloc_env_conn_stmt();
-            // Not connected — should fail.
+            // Not connected, so this must fail.
             let sql = "SELECT ?";
             let wide: Vec<u16> = sql.encode_utf16().collect();
             let ret = sql_prepare_w::<MockBackend>(stmt, wide.as_ptr(), wide.len() as i32);
@@ -1179,8 +1172,8 @@ mod tests {
         // and SQLSetDescField setting the APD's SQL_DESC_COUNT to 0. SQLPrepare
         // is not among them, and SQLPrepare's own Comments tell the application
         // to "unbind all parameters that applied to an old SQL statement before
-        // preparing a new SQL statement" — advice only a driver that keeps them
-        // could need.
+        // preparing a new SQL statement", which is advice only a driver that
+        // keeps them could need.
         //
         // Clearing them here would break the ordinary
         // bind -> prepare -> execute order silently: `collect_params`
@@ -1489,7 +1482,7 @@ mod tests {
     }
 
     /// A parameter that converts cleanly leaves the call at plain
-    /// `SQL_SUCCESS` — the flag must not latch on.
+    /// `SQL_SUCCESS`, because the flag must not latch on.
     #[test]
     fn an_untruncated_parameter_leaves_the_return_at_success() {
         unsafe {
@@ -1519,7 +1512,7 @@ mod tests {
     /// sets of parameters that have been processed, and
     /// `SQL_ATTR_PARAM_STATUS_PTR` holds one status per set.
     /// `SQL_ATTR_PARAMSET_SIZE` is pinned at 1, so an execution processes
-    /// exactly one set and reports `SQL_PARAM_SUCCESS` for it — the
+    /// exactly one set and reports `SQL_PARAM_SUCCESS` for it, the
     /// parameter-side counterpart of what `SQLFetch` writes through
     /// `SQL_ATTR_ROWS_FETCHED_PTR`.
     #[test]
@@ -1646,7 +1639,7 @@ mod tests {
             // Through the production accessor, not a hand-written downcast:
             // the registry stores a `CancelState` wrapper, and a test that
             // spelled the stored type itself would keep passing while
-            // `cancel_as` — what every call site actually uses — broke.
+            // `cancel_as`, what every call site actually uses, broke.
             let token = crate::handles::cancel_as::<MockRecordingBackend>(&token)
                 .expect("backend's own type");
             assert!(
@@ -1708,7 +1701,7 @@ mod tests {
             assert!(
                 !std::sync::Arc::ptr_eq(&first, &second),
                 "each execution owns its own cancel token, so a cancel aimed at one execution \
-                 cannot leak into the next — which is what makes a cancelled statement reusable"
+                 cannot leak into the next, which is what makes a cancelled statement reusable"
             );
 
             cleanup_env_conn_stmt_for::<MockRecordingBackend>(env, conn, stmt);
@@ -1718,11 +1711,10 @@ mod tests {
     /// A `SQL_NTS` statement with no terminator inside `MAX_NTS_SCAN` is
     /// `HY090`, and the backend is never called.
     ///
-    /// This is the one silent-truncation bug on the *input* side:
-    /// `utf16_to_string` gave up at the cap and handed back the prefix, which
-    /// `sql_exec_direct_w` then executed. A truncation landing after a
-    /// syntactically complete prefix executes a **different statement than the
-    /// application wrote** — `DELETE FROM t WHERE id = 1` from
+    /// This is the silent-truncation case on the *input* side. Handing back the
+    /// cap-length prefix and executing it would run a **different statement than
+    /// the application wrote** whenever the prefix is syntactically complete:
+    /// `DELETE FROM t WHERE id = 1` in place of
     /// `DELETE FROM t WHERE id = 1 AND …`.
     ///
     /// "The backend was never called" is asserted through the cancel token:
@@ -1798,20 +1790,19 @@ mod tests {
 
     /// A 100 000-character `SQL_NTS` statement executes.
     ///
-    /// The length is the point: it is above `i16::MAX` (32 767), which is what
-    /// `MAX_NTS_SCAN` used to be, and far below the cap now. Machine-generated
-    /// SQL — a batched `INSERT … VALUES`, an `IN` list built from a key set —
-    /// passes that mark routinely, and unixODBC forwards `SQL_NTS` unchanged
-    /// from a Unicode application to a Unicode driver, so such a statement
-    /// reaches this function still needing a scan. While the cap was `i16::MAX`
-    /// this call was `HY090`.
+    /// The length is the point: it is above `i16::MAX` (32 767) and far below
+    /// `MAX_NTS_SCAN`. Machine-generated SQL (a batched `INSERT … VALUES`, an
+    /// `IN` list built from a key set) passes that mark routinely, and unixODBC
+    /// forwards `SQL_NTS` unchanged from a Unicode application to a Unicode
+    /// driver, so such a statement reaches this function still needing a scan.
+    /// A cap of `i16::MAX` would answer `HY090` for it.
     ///
     /// What the driver survey on `MAX_NTS_SCAN` establishes is narrower than
     /// "the other drivers run this statement", which depends on the data source
     /// and not on the driver: it is that **none of them refuses it for length**.
     /// Their `SQL_NTS` scans are unbounded, so no length threshold exists at
     /// which they stop. MySQL Connector/ODBC is the one that has an `HY090`
-    /// length limit at all — `GET_NAME_LEN`, 192 bytes — and it does not bear on
+    /// length limit at all (`GET_NAME_LEN`, 192 bytes), and it does not bear on
     /// this: it is a post-hoc MySQL identifier check applied to catalog-function
     /// name arguments, never to SQL text.
     ///
@@ -1850,7 +1841,7 @@ mod tests {
     }
 
     /// The cap bounds a scan, never a declared length. A statement one unit past
-    /// the cap, passed with its real `TextLength`, is unaffected — which is the
+    /// the cap, passed with its real `TextLength`, is unaffected, which is the
     /// property that keeps generated multi-row `INSERT` statements working
     /// however long they get.
     ///
@@ -2124,7 +2115,7 @@ mod tests {
             let _ = crate::ffi::cursor::sql_close_cursor::<MockCancelAwareBackend>(stmt);
 
             // A fresh execution mints a fresh token, so the stale signal cannot
-            // reach it — even though this one is also told to fail, which is
+            // reach it, even though this one is also told to fail, which is
             // what makes the assertion about the token and not about luck.
             MockCancelAwareBackend::fail_next_execution();
             assert_eq!(
@@ -2266,7 +2257,7 @@ mod tests {
 
     /// `row_count() == None` means "not applicable to this statement" and
     /// `Some(SQL_NO_TOTAL)` means "the backend could not work it out". Neither
-    /// asserts that nothing was affected, so both keep SQL_SUCCESS — a backend
+    /// asserts that nothing was affected, so both keep SQL_SUCCESS. A backend
     /// that reports no counts must not have every DDL statement reported as a
     /// miss.
     #[test]
@@ -2375,8 +2366,8 @@ mod tests {
     /// application must call SQLCloseCursor before reexecuting." The `24000`
     /// row gives the driver the clause where `SQLFetch` has returned
     /// `SQL_NO_DATA`, and Appendix B's cursor-states table for this function
-    /// reads `24000 [p]` in every column — `[p]` meaning prepared, which is the
-    /// only way `SQLExecute` gets this far at all.
+    /// reads `24000 [p]` in every column, with `[p]` meaning prepared, which is
+    /// the only way `SQLExecute` gets this far at all.
     ///
     /// `MockLongDataBackend` reports three columns, so the first execution
     /// really opens a cursor. `MockBackend` reports none and could not reach

@@ -17,8 +17,8 @@ const DIAG_MSG_BUF_LEN: usize = 256;
 // restated. The record fields are the reason: `sqlext.h` puts
 // `SQL_DIAG_ROW_NUMBER` at -1248 and `SQL_DIAG_COLUMN_NUMBER` at -1247, far
 // from the small positive header-field numbers around them, and 12 is
-// `SQL_DIAG_DYNAMIC_FUNCTION_CODE`. A transcribed copy that drifts therefore
-// does not simply fail to match — it answers a different field.
+// `SQL_DIAG_DYNAMIC_FUNCTION_CODE`. A transcribed copy that drifts does not
+// simply fail to match; it answers a different field.
 //
 // These are `const` bindings rather than direct enum uses because the match
 // below needs them in patterns, including an inclusive range.
@@ -119,14 +119,14 @@ const SQL_DIAG_DYNAMIC_FUNCTION_UNKNOWN: &str = "";
 
 /// `SQL_DIAG_CURSOR_ROW_COUNT` when no cursor row count is available.
 ///
-/// Not a spec sentinel — the field has none. The field's own row makes its
-/// meaning conditional: "Its semantics depend on the **SQLGetInfo** information
-/// types … SQL_FORWARD_ONLY_CURSOR_ATTRIBUTES2 … (in the SQL_CA2_CRC_EXACT and
-/// SQL_CA2_CRC_APPROXIMATE bits)". Core sets neither of those two bits in that
-/// info type (`crate::backend::default_get_info`), so it has declared that no
-/// row count is available and zero is the consequence rather than a guess.
-/// Note the info type itself is not zero — it carries
-/// `SQL_CA2_READ_ONLY_CONCURRENCY` — so it is the two named bits that matter
+/// Not a spec sentinel, because the field has none. The field's own row makes
+/// its meaning conditional: "Its semantics depend on the **SQLGetInfo**
+/// information types … SQL_FORWARD_ONLY_CURSOR_ATTRIBUTES2 … (in the
+/// SQL_CA2_CRC_EXACT and SQL_CA2_CRC_APPROXIMATE bits)". Core sets neither of
+/// those two bits in that info type (`crate::backend::default_get_info`), so it
+/// has declared that no row count is available and zero is the consequence
+/// rather than a guess. The info type itself is not zero: it carries
+/// `SQL_CA2_READ_ONLY_CONCURRENCY`, so it is the two named bits that matter
 /// here, not the whole value.
 const CURSOR_ROW_COUNT_UNAVAILABLE: isize = 0;
 
@@ -182,17 +182,17 @@ unsafe fn write_diag_string(
 /// which applies to character fields and to nothing else.
 ///
 /// The spec's SQL_ERROR list: "The value requested **was a character string**
-/// and *BufferLength* was less than zero." An integer field is exempt by name —
-/// "If *DiagIdentifier* is an ODBC-defined field and \**DiagInfoPtr* is an
-/// integer, *BufferLength* is ignored" — and applications are told to pass a
+/// and *BufferLength* was less than zero." An integer field is exempt by name
+/// ("If *DiagIdentifier* is an ODBC-defined field and \**DiagInfoPtr* is an
+/// integer, *BufferLength* is ignored"), and applications are told to pass a
 /// negative value there: "If *\*DiagInfoPtr* contains a fixed-length data type,
 /// *BufferLength* is SQL_IS_INTEGER, SQL_IS_UINTEGER, SQL_IS_SMALLINT, or
 /// SQL_IS_USMALLINT, as appropriate", which are -6, -5, -8 and -7.
 ///
-/// A single check ahead of the field match was therefore failing conventional,
+/// A single check ahead of the field match would fail conventional,
 /// spec-recommended calls to `SQL_DIAG_NATIVE`, `SQL_DIAG_COLUMN_NUMBER` and
-/// `SQL_DIAG_ROW_NUMBER`. Here instead of triplicated at the three character
-/// arms, so a fourth character field cannot be added without it.
+/// `SQL_DIAG_ROW_NUMBER`. It lives here rather than triplicated at the three
+/// character arms, so a fourth character field cannot be added without it.
 ///
 /// # Safety
 ///
@@ -240,15 +240,15 @@ unsafe fn write_diag_string_checked(
 /// This function does not post diagnostic records for itself; it reports its
 /// outcome via return value only (no SQLSTATEs in the Diagnostics table).
 ///
-/// - `SQL_SUCCESS` — diagnostic information returned successfully.
-/// - `SQL_SUCCESS_WITH_INFO` — `*MessageText` buffer was too small; message
+/// - `SQL_SUCCESS`: diagnostic information returned successfully.
+/// - `SQL_SUCCESS_WITH_INFO`: `*MessageText` buffer was too small; message
 ///   was truncated. `*TextLengthPtr` contains the full untruncated character
 ///   count.
-/// - `SQL_INVALID_HANDLE` — `handle` is not a valid ODBC handle.
-/// - `SQL_ERROR` — `rec_number` was negative or 0; or `buffer_length` was less
+/// - `SQL_INVALID_HANDLE`: `handle` is not a valid ODBC handle.
+/// - `SQL_ERROR`: `rec_number` was negative or 0; or `buffer_length` was less
 ///   than zero.
 ///   - Async-operation-not-complete case: not applicable (the `Backend` trait is synchronous).
-/// - `SQL_NO_DATA` — `rec_number` was greater than the number of diagnostic
+/// - `SQL_NO_DATA`: `rec_number` was greater than the number of diagnostic
 ///   records for `handle`, or `handle` has no diagnostic records at all.
 ///
 /// # Safety
@@ -295,7 +295,7 @@ pub unsafe fn sql_get_diag_rec_w<B: Backend>(
             }
 
             // Spec: SQL_ERROR if BufferLength is less than zero. `Ok`, not
-            // `Err` — same invariant as immediately above.
+            // `Err`, on the same invariant as immediately above.
             if buffer_length < 0 {
                 return Ok(SqlReturn::ERROR);
             }
@@ -366,7 +366,7 @@ pub unsafe fn sql_get_diag_rec_w<B: Backend>(
 /// The four header fields the spec defines only for statement handles.
 ///
 /// A typed enum rather than four comparisons at the call site, so the match
-/// that answers them is exhaustive and needs no unreachable arm — the `panic`
+/// that answers them is exhaustive and needs no unreachable arm; the `panic`
 /// lint is denied outside tests.
 #[derive(Clone, Copy)]
 enum StatementHeaderField {
@@ -420,15 +420,15 @@ fn statement_header_field(diag_identifier: i16) -> Option<StatementHeaderField> 
 /// This function does not post diagnostic records for itself; it reports its
 /// outcome via return value only (no SQLSTATEs in the Diagnostics table).
 ///
-/// - `SQL_SUCCESS` — diagnostic field returned successfully.
-/// - `SQL_SUCCESS_WITH_INFO` — `*DiagInfoPtr` was too small; character data
+/// - `SQL_SUCCESS`: diagnostic field returned successfully.
+/// - `SQL_SUCCESS_WITH_INFO`: `*DiagInfoPtr` was too small; character data
 ///   was truncated. `*StringLengthPtr` contains the full byte count.
-/// - `SQL_INVALID_HANDLE` — `handle` is not a valid ODBC handle.
+/// - `SQL_INVALID_HANDLE`: `handle` is not a valid ODBC handle.
 ///   - For header fields (SQL_DIAG_NUMBER, SQL_DIAG_RETURNCODE), an invalid
-///     handle is deliberately *not* surfaced as `SQL_INVALID_HANDLE`: these two
-///     fields answer with a default value (count 0 / `SQL_SUCCESS`) instead.
-///     This is a known, deliberate deviation from the spec.
-/// - `SQL_ERROR` — one of:
+///     handle is *not* surfaced as `SQL_INVALID_HANDLE`: these two fields
+///     answer with a default value (count 0 / `SQL_SUCCESS`) instead. This is a
+///     known and intended deviation from the spec.
+/// - `SQL_ERROR`: one of:
 ///   - `diag_identifier` was not a valid value (driver returns `SQL_NO_DATA`
 ///     for unknown identifiers to avoid corrupting the Driver Manager state;
 ///     spec says SQL_ERROR but the DM handles unrecognised values itself).
@@ -437,19 +437,19 @@ fn statement_header_field(diag_identifier: i16) -> Option<StatementHeaderField> 
 ///     SQL_DIAG_ROW_COUNT and `handle` is not a statement handle. **Returned by
 ///     this driver.** The Diagnostics list marks the clause (DM), but the Header
 ///     Fields table states it once per field without a marker, and the Comments
-///     section a fifth time — "except for SQL_DIAG_CURSOR_ROW_COUNT or
+///     section a fifth time: "except for SQL_DIAG_CURSOR_ROW_COUNT or
 ///     SQL_DIAG_ROW_COUNT, which will return SQL_ERROR if *Handle* is not a
 ///     statement handle."
 ///   - `rec_number` was negative or 0 for a record field (not a header field).
 ///   - `buffer_length` was less than zero **for a character-string field**. An
 ///     integer-valued field ignores it, per "If *DiagIdentifier* is an
 ///     ODBC-defined field and \**DiagInfoPtr* is an integer, *BufferLength* is
-///     ignored" — and applications are told to pass a negative sentinel there
+///     ignored", and applications are told to pass a negative sentinel there
 ///     ("*BufferLength* is SQL_IS_INTEGER, SQL_IS_UINTEGER, SQL_IS_SMALLINT, or
 ///     SQL_IS_USMALLINT, as appropriate"), so a blanket check fails a
 ///     conventional call.
 ///   - Async-operation-not-complete case: not applicable (the `Backend` trait is synchronous).
-/// - `SQL_NO_DATA` — `rec_number` was greater than the number of diagnostic
+/// - `SQL_NO_DATA`: `rec_number` was greater than the number of diagnostic
 ///   records, or the handle has no diagnostic records.
 ///
 /// # The statement-only header fields
@@ -457,16 +457,16 @@ fn statement_header_field(diag_identifier: i16) -> Option<StatementHeaderField> 
 /// All four are answered, and `RecNumber` is ignored for them as the spec
 /// requires ("*RecNumber* is ignored for header fields"):
 ///
-/// - **SQL_DIAG_ROW_COUNT** — the same `SQLLEN` `SQLRowCount` reports, from the
+/// - **SQL_DIAG_ROW_COUNT**: the same `SQLLEN` `SQLRowCount` reports, from the
 ///   shared `crate::ffi::cursor::statement_row_count`. The spec's row: "The data
 ///   in this field is also returned in the *RowCountPtr* argument of
 ///   **SQLRowCount**."
-/// - **SQL_DIAG_CURSOR_ROW_COUNT** — `0`. Its semantics "depend on the
+/// - **SQL_DIAG_CURSOR_ROW_COUNT**: `0`. Its semantics "depend on the
 ///   **SQLGetInfo** information types … SQL_FORWARD_ONLY_CURSOR_ATTRIBUTES2 …
 ///   (in the SQL_CA2_CRC_EXACT and SQL_CA2_CRC_APPROXIMATE bits)", and core
 ///   sets neither of those bits, so no cursor row count is available.
-/// - **SQL_DIAG_DYNAMIC_FUNCTION** — the empty string, and
-///   **SQL_DIAG_DYNAMIC_FUNCTION_CODE** — `SQL_DIAG_UNKNOWN_STATEMENT`. Those
+/// - **SQL_DIAG_DYNAMIC_FUNCTION**: the empty string, and
+///   **SQL_DIAG_DYNAMIC_FUNCTION_CODE** is `SQL_DIAG_UNKNOWN_STATEMENT`. Those
 ///   are one row of the spec's "Values of the Dynamic Function Fields" table,
 ///   headed "Unknown"; core parses no SQL and cannot classify the statement it
 ///   ran.
@@ -753,7 +753,7 @@ pub unsafe fn sql_get_diag_field_w<B: Backend>(
                     }
                     SqlReturn::SUCCESS
                 }
-                // Unknown field — return NO_DATA rather than ERROR
+                // Unknown field: return NO_DATA rather than ERROR
                 _ => {
                     tracing::debug!(
                         "SQLGetDiagFieldW: unknown diag_identifier {}, returning NO_DATA",
@@ -987,7 +987,7 @@ mod tests {
 
             let mut state = [0u16; 6];
             let mut native_err: i32 = 0;
-            let mut msg_buf = [0u16; 4]; // very small buffer — will truncate
+            let mut msg_buf = [0u16; 4]; // very small buffer, will truncate
             let mut msg_len: i16 = 0;
 
             let ret = sql_get_diag_rec_w::<MockBackend>(
@@ -1410,7 +1410,7 @@ mod tests {
             let ret = sql_get_diag_field_w::<MockBackend>(
                 1,
                 env,
-                0, // rec_number 0 — invalid for record field
+                0, // rec_number 0, invalid for record field
                 SQL_DIAG_SQLSTATE,
                 buf.as_mut_ptr() as *mut c_void,
                 DIAG_MSG_BUF_LEN as i16,
@@ -1512,7 +1512,7 @@ mod tests {
         // deriving them from `odbc-sys` cannot silently move one. The two
         // record fields carry the risk: they sit at -1247 and -1248, nowhere
         // near the header fields they are listed beside, and the value a
-        // careless transcription reaches for — 12 — is a real identifier,
+        // careless transcription reaches for (12) is a real identifier,
         // `SQL_DIAG_DYNAMIC_FUNCTION_CODE`. A wrong value here answers the
         // wrong field rather than failing to match.
         assert_eq!(SQL_DIAG_COLUMN_NUMBER, -1247);
@@ -1686,12 +1686,12 @@ mod tests {
     }
 
     /// The spec tells applications to pass a negative `BufferLength` for a
-    /// fixed-length field — "If *\*DiagInfoPtr* contains a fixed-length data
+    /// fixed-length field ("If *\*DiagInfoPtr* contains a fixed-length data
     /// type, *BufferLength* is SQL_IS_INTEGER, SQL_IS_UINTEGER, SQL_IS_SMALLINT,
-    /// or SQL_IS_USMALLINT, as appropriate" — and every one of those constants
-    /// is negative. Its SQL_ERROR condition is narrower than the check that was
-    /// here: "The value requested **was a character string** and *BufferLength*
-    /// was less than zero."
+    /// or SQL_IS_USMALLINT, as appropriate"), and every one of those constants
+    /// is negative. Its SQL_ERROR condition is narrower than a blanket check:
+    /// "The value requested **was a character string** and *BufferLength* was
+    /// less than zero."
     ///
     /// So the integer fields must answer, and a conventional call must not be a
     /// failure.
@@ -1803,7 +1803,7 @@ mod tests {
         }
     }
 
-    /// `SQL_DIAG_ROW_COUNT` is the same number `SQLRowCount` reports — the
+    /// `SQL_DIAG_ROW_COUNT` is the same number `SQLRowCount` reports, and the
     /// spec's row says so outright: "The data in this field is also returned in
     /// the *RowCountPtr* argument of **SQLRowCount**." Asserting both in one
     /// test is what stops the two computations drifting apart.
@@ -1936,8 +1936,8 @@ mod tests {
     /// this field to start answering.
     ///
     /// The assertion is against the two CRC bits, not against the whole info
-    /// value. That info type is *not* zero — it carries
-    /// `SQL_CA2_READ_ONLY_CONCURRENCY` — and a test written against the whole
+    /// value. That info type is *not* zero: it carries
+    /// `SQL_CA2_READ_ONLY_CONCURRENCY`, and a test written against the whole
     /// value would fail the next time an unrelated capability bit is added while
     /// still not noticing a CRC bit appearing inside a value that stayed
     /// non-zero. The bits named by the spec's sentence are what this is about.

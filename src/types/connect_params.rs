@@ -54,8 +54,8 @@ pub struct ConnectParams {
 /// Matched as substrings, not whole names, because the keyword set is
 /// backend-defined: core sees `sslkeypassword`, `clientsecret` and
 /// `accesstoken` as readily as `pwd`, and a driver is free to invent more.
-/// Over-matching is harmless — redacting `authentication=kerberos` costs a line
-/// of diagnostics — whereas under-matching writes a credential to the log file.
+/// Over-matching is harmless, since redacting `authentication=kerberos` costs a
+/// line of diagnostics, whereas under-matching writes a credential to the log.
 ///
 /// This is a safety net, not the primary mechanism, and it cannot be complete
 /// for exactly the reason above. A backend names its own secret keywords
@@ -88,11 +88,11 @@ fn is_sensitive_keyword(key: &str) -> bool {
 impl std::fmt::Debug for ConnectParams {
     /// Renders the connection-string keywords and nothing else.
     ///
-    /// The three fields that are not keywords are deliberately omitted rather
-    /// than redacted. The two timeouts are already logged where they are read,
-    /// and [`Self::prompter`] is a trait object with nothing to render — an
-    /// entry for it would only add noise to a line whose job is to show what
-    /// the application actually asked for.
+    /// The three fields that are not keywords are omitted rather than redacted.
+    /// The two timeouts are already logged where they are read, and
+    /// [`Self::prompter`] is a trait object with nothing to render. An entry
+    /// for it would only add noise to a line whose job is to show what the
+    /// application actually asked for.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut map = f.debug_map();
         for (key, value) in &self.params {
@@ -147,7 +147,7 @@ impl ConnectParams {
                         saw_eq = true;
                         break;
                     }
-                    ';' => break, // segment with no '=' — skip below
+                    ';' => break, // segment with no '=', skipped below
                     _ => {
                         key.push(c);
                         chars.next();
@@ -175,7 +175,7 @@ impl ConnectParams {
                 chars.next(); // consume '{'
                 // A `}` inside a braced value is written `}}`. Without that, a
                 // value containing a brace ends its own quoted run and
-                // everything after it parses as further keywords — which is how
+                // everything after it parses as further keywords, which is how
                 // a DSN value could inject keywords into the string this driver
                 // hands back through *OutConnectionString*. unixODBC's Driver
                 // Manager uses the same convention in both directions
@@ -186,7 +186,7 @@ impl ConnectParams {
                 // needs `chars.peek()` to look one past the current character,
                 // and `by_ref()` borrows the iterator for the whole body.
                 // Clippy's `while_let_on_iterator` does not fire for the same
-                // reason — the iterator is used inside the loop.
+                // reason, since the iterator is used inside the loop.
                 while let Some(c) = chars.next() {
                     if c == '}' {
                         if chars.peek() == Some(&'}') {
@@ -282,15 +282,15 @@ impl ConnectParams {
     ///
     /// `None` means the application set nothing and the backend should use its
     /// own default; the spec says "the default is driver-dependent". `Some(0)`
-    /// is **not** the same thing and must not be treated as unset — the spec is
+    /// is **not** the same thing and must not be treated as unset. The spec is
     /// explicit that "if *ValuePtr* is 0, the timeout is disabled and a
     /// connection attempt will wait indefinitely".
     ///
     /// This is the number of seconds "to wait for a login request to complete
     /// before returning to the application", so it bounds
     /// [`Backend::connect`](crate::backend::Backend::connect) itself. Core
-    /// cannot enforce it — `connect` is synchronous and there is no cancel
-    /// token before a connection exists — so a backend that wants a login
+    /// cannot enforce it, because `connect` is synchronous and there is no
+    /// cancel token before a connection exists, so a backend that wants a login
     /// timeout has to pass this to its own client library.
     ///
     /// A backend that clamps this to a maximum it supports should report
@@ -315,7 +315,7 @@ impl ConnectParams {
     /// a backend that honours it does so in its own client library.
     ///
     /// The spec lists this attribute as settable either side of a connection,
-    /// so a value set *after* connecting never passes through here — this
+    /// so a value set *after* connecting never passes through here. This
     /// carries only what was set before, which is what `Backend::connect` can
     /// act on.
     pub fn connection_timeout(&self) -> Option<u32> {
@@ -345,7 +345,7 @@ impl ConnectParams {
     /// rule it never has to check.
     ///
     /// A backend that needs interactive authentication and finds `None` should
-    /// fail the connect with whatever its non-interactive path reports —
+    /// fail the connect with whatever its non-interactive path reports.
     /// `SQL_DRIVER_NOPROMPT`'s own clause in the spec says exactly that: "if the
     /// connection string contains enough information, the driver connects to
     /// the data source ... Otherwise, the driver returns SQL_ERROR."
@@ -355,7 +355,7 @@ impl ConnectParams {
     /// library that will present the URL, and a driver caching the resulting
     /// credential keeps it for the process. A borrow ends with `connect` and
     /// would force every such backend to substitute an equivalent of its own,
-    /// which is the same object by luck rather than by construction — and would
+    /// which is the same object by luck rather than by construction, and would
     /// silently stop being the same the day core wraps what a driver declared.
     #[must_use]
     pub fn prompter(&self) -> Option<Arc<dyn Prompter>> {
@@ -366,7 +366,7 @@ impl ConnectParams {
     /// [`Backend::connect`](crate::backend::Backend::connect).
     ///
     /// Called by the three connect entry points; not public, because the
-    /// decision is core's — it is what enforces *DriverCompletion*, and a
+    /// decision is core's. It is what enforces *DriverCompletion*, and a
     /// driver able to set this could hand itself a prompter the application
     /// forbade.
     pub(crate) fn set_prompter(&mut self, prompter: Option<Arc<dyn Prompter>>) {
@@ -382,7 +382,7 @@ impl ConnectParams {
     /// `Debug` output.
     ///
     /// The backend owns its connection-string vocabulary, so it is the only
-    /// party that can name a secret core would never guess — an `OAuthAssertion`
+    /// party that can name a secret core would never guess: an `OAuthAssertion`
     /// or a `WalletLocation` looks like any other keyword from here. Core's
     /// built-in substring heuristic stays in force underneath: this
     /// list is additive, never a replacement, so declaring nothing is safe and
@@ -411,16 +411,16 @@ impl ConnectParams {
     /// Reconstruct an ODBC connection string from the stored key-value pairs.
     ///
     /// A value is wrapped in `{braces}` when it contains `;`, `=`, `{` or `}`,
-    /// or begins or ends with whitespace — anything that would otherwise mean
-    /// something different when the string is parsed again. Inside the braces
+    /// or begins or ends with whitespace, which is anything that would
+    /// otherwise parse differently a second time. Inside the braces
     /// every `}` is doubled, because a single one ends the quoted run.
     ///
     /// The doubling closes an injection hole rather than a cosmetic one. This
     /// string is what `SQLBrowseConnectW` returns to the application, and the
-    /// spec calls it "suitable to use, in conjunction with **SQLDriverConnect**"
-    /// — so a value that ends its own quoting early lets a hostile `odbc.ini`
-    /// entry add keywords to the application's *next* connect, even though the
-    /// merge that produced it was safe.
+    /// spec calls it "suitable to use, in conjunction with
+    /// **SQLDriverConnect**". A value that ends its own quoting early therefore
+    /// lets a hostile `odbc.ini` entry add keywords to the application's *next*
+    /// connect, even though the merge that produced it was safe.
     ///
     /// Both halves follow unixODBC's Driver Manager, which uses the same
     /// convention in both directions (`DriverManager/SQLDriverConnect.c`: its
@@ -663,7 +663,7 @@ mod tests {
     #[test]
     fn debug_does_not_render_the_prompter() {
         // `Debug` is hand-written for redaction. A prompter is not a value to
-        // render at all, so it must be absent rather than redacted — an entry
+        // render at all, so it must be absent rather than redacted. An entry
         // reading `prompter: *****` would still be an entry no application
         // wrote.
         let mut params = ConnectParams::parse("Host=localhost").unwrap();
@@ -728,8 +728,8 @@ mod tests {
     /// The completed connection string `SQLBrowseConnect` hands back is
     /// "suitable to use, in conjunction with SQLDriverConnect", so a value that
     /// does not survive the round trip is a value the application's *next*
-    /// connect reads differently. A `}` used to end its own quoted run, so
-    /// everything after it parsed as further keywords.
+    /// connect reads differently. An undoubled `}` ends its own quoted run, and
+    /// everything after it parses as further keywords.
     #[test]
     fn to_connection_string_round_trips_a_value_containing_a_closing_brace() {
         let mut params = ConnectParams::parse("").unwrap();

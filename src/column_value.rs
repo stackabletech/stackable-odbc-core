@@ -59,9 +59,9 @@ pub unsafe fn write_column_value(
 /// written, which only `SQL_C_NUMERIC` reads.
 ///
 /// The *SQL to C: Numeric* page is explicit that an application controls a
-/// `SQL_NUMERIC_STRUCT`'s precision and scale through the descriptor —
+/// `SQL_NUMERIC_STRUCT`'s precision and scale through the descriptor:
 /// "**SQLSetDescField** is required to perform manual binding with
-/// SQL_C_NUMERIC values" — so the conversion cannot be done from the
+/// SQL_C_NUMERIC values". So the conversion cannot be done from the
 /// [`ColumnValue`] alone.
 ///
 /// A struct rather than two `i16` arguments, for the reason
@@ -121,7 +121,7 @@ impl ChunkWrite {
         self.ret
     }
 
-    /// Units delivered by this call — UTF-16 code units for `SQL_C_WCHAR`,
+    /// Units delivered by this call: UTF-16 code units for `SQL_C_WCHAR`,
     /// bytes for `SQL_C_CHAR` and `SQL_C_BINARY`, `0` for a fixed-width target.
     /// The caller adds this to its running offset.
     #[must_use]
@@ -146,7 +146,7 @@ impl ChunkWrite {
 /// Character and binary targets are the only ones that can be read in parts, and
 /// all three of them funnel through `write_wchar` / `write_char` /
 /// `write_binary`, so the chunking is handled in one place here rather than
-/// spread across the fixed-width arms below — none of which can chunk.
+/// spread across the fixed-width arms below, none of which can chunk.
 ///
 /// # Safety
 /// Same contract as [`write_column_value`].
@@ -177,15 +177,16 @@ pub unsafe fn write_column_value_at(
 /// # Why this exists
 ///
 /// `SQLGetData` is called repeatedly for one column, each call delivering the
-/// next part. Every call used to ask the backend for the value again and convert
-/// it again, so draining an N-byte column through a K-byte buffer cost
-/// O(N²/K): 128 materialisations of 64 KiB to deliver 64 KiB through the
-/// 512-byte buffer a driver manager may pick. The chunk size is the
-/// application's own buffer, so nothing it could do avoided the amplification.
+/// next part. Asking the backend for the value and converting it again on every
+/// call would drain an N-byte column through a K-byte buffer at O(N²/K): 128
+/// materialisations of 64 KiB to deliver 64 KiB through the 512-byte buffer a
+/// driver manager may pick. The chunk size is the application's own buffer, so
+/// nothing it could do would avoid the amplification.
 ///
 /// The variant records the shape the target C type needs, and the C type it was
-/// built for is stored beside it — an application may legally change target type
-/// between parts, and that invalidates the conversion, not just the offset.
+/// built for is stored beside it, because an application may legally change
+/// target type between parts, and that invalidates the conversion rather than
+/// only the offset.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CachedChunkSource {
     /// UTF-16 code units, for `SQL_C_WCHAR`.
@@ -199,8 +200,8 @@ pub enum CachedChunkSource {
 /// The chunk source for a value whose string or byte form **is** the value, or
 /// `None` for every other combination.
 ///
-/// Deliberately narrow. `ColumnValue::String` and `ColumnValue::Bytes` are the
-/// variants a data source makes long enough to chunk — a LOB — and they are the
+/// Narrow on purpose. `ColumnValue::String` and `ColumnValue::Bytes` are the
+/// variants a data source makes long enough to chunk (a LOB), and they are the
 /// two whose conversion is a borrow rather than a rendering. Everything else
 /// keeps the uncached path unchanged, which matters for one reason beyond
 /// caution: [`check_whole_digits_fit`] must be re-evaluated per call, because it
@@ -227,9 +228,9 @@ pub(crate) fn cacheable_chunk_source(
 /// Write one chunk from an already-converted source.
 ///
 /// The same three writers the uncached path uses, entered past their conversion
-/// step, so the chunking contract — the indicator reporting bytes *remaining*,
-/// the terminator, the `SUCCESS_WITH_INFO` that marks "more to come" — is one
-/// implementation rather than two.
+/// step, so the chunking contract is one implementation rather than two: the
+/// indicator reporting bytes *remaining*, the terminator, and the
+/// `SUCCESS_WITH_INFO` that marks "more to come".
 ///
 /// # Safety
 ///
@@ -303,7 +304,8 @@ unsafe fn write_fixed_or_chunked(
             ColumnValue::Date { .. } => CDataType::TypeDate,
             ColumnValue::Time { .. } => CDataType::TypeTime,
             ColumnValue::Timestamp { .. } => CDataType::TypeTimestamp,
-            // No SQL_C_TYPE_TIMESTAMP_TZ in ODBC — map to TypeTimestamp (offset is dropped).
+            // No SQL_C_TYPE_TIMESTAMP_TZ in ODBC, so map to TypeTimestamp
+            // (the offset is dropped).
             ColumnValue::TimestampTz { .. } => CDataType::TypeTimestamp,
             ColumnValue::Bytes(_) => CDataType::Binary,
             ColumnValue::Guid(_) => CDataType::Binary,
@@ -321,7 +323,7 @@ unsafe fn write_fixed_or_chunked(
         // `sql_type` that `SQLDescribeCol` reported and the application sized
         // its buffer from. Nothing cross-checks those two, so a backend
         // yielding a wider variant than it described would otherwise write past
-        // the application's buffer — 16 bytes of `Timestamp` into the four an
+        // the application's buffer: 16 bytes of `Timestamp` into the four an
         // application allocated for a declared `SQL_INTEGER`.
         //
         // A positive `buf_len` is the only evidence of the real buffer size
@@ -358,9 +360,9 @@ unsafe fn write_fixed_or_chunked(
 
     // The three chunkable targets are handled here, ahead of the coercion match,
     // because every character and binary conversion below funnelled into these
-    // same three writers anyway — the arms differed only in how they produced
-    // the string or byte form. Resuming at `offset` therefore belongs in one
-    // place rather than in each arm, and no fixed-width arm can chunk at all.
+    // same three writers, differing only in how they produce the string or
+    // byte form. Resuming at `offset` therefore belongs in one place rather
+    // than in each arm, and no fixed-width arm can chunk at all.
     //
     // For `ColumnValue::String` the string form *is* the value, which is why
     // this borrows instead of going through `column_value_to_string` (that
@@ -370,11 +372,11 @@ unsafe fn write_fixed_or_chunked(
             let owned;
             let s: &str = match value {
                 // Both variants hold the string form already, so this borrows
-                // instead of going through `column_value_to_string` — which
-                // returns `s.clone()` for each of them, so the two agree. The
-                // clone was a full copy of the value on every call, and for
-                // `Decimal` that is every numeric column an application binds as
-                // character data.
+                // instead of going through `column_value_to_string`, which
+                // returns `s.clone()` for each of them, so the two agree. That
+                // clone is a full copy of the value on every call, and for
+                // `Decimal` that is every numeric column an application binds
+                // as character data.
                 ColumnValue::String(s) | ColumnValue::Decimal(s) => s,
                 _ => {
                     owned = column_value_to_string(value);
@@ -408,13 +410,13 @@ unsafe fn write_fixed_or_chunked(
         // `SQL_C_NUMERIC` sits here, beside the other targets that need the
         // value's *text* rather than a numeric pivot, and ahead of the coercion
         // match for the same reason they are: it reads the rendered decimal.
-        // Not chunkable — `SQL_NUMERIC_STRUCT` is fixed-width.
+        // Not chunkable: `SQL_NUMERIC_STRUCT` is fixed-width.
         CDataType::Numeric => {
             return unsafe { write_numeric(value, target_ptr, len_ind_ptr, numeric) }.map(whole);
         }
         // The *SQL to C: GUID* table's own row, and the only row that table
         // gives for this C type: test "None", data written, indicator 16, no
-        // SQLSTATE — there is no failure case.
+        // SQLSTATE. There is no failure case.
         //
         // Only `ColumnValue::Guid` reaches it. `SQL_C_GUID` appears in exactly
         // one conversion table, whose single source type is `SQL_GUID`; the
@@ -427,7 +429,7 @@ unsafe fn write_fixed_or_chunked(
         CDataType::Guid => {
             if let ColumnValue::Guid(bytes) = value {
                 // `SQLGUID`'s first three groups are integers whose textual
-                // form is the big-endian reading of the bytes — the same order
+                // form is the big-endian reading of the bytes, the same order
                 // `column_value_to_string` renders, where `data[0]` is the
                 // leading digit pair. Reading them natively would byte-swap the
                 // GUID on every little-endian machine, silently.
@@ -466,11 +468,11 @@ unsafe fn write_fixed_or_chunked(
         // they are not one function.
 
         // "Data value is a valid date-value" / "a valid timestamp-value; time
-        // portion is zero" — data written, no SQLSTATE. "a valid
-        // timestamp-value; time portion is nonzero" — truncated data written
+        // portion is zero": data written, no SQLSTATE. "a valid
+        // timestamp-value; time portion is nonzero": truncated data written
         // with 01S07, footnote [c]: "The time portion of the timestamp-value is
-        // truncated." Anything else is the row's 22018 with nothing written —
-        // or this module's 22007, which `parse_sql_timestamp`'s `?` propagates
+        // truncated." Anything else is the row's 22018 with nothing written, or
+        // this module's 22007, which `parse_sql_timestamp`'s `?` propagates
         // for a literal it recognises whose field is out of range.
         //
         // One branch covers all three: `parse_sql_timestamp` reads a bare
@@ -495,10 +497,10 @@ unsafe fn write_fixed_or_chunked(
 
         // "Data value is a valid time-value and the fractional seconds value is
         // 0" / "a valid timestamp-value or a valid time-value; fractional
-        // seconds portion is zero" — data written, no SQLSTATE, footnote [d]:
+        // seconds portion is zero": data written, no SQLSTATE, footnote [d]:
         // "The date portion of the timestamp-value is ignored", so a discarded
         // date is not a truncation and reports nothing. "a valid
-        // timestamp-value; fractional seconds portion is nonzero" — truncated
+        // timestamp-value; fractional seconds portion is nonzero": truncated
         // data written with 01S07, footnote [e]. Anything else is 22018.
         (ColumnValue::String(s), CDataType::TypeTime) => {
             let (t, fraction) = match parse_sql_time(s) {
@@ -509,7 +511,7 @@ unsafe fn write_fixed_or_chunked(
                 // discarding the 22007 this module gives a recognised literal
                 // with an out-of-range field. Deleting it fails
                 // `hour_that_overflows_u16_returns_22007_not_22018`, and only
-                // that test — the newer
+                // that test. The newer
                 // `timestamp_text_with_out_of_range_minute_to_time_stays_22007`
                 // takes the fall-through and gets its 22007 from the timestamp
                 // parser, so it stays green either way.
@@ -538,14 +540,14 @@ unsafe fn write_fixed_or_chunked(
         // "Data value is a valid timestamp-value or a valid time-value;
         // fractional seconds portion not truncated" / "a valid date-value",
         // footnote [f]: "The time fields of the timestamp structure are set to
-        // zero" — both are what `parse_sql_timestamp` already produces. "a
+        // zero": both are what `parse_sql_timestamp` already produces. "a
         // valid time-value", footnote [g]: "The date fields of the timestamp
-        // structure are set to the current date" — the branch below. Anything
-        // else is 22018 with nothing written.
+        // structure are set to the current date", which is the branch below.
+        // Anything else is 22018 with nothing written.
         //
         // Footnote [g] speaks only of the date fields, and the row above it
         // makes a time-value's fractional seconds something that can be
-        // "truncated" — so the literal's fraction is carried into the target's
+        // "truncated", so the literal's fraction is carried into the target's
         // own fraction field rather than zeroed. That is the opposite of the
         // typed `ColumnValue::Time` arm below, whose row (SQL to C: Time) says
         // in as many words that the fraction is set to zero. Two source types,
@@ -555,10 +557,11 @@ unsafe fn write_fixed_or_chunked(
         // portion truncated" row's 01S07 is not reported. `parse_time_fields`
         // truncates a literal carrying more than nine fractional digits to
         // nanoseconds silently, on this path and on the timestamp-value path
-        // alike, so the two cannot disagree and the data still arrives — only
-        // the warning is missing. Ruled 2026-08-01 and listed under "Known
-        // limitations" in docs/superpowers/plans/2026-07-31-audit-remediation.md.
-        // Not an open intention: changing it needs that ruling revisited first.
+        // alike, so the two cannot disagree and the data still arrives; only
+        // the warning is missing. This is a ruling rather than an open
+        // intention: reporting it means deciding what a driver should do when
+        // the two paths disagree about precision, which is a larger question
+        // than the warning itself.
         (ColumnValue::String(s), CDataType::TypeTimestamp) => {
             let ts = match parse_sql_timestamp(s) {
                 Ok(ts) => ts,
@@ -599,7 +602,7 @@ unsafe fn write_fixed_or_chunked(
         // that happen to hold i16 values, so all cross-type numeric casts must work.
         //
         // The pivot (column_value_as_numeric) maps every ColumnValue to Int(i64), Float(f64)
-        // or, for text bound for an integer target, exact decimal digits — none of which
+        // or, for text bound for an integer target, exact decimal digits, none of which
         // loses precision on the way in. write_numeric_pivot then narrows to the requested
         // C type at the last possible moment.
         //
@@ -659,7 +662,7 @@ unsafe fn write_fixed_or_chunked(
 
         // SQL_TYPE_DATE -> SQL_C_TYPE_TIMESTAMP. Legal per the spec's SQL-to-C
         // table: "The driver sets the time fields of the timestamp structure to
-        // zero." No SQLSTATE — nothing is lost.
+        // zero." No SQLSTATE, because nothing is lost.
         (ColumnValue::Date { year, month, day }, CDataType::TypeTimestamp) => {
             let ts = Timestamp {
                 year: *year,
@@ -705,7 +708,7 @@ unsafe fn write_fixed_or_chunked(
         // structure is set to zero."
         //
         // The spec lists no SQLSTATE for this row, so a dropped fraction is not
-        // reported here — unlike the SQL_C_TYPE_TIME row above, where the target
+        // reported here, unlike the SQL_C_TYPE_TIME row above, where the target
         // has nowhere to put one. Here the target *has* a fraction field and the
         // spec still says to zero it, which makes it a defined part of the
         // conversion rather than a truncation.
@@ -787,7 +790,7 @@ unsafe fn write_fixed_or_chunked(
 
         // SQL_TYPE_TIMESTAMP -> SQL_C_TYPE_TIME. Legal per the spec's SQL-to-C
         // table: "The date portion of the timestamp is ignored", and the split
-        // is on the *fractional seconds* alone — a discarded date is not a
+        // is on the *fractional seconds* alone: a discarded date is not a
         // truncation, so only a non-zero fraction reports `01S07`.
         (
             ColumnValue::Timestamp {
@@ -901,9 +904,9 @@ unsafe fn write_fixed_or_chunked(
             Ok(SqlReturn::SUCCESS)
         }
 
-        // The `Binary`, `WChar` and `Char` catch-alls that used to close this
-        // match now sit ahead of it, where the chunking offset is applied; every
-        // target reaching here is fixed-width.
+        // The `Binary`, `WChar` and `Char` catch-alls sit ahead of this match,
+        // where the chunking offset is applied, so every target reaching here
+        // is fixed-width.
 
         // Unsupported conversion. Spec 07006: "The data value of a column in
         // the result set could not be converted to the data type specified
@@ -965,7 +968,7 @@ fn civil_from_days(days: i64) -> (i64, u16, u16) {
 /// `duration_since` fails in that case, but the error carries the distance
 /// backwards, so the date is still recoverable. There is no SQLSTATE for "no
 /// clock" and the conversion owes a date either way, so the only alternative
-/// would be to substitute one — and a wrong date presented as correct is worse
+/// would be to substitute one, and a wrong date presented as correct is worse
 /// than an unusual one.
 // The single sanctioned wall-clock read in the crate. `clippy.toml` disallows
 // `SystemTime::now` so that a second one has to be argued for rather than
@@ -1000,10 +1003,10 @@ pub(crate) fn current_utc_date() -> (i16, u16, u16) {
 /// [`write_column_value`]'s `SQL_C_DEFAULT` inference can select, or `None` for
 /// the variable-length targets, which bound themselves by `buf_len`.
 ///
-/// Deliberately covers only the types that inference can produce. A wider match
-/// would invite the impression that this is a general size table for
-/// `CDataType`, which it is not — it exists solely to bound the one path where
-/// the driver, not the application, picks the C type.
+/// Covers only the types that inference can produce. A wider match would invite
+/// the impression that this is a general size table for `CDataType`, which it is
+/// not: it exists solely to bound the one path where the driver, not the
+/// application, picks the C type.
 fn default_target_width(c_type: CDataType) -> Option<usize> {
     Some(match c_type {
         CDataType::Bit | CDataType::STinyInt => 1,
@@ -1048,7 +1051,7 @@ unsafe fn write_fixed<T: Copy>(
 // Unparseable text is 22018; text that parses but carries an out-of-range field
 // is 22007. Both codes are scoped by the spec to a character column source
 // (see the SQLGetData diagnostics table), which is exactly the case handled
-// in this module — stackable-odbc-core has no numeric datetime encodings left to
+// in this module. stackable-odbc-core has no numeric datetime encodings to
 // decode (see the Backend-side decoding note on write_column_value above).
 
 fn cast_error(s: &str) -> OdbcError {
@@ -1081,18 +1084,19 @@ fn field_parse_error(s: &str, e: std::num::ParseIntError) -> OdbcError {
 
 /// Is `year` a leap year in the proleptic Gregorian calendar?
 ///
-/// Divisible by 4, except centuries, except every fourth century — so 2000 is a
+/// Divisible by 4, except centuries, except every fourth century, so 2000 is a
 /// leap year and 1900 is not. The same calendar [`civil_from_days`] implements,
-/// which is what keeps this module's two date computations from disagreeing —
-/// and `days_in_month_agrees_with_civil_from_days` checks that rather than
-/// leaving it to this sentence, by walking every day of nine chosen years
-/// through both.
+/// which is what keeps this module's two date computations from disagreeing.
+/// `days_in_month_agrees_with_civil_from_days` checks that rather than leaving
+/// it to this sentence, by walking every day of nine chosen years through
+/// both.
 ///
 /// `%` is correct for a negative year here because every arm compares against
 /// zero, and `-100 % 100` is 0 in Rust as it is in mathematics. No negative year
-/// reaches this function today — [`parse_date_fields`] splits on `-`, so a
-/// leading minus sign produces a fourth part and is refused as malformed — but
-/// the rule is written to be right either way rather than to depend on that.
+/// reaches this function, because [`parse_date_fields`] splits on `-` and a
+/// leading minus sign therefore produces a fourth part that is refused as
+/// malformed. The rule is written to be right either way rather than to depend
+/// on that.
 fn is_leap_year(year: i32) -> bool {
     year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
 }
@@ -1131,8 +1135,8 @@ fn parse_date_fields(s: &str) -> Result<(i16, u16, u16), OdbcError> {
     if !(1..=12).contains(&month) {
         return Err(invalid_datetime_format(s));
     }
-    // "Data value is not a valid date-value or timestamp-value" — SQL to C:
-    // Character. ODBC's grammar says only `days-value ::= digit digit`, so what
+    // "Data value is not a valid date-value or timestamp-value", from SQL to
+    // C: Character. ODBC's grammar says only `days-value ::= digit digit`, so what
     // makes a day valid is the calendar, not the syntax: 2024-02-30 is
     // well-formed and does not exist. Covered by `feb_30_is_rejected` and its
     // neighbours.
@@ -1203,7 +1207,7 @@ fn is_wrong_literal_shape(e: &OdbcError) -> bool {
 /// Parse ODBC time literal text into a [`Time`] struct plus the fractional
 /// seconds (nanoseconds) that `SQL_TIME_STRUCT` cannot carry. Callers writing
 /// to `SQL_C_TYPE_TIME` must check the returned fraction themselves and report
-/// 01S07 if it is non-zero — this function only parses, it does not decide
+/// 01S07 if it is non-zero. This function only parses; it does not decide
 /// whether the drop is acceptable for the caller's target type.
 pub(crate) fn parse_sql_time(s: &str) -> Result<(Time, u32), OdbcError> {
     let (hour, minute, second, fraction) = parse_time_fields(s.trim())?;
@@ -1251,7 +1255,7 @@ pub(crate) fn parse_sql_timestamp(s: &str) -> Result<Timestamp, OdbcError> {
 ///
 /// The table's own list of numeric SQL types is SQL_DECIMAL, SQL_NUMERIC,
 /// SQL_TINYINT, SQL_SMALLINT, SQL_INTEGER, SQL_BIGINT, SQL_REAL, SQL_FLOAT and
-/// SQL_DOUBLE — which is exactly the seven variants below and no others.
+/// SQL_DOUBLE, which is exactly the seven variants below and no others.
 ///
 /// The other fifteen variants are excluded. Enumerated in full, because a
 /// variant quietly missing from this list is a silently wrong number:
@@ -1267,8 +1271,8 @@ pub(crate) fn parse_sql_timestamp(s: &str) -> Result<Timestamp, OdbcError> {
 ///   *Time* / *Timestamp*, whose character rows carry a 22003 of their own
 ///   keyed to a fixed minimum width, not to a digit count.
 ///
-///   TODO(spec): implement those minimum-width 22003 rows — "*BufferLength* <
-///   20" for a timestamp, and the analogous widths on the date and time pages.
+///   TODO(spec): implement those minimum-width 22003 rows, "*BufferLength* <
+///   20" for a timestamp and the analogous widths on the date and time pages.
 ///   Core returns 01004 for all of them today.
 /// - `String`, `Json`, `Bytes`, `Guid`, `Array`, `Map`, `Row` and the two
 ///   interval variants (`IntervalYearMonth`, `IntervalDayTime`) are not numeric
@@ -1295,7 +1299,7 @@ const fn is_numeric_source(value: &ColumnValue) -> bool {
 ///
 /// A leading `-` is included. The table says "digits" and a sign is not one,
 /// but the boundary the table draws is `>=`, which is precisely "the whole part
-/// plus the null terminator must fit" — and a sign occupies a byte of the
+/// plus the null terminator must fit", and a sign occupies a byte of the
 /// application's buffer exactly as a digit does. Excluding it would deliver
 /// `-12` for `-123.45` in a four-byte buffer under the 01004 row: a different
 /// number, which is the outcome this row exists to prevent. Pinned in both
@@ -1309,24 +1313,24 @@ const fn is_numeric_source(value: &ColumnValue) -> bool {
 /// costs is worth more than either wording.
 ///
 /// A rendering with no decimal point is all whole part, which is what makes
-/// `Infinity` and `NaN` fall out correctly with no special case — they have no
+/// `Infinity` and `NaN` fall out correctly with no special case: they have no
 /// fraction to sacrifice, so any truncation at all is whole-part loss.
 ///
 /// Both of the odd renderings this can meet come from a backend-supplied
 /// `ColumnValue::Decimal`, since core produces neither itself:
 ///
-/// - **Exponent notation is not decomposed** — `1.5E10` counts one whole digit
+/// - **Exponent notation is not decomposed.** `1.5E10` counts one whole digit
 ///   rather than eleven. This *under*-counts, which is the safe direction: such
-///   a value keeps the previous 01004 behaviour rather than gaining a false
-///   22003. Rust's `Display` for `f32`/`f64` never uses exponent form, so it
-///   cannot arrive from the float variants.
+///   a value gets the ordinary 01004 rather than a false 22003. Rust's
+///   `Display` for `f32`/`f64` never uses exponent form, so it cannot arrive
+///   from the float variants.
 /// - **A leading space or `+` counts as a whole-part position**, and that is
 ///   correct rather than an over-count, because core writes a `Decimal`'s text
 ///   through verbatim: the character occupies a byte of the application's
 ///   buffer exactly as the sign does. `" 123.45"` needs five bytes for `" 123"`
-///   and its terminator, and gets them. The two halves agree — what is reserved
-///   is what is written — which is the property that matters, and the one that
-///   would break if this trimmed.
+///   and its terminator, and gets them. The two halves agree, so what is
+///   reserved is what is written, and that is the property that would break if
+///   this trimmed.
 fn whole_part(rendered: &str) -> &str {
     match rendered.find('.') {
         Some(point) => &rendered[..point],
@@ -1352,7 +1356,7 @@ fn whole_part(rendered: &str) -> &str {
 /// This function answers only the third row; the first two are the ordinary
 /// truncation the character writers already implement. Both output locations
 /// are "Undefined" on that row, so it returns before either writer runs and
-/// **nothing at all is written — not the data, not the indicator**.
+/// **nothing at all is written: not the data, not the indicator**.
 /// `assert_22003_writes_nothing` checks both with sentinels.
 ///
 /// # Who reaches this
@@ -1363,19 +1367,19 @@ fn whole_part(rendered: &str) -> &str {
 ///   `SQLFetchScroll`.
 /// - `sql_get_data` (`ffi/fetch.rs`), via `write_column_value_at`.
 /// - `write_output_params` (`ffi/params.rs`), so a numeric **output parameter**
-///   too — reached from `sql_exec_direct_w` and `sql_execute`, and not from
+///   too, reached from `sql_exec_direct_w` and `sql_execute`, and not from
 ///   `sql_param_data`, which executes without writing output parameters back.
-///   That site is the one where the change is sharpest: it discards the
-///   `SqlReturn` (it has no diagnostic queue to raise `01004` on) but
-///   propagates the `Err` with `?`, so a truncation that was silent becomes a
-///   failed execution. It cannot hit the no-buffer exemption spuriously — the
-///   loop skips records where `DescriptorRecord::is_bound` is false, so the
-///   data pointer is non-null by the time this runs.
+///   That site is the sharpest: it discards the `SqlReturn` (it has no
+///   diagnostic queue to raise `01004` on) but propagates the `Err` with `?`,
+///   so a truncation there is a failed execution rather than a warning. It
+///   cannot hit the no-buffer exemption spuriously, because the loop skips
+///   records where `DescriptorRecord::is_bound` is false and the data pointer
+///   is therefore non-null by the time this runs.
 ///
 /// Two points about the arithmetic:
 ///
 /// - For SQL_C_CHAR the condition below is `buf_len < whole + 1`, which is
-///   `whole >= buf_len` — the table's `>=` exactly, and readable as "the whole
+///   `whole >= buf_len`, the table's `>=` exactly, and readable as "the whole
 ///   part and its null terminator must both fit".
 /// - For SQL_C_WCHAR the row's "Number of whole ... digits" is a character
 ///   count while `BufferLength` is a byte count on the wire, so the same
@@ -1385,7 +1389,7 @@ fn whole_part(rendered: &str) -> &str {
 ///
 /// # A call that supplies no buffer is exempt
 ///
-/// The row is not applied when the writer would write nothing anyway — a null
+/// The row is not applied when the writer would write nothing anyway: a null
 /// `target_ptr`, or a `buf_len` with no room for even the null terminator
 /// (`<= 0` for SQL_C_CHAR, `< 2` for SQL_C_WCHAR). Those are exactly the
 /// early-return conditions `write_char` and `write_wchar` already have, so this
@@ -1396,12 +1400,12 @@ fn whole_part(rendered: &str) -> &str {
 /// that harm cannot occur, so literalism buys nothing and costs two idioms the
 /// spec sanctions:
 ///
-/// - **The zero-length length probe** — `BufferLength` 0 with a real pointer,
+/// - **The zero-length length probe.** `BufferLength` 0 with a real pointer,
 ///   the documented "how much room do I need" call, which `SQLGetData`'s own
 ///   prose protects by returning `HY090` when `BufferLength` is less than 0
 ///   *but not when it is 0*. Pinned by
 ///   `a_zero_length_buffer_on_a_numeric_column_stays_a_length_probe`.
-/// - **The indicator-only binding** — `SQLBindCol` with a null data pointer and
+/// - **The indicator-only binding.** `SQLBindCol` with a null data pointer and
 ///   a live length/indicator pointer, which the spec permits in as many words
 ///   ("An application can unbind the data buffer for a column but still have a
 ///   length/indicator buffer bound for the column") and which
@@ -1413,18 +1417,19 @@ fn whole_part(rendered: &str) -> &str {
 /// length info", and MySQL Connector/ODBC does the same in `utility.cc`.
 ///
 /// **`buf_len == 1` on SQL_C_CHAR is *not* exempt.** There is a buffer there,
-/// and the writer would put a bare null terminator in it — delivering `""` for
+/// and the writer would put a bare null terminator in it, delivering `""` for
 /// a number, which is the wrong number and exactly the harm above.
 /// `a_one_byte_char_buffer_is_still_22003` pins that edge.
 ///
-/// The check is independent of the `SQLGetData` chunk offset by construction —
-/// it reads the whole rendered value, not the not-yet-delivered remainder — so
-/// a value that passes on the first chunk passes on every later one. The
-/// consequence is that a rendering longer than the buffer cannot be retrieved
-/// in parts at all: a `DECIMAL(38,0)` is 39 characters and a 32-byte buffer now
-/// answers 22003 where both reference drivers would deliver it in chunks. That
-/// is spec-defensible — the numeric types are absent from `SQLGetData`'s
-/// "Retrieving Variable-Length Data in Parts" list — and `sql_get_data` does
+/// The check is independent of the `SQLGetData` chunk offset by construction,
+/// since it reads the whole rendered value rather than the not-yet-delivered
+/// remainder, so a value that passes on the first chunk passes on every later
+/// one. The consequence is that a rendering longer than the buffer cannot be
+/// retrieved in parts at all: a `DECIMAL(38,0)` is 39 characters, and a 32-byte
+/// buffer answers 22003 where both reference drivers would deliver it in
+/// chunks. That is spec-defensible, since the numeric types are absent from
+/// `SQLGetData`'s "Retrieving Variable-Length Data in Parts" list, and
+/// `sql_get_data` does
 /// not advance the cursor on the `Err` path, so the column stays readable with
 /// a buffer that fits.
 fn check_whole_digits_fit(
@@ -1498,10 +1503,10 @@ unsafe fn write_wchar(
 ) -> Result<(SqlReturn, usize), OdbcError> {
     // Encoded straight into the caller's buffer: no intermediate `Vec`.
     //
-    // The allocation this replaces was on every bound-column fetch of every
-    // character column — `sql_fetch`'s loop calls this once per column per row —
-    // and it was pure overhead, since the units were built only to be copied out
-    // and dropped. The chunked path keeps a materialised copy on purpose (see
+    // A `Vec` here would allocate on every bound-column fetch of every
+    // character column, since `sql_fetch`'s loop calls this once per column per
+    // row, and the units would be built only to be copied out and dropped. The
+    // chunked path keeps a materialised copy on purpose (see
     // [`CachedChunkSource`]) and enters at [`write_wchar_units`] instead.
     //
     // Two passes over the string, still allocation-free. The first counts, and
@@ -1547,8 +1552,8 @@ unsafe fn write_wchar(
 /// [`write_wchar`] from the point the UTF-16 units exist.
 ///
 /// Split out so a chunked read can encode once and write many times: encoding
-/// inside the per-chunk path made draining an N-unit column in K-unit parts cost
-/// O(N²/K). See [`CachedChunkSource`].
+/// inside the per-chunk path would make draining an N-unit column in K-unit
+/// parts cost O(N²/K). See [`CachedChunkSource`].
 unsafe fn write_wchar_units(
     wide: &[u16],
     target_ptr: *mut c_void,
@@ -1567,12 +1572,12 @@ unsafe fn write_wchar_units(
         unsafe { std::ptr::write_unaligned(len_ind_ptr, total_bytes) };
     }
 
-    // A null target is not something SQLGetData's own spec sanctions — its
+    // A null target is not something SQLGetData's own spec sanctions: its
     // Arguments section is explicit that "TargetValuePtr cannot be NULL."
     // The case that actually reaches this branch comes from this function's
     // *other* caller: `sql_fetch`'s bound-column loop (`ffi/fetch.rs`)
     // legitimately passes a null data pointer when `SQL_DESC_DATA_PTR` is
-    // null but `SQL_DESC_INDICATOR_PTR` is not — the indicator-only binding
+    // null but `SQL_DESC_INDICATOR_PTR` is not. That is the indicator-only binding
     // the spec allows ("An application can unbind the data buffer for a
     // column but still have a length/indicator buffer bound for the
     // column"), which `collect_bindings` deliberately keeps and
@@ -1587,17 +1592,17 @@ unsafe fn write_wchar_units(
         return Ok((SqlReturn::SUCCESS, 0));
     }
 
-    // A non-null target with fewer than two bytes of room — including
-    // exactly zero, the standard "how big a buffer do I need" probe — cannot
-    // hold even the one-UTF-16-code-unit null terminator. That is total
-    // truncation, not a length query: the application supplied somewhere to
-    // write and nothing was written there. Spec: "If the data buffer
-    // supplied is too small to hold the null-termination character,
-    // SQLGetData returns SQL_SUCCESS_WITH_INFO and SQLSTATE 01004." Reporting
-    // plain SUCCESS here (as a shared branch with the null-target case above
-    // used to) made SQLGetData indistinguishable from "this column is fully
-    // delivered," which permanently stranded the data behind a `buf_len == 0`
-    // probe: `cursor.done` is derived from this return value.
+    // A non-null target with fewer than two bytes of room, including exactly
+    // zero (the standard "how big a buffer do I need" probe), cannot hold even
+    // the one-UTF-16-code-unit null terminator. That is total truncation, not a
+    // length query: the application supplied somewhere to write and nothing was
+    // written there. Spec: "If the data buffer supplied is too small to hold
+    // the null-termination character, SQLGetData returns SQL_SUCCESS_WITH_INFO
+    // and SQLSTATE 01004." Reporting plain SUCCESS here, as a shared branch
+    // with the null-target case above, would make SQLGetData indistinguishable
+    // from "this column is fully delivered" and permanently strand the data
+    // behind a `buf_len == 0` probe: `cursor.done` is derived from this return
+    // value.
     if buf_len < 2 {
         return Ok((SqlReturn::SUCCESS_WITH_INFO, 0));
     }
@@ -1633,7 +1638,7 @@ unsafe fn write_wchar_units(
 /// already performs at the buffer edge, and it is what the ODBC contract asks
 /// for: the application is reassembling a byte stream and is told to concatenate
 /// the parts, so the sequence is whole again once it does. Deliberately not
-/// "fixed" by backing up to a character boundary — that would deliver fewer
+/// "fixed" by backing up to a character boundary, which would deliver fewer
 /// bytes than the buffer holds and, on a buffer smaller than one character,
 /// would deliver nothing and never terminate.
 unsafe fn write_char(
@@ -1666,14 +1671,14 @@ unsafe fn write_char_bytes(
     }
 
     // A null target here is the bound-column caller's indicator-only
-    // binding, not something SQLGetData's own spec permits — see
+    // binding, not something SQLGetData's own spec permits; see
     // `write_wchar`'s full reasoning.
     if target_ptr.is_null() {
         return Ok((SqlReturn::SUCCESS, 0));
     }
 
-    // A non-null target with no room in it — including exactly zero, the
-    // standard length-probe — cannot hold even the one-byte null terminator,
+    // A non-null target with no room in it, including exactly zero (the
+    // standard length-probe), cannot hold even the one-byte null terminator,
     // which is total truncation (SUCCESS_WITH_INFO / 01004), not a length
     // query. See `write_wchar`'s identical split.
     if buf_len <= 0 {
@@ -1721,14 +1726,14 @@ unsafe fn write_binary(
     }
 
     // A null target here is the bound-column caller's indicator-only
-    // binding, not something SQLGetData's own spec permits — see
+    // binding, not something SQLGetData's own spec permits; see
     // `write_wchar`'s full reasoning.
     if target_ptr.is_null() {
         return Ok((SqlReturn::SUCCESS, 0));
     }
 
-    // A non-null target with no room in it — including exactly zero, the
-    // standard length-probe — cannot hold any of the data, which is total
+    // A non-null target with no room in it, including exactly zero (the
+    // standard length-probe), cannot hold any of the data, which is total
     // truncation (SUCCESS_WITH_INFO / 01004), not a length query. Binary
     // reserves no terminator, so unlike the two character writers there is no
     // extra "room for one more byte" boundary; `buf_len <= 0` is the whole
@@ -1802,14 +1807,15 @@ const fn is_exact_integer_target(target_type: CDataType) -> bool {
 /// path, since `f64` is where the value is going anyway.
 ///
 /// The `i64`-then-`f64` fallback still runs for the float targets, and for text
-/// that is not a *numeric-literal* at all — `inf` and `NaN`, which
+/// that is not a *numeric-literal* at all, meaning `inf` and `NaN`, which
 /// [`parse_numeric_literal`] rejects and Rust's float parser accepts.
 ///
 /// **A literal whose magnitude no `f64` holds is [`NumericPivotError::OutOfRange`]
 /// here, not an infinity downstream.** Rust's parser saturates `"1e400"` to
-/// `f64::INFINITY`, and every caller below this point sees a legitimate infinity
-/// — the value a `'Infinity'::float8` column really holds — so the overflow has
-/// to be caught at the parse or not at all. *SQL to C: Character*'s row for
+/// `f64::INFINITY`, and every caller below this point sees a legitimate
+/// infinity, the value a `'Infinity'::float8` column really holds, so the
+/// overflow has to be caught at the parse or not at all. *SQL to C:
+/// Character*'s row for
 /// `SQL_C_FLOAT`/`SQL_C_DOUBLE` gives it the second of its three cells: "outside
 /// the range of the data type to which the number is being converted" →
 /// *Undefined* / `22003`.
@@ -1822,12 +1828,12 @@ const fn is_exact_integer_target(target_type: CDataType) -> bool {
 /// closer but leaks: it parses the exponent as an `i32`, so `"1e99999999999999"`
 /// is `None` there and would slip through as an infinity. Among the strings
 /// Rust's float parser accepts at all, the only digitless ones are the
-/// `inf`/`infinity`/`nan` spellings — so a digit is exactly the line between
+/// `inf`/`infinity`/`nan` spellings, so a digit is exactly the line between
 /// "a numeric-literal that overflowed" and "the source said infinity".
 ///
-/// Underflow is deliberately not out of range: `"1e-400"` parses to `0.0`, and
-/// zero is a value the target holds, so it is the row's *first* cell. The same
-/// reading the `F64` → `f32` narrowing takes.
+/// Underflow is not out of range: `"1e-400"` parses to `0.0`, and zero is a
+/// value the target holds, so it is the row's *first* cell. The same reading
+/// the `F64` → `f32` narrowing takes.
 fn parse_numeric_text(
     s: &str,
     target_type: CDataType,
@@ -1853,13 +1859,13 @@ fn parse_numeric_text(
 /// Why a [`ColumnValue`] has no [`NumericPivot`] reading, and therefore which
 /// SQLSTATE the numeric arm of [`write_column_value`] answers with.
 ///
-/// Three variants rather than the plain `None` this used to be, because the two
-/// text failures are different cells of the *SQL to C: Character* row and were
-/// being collapsed into one: an overflowing literal reached the pivot as an
-/// infinity and was delivered as a success.
+/// Three variants rather than a plain `None`, because the two text failures are
+/// different cells of the *SQL to C: Character* row. Collapsing them lets an
+/// overflowing literal reach the pivot as an infinity and be delivered as a
+/// success.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NumericPivotError {
-    /// The variant has no numeric reading at all — a `Bytes`, a `Guid`, a
+    /// The variant has no numeric reading at all: a `Bytes`, a `Guid`, a
     /// structured value. `07006`, and off both tables: neither has a row for a
     /// source type that is not numeric or character in the first place.
     NotNumericType,
@@ -1910,10 +1916,10 @@ fn column_value_as_numeric(
 ///
 /// Handles all signed and unsigned integer C types, `SQL_C_FLOAT`, `SQL_C_DOUBLE`,
 /// and `SQL_C_BIT`. Returns `SQL_ERROR` with SQLSTATE `22003` (numeric value out of
-/// range) when the value does not fit the target type — including a finite `f64`
+/// range) when the value does not fit the target type, including a finite `f64`
 /// whose magnitude exceeds `f32::MAX` on its way to `SQL_C_FLOAT`, which the
 /// *SQL to C: Numeric* row for that target calls "outside the range of the data
-/// type to which the number is being converted" — and `SQL_SUCCESS_WITH_INFO`
+/// type to which the number is being converted". It returns `SQL_SUCCESS_WITH_INFO`
 /// with SQLSTATE `01S07` (fractional truncation) in the three cases that drop a
 /// *fraction*: a value between 0 and 2 losing its fractional part to reach
 /// `SQL_C_BIT`, an exact decimal losing a non-zero fraction to reach an integer
@@ -1922,7 +1928,7 @@ fn column_value_as_numeric(
 ///
 /// **A float target reports no `01S07` at all**, however inexact the narrowing:
 /// the *SQL to C: Numeric* row for `SQL_C_FLOAT`/`SQL_C_DOUBLE` has exactly two
-/// cells — in range → *Data* / `n/a`, out of range → *Undefined* / `22003` — and
+/// cells (in range → *Data* / `n/a`, out of range → *Undefined* / `22003`), and
 /// the integer row above it and the `SQL_C_BIT` row below it both do carry
 /// `01S07`, so the omission is a distinction the table draws. See the
 /// `SQL_C_FLOAT` arm for the rest of that argument.
@@ -2104,40 +2110,37 @@ unsafe fn write_numeric_pivot(
         // `f.is_infinite()` would make that column unreadable through
         // SQL_C_FLOAT. `f64_infinity_to_float_is_the_value_the_source_held`
         // pins it. One thing that half cannot distinguish: character text that
-        // *parsed* to an infinity, since `"1e400".parse::<f64>()` is `Ok(inf)` —
-        // by the time such a value reaches this arm it is indistinguishable from
+        // *parsed* to an infinity, since `"1e400".parse::<f64>()` is `Ok(inf)`.
+        // By the time such a value reaches this arm it is indistinguishable from
         // a column that really holds an infinity. That is why the overflow of a
         // character literal is caught in `parse_numeric_text` instead, which is
         // also where it has to be for the other two reasons: its governing table
         // is *SQL to C: Character* rather than this one, and the same text
         // reaches SQL_C_DOUBLE by a path this arm never sees.
         //
-        // Underflow is deliberately *not* the second outcome: a subnormal f32,
-        // and zero, are values f32 can hold, so they are inside the row's
-        // "within the range" cell. `1e-300` therefore writes `0.0` rather than
-        // failing — the reading psqlODBC and MySQL Connector/ODBC also take,
+        // Underflow is *not* the second outcome: a subnormal f32, and zero, are
+        // values f32 can hold, so they are inside the row's "within the range"
+        // cell. `1e-300` therefore writes `0.0` rather than
+        // failing, the reading psqlODBC and MySQL Connector/ODBC also take,
         // both of which narrow with a plain C cast and range-check neither end
         // (psqlODBC `convert.c`, `case SQL_C_FLOAT`; MySQL `driver/results.cc`,
         // `sql_get_data`).
         //
         // What is left after the range test is an inexact narrowing, and it is
         // reported as **nothing**: the row's in-range cell is *Data* / `n/a`, and
-        // it has no third cell to hold a warning. The row either side of it does
-        // — the integer row's "truncation of fractional digits" and the
+        // it has no third cell to hold a warning. The rows either side of it do:
+        // the integer row's "truncation of fractional digits" and the
         // `SQL_C_BIT` row's "greater than 0, less than 2, and not equal to 1"
-        // both carry `01S07` — so the float row's omission is a distinction the
+        // both carry `01S07`. So the float row's omission is a distinction the
         // table draws rather than a gap to fill, and neither psqlODBC
         // (`convert.c`, `case SQL_C_FLOAT`) nor MySQL Connector/ODBC
-        // (`driver/results.cc`, `sql_get_data`) reports anything here. Core did
-        // report `01S07`, which was its own invention; an application watching
-        // for it to detect precision loss no longer sees it, and CHANGELOG.md
-        // carries that as a behaviour change.
+        // (`driver/results.cc`, `sql_get_data`) reports anything here.
         //
-        // A NaN is the clearest case of why the equality test that produced it
-        // was wrong rather than merely unauthorised: no comparison calls a NaN
-        // equal to its source, so a faithfully delivered NaN reported a
-        // fractional truncation that never happened. It is now delivered and
-        // nothing is reported — note the contrast with the `SQL_C_BIT` arm
+        // A NaN shows why an equality test between source and narrowed value
+        // would be wrong rather than merely unauthorised: no comparison calls a
+        // NaN equal to its source, so a faithfully delivered NaN would report a
+        // fractional truncation that never happened. It is delivered and
+        // nothing is reported. Note the contrast with the `SQL_C_BIT` arm
         // below, which has a range test a NaN fails, where `SQL_C_FLOAT` has no
         // range a NaN is outside of.
         (NumericPivot::Float(v), CDataType::Float) => {
@@ -2198,33 +2201,33 @@ unsafe fn write_numeric_pivot(
 
 /// Write an `f64` into an integer C target, truncated toward zero.
 ///
-/// The governing row is the same one [`write_exact_integer`] cites — [SQL to C:
+/// The governing row is the same one [`write_exact_integer`] cites, [SQL to C:
 /// Numeric]'s row for `SQL_C_STINYINT`, `SQL_C_UTINYINT`, `SQL_C_TINYINT`,
 /// `SQL_C_SBIGINT`, `SQL_C_UBIGINT`, `SQL_C_SSHORT`, `SQL_C_USHORT`,
 /// `SQL_C_SHORT`, `SQL_C_SLONG`, `SQL_C_ULONG`, `SQL_C_LONG` and
 /// `SQL_C_NUMERIC`. That table covers the approximate numeric SQL types
-/// (`SQL_REAL`, `SQL_FLOAT`, `SQL_DOUBLE`) alongside the exact ones — its
-/// identifier list names all nine — so a float source gets the same three
+/// (`SQL_REAL`, `SQL_FLOAT`, `SQL_DOUBLE`) alongside the exact ones, since its
+/// identifier list names all nine, so a float source gets the same three
 /// outcomes. Eight of the row's C types reach here, one per caller in
 /// [`write_numeric_pivot`]: `odbc-sys` models the deprecated `SQL_C_TINYINT`,
 /// `SQL_C_SHORT` and `SQL_C_LONG` only as commented-out entries, and
-/// `SQL_C_NUMERIC` is answered before the pivot is built at all — it needs the
-/// value's *digits* rather than a pivot already narrowed to `i64`/`f64`, so it
+/// `SQL_C_NUMERIC` is answered before the pivot is built at all, because it
+/// needs the value's *digits* rather than a pivot narrowed to `i64`/`f64`, so it
 /// has its own writer, [`write_numeric`], reached from `write_fixed_or_chunked`
 /// beside the character targets. It shares this row's three outcomes, which is
 /// why they are stated once here. The three outcomes:
 ///
-/// - "Data converted without truncation" — `SQL_SUCCESS`.
-/// - "Data converted with truncation of fractional digits" — the truncated
+/// - "Data converted without truncation": `SQL_SUCCESS`.
+/// - "Data converted with truncation of fractional digits": the truncated
 ///   value is written and `01S07` returned.
 /// - "Conversion of data would result in loss of whole (as opposed to
-///   fractional) digits" — `22003`, with `*TargetValuePtr` left alone, which the
+///   fractional) digits": `22003`, with `*TargetValuePtr` left alone, which the
 ///   table's "Undefined" requires.
 ///
 /// **The order matters: truncate first, then range-check the truncated value.**
 /// It is whole digits the third outcome protects, so `127.5` into
 /// `SQL_C_STINYINT` is the second outcome and writes `127`, and `-0.5` into any
-/// unsigned target writes `0` — the same reading [`write_exact_integer`] gives
+/// unsigned target writes `0`, the same reading [`write_exact_integer`] gives
 /// the text path, so the two agree on that value.
 ///
 /// Two notes on the arithmetic:
@@ -2237,10 +2240,10 @@ unsafe fn write_numeric_pivot(
 /// - **`i128` is the exact intermediary for every one of the eight targets.**
 ///   A finite `f64` carries at most 53 significant bits, so its truncation is
 ///   representable in `i128` exactly whenever `|v| < 2^127`, and the eight
-///   target widths are all far below that — `T::try_from` therefore decides the
+///   target widths are all far below that, so `T::try_from` decides the
 ///   bound at the target's own width rather than at an `f64`-rounded
 ///   approximation of it. That is what makes `2^63` reject for `SQL_C_SBIGINT`
-///   where `v > i64::MAX as f64` admitted it: `i64::MAX as f64` rounds *up* to
+///   where `v > i64::MAX as f64` would admit it: `i64::MAX as f64` rounds *up* to
 ///   `2^63`. A magnitude at or beyond `2^127` saturates to `i128::MIN`/`MAX`
 ///   and fails `T::try_from`, which is the same `22003` it deserves.
 ///
@@ -2278,19 +2281,19 @@ unsafe fn write_truncated_float<T: Copy + TryFrom<i128>>(
 /// `ColumnValue::Decimal` comes from `SQL_DECIMAL`/`SQL_NUMERIC`, so [SQL to C:
 /// Numeric] does. Their exact-numeric rows list the same twelve C types and the
 /// same three outcomes, in the same order and with the same SQLSTATEs. The one
-/// difference is a fourth row that only the character table has — "Data is not a
-/// *numeric-literal*" → `22018` — which a numeric SQL source cannot reach, and
+/// difference is a fourth row that only the character table has, "Data is not a
+/// *numeric-literal*" → `22018`, which a numeric SQL source cannot reach, and
 /// which is handled by [`column_value_as_numeric`] returning
 /// [`NumericPivotError::NotNumericLiteral`] rather than here.
 ///
 /// The three shared outcomes, in the tables' own order:
 ///
-/// - "Data converted without truncation" — `SQL_SUCCESS`, nothing to report.
-/// - "Data converted with truncation of fractional digits" — the truncated
+/// - "Data converted without truncation": `SQL_SUCCESS`, nothing to report.
+/// - "Data converted with truncation of fractional digits": the truncated
 ///   value is written and `01S07` returned. Truncation is toward zero, which is
 ///   what [`DecimalLiteral::to_integer`] does, so `-3.9` delivers `-3`.
 /// - "Conversion of data would result in loss of whole (as opposed to
-///   fractional) digits" — `22003`, and the range test runs before the write so
+///   fractional) digits": `22003`, and the range test runs before the write so
 ///   `*TargetValuePtr` is left alone. A magnitude beyond `i128` reaches the same
 ///   branch: no integer C type holds it either.
 ///
@@ -2335,14 +2338,14 @@ unsafe fn write_exact_integer<T: Copy + TryFrom<i128>>(
 /// The ODBC spec defines no textual form for a non-finite float, so this is
 /// decided by ecosystem fit rather than by conformance. Every relevant
 /// neighbour agrees against Rust: Trino renders `Infinity`, the Trino JDBC
-/// driver renders `Infinity`, and PostgreSQL — the other major data source with
-/// infinite floats — emits `Infinity` in its own text output. Rust's `Display`
-/// gives `inf`/`-inf`, which arrived here by default rather than by decision.
+/// driver renders `Infinity`, and PostgreSQL, the other major data source with
+/// infinite floats, emits `Infinity` in its own text output. Rust's `Display`
+/// gives `inf`/`-inf`, which is a default rather than a decision.
 ///
 /// The deciding argument is that this is core's *shared* coercion path and a
 /// driver cannot override it, so core should not impose a Rust-ism on every
-/// backend. `NaN` already agrees between Rust and Java and is deliberately left
-/// alone, so only the two infinities differ from `Display`.
+/// backend. `NaN` already agrees between Rust and Java and is left alone, so
+/// only the two infinities differ from `Display`.
 const fn infinity_text(negative: bool) -> &'static str {
     if negative { "-Infinity" } else { "Infinity" }
 }
@@ -2364,11 +2367,9 @@ const fn infinity_text(negative: bool) -> &'static str {
 /// for this conversion. The driver assumes that the size of \**TargetValuePtr*
 /// is the size of the C data type." So `buf_len` is not a parameter here.
 ///
-/// This target had no arm at all and answered `07006` for every value, while
-/// the same C type worked as an *input* parameter through `numeric_convert`.
-/// The overview page is explicit that this is not optional: drivers "are
-/// required to support conversions to all ODBC C data types from the ODBC SQL
-/// data types that they support".
+/// This target is not optional. The overview page: drivers "are required to
+/// support conversions to all ODBC C data types from the ODBC SQL data types
+/// that they support".
 ///
 /// # Precision and scale
 ///
@@ -2383,7 +2384,7 @@ const fn infinity_text(negative: bool) -> &'static str {
 ///
 /// # Sign
 ///
-/// `odbc-sys` documents `sign` as "1 if positive, 0 if negative" — the opposite
+/// `odbc-sys` documents `sign` as "1 if positive, 0 if negative", the opposite
 /// of a sign *bit*, and the field most likely to be inverted by habit.
 /// `a_negative_value_sets_the_numeric_sign_byte_to_zero` pins it.
 unsafe fn write_numeric(
@@ -2452,20 +2453,21 @@ const DISPLAY_SIZE_FLOAT_DOUBLE: usize = 24;
 /// Spec: <https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/display-size>
 ///
 /// The *Display Size* appendix does not just give a number, it says what the
-/// number is made of — "a sign, 15 digits, a decimal point, the letter *E*, a
-/// sign, and 3 digits" — so the size it fixes is the size of an **exponent**
-/// rendering. `col_attr::display_size_for` already reports 24 and 14 on the
-/// strength of exactly those sentences.
+/// number is made of ("a sign, 15 digits, a decimal point, the letter *E*, a
+/// sign, and 3 digits"), so the size it fixes is the size of an **exponent**
+/// rendering. `col_attr::display_size_for` reports 24 and 14 on the strength of
+/// exactly those sentences.
 ///
-/// Rust's `Display` for `f32`/`f64` never emits an exponent, so core promised a
-/// 24-character exponent form and delivered a positional one up to 326
-/// characters long. Two things followed, and the second is the worse:
+/// Rust's `Display` for `f32`/`f64` never emits an exponent, so rendering
+/// positionally would promise a 24-character exponent form and deliver a
+/// positional one up to 326 characters long. Two things follow, and the second
+/// is the worse:
 ///
-/// - **Large magnitudes were a hard error.** 309 positional digits against a
+/// - **Large magnitudes become a hard error.** 309 positional digits against a
 ///   display-size buffer trips the *SQL to C: Numeric* whole-digit rule, so
-///   `f64::MAX` was `22003` — loud, at least.
-/// - **Small magnitudes were silently wrong.** `4.9e-324` is 326 characters
-///   whose first 24 are `0.00000000000000000000000`, so the application read
+///   `f64::MAX` is `22003`, loud at least.
+/// - **Small magnitudes become silently wrong.** `4.9e-324` is 326 characters
+///   whose first 24 are `0.00000000000000000000000`, so the application reads
 ///   **zero**, flagged `01004` ("truncated"), which is not the same claim as
 ///   "wrong".
 ///
@@ -2474,7 +2476,7 @@ const DISPLAY_SIZE_FLOAT_DOUBLE: usize = 24;
 /// Rendering *every* float in exponent form would satisfy the display size too,
 /// and would turn `1.5` into `1.5E0` for every application reading a float as
 /// text. The spec fixes the size, not the notation, so the notation is chosen
-/// to keep the familiar rendering wherever it already fits — which is every
+/// to keep the familiar rendering wherever it already fits, which is every
 /// value an application is likely to see. `an_ordinary_float_keeps_its_positional_rendering`
 /// pins that half.
 ///
@@ -2495,8 +2497,8 @@ const DISPLAY_SIZE_FLOAT_DOUBLE: usize = 24;
 /// a *maximum* width and 17 significant digits are what an `f64` needs to
 /// survive the round trip: `f64::MAX` renders as `1.7976931348623157E308`, 22
 /// characters, inside the 24. Truncating to 15 would fit a budget that is not
-/// binding and lose the value's identity, which is the defect this function
-/// exists to fix.
+/// binding and lose the value's identity, which is what this function exists to
+/// prevent.
 fn render_float<T>(v: T, display_size: usize) -> String
 where
     T: std::fmt::Display + std::fmt::UpperExp,
@@ -3104,7 +3106,7 @@ mod tests {
         // A non-null target with buf_len == 0 has no room for even the null
         // terminator, which is total truncation (SUCCESS_WITH_INFO / 01004),
         // not a length query. Only a null target is a length query
-        // (SUCCESS) — see `write_utf16`'s identical split.
+        // (SUCCESS); see `write_utf16`'s identical split.
         let mut buf = [0xAAu8; 4];
         let mut ind: isize = 0;
         let ret = unsafe {
@@ -3125,8 +3127,8 @@ mod tests {
     #[test]
     fn wchar_null_target_with_zero_length_is_a_pure_length_query() {
         // A null target pointer stays SUCCESS regardless of buf_len. Not
-        // something SQLGetData's own spec sanctions directly — its Arguments
-        // section says "TargetValuePtr cannot be NULL" — but this writer is
+        // something SQLGetData's own spec sanctions directly (its Arguments
+        // section says "TargetValuePtr cannot be NULL"), but this writer is
         // shared with `sql_fetch`'s bound-column loop, where a null
         // `SQL_DESC_DATA_PTR` paired with a live indicator pointer is the
         // spec-legal indicator-only binding (see `write_wchar`'s doc
@@ -3484,7 +3486,7 @@ mod tests {
                     minute: 30,
                     second: 45,
                     fraction: 123_000_000,
-                    timezone_offset_minutes: 330, // +05:30 — dropped by write_column_value
+                    timezone_offset_minutes: 330, // +05:30, dropped by write_column_value
                 },
                 CDataType::TypeTimestamp,
                 buf.as_mut_ptr() as *mut c_void,
@@ -4032,7 +4034,7 @@ mod tests {
         // The round trip: a backend returning "Infinity" as *text* that an
         // application then requests as a numeric type goes through
         // `parse_numeric_text`. Rust's float parser is ASCII-case-insensitive
-        // over `inf`/`infinity`, so both spellings survive — but nothing pinned
+        // over `inf`/`infinity`, so both spellings survive, but nothing pinned
         // that before, and emitting a spelling core cannot read back would be a
         // one-way door.
         //
@@ -5055,7 +5057,7 @@ mod tests {
     fn f64_just_below_two_pow_63_to_sbigint_is_written() {
         // The largest f64 below 2^63: spacing in [2^62, 2^63) is 1024, so this
         // is 2^63 - 1024. It fits i64, and the sibling test at 2^63 itself does
-        // not — together they pin the bound as exact for the target's width.
+        // not; together they pin the bound as exact for the target's width.
         let v = 9_223_372_036_854_774_784.0_f64;
         let mut out = 0i64;
         let mut ind: isize = 0;
@@ -5272,8 +5274,8 @@ mod tests {
     }
 
     /// `2.0` is the lower edge of the table's "greater than or equal to 2" row,
-    /// so it is 22003 and not the 1 an earlier revision wrote for every non-zero
-    /// float.
+    /// so it is 22003 rather than the `1` a "non-zero means true" reading would
+    /// write.
     #[test]
     fn float_two_to_bit_is_22003() {
         let mut buf: u8 = 9;
@@ -5302,8 +5304,8 @@ mod tests {
     fn int_to_float_precision_loss_is_success_with_the_narrowed_value() {
         // 2^24 + 1 = 16_777_217 cannot be represented exactly as f32, so the
         // narrowing is inexact. The *SQL to C: Numeric* row for
-        // SQL_C_FLOAT/SQL_C_DOUBLE has only two cells — in range -> *Data* /
-        // n/a, out of range -> *Undefined* / 22003 — and 16_777_216.0 is
+        // SQL_C_FLOAT/SQL_C_DOUBLE has only two cells (in range -> *Data* /
+        // n/a, out of range -> *Undefined* / 22003), and 16_777_216.0 is
         // in range, so the outcome is the first cell: the value is written and
         // nothing is reported. The integer row above and the SQL_C_BIT row
         // below both carry 01S07; the float row's omission is a distinction
@@ -5395,7 +5397,7 @@ mod tests {
     fn f64_narrowed_to_f32_with_precision_loss_is_success() {
         // 0.1 is a genuinely inexact narrowing: the nearest f32 is not the
         // f64 the source held. It is still inside the range of SQL_C_FLOAT,
-        // so it is the float row's "within the range" cell — *Data* / n/a.
+        // so it is the float row's "within the range" cell: *Data* / n/a.
         let mut out = 0f32;
         let mut ind = 0isize;
         let ret = unsafe {
@@ -5546,9 +5548,9 @@ mod tests {
     #[test]
     fn f64_nan_to_float_is_written_without_a_diagnostic() {
         // A NaN narrows to a NaN, which no comparison can call equal to its
-        // source — so the equality test that used to gate 01S07 reported a
-        // fractional truncation that never happened. With that warning gone
-        // the NaN is delivered and nothing is reported. Note the contrast with
+        // source, so an equality test between the two would report a fractional
+        // truncation that never happened. The NaN is delivered and nothing is
+        // reported. Note the contrast with
         // `float_nan_to_bit_returns_22003`: SQL_C_BIT has a range test a NaN
         // fails, and SQL_C_FLOAT has no range a NaN is outside of.
         let mut out = 9.0f32;
@@ -5575,7 +5577,7 @@ mod tests {
     // ODBC row-wise binding hands out pointers at arbitrary offsets into a
     // packed buffer, so no target pointer is ever guaranteed aligned. Each test
     // below offsets one byte into an allocation of the *target* type, which is
-    // misaligned on every platform — offsetting into a `Vec<u8>` would not be,
+    // misaligned on every platform. Offsetting into a `Vec<u8>` would not be,
     // since a byte allocation may already start on an odd address.
     //
     // What these prove where, measured on x86-64 with `debug-assertions`:
@@ -5641,8 +5643,8 @@ mod tests {
     }
 
     /// A struct target rather than a scalar. `SQL_TIMESTAMP_STRUCT` is written
-    /// as one value, so a single misaligned write covers all seven fields — and
-    /// its `year` is an `i16` inside a struct whose alignment is 4, so a naive
+    /// as one value, so a single misaligned write covers all seven fields. Its
+    /// `year` is an `i16` inside a struct whose alignment is 4, so a naive
     /// field-by-field write would have a different bug.
     #[test]
     fn timestamp_struct_target_may_be_misaligned() {
@@ -5716,11 +5718,10 @@ mod tests {
         assert_eq!(ind, 16, "the table's indicator cell is 16");
     }
 
-    /// The guard against over-reach, and the reason this task is smaller than
-    /// it was reported to be. `SQL_C_GUID` appears in **one** conversion table,
-    /// *SQL to C: GUID*, whose only source type is `SQL_GUID`. The
+    /// The guard against over-reach. `SQL_C_GUID` appears in **one** conversion
+    /// table, *SQL to C: GUID*, whose only source type is `SQL_GUID`. The
     /// *SQL to C: Character* table has no `SQL_C_GUID` row at all, so a
-    /// character column read as `SQL_C_GUID` is not a defined conversion — and
+    /// character column read as `SQL_C_GUID` is not a defined conversion, and
     /// the overview page says exactly what that is: "If the *TargetType*
     /// argument ... contains an identifier for an ODBC C data type not shown in
     /// the table for a given ODBC SQL data type, **SQLFetch**,
@@ -5757,7 +5758,7 @@ mod tests {
     }
 
     /// `SQLGUID` leads with a `u32`, so it has alignment 4 and *can* be
-    /// misaligned — unlike `SQL_NUMERIC_STRUCT` below. Offset one byte into an
+    /// misaligned, unlike `SQL_NUMERIC_STRUCT` below. Offset one byte into an
     /// arena of the target type so this is misaligned on every platform.
     #[test]
     fn guid_target_may_be_misaligned() {
@@ -5788,8 +5789,8 @@ mod tests {
         assert_eq!((g.d1, g.d2, g.d3), (0x0011_2233, 0x4455, 0x6677));
     }
 
-    /// `SQL_NUMERIC_STRUCT` has **alignment 1**, so — alone among the fixed
-    /// targets — it needs no misalignment test, and one cannot be written: its
+    /// `SQL_NUMERIC_STRUCT` has **alignment 1**, so, alone among the fixed
+    /// targets, it needs no misalignment test and one cannot be written: its
     /// fields are `u8`, `i8`, `u8` and `[u8; 16]`, so every address is aligned
     /// for it and `u8`'s exemption in AGENTS.md's alignment table covers it.
     ///
@@ -5799,8 +5800,8 @@ mod tests {
     /// `assert!(!out.is_aligned())` premise, which reads like a broken test
     /// rather than a type that cannot be misaligned. Asserting the alignment
     /// directly records the reason, and fails if `odbc-sys` ever gives
-    /// `Numeric` a wider field — at which point a real misalignment test
-    /// becomes both necessary and possible.
+    /// `Numeric` a wider field, at which point a real misalignment test becomes
+    /// both necessary and possible.
     #[test]
     fn the_numeric_struct_cannot_be_misaligned() {
         assert_eq!(
@@ -5822,11 +5823,11 @@ mod tests {
 
     #[test]
     fn a_character_literal_beyond_f64_range_is_22003_with_nothing_written() {
-        // "1e400" is a *numeric-literal* — so not the SQL to C: Character row's
-        // 22018 cell — whose magnitude no f64 holds. Rust's parser saturates it
-        // to an infinity, so before this was fixed the application received
-        // +inf and SQL_SUCCESS: a number the data source never held, reported as
-        // exact. The row's second cell governs it, "outside the range of the
+        // "1e400" is a *numeric-literal*, so not the SQL to C: Character row's
+        // 22018 cell, but its magnitude is one no f64 holds. Rust's parser
+        // saturates it to an infinity, so delivering the parse result would hand
+        // the application +inf and SQL_SUCCESS: a number the data source never
+        // held, reported as exact. The row's second cell governs it, "outside the range of the
         // data type to which the number is being converted" → *Undefined* /
         // 22003, so both sentinels must survive.
         //
@@ -5836,7 +5837,7 @@ mod tests {
         //
         // The last two cases are what rule out the near-miss implementation of
         // this check. `"9" * 400` has no exponent to inspect at all, and
-        // `1e2147483648`'s exponent does not fit an `i32` — so
+        // `1e2147483648`'s exponent does not fit an `i32`, so
         // `parse_numeric_literal` answers `None` for it, and a check written in
         // terms of that function would let it through as an infinity.
         for text in ["1e400", "-1e400", "9".repeat(400).as_str(), "1e2147483648"] {
@@ -5922,7 +5923,7 @@ mod tests {
         // The cell either side of the overflow one: "Data is not a
         // *numeric-literal*" → 22018. The overflow fix must not swallow it,
         // which is the failure mode of deciding "out of range" from the parsed
-        // value alone — an infinity spelling parses to the same f64 as an
+        // value alone, because an infinity spelling parses to the same f64 as an
         // overflow does. `parse_numeric_literal` is what separates them, and
         // `the_infinity_spelling_parses_back_into_a_float` pins the other half.
         let mut out = 9.0f32;
@@ -6264,12 +6265,12 @@ mod tests {
     }
 
     /// A column value is whatever the data source sent, so its exponent is
-    /// attacker-controlled on a compromised or hostile source. Before
-    /// `param_convert::MAX_DECIMAL_EXPANSION_DIGITS`, this reached
-    /// `"0".repeat(2_147_483_646)` inside `DecimalLiteral::to_integer` — a
-    /// ~2 GB allocation, with a second copy in the `format!` that follows —
-    /// and an allocation failure aborts the process rather than unwinding, so
-    /// `panic_safe` could not contain it.
+    /// attacker-controlled on a compromised or hostile source. Without
+    /// `param_convert::MAX_DECIMAL_EXPANSION_DIGITS`, this reaches
+    /// `"0".repeat(2_147_483_646)` inside `DecimalLiteral::to_integer`, a
+    /// ~2 GB allocation with a second copy in the `format!` that follows.
+    /// An allocation failure aborts the process rather than unwinding, so
+    /// `panic_safe` cannot contain it.
     ///
     /// The SQLSTATE is the one the exact-numeric row of both *SQL to C:
     /// Character* and *SQL to C: Numeric* gives for "Conversion of data would
@@ -6298,9 +6299,9 @@ mod tests {
     }
 
     /// A magnitude far below the target's resolution truncates toward zero at
-    /// no cost — `to_integer`'s positive-scale branch slices digits the source
-    /// supplied rather than expanding anything — so the expansion bound must
-    /// not reach it. `01S07` because a non-zero fraction was dropped.
+    /// no cost, since `to_integer`'s positive-scale branch slices digits the
+    /// source supplied rather than expanding anything, so the expansion bound
+    /// must not reach it. `01S07` because a non-zero fraction was dropped.
     #[test]
     fn a_pathologically_small_column_value_truncates_to_zero_with_01s07() {
         let mut out = 7i64;
@@ -6607,7 +6608,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // The cross-form rows of SQL to C: Character — a character column whose
+    // The cross-form rows of SQL to C: Character: a character column whose
     // literal is one datetime form read into a C struct of another.
     //
     // Spec: https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/sql-to-c-character
@@ -6671,7 +6672,7 @@ mod tests {
 
     #[test]
     fn timestamp_text_with_zero_time_converts_to_date() {
-        // "Data value is a valid timestamp-value; time portion is zero" — the
+        // "Data value is a valid timestamp-value; time portion is zero": the
         // date is written and the SQLSTATE column is "n/a".
         let (out, ret) =
             unsafe { convert_text("2026-07-21 00:00:00", CDataType::TypeDate, date_sentinel()) };
@@ -6682,7 +6683,7 @@ mod tests {
 
     #[test]
     fn timestamp_text_with_time_to_date_is_01s07() {
-        // "Data value is a valid timestamp-value; time portion is nonzero" —
+        // "Data value is a valid timestamp-value; time portion is nonzero":
         // "Truncated data" is written and the SQLSTATE is 01S07, footnote [c]:
         // "The time portion of the timestamp-value is truncated."
         let (out, ret) =
@@ -6718,7 +6719,7 @@ mod tests {
     #[test]
     fn text_that_is_no_date_or_timestamp_to_date_is_22018() {
         // The row's last line: "Data value is not a valid date-value or
-        // timestamp-value" — 22018, *TargetValuePtr* undefined.
+        // timestamp-value": 22018, *TargetValuePtr* undefined.
         let (out, ret) = unsafe { convert_text("10:30:15", CDataType::TypeDate, date_sentinel()) };
         let err = ret.expect_err("a time-only literal is not a date or a timestamp");
         assert_eq!(
@@ -6745,7 +6746,7 @@ mod tests {
     #[test]
     fn timestamp_text_with_fraction_to_time_is_01s07() {
         // "Data value is a valid timestamp-value; fractional seconds portion is
-        // nonzero" — 01S07 with the truncated data written. Only the *fraction*
+        // nonzero": 01S07 with the truncated data written. Only the *fraction*
         // provokes it; the discarded date does not, per footnote [d].
         let (out, ret) = unsafe {
             convert_text(
@@ -6860,7 +6861,7 @@ mod tests {
     // -----------------------------------------------------------------------
     // Impossible calendar days.
     //
-    // "Data value is not a valid date-value or timestamp-value" — the last row
+    // "Data value is not a valid date-value or timestamp-value": the last row
     // of SQL to C: Character's SQL_C_TYPE_DATE cell. ODBC's own grammar defines
     // `days-value ::= digit digit` and says nothing about which day numbers a
     // month has, so "valid date-value" is validity against the calendar, and the
@@ -6968,7 +6969,7 @@ mod tests {
     #[test]
     fn impossible_day_in_timestamp_text_is_rejected() {
         // The timestamp path shares `parse_date_fields`, so the check reaches it
-        // too — a well-formed time does not rescue an impossible date.
+        // too: a well-formed time does not rescue an impossible date.
         let (out, ret) = unsafe {
             convert_text(
                 "2024-02-30 10:00:00",
@@ -6988,7 +6989,7 @@ mod tests {
     fn impossible_day_in_timestamp_text_to_time_is_rejected() {
         // The third C target the change reaches. SQL to C: Character's
         // SQL_C_TYPE_TIME cell ignores the *date portion* of a
-        // timestamp-value — but only of a valid one, and the row's last line
+        // timestamp-value, but only of a valid one, and the row's last line
         // covers text that is not a valid timestamp-value at all.
         let (out, ret) =
             unsafe { convert_text("2024-02-30 10:00:00", CDataType::TypeTime, time_sentinel()) };
@@ -7153,7 +7154,7 @@ mod tests {
         // spec's three tables define. The illegal pairs matter as much as the
         // legal ones: a driver that accepted them would silently invent data.
         let cases: &[(&str, ColumnValue, CDataType, bool)] = &[
-            // SQL to C: Date — SQL_C_TYPE_DATE and SQL_C_TYPE_TIMESTAMP only.
+            // SQL to C: Date, so SQL_C_TYPE_DATE and SQL_C_TYPE_TIMESTAMP only.
             ("DATE -> DATE", a_date(), CDataType::TypeDate, true),
             (
                 "DATE -> TIMESTAMP",
@@ -7162,7 +7163,7 @@ mod tests {
                 true,
             ),
             ("DATE -> TIME", a_date(), CDataType::TypeTime, false),
-            // SQL to C: Time — SQL_C_TYPE_TIME and SQL_C_TYPE_TIMESTAMP only.
+            // SQL to C: Time, so SQL_C_TYPE_TIME and SQL_C_TYPE_TIMESTAMP only.
             ("TIME -> TIME", a_time(0), CDataType::TypeTime, true),
             (
                 "TIME -> TIMESTAMP",
@@ -7171,7 +7172,7 @@ mod tests {
                 true,
             ),
             ("TIME -> DATE", a_time(0), CDataType::TypeDate, false),
-            // SQL to C: Timestamp — all three.
+            // SQL to C: Timestamp, so all three.
             (
                 "TIMESTAMP -> TIMESTAMP",
                 a_timestamp(1, 2, 3, 0),
@@ -7238,7 +7239,7 @@ mod tests {
     #[test]
     fn date_to_timestamp_zeroes_the_time_fields() {
         // Spec: "The driver sets the time fields of the timestamp structure to
-        // zero." No SQLSTATE — nothing is lost.
+        // zero." No SQLSTATE, because nothing is lost.
         let (ret, buf, ind) = unsafe { convert(&a_date(), CDataType::TypeTimestamp) };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
         assert_eq!(ind, std::mem::size_of::<Timestamp>() as isize);
@@ -7315,7 +7316,7 @@ mod tests {
     #[test]
     fn timestamp_to_time_ignores_the_date_but_reports_a_dropped_fraction() {
         // Spec: "The date portion of the timestamp is ignored", and the row
-        // splits on the fractional seconds alone — so a discarded date is not a
+        // splits on the fractional seconds alone, so a discarded date is not a
         // truncation, but a discarded fraction is.
         let (ret, buf, ind) = unsafe { convert(&a_timestamp(14, 30, 45, 0), CDataType::TypeTime) };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
@@ -7387,8 +7388,8 @@ mod tests {
         //
         // The years are the ones where the two could differ: both century
         // rules (1900 not a leap year, 1600 and 2000 leap), an ordinary leap
-        // year and its neighbour, year 0 — which is divisible by 400 and
-        // therefore leap in the proleptic Gregorian calendar both sides use —
+        // year and its neighbour, year 0, which is divisible by 400 and
+        // therefore leap in the proleptic Gregorian calendar both sides use,
         // and 2100, the next century non-leap year.
         for year in [0_i64, 1600, 1700, 1900, 1996, 2000, 2023, 2024, 2100] {
             let year_i32 = i32::try_from(year).expect("year fits i32");
@@ -7440,11 +7441,11 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // SQL to C: Numeric — the SQL_C_CHAR / SQL_C_WCHAR rows
+    // SQL to C: Numeric: the SQL_C_CHAR / SQL_C_WCHAR rows
     //
-    // "Number of whole (as opposed to fractional) digits < BufferLength" —
+    // "Number of whole (as opposed to fractional) digits < BufferLength":
     // truncated data written, indicator set, 01004.
-    // "Number of whole (as opposed to fractional) digits >= BufferLength" —
+    // "Number of whole (as opposed to fractional) digits >= BufferLength":
     // *TargetValuePtr* "Undefined", *StrLen_or_IndPtr* "Undefined", 22003.
     // -----------------------------------------------------------------------
 
@@ -7526,7 +7527,7 @@ mod tests {
     #[test]
     fn the_char_boundary_is_every_whole_digit_plus_the_terminator() {
         // "1234.5": four whole digits. BufferLength 5 holds "1234" and the
-        // null terminator and nothing else — whole digits 4 < 5, the 01004
+        // null terminator and nothing else: whole digits 4 < 5, the 01004
         // row. One byte less and 4 >= 4, the 22003 row. This pins the exact
         // `>=` of the table rather than an off-by-one either side of it.
         let (ret, written, ind) = char_write(&ColumnValue::Decimal("1234.5".to_string()), 5);
@@ -7545,7 +7546,7 @@ mod tests {
     fn a_numeric_that_fits_entirely_is_not_truncated_at_the_boundary() {
         // The first row: "Character byte length < BufferLength". "1234" in a
         // five-byte buffer is four bytes plus the terminator, so it is whole
-        // data with no SQLSTATE — the boundary case that must not be dragged
+        // data with no SQLSTATE, the boundary case that must not be dragged
         // into either truncation row.
         let (ret, written, ind) = char_write(&ColumnValue::I32(1234), 5);
         assert_eq!(ret, SqlReturn::SUCCESS);
@@ -7557,7 +7558,7 @@ mod tests {
     fn the_wchar_boundary_counts_utf16_units_not_bytes() {
         // The SQL_C_WCHAR row states the same test, and `BufferLength` is a
         // byte count on the wire while the row's "Number of whole ... digits"
-        // is a character count — so four whole digits need ten bytes here,
+        // is a character count, so four whole digits need ten bytes here,
         // five UTF-16 units, not five bytes. Ten passes; eight is 22003.
         let mut buf = [0u16; 16];
         let mut ind: isize = 0;
@@ -7630,7 +7631,7 @@ mod tests {
     /// The subnormal case, which is the one that delivered *wrong data* rather
     /// than an error. Positional `4.9e-324` is 326 characters whose first 24
     /// are `0.00000000000000000000000`, so an application sizing its buffer
-    /// from the display size read **zero** — under `01004`, which says
+    /// from the display size read **zero**, under `01004`, which says
     /// "truncated", not "wrong".
     ///
     /// Its large-magnitude sibling was at least loud: the *SQL to C: Numeric*
@@ -7646,8 +7647,8 @@ mod tests {
         );
     }
 
-    /// The `f32` half, against its own display size. `SQL_REAL` is 14 — "a
-    /// sign, 7 digits, a decimal point, the letter *E*, a sign, and 2 digits" —
+    /// The `f32` half, against its own display size. `SQL_REAL` is 14: "a
+    /// sign, 7 digits, a decimal point, the letter *E*, a sign, and 2 digits",
     /// so an `f32` is measured against 14 and not against the double's 24.
     #[test]
     fn a_real_is_measured_against_its_own_display_size() {
@@ -7733,7 +7734,7 @@ mod tests {
         );
     }
 
-    /// An integer column reaches `SQL_C_NUMERIC` too — the table's row lists
+    /// An integer column reaches `SQL_C_NUMERIC` too, since the table's row lists
     /// every exact numeric SQL type, not only `DECIMAL`.
     #[test]
     fn an_integer_column_converts_to_sql_c_numeric() {
@@ -7800,7 +7801,7 @@ mod tests {
     }
 
     /// A character column that is not a numeric literal is `22018`, the
-    /// *SQL to C: Character* table's cell for it — not `07006`, which is about
+    /// *SQL to C: Character* table's cell for it, not `07006`, which is about
     /// the type pairing rather than the value.
     #[test]
     fn a_non_numeric_string_into_sql_c_numeric_is_22018() {
@@ -7883,9 +7884,9 @@ mod tests {
 
     #[test]
     fn a_zero_length_buffer_on_a_numeric_column_stays_a_length_probe() {
-        // The carve-out. Read literally the table's third row would fire here —
+        // The carve-out. Read literally, the table's third row would fire here,
         // every number has at least one whole digit, so "whole digits >=
-        // BufferLength" holds for BufferLength 0 — but the row exists to stop a
+        // BufferLength" holds for BufferLength 0, but the row exists to stop a
         // wrong *number* reaching the application's buffer, and there is no
         // buffer to reach. `SQLGetData`'s own prose protects this call
         // (`HY090` when BufferLength is less than 0 but not when it is 0), and
@@ -7924,7 +7925,7 @@ mod tests {
         // `whole_part` counts it, and that is right rather than an over-count:
         // core writes a `Decimal`'s text through verbatim, so the character
         // occupies a byte of the buffer exactly as a digit does. This pins the
-        // property that makes it right — what is reserved is what is written.
+        // property that makes it right: what is reserved is what is written.
         let (ret, written, ind) = char_write(&ColumnValue::Decimal(" 123.45".to_string()), 5);
         assert_eq!(ret, SqlReturn::SUCCESS_WITH_INFO);
         assert_eq!(
@@ -7933,7 +7934,7 @@ mod tests {
         );
         assert_eq!(ind, 7);
 
-        // One byte less and the whole part no longer fits.
+        // One byte less and the whole part does not fit.
         assert_22003_writes_nothing(
             &ColumnValue::Decimal(" 123.45".to_string()),
             CDataType::Char,

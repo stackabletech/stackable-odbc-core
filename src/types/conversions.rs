@@ -100,7 +100,7 @@ pub fn info_type_from_raw(value: u16) -> Option<odbc_sys::InfoType> {
         20 => Some(InfoType::AccessibleProcedures),
         22 => Some(InfoType::ConcatNullBehavior),
         23 => Some(InfoType::CursorCommitBehaviour),
-        // 24 = SQL_CURSOR_ROLLBACK_BEHAVIOR — not in odbc-sys, handled via get_info_raw
+        // 24 = SQL_CURSOR_ROLLBACK_BEHAVIOR: not in odbc-sys, handled via get_info_raw
         25 => Some(InfoType::DataSourceReadOnly),
         26 => Some(InfoType::DefaultTxnIsolation),
         27 => Some(InfoType::ExpressionsInOrderBy),
@@ -206,7 +206,7 @@ pub fn info_type_from_raw(value: u16) -> Option<odbc_sys::InfoType> {
 /// Returns `None` for values that are not a recognised interval subcode.
 /// This is the safe alternative to `transmute` for the `#[repr(C)]` `Interval`
 /// enum, whose explicit discriminants 1..=13 let a converted value be cast back
-/// to the integer it came from — the round-trip that makes a conversion
+/// to the integer it came from. That round trip is what makes a conversion
 /// function the right answer here rather than a named constant.
 ///
 /// **These are `SQL_DESC_DATETIME_INTERVAL_CODE`'s values, 1..=13, not the
@@ -257,7 +257,7 @@ pub fn c_data_type_from_raw(value: i16) -> Option<CDataType> {
         // SQL_C_TINYINT (-6), SQL_C_LONG (4) and SQL_C_SHORT (5) are the
         // deprecated ODBC 2.x spellings of SQL_C_STINYINT (-26), SQL_C_SLONG
         // (-16) and SQL_C_SSHORT (-15). All three default to signed.
-        // Applications still emit them — pyodbc among them — so they are
+        // Applications still emit them, pyodbc among them, so they are
         // accepted and normalised here, which is why no code past this boundary
         // has to know they exist. `odbc-sys` models none of the three, carrying
         // them only as commented-out lines; that is a gap in the binding, not
@@ -388,7 +388,7 @@ pub fn free_stmt_option_from_raw(value: u16) -> Option<FreeStmtOption> {
 /// Returns `None` for values that are not a recognised completion flag. The
 /// spec's state for that is `HY110` ("Invalid driver completion"), but **both**
 /// of its clauses carry `(DM)`, so the check belongs to the Driver Manager and
-/// core adds none — the caller treats `None` as permitting a prompt, which is
+/// core adds none. The caller treats `None` as permitting a prompt, which is
 /// the reading that does not silently disable interactive authentication for an
 /// application whose value never reached a Driver Manager to be validated.
 #[must_use]
@@ -463,7 +463,7 @@ pub fn completion_type_from_raw(value: i16) -> Option<CompletionType> {
 // `SQLSetPos`'s Operation and LockType have no conversion here, and that is a
 // limitation of `odbc-sys` rather than an oversight. `odbc_sys::Operation` and
 // `odbc_sys::Lock` are newtype structs over a *private* `i16` with no accessor,
-// no `From`, and no `#[repr]` enum to cast through — so a converted value could
+// no `From`, and no `#[repr]` enum to cast through, so a converted value could
 // be compared against the three associated constants and nothing else. Neither
 // core nor a driver could recover the raw code to forward it, and a test could
 // not name a valid input at all. `SQLSetPos` therefore validates against
@@ -1001,10 +1001,10 @@ mod tests {
         );
     }
 
-    /// `AttrOdbcVersion` has no `SQL_OV_ODBC2` variant — `odbc-sys` omits it
-    /// deliberately, with `// Not supported by this crate` above a
-    /// commented-out `SQL_OV_ODBC2 = 2` in its `attributes.rs` — so this
-    /// function cannot name it and answers `None`. That is a fact about the
+    /// `AttrOdbcVersion` has no `SQL_OV_ODBC2` variant, since `odbc-sys` omits
+    /// it on purpose, with `// Not supported by this crate` above a
+    /// commented-out `SQL_OV_ODBC2 = 2` in its `attributes.rs`. This function
+    /// therefore cannot name it and answers `None`. That is a fact about the
     /// *type*, not a ruling that core rejects ODBC 2.x: `SQLSetEnvAttr` goes
     /// through `declared_odbc_version_from_raw`, which accepts all three.
     #[test]
