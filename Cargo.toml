@@ -1,0 +1,98 @@
+[package]
+name = "stackable-odbc-core"
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.95.0"
+authors = ["Stackable GmbH <info@stackable.tech>"]
+license = "Apache-2.0"
+
+# Publishing is switched off at the manifest, not only in `release.toml`.
+# `cargo publish` refuses outright while this is false, so neither a stray
+# `cargo release --execute` nor a hand-run publish can push this crate to
+# crates.io by accident.
+publish = false
+repository = "https://github.com/stackabletech/stackable-odbc-core"
+homepage = "https://github.com/stackabletech/stackable-odbc-core"
+documentation = "https://docs.rs/stackable-odbc-core"
+description = "Database-independent framework for building ODBC drivers in Rust. Implement two traits, get a conformant ODBC 3.80 driver."
+readme = "README.md"
+keywords = ["odbc", "database", "driver", "ffi", "sql"]
+categories = ["database", "external-ffi-bindings", "api-bindings"]
+
+# What does NOT go in the published tarball.
+#
+# `rust-toolchain.toml` is the important one: shipped, it pins *consumers* to
+# 1.95.0, because rustup honours the file it finds in a vendored or unpacked
+# dependency. That is a known docs.rs and vendoring failure mode, and the pin is
+# a contributor convenience with no business travelling with the crate.
+exclude = [
+    "rust-toolchain.toml",
+    ".github/",
+    "release/",
+    "release.toml",
+    "fuzz/",
+    "bench/",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "clippy.toml",
+    "deny.toml",
+    "rustfmt.toml",
+    ".pre-commit-config.yaml",
+    ".markdownlint.yaml",
+]
+
+# docs.rs builds for a single target by default, which would leave `ConfigDSNW`
+# and the seven other `#[cfg(windows)]` items undocumented, exactly the parts
+# a Windows driver author needs. Build the docs on Windows, and turn on the
+# `test-support` feature so the `conformance` module a driver's test suite uses
+# is documented too.
+[package.metadata.docs.rs]
+default-target = "x86_64-pc-windows-msvc"
+targets = ["x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu"]
+features = ["test-support"]
+
+[features]
+# Test support for driver crates: the `conformance` module, which drives
+# `SQLGetInfoW` through the real C ABI to check an info type's return shape.
+#
+# Default-off because it is test code. Compiled unconditionally it lands in
+# every driver's production binary, and it reaches an `unreachable!()` through a
+# public `unsafe fn` taking a caller-supplied `u16` — a panic path a shipped
+# driver has no reason to carry. Driver test suites enable it under
+# `[dev-dependencies]`.
+test-support = []
+
+[dependencies]
+odbc-sys = "0.31"
+snafu = "0.9"
+tracing = "0.1"
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+proptest = "1"
+# For `tests/logging.rs`, which installs a competing global subscriber before
+# calling `init_logging`. That has to run in its own process, so it cannot be a
+# unit test, and an integration test reaches only the public API plus these.
+tracing-subscriber = "0.3"
+
+# Exhaustive interleaving checker for the handle lock discipline. The models
+# themselves live in `src/handles/registry.rs`'s
+# `#[cfg(all(test, loom))] mod loom_tests`, and `src/sync.rs`'s type aliases
+# are gated the same way, so `loom` is only ever resolved inside a test build
+# with `--cfg loom` set. That keeps it a dev-dependency: it never appears in a
+# downstream consumer's resolved dependency graph.
+[target.'cfg(loom)'.dev-dependencies]
+loom = "0.7"
+
+[lints.rust]
+# `loom` is a custom cfg (see `src/sync.rs`), set via `RUSTFLAGS="--cfg loom"`
+# rather than a Cargo feature, so rustc does not know its name is legitimate
+# without this declaration.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)"] }
+
+[lints.clippy]
+expect_used = "deny"
+unwrap_in_result = "deny"
+unwrap_used = "deny"
+panic = "deny"

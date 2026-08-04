@@ -1,0 +1,30 @@
+---
+# Every `uses:` in this repository is pinned to a full commit SHA, which is only
+# safe if something keeps those pins current. Without this file they freeze
+# permanently, and Cargo.lock drifts toward advisories cargo-deny will start
+# failing on with no PR available to fix them.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      cargo:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+
+  # fuzz/ is a separate Cargo workspace (libFuzzer needs nightly), so the root
+  # ecosystem entry above does not cover it.
+  - package-ecosystem: cargo
+    directory: /fuzz
+    schedule:
+      interval: monthly

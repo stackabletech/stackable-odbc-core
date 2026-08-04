@@ -1,0 +1,16 @@
+# Check every text file out with LF endings on every platform.
+#
+# Windows git defaults to `core.autocrlf=true`, and GitHub's `windows-latest`
+# runners ship that default — so without this line `actions/checkout` writes CRLF
+# into the working tree even though the repository stores LF. That is not a
+# cosmetic difference: `the_set_of_group_lock_acquisition_sites_is_closed`
+# (`src/handles/registry.rs`) reads the source tree and splits each file on a
+# pattern containing a newline, and CRLF made that pattern miss, so the audit
+# counted the test modules and failed on Windows alone. The test normalises line
+# endings itself now; this stops the next reader of a file from having to.
+#
+# `text=auto` still lets git detect and leave binary content alone, so the
+# wildcard is safe for anything added later. Every file currently tracked is
+# text — no images, and no `.bat`/`.cmd`/`.ps1`, which are the ones that would
+# want CRLF kept.
+* text=auto eol=lf

@@ -1,0 +1,87 @@
+---
+default_language_version:
+  node: system
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: cef0300fd0fc4d2a87a85fa2093c6b283ea36f4b # 5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: mixed-line-ending
+      - id: detect-aws-credentials
+        args: ["--allow-missing-credentials"]
+      - id: detect-private-key
+
+  - repo: https://github.com/igorshubovych/markdownlint-cli
+    rev: 192ad822316c3a22fb3d3cc8aa6eafa0b8488360 # 0.45.0
+    hooks:
+      - id: markdownlint
+
+  - repo: local
+    hooks:
+      - id: cargo-test
+        name: cargo-test
+        language: system
+        entry: cargo test --locked
+        stages: [pre-commit, pre-merge-commit]
+        pass_filenames: false
+        files: \.rs$|Cargo\.(toml|lock)
+      - id: cargo-rustfmt
+        name: cargo-rustfmt
+        language: system
+        entry: cargo fmt --all -- --check
+        stages: [pre-commit, pre-merge-commit]
+        pass_filenames: false
+        files: \.rs$
+
+      - id: cargo-clippy
+        name: cargo-clippy
+        language: system
+        entry: cargo clippy --locked --all-targets -- -D warnings
+        stages: [pre-commit, pre-merge-commit]
+        pass_filenames: false
+        files: \.rs$
+
+      # Broken intra-doc links are warnings, not errors, so they reach docs.rs
+      # silently — and docs.rs is this crate's shop window, since a driver
+      # author reads the Backend trait docs before writing any code. -D warnings
+      # promotes them. Runs in well under a second because the dependency graph
+      # is already built by the hooks above.
+      #
+      # `--all-features` is load-bearing, not tidiness. `conformance` and
+      # `test_support` are gated on `#[cfg(any(test, feature = "test-support"))]`,
+      # and rustdoc documents the lib target *without* `cfg(test)` — so without
+      # this flag neither module is documented and neither is checked. The
+      # cargo-clippy hook above does not have the gap, because `--all-targets`
+      # builds the test target and that sets `cfg(test)`. Cargo.toml points
+      # docs.rs at `features = ["test-support"]`, so those are exactly the
+      # modules whose broken links ship to the shop window. One did: the
+      # conformance module's link to `info_group_inconsistencies` rendered as
+      # broken text while every local and CI run reported clean.
+      - id: cargo-doc
+        name: cargo-doc
+        language: system
+        entry: env RUSTDOCFLAGS=-Dwarnings cargo doc --locked --no-deps --all-features
+        stages: [pre-commit, pre-merge-commit]
+        pass_filenames: false
+        files: \.rs$|Cargo\.(toml|lock)
+
+      - id: cargo-sort
+        name: cargo-sort
+        language: system
+        entry: cargo sort --grouped --check
+        stages: [pre-commit, pre-merge-commit]
+        pass_filenames: false
+        files: Cargo\.toml$
+
+      - id: cargo-deny
+        name: cargo-deny
+        language: system
+        entry: cargo deny --locked check
+        stages: [pre-commit, pre-merge-commit]
+        pass_filenames: false
+        files: Cargo\.(toml|lock)|deny\.toml
