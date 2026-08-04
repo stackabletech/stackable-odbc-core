@@ -8,8 +8,8 @@
 #   release/release.sh minor --execute    # actually perform the release
 #
 # cargo-release is dry-run by default; --execute is required to mutate state.
-# See release.toml for what a release rewrites (CHANGELOG.md, README.md) and
-# for the `main`-only branch restriction.
+# See release.toml for what a release rewrites (CHANGELOG.md) and for the
+# `main`-only branch restriction.
 set -euo pipefail
 
 if [[ $# -lt 1 ]]; then

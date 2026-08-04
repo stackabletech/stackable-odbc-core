@@ -2,8 +2,8 @@
 #
 # cargo-release is dry-run by default; --execute is required to mutate state.
 # Publication to crates.io is deliberately disabled: this configuration only
-# bumps the version, rewrites CHANGELOG.md and README.md, commits, tags and
-# pushes. Publishing is a separate, manual step for now.
+# bumps the version, rewrites CHANGELOG.md, commits, tags and pushes.
+# Publishing is a separate, manual step for now.
 
 publish = false
 push = true

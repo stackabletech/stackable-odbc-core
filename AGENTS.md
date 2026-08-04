@@ -136,6 +136,7 @@ Generic framework. Zero database-specific code.
 | `binary_convert.rs` | The spec's "C to SQL: Binary" table, transcribed. `SQL_C_BINARY` to the targets whose byte layout ODBC defines; refuses the rest at bind with `07006` |
 | `numeric_convert.rs` | The spec's "C to SQL: Numeric" table, transcribed. Every numeric C type to any of its six target rows, including the interval row and footnote [b]'s optional `01S07`. `numeric_pairing_is_supported` is `SQLBindParameter`'s gate |
 | `prompt.rs` | `Prompter`: the trait a driver implements to present a login URL to the user during a connect. Definition only: core ships no implementation and gains no dependency |
+| `setup.rs` | `ConfigRequest`, `InstallerError` and `config_request_from_raw`: the driver-facing half of the ODBC installer's `ConfigDSN` entry point, which a driver reaches through `Backend::configure_dsn`. Nothing here is `#[cfg(windows)]`; only the `ConfigDSNW` export in `ffi/setup.rs` is |
 | `query_timer.rs` | `QueryTimer`, core-side `SQL_ATTR_QUERY_TIMEOUT` enforcement: a timer thread that calls `Backend::cancel` on expiry and relabels the resulting failure `HYT00` |
 | `cancel.rs` | `CancelState`: a backend's cancel token plus core's `timed_out` flag, and the one implementation of "a cancelled call reports `HY008`" |
 | `synthetic.rs` | `SyntheticStatement`: in-memory result set for `SQLGetTypeInfo` and catalog functions |
