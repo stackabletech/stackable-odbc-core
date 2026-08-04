@@ -33,7 +33,23 @@ use crate::types::{ColumnValue, FetchResult, SqlReturn, SqlState, fetch_orientat
 /// infallible pointer arithmetic and so carries no ordering constraint. Applying
 /// it here is what lets the write loop read this list directly, instead of
 /// mapping it into a second vector allocated on every row.
-type Binding = (u16, i16, *mut c_void, isize, *mut isize);
+/// A struct rather than the tuple this was, because it now carries seven
+/// fields and two of them are adjacent `i16`s. That is the shape
+/// `SQLForeignKeys`' argument list is a standing warning about: crossing
+/// `precision` with `scale` would compile silently and produce a
+/// `SQL_NUMERIC_STRUCT` describing a different number. Named fields cannot be
+/// crossed.
+#[derive(Clone, Copy)]
+struct Binding {
+    col: u16,
+    concise_type: i16,
+    target_ptr: *mut c_void,
+    buf_len: isize,
+    ind_ptr: *mut isize,
+    /// The ARD's `SQL_DESC_PRECISION` and `SQL_DESC_SCALE` for this column,
+    /// which `SQL_C_NUMERIC` reads and every other C type ignores.
+    numeric: crate::column_value::NumericTarget,
+}
 
 /// Every binding of an ARD that this fetch must serve, in no particular order.
 ///
@@ -70,24 +86,44 @@ fn collect_bindings(ard: &Descriptor, bind_offset: crate::descriptor::BindOffset
         .records
         .iter()
         .filter(|(_, record)| record.is_bound() || !record.indicator_ptr.is_null())
-        .map(|(&col, r)| {
-            (
-                col,
-                r.concise_type,
-                // A null pointer is left alone rather than shifted, which is
-                // `BindOffset::apply`'s business: a record may carry either
-                // pointer null — the indicator-only binding the spec allows —
-                // and offsetting `0` would turn that absence into a non-null
-                // address the `22002` check and `write_column_value` would then
-                // treat as real.
-                bind_offset.apply(r.data_ptr),
-                r.octet_length,
-                bind_offset.apply(r.indicator_ptr),
-            )
+        .map(|(&col, r)| Binding {
+            col,
+            concise_type: r.concise_type,
+            // A null pointer is left alone rather than shifted, which is
+            // `BindOffset::apply`'s business: a record may carry either
+            // pointer null — the indicator-only binding the spec allows —
+            // and offsetting `0` would turn that absence into a non-null
+            // address the `22002` check and `write_column_value` would then
+            // treat as real.
+            target_ptr: bind_offset.apply(r.data_ptr),
+            buf_len: r.octet_length,
+            ind_ptr: bind_offset.apply(r.indicator_ptr),
+            numeric: crate::column_value::NumericTarget {
+                precision: r.precision,
+                scale: r.scale,
+            },
         })
         .collect();
-    bindings.sort_unstable_by_key(|&(col, ..)| col);
+    bindings.sort_unstable_by_key(|b| b.col);
     bindings
+}
+
+/// The `OdbcError` a backend's [`ValueWarning`](crate::types::ValueWarning)
+/// becomes.
+///
+/// One function so both drain sites — `SQLGetData` and `SQLFetch`'s
+/// bound-column loop — cannot disagree about which SQLSTATE a backend warning
+/// carries. `OdbcError::FractionalTruncation` already maps to `01S07` and
+/// already classifies as a warning rather than a failure (`errors.rs`), so this
+/// reuses that path rather than building a second one.
+fn value_warning_error(warning: crate::types::ValueWarning) -> OdbcError {
+    match warning {
+        // `ValueWarning` is `#[non_exhaustive]`, but it is non-exhaustive to
+        // *other crates*: within core this match is exhaustive, so adding a
+        // variant breaks the build here and has to choose its own SQLSTATE
+        // rather than inherit 01S07 silently. That is the point.
+        crate::types::ValueWarning::FractionalTruncation => OdbcError::FractionalTruncation,
+    }
 }
 
 /// `SQL_ROW_SUCCESS` — the row-status value for a row fetched without warning.
@@ -429,8 +465,22 @@ unsafe fn fetch_with_report<B: Backend>(
                     // `HY003`, and the spec puts that failure after this call's
                     // `HY010` and `24000` checks, both of which are above.
                     let mut truncated = false;
+                    // Collected across the whole row rather than posted per
+                    // column, because the diagnostic queue lives on the handle
+                    // and `statement` borrows it for this loop. A row may lose
+                    // precision in more than one column, and each gets its own
+                    // record.
+                    let mut value_warnings: Vec<crate::types::ValueWarning> = Vec::new();
                     if let Some(ref mut statement) = stmt.statement {
-                        for &(col, concise_type, target_ptr, buf_len, ind_ptr) in &bindings {
+                        for &Binding {
+                            col,
+                            concise_type,
+                            target_ptr,
+                            buf_len,
+                            ind_ptr,
+                            numeric,
+                        } in &bindings
+                        {
                             let c_type = c_type_of(concise_type)?;
                             // Under the same deadline as the `fetch` above: these
                             // reads are part of `SQLFetch`'s own execution, so
@@ -447,10 +497,19 @@ unsafe fn fetch_with_report<B: Backend>(
                                     SqlState::indicator_variable_required(),
                                 ));
                             }
-                            let written =
-                                write_column_value(&value, c_type, target_ptr, buf_len, ind_ptr)?;
+                            let written = write_column_value(
+                                &value, c_type, target_ptr, buf_len, ind_ptr, numeric,
+                            )?;
                             if written == SqlReturn::SUCCESS_WITH_INFO {
                                 truncated = true;
+                            }
+                            // Drop the borrow of `statement` that `value` holds
+                            // before draining, and collect rather than post:
+                            // the diagnostic queue lives on the handle, which
+                            // is borrowed for this whole loop.
+                            drop(value);
+                            if let Some(warning) = statement.take_value_warning() {
+                                value_warnings.push(warning);
                             }
                         }
                     }
@@ -463,11 +522,19 @@ unsafe fn fetch_with_report<B: Backend>(
                     //
                     // Fractional truncation (01S07) arrives as an `Err` from
                     // write_column_value and is handled by panic_safe.
-                    if truncated {
+                    if truncated || !value_warnings.is_empty() {
                         // SAFETY: application-supplied pointers; see
                         // `report_rows_fetched`.
                         report_rows_fetched(stmt, report, 1, SQL_ROW_SUCCESS_WITH_INFO);
-                        stmt.diagnostics.push(&OdbcError::StringTruncated);
+                        if truncated {
+                            stmt.diagnostics.push(&OdbcError::StringTruncated);
+                        }
+                        // The backend's own warnings about this row's values —
+                        // precision it dropped in its own conversion, before a
+                        // `ColumnValue` existed for core to inspect.
+                        for warning in value_warnings {
+                            stmt.diagnostics.push(&value_warning_error(warning));
+                        }
                         return Ok(SqlReturn::SUCCESS_WITH_INFO);
                     }
 
@@ -891,9 +958,12 @@ pub unsafe fn sql_extended_fetch<B: Backend>(
 /// - 07009 (invalid descriptor index): the row's first three clauses carry no `(DM)` marker
 ///   and are the driver's. The column-0 one is **returned by this driver**, when
 ///   `col_or_param_num` is 0 (bookmark). The one naming a column number greater than the number
-///   of columns in the result set is delegated to the backend, which returns `HY000` rather
-///   than `07009`; a precise check would require an extra round-trip to obtain the column
-///   count. The third names a parameter ordinal, which cannot arise because core returns no
+///   of columns in the result set is **also returned by this driver**, checked against
+///   [`StatementBackend::column_count`]. It was delegated to the backend — which answered
+///   `HY000` — on the recorded grounds that "a precise check would require an extra round-trip
+///   to obtain the column count". That was false: `column_count` is a local accessor with no
+///   I/O behind it, and `describe_col` is already range-checked against the same call. The
+///   third clause names a parameter ordinal, which cannot arise because core returns no
 ///   streamed output parameters. The five clauses that follow — bound column, column ordering,
 ///   ARD consistency and ARD count — are all `(DM)`-marked and not returned here.
 /// - 08S01 (communication link failure): propagated from the backend.
@@ -1047,6 +1117,28 @@ pub unsafe fn sql_get_data<B: Backend>(
                 .map(crate::handles::cancel_as::<B>)
                 .transpose()?;
 
+            // The ARD's precision and scale for this column, which only
+            // `SQL_C_NUMERIC` reads. Resolved here, before the mutable borrow
+            // below, for the same reason the cancel token is: `desc_of` needs
+            // the scope, and `stmt` is borrowed for the rest of the closure.
+            //
+            // A column with no ARD record yields `UNSPECIFIED`, which is the
+            // right answer rather than a fallback: `SQLGetData` names its own
+            // target type and need never have bound the column at all, and the
+            // spec's route for declaring these two is `SQLSetDescField` on the
+            // ARD. Saying nothing means the value describes itself.
+            let numeric = {
+                let ard = scope.desc_of::<B>(statement_handle, DescriptorRole::Ard)?;
+                ard.records.get(&col_or_param_num).map_or(
+                    crate::column_value::NumericTarget::UNSPECIFIED,
+                    |r| crate::column_value::NumericTarget {
+                        precision: r.precision,
+                        scale: r.scale,
+                    },
+                )
+            };
+            let stmt = scope.get::<StatementHandle<B>>(statement_handle)?;
+
             // `cursor_open` implies `statement.is_some()`; this arm keeps the
             // invariant honest rather than unwrapping.
             let Some(ref mut statement) = stmt.statement else {
@@ -1060,6 +1152,35 @@ pub unsafe fn sql_get_data<B: Backend>(
             if col_or_param_num == 0 {
                 return Err(OdbcError::general(
                     "Column number 0 (bookmark) is not supported",
+                    SqlState::invalid_descriptor_index(),
+                ));
+            }
+
+            // Spec 07009, the clause naming "a column number greater than the
+            // number of columns in the result set". It carries no `(DM)`
+            // marker, so it is the driver's.
+            //
+            // This was delegated to the backend for years on the stated
+            // grounds that "a precise check would require an extra round-trip
+            // to obtain the column count" — which was false.
+            // `StatementBackend::column_count` is a local accessor with no I/O
+            // behind it, and `describe_col` is already range-checked against
+            // that very call (see its doc comment). The cost was imagined; the
+            // consequence was that every backend answered this with whatever
+            // its error mapping produced, usually `HY000`.
+            //
+            // Compared as `i32` so a `col_or_param_num` above `i16::MAX` is out
+            // of range rather than wrapping negative: `column_count` returns
+            // `i16` because that is what `SQLNumResultCols` writes through,
+            // while the ordinal arrives as `u16`, and the two do not share a
+            // range.
+            let column_count = i32::from(statement.column_count());
+            if i32::from(col_or_param_num) > column_count {
+                return Err(OdbcError::general(
+                    format!(
+                        "Invalid descriptor index: column {col_or_param_num} of a \
+                         {column_count}-column result set"
+                    ),
                     SqlState::invalid_descriptor_index(),
                 ));
             }
@@ -1089,6 +1210,9 @@ pub unsafe fn sql_get_data<B: Backend>(
             // column requested; prior offsets become invalid."
             // Taken rather than copied: the cursor owns the cached conversion,
             // so it is moved out, used, and put back.
+            // Set on the arm that reads a fresh value from the backend; read
+            // after the borrows above have ended.
+            let mut value_warning: Option<crate::types::ValueWarning> = None;
             let mut cursor = match stmt.get_data_cursor.take() {
                 Some(c) if c.column == col_or_param_num => c,
                 _ => GetDataCursor {
@@ -1134,7 +1258,7 @@ pub unsafe fn sql_get_data<B: Backend>(
                     }
                     // Cache before writing, so the first part and every later
                     // one go through exactly the same writer.
-                    match crate::column_value::cacheable_chunk_source(&value, c_type) {
+                    let write = match crate::column_value::cacheable_chunk_source(&value, c_type) {
                         Some(source) => {
                             let write = crate::column_value::write_cached_chunk(
                                 &source,
@@ -1157,8 +1281,18 @@ pub unsafe fn sql_get_data<B: Backend>(
                             buffer_length,
                             str_len_or_ind_ptr,
                             cursor.delivered,
+                            numeric,
                         )?,
-                    }
+                    };
+                    // Drained here, after the last use of `value` — which
+                    // borrows `statement` — and before the diagnostic queue is
+                    // touched, which borrows the handle. Only on this arm: the
+                    // cached-chunk arm above delivers a later part of a value
+                    // an *earlier* call already read, and reporting the
+                    // backend's warning again on every chunk would post one
+                    // record per part.
+                    value_warning = statement.take_value_warning();
+                    write
                 }
             };
 
@@ -1173,6 +1307,15 @@ pub unsafe fn sql_get_data<B: Backend>(
             // Spec 01004: If data was truncated, push a diagnostic.
             if write.ret == SqlReturn::SUCCESS_WITH_INFO {
                 stmt.diagnostics.push(&OdbcError::StringTruncated);
+            }
+
+            // The backend's own warning about this value. It reports
+            // SUCCESS_WITH_INFO alongside whatever the write already said, so a
+            // value that both truncated into the buffer and lost precision at
+            // the source carries both records.
+            if let Some(warning) = value_warning {
+                stmt.diagnostics.push(&value_warning_error(warning));
+                return Ok(SqlReturn::SUCCESS_WITH_INFO);
             }
 
             Ok(write.ret)
@@ -1302,6 +1445,116 @@ mod tests {
                 },
             );
             cleanup_stmt_for::<MockCancelAwareBackend>(env, conn, stmt);
+        }
+    }
+
+    /// A backend that lost precision in its *own* type conversion can now say
+    /// so, and `SQLGetData` reports `01S07`.
+    ///
+    /// Core already raises `01S07` where *it* drops precision — a non-zero
+    /// `ColumnValue::Time` fraction written to `SQL_C_TYPE_TIME`, or a fraction
+    /// lost reaching an exact-integer C type. But a driver converting a
+    /// `timestamp(12)` to nine fractional digits does that before a
+    /// `ColumnValue` exists, so core never saw it and the application got
+    /// `SQL_SUCCESS` with no diagnostic at all.
+    #[test]
+    fn a_backend_value_warning_becomes_01s07_on_get_data() {
+        unsafe {
+            let (env, conn, stmt) = executed_stmt_for::<crate::test_utils::MockTruncatingBackend>();
+            assert_eq!(
+                sql_fetch::<crate::test_utils::MockTruncatingBackend>(stmt),
+                SqlReturn::SUCCESS
+            );
+
+            let mut buf: i64 = 0;
+            let mut ind: isize = 0;
+            let ret = sql_get_data::<crate::test_utils::MockTruncatingBackend>(
+                stmt,
+                1, // the mock loses precision on column 1 only
+                CDataType::SBigInt as i16,
+                std::ptr::from_mut(&mut buf).cast::<c_void>(),
+                8,
+                &mut ind,
+            );
+            assert_eq!(
+                ret,
+                SqlReturn::SUCCESS_WITH_INFO,
+                "a warning, not a failure"
+            );
+            assert_eq!(buf, 1, "the value is still delivered");
+            assert_eq!(
+                first_sqlstate::<crate::test_utils::MockTruncatingBackend>(stmt),
+                crate::types::sql_state::FRACTIONAL_TRUNCATION,
+            );
+
+            cleanup_stmt_for::<crate::test_utils::MockTruncatingBackend>(env, conn, stmt);
+        }
+    }
+
+    /// The bound-column loop is the other `get_data` call site and must drain
+    /// the warning too, or it is visible through `SQLGetData` only — which is
+    /// the path an application using `SQLBindCol` never takes.
+    #[test]
+    fn a_backend_value_warning_becomes_01s07_on_a_bound_fetch() {
+        unsafe {
+            let (env, conn, stmt) = executed_stmt_for::<crate::test_utils::MockTruncatingBackend>();
+
+            let mut buf: i64 = 0;
+            let mut ind: isize = 0;
+            assert_eq!(
+                crate::ffi::bind::sql_bind_col::<crate::test_utils::MockTruncatingBackend>(
+                    stmt,
+                    1,
+                    CDataType::SBigInt as i16,
+                    std::ptr::from_mut(&mut buf).cast::<c_void>(),
+                    8,
+                    &mut ind,
+                ),
+                SqlReturn::SUCCESS,
+            );
+
+            assert_eq!(
+                sql_fetch::<crate::test_utils::MockTruncatingBackend>(stmt),
+                SqlReturn::SUCCESS_WITH_INFO,
+            );
+            assert_eq!(buf, 1, "the value is still delivered");
+            assert_eq!(
+                first_sqlstate::<crate::test_utils::MockTruncatingBackend>(stmt),
+                crate::types::sql_state::FRACTIONAL_TRUNCATION,
+            );
+
+            cleanup_stmt_for::<crate::test_utils::MockTruncatingBackend>(env, conn, stmt);
+        }
+    }
+
+    /// The guard against over-reach: the defaulted `None` must not downgrade
+    /// every successful read to `SQL_SUCCESS_WITH_INFO`. The mock warns on
+    /// column 1 only, so column 2 proves the warning belongs to the value
+    /// rather than to the statement — and proves `take_value_warning` really
+    /// takes, since column 1 was read first and cleared it.
+    #[test]
+    fn a_value_with_no_backend_warning_is_plain_success() {
+        unsafe {
+            let (env, conn, stmt) = executed_stmt_for::<crate::test_utils::MockTruncatingBackend>();
+            assert_eq!(
+                sql_fetch::<crate::test_utils::MockTruncatingBackend>(stmt),
+                SqlReturn::SUCCESS
+            );
+
+            let mut buf: i64 = 0;
+            let mut ind: isize = 0;
+            let ret = sql_get_data::<crate::test_utils::MockTruncatingBackend>(
+                stmt,
+                2, // the mock raises no warning for this column
+                CDataType::SBigInt as i16,
+                std::ptr::from_mut(&mut buf).cast::<c_void>(),
+                8,
+                &mut ind,
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS, "no warning, no downgrade");
+            assert_eq!(buf, 2);
+
+            cleanup_stmt_for::<crate::test_utils::MockTruncatingBackend>(env, conn, stmt);
         }
     }
 
@@ -3231,17 +3484,19 @@ mod tests {
         }
     }
 
-    /// A column ordinal at `u16::MAX` with a row fetched. **Not `07009`**: this
-    /// function's own doc records that the row's "greater than the number of
-    /// columns" clause is delegated to the backend rather than checked here,
-    /// because a precise check would cost an extra round-trip, and the backend
-    /// answers `HY000`.
+    /// A column ordinal at `u16::MAX` with a row fetched is `07009`.
     ///
-    /// Pinned so that changing it is a decision rather than an accident — the
-    /// audit expected `07009` here, which is what the spec would give if core
-    /// did the check itself.
+    /// This test previously pinned the opposite — the backend's `HY000` — and
+    /// said so "so that changing it is a decision rather than an accident".
+    /// This is that decision. The reason recorded for delegating the check was
+    /// that "a precise check would cost an extra round-trip", and that was
+    /// simply false: [`StatementBackend::column_count`] is a local accessor
+    /// with no I/O behind it, and core already range-checks `describe_col`
+    /// against exactly that call. The clause naming "a column number greater
+    /// than the number of columns in the result set" carries no Driver-Manager
+    /// marker, so it is the driver's to answer, and now does.
     #[test]
-    fn get_data_with_a_huge_ordinal_is_the_backends_hy000_not_07009() {
+    fn get_data_past_the_last_column_is_07009() {
         unsafe {
             let (env, conn, stmt) = alloc_env_conn_stmt();
             with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
@@ -3266,9 +3521,44 @@ mod tests {
             assert_eq!(ret, SqlReturn::ERROR);
             assert_eq!(
                 first_sqlstate::<MockBackend>(stmt),
-                crate::types::sql_state::GENERAL_ERROR,
-                "delegated to the backend, per this function's doc comment"
+                crate::types::sql_state::INVALID_DESCRIPTOR_INDEX,
+                "a column past the end of the result set is what 07009 is for"
             );
+
+            cleanup_stmt_for::<MockBackend>(env, conn, stmt);
+        }
+    }
+
+    /// The guard against over-reach on the test above: the *last* column is in
+    /// range, so the boundary must be `>` and not `>=`. A one-column result set
+    /// makes the off-by-one the only thing this can catch.
+    #[test]
+    fn get_data_of_the_last_column_is_in_range() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+                handle.set_result_set(crate::handles::StatementData::Synthetic(
+                    crate::test_utils::synthetic_result_set(vec![vec![
+                        crate::types::ColumnValue::I32(42),
+                    ]]),
+                ));
+            });
+            assert_eq!(sql_fetch::<MockBackend>(stmt), SqlReturn::SUCCESS);
+
+            let mut buf: i64 = 0;
+            let mut ind: isize = 0;
+            assert_eq!(
+                sql_get_data::<MockBackend>(
+                    stmt,
+                    1, // the one and only column
+                    CDataType::SLong as i16,
+                    std::ptr::from_mut(&mut buf).cast::<c_void>(),
+                    8,
+                    &mut ind,
+                ),
+                SqlReturn::SUCCESS,
+            );
+            assert_eq!(buf, 42);
 
             cleanup_stmt_for::<MockBackend>(env, conn, stmt);
         }

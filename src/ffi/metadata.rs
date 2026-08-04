@@ -1874,10 +1874,24 @@ pub unsafe fn sql_describe_col_w<B: Backend>(
 ///   (driver-manager-handled; not returned here). Unlike several of its siblings' rows,
 ///   this one has only the name-length-below-zero sentence and no maximum-length
 ///   sentence, so nothing in it is the driver's.
-/// - HY091: Invalid descriptor field identifier — `HYC00` ("driver not capable") is returned
-///   instead, treating unrecognised field identifiers as unsupported extensions rather than invalid IDs.
+/// - HY091: Invalid descriptor field identifier — **returned by this driver**, for a
+///   `field_identifier` that is not a defined `SQL_DESC_*`/`SQL_COLUMN_*` value. The row's own
+///   text is the whole test: "was not one of the defined values and was not
+///   an implementation-defined value". Core defines no implementation-defined fields, so
+///   anything `desc_from_raw` rejects and that is not one of the three ODBC 2.x spellings below
+///   lands here. This used to answer `HYC00`, which conflated a garbage identifier with a valid
+///   extension core has not implemented.
 /// - HY117: Connection suspended (DM) (driver-manager-handled; not returned here).
-/// - HYC00: Driver not capable — returned for unrecognized `field_identifier` values.
+/// - HYC00: Driver not capable — **returned by this driver**, for a `field_identifier` that
+///   *is* a defined value core does not support. The row's text is "was not supported by the
+///   driver", which is a different claim from `HY091`'s. Today that is exactly
+///   `SQL_COLUMN_LENGTH` (3), `SQL_COLUMN_PRECISION` (4) and `SQL_COLUMN_SCALE` (5), the ODBC
+///   2.x spellings of three fields. The spec's Backward Compatibility section says a 3.x driver
+///   should support all three — "An ODBC 3.x driver must support both 'SQL_COLUMN' and
+///   'SQL_DESC' values for these three FieldIdentifiers" — and core does not yet, because their
+///   ODBC 2.x semantics differ from their 3.x counterparts (Appendix D, "Column Size, Decimal
+///   Digits, Transfer Octet Length, and Display Size"). `HYC00` is the honest answer until it
+///   does.
 /// - HYT01: Connection timeout expired; not applicable.
 /// - IM001: Driver does not support this function (DM) (driver-manager-handled; not returned here).
 /// - IM017: Polling disabled; not returned here (the asynchronous notification model is not
@@ -1932,11 +1946,49 @@ pub unsafe fn sql_col_attribute_w<B: Backend>(
                 field_identifier,
                 field
             );
+            // `HY091` and `HYC00` are different questions, and both rows are
+            // un-`(DM)` so both are core's to answer:
+            //
+            // - `HY091` — "was not one of the defined values and was not an
+            //   implementation-defined value".
+            // - `HYC00` — "was not supported by the driver".
+            //
+            // So a value `desc_from_raw` does not recognise is `HY091`: it is
+            // not a defined field, and core defines no implementation-defined
+            // ones. A blanket `HYC00` left an application unable to tell a
+            // garbage identifier from a valid extension core has not
+            // implemented. `SQLGetDescField`/`SQLSetDescField` already drew the
+            // line here (`ffi::desc::field_from_raw`); this was the outlier.
+            //
+            // The three ODBC 2.x spellings are the exception that proves it.
+            // They *are* defined identifiers, so they take `HYC00` — and the
+            // spec's Backward Compatibility section says a 3.x driver should
+            // support them outright ("An ODBC 3.x driver must support both
+            // 'SQL_COLUMN' and 'SQL_DESC' values for these three
+            // FieldIdentifiers"), which core does not do yet. They are absent
+            // from `desc_from_raw` deliberately: it is shared with the
+            // descriptor functions, where an ODBC 2.x column identifier names
+            // no field at all.
             let field = field.ok_or_else(|| {
-                OdbcError::general(
-                    format!("Unknown descriptor field identifier: {field_identifier}"),
-                    SqlState::optional_feature_not_implemented(),
-                )
+                if matches!(
+                    field_identifier,
+                    crate::types::SQL_COLUMN_LENGTH
+                        | crate::types::SQL_COLUMN_PRECISION
+                        | crate::types::SQL_COLUMN_SCALE
+                ) {
+                    OdbcError::general(
+                        format!(
+                            "ODBC 2.x descriptor field identifier not supported: \
+                             {field_identifier}"
+                        ),
+                        SqlState::optional_feature_not_implemented(),
+                    )
+                } else {
+                    OdbcError::general(
+                        format!("Invalid descriptor field identifier: {field_identifier}"),
+                        SqlState::invalid_descriptor_field_identifier(),
+                    )
+                }
             })?;
 
             // SQL_DESC_COUNT is a header field describing the whole result set, not a
@@ -6036,6 +6088,101 @@ mod tests {
             crate::test_utils::cleanup_connected_env_conn_stmt::<MockFailingDescribeBackend>(
                 env, conn, stmt,
             );
+        }
+    }
+
+    /// `HY091` and `HYC00` are different questions, and both rows are un-`(DM)`
+    /// so both are core's to answer. The spec:
+    ///
+    /// - `HY091` — "The value specified for the argument *FieldIdentifier* was
+    ///   not one of the defined values and was not an implementation-defined
+    ///   value."
+    /// - `HYC00` — "The value specified for the argument *FieldIdentifier* was
+    ///   not supported by the driver."
+    ///
+    /// `desc_from_raw` returning `None` is precisely the first condition, and
+    /// core defines no implementation-defined fields. Answering `HYC00` for it
+    /// left an application unable to tell a garbage identifier from a valid
+    /// extension core has not implemented. `SQLGetDescField` and
+    /// `SQLSetDescField` already answered `HY091` here (`ffi/desc.rs`'s
+    /// `field_from_raw`); `SQLColAttributeW` was the outlier.
+    #[test]
+    fn col_attribute_undefined_field_identifier_is_hy091() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            stmt_with_named_column(stmt);
+
+            // Not a `Desc` value, and not in any ODBC header.
+            const UNDEFINED_FIELD: u16 = 4242;
+            let mut numeric: isize = 0;
+            assert_eq!(
+                sql_col_attribute_w::<MockBackend>(
+                    stmt,
+                    1,
+                    UNDEFINED_FIELD,
+                    std::ptr::null_mut(),
+                    0,
+                    std::ptr::null_mut(),
+                    &mut numeric,
+                ),
+                SqlReturn::ERROR,
+            );
+            assert_eq!(
+                first_sqlstate::<MockBackend>(stmt),
+                crate::types::sql_state::INVALID_DESCRIPTOR_FIELD_IDENTIFIER,
+            );
+
+            cleanup(env, conn, stmt);
+        }
+    }
+
+    /// The guard against over-reach on the test above. `SQL_COLUMN_LENGTH`,
+    /// `SQL_COLUMN_PRECISION` and `SQL_COLUMN_SCALE` are the ODBC 2.x spellings
+    /// of three fields, and they *are* defined values — so they take `HYC00`
+    /// ("not supported by the driver"), never `HY091` ("not one of the defined
+    /// values"). Reaching them through the `None` branch would report the wrong
+    /// one of the two.
+    ///
+    /// Core does not implement them yet. `SQLColAttribute`'s Backward
+    /// Compatibility section says it should — "An ODBC 3.x driver must support
+    /// both 'SQL_COLUMN' and 'SQL_DESC' values for these three
+    /// *FieldIdentifiers*" — and that is tracked separately, because the three
+    /// carry ODBC 2.x semantics that differ from their 3.x counterparts
+    /// (see Appendix D, "Column Size, Decimal Digits, Transfer Octet Length,
+    /// and Display Size"). This test pins the SQLSTATE, not the support.
+    #[test]
+    fn col_attribute_odbc_2x_column_field_identifiers_are_hyc00_not_hy091() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            stmt_with_named_column(stmt);
+
+            for field in [
+                crate::types::SQL_COLUMN_LENGTH,
+                crate::types::SQL_COLUMN_PRECISION,
+                crate::types::SQL_COLUMN_SCALE,
+            ] {
+                let mut numeric: isize = 0;
+                assert_eq!(
+                    sql_col_attribute_w::<MockBackend>(
+                        stmt,
+                        1,
+                        field,
+                        std::ptr::null_mut(),
+                        0,
+                        std::ptr::null_mut(),
+                        &mut numeric,
+                    ),
+                    SqlReturn::ERROR,
+                );
+                assert_eq!(
+                    first_sqlstate::<MockBackend>(stmt),
+                    crate::types::sql_state::OPTIONAL_FEATURE_NOT_IMPLEMENTED,
+                    "field {field} is a defined ODBC 2.x identifier, so it is \
+                     unsupported (HYC00), not undefined (HY091)",
+                );
+            }
+
+            cleanup(env, conn, stmt);
         }
     }
 

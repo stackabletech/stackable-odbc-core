@@ -30,18 +30,6 @@ repos:
         stages: [pre-commit, pre-merge-commit]
         pass_filenames: false
         files: \.rs$|Cargo\.(toml|lock)
-      # A test function carrying two `#[test]` attributes is registered twice
-      # and its neighbour, whose attribute was absorbed, silently stops
-      # running. Both outcomes leave the suite green, so only the registered
-      # names expose them.
-      - id: no-duplicate-test-names
-        name: no-duplicate-test-names
-        language: system
-        entry: ./scripts/no-duplicate-test-names.sh
-        stages: [pre-commit, pre-merge-commit]
-        pass_filenames: false
-        files: \.rs$
-
       - id: cargo-rustfmt
         name: cargo-rustfmt
         language: system

@@ -22,6 +22,31 @@ use crate::utf16::{utf16_to_string, utf16_to_string_named, write_utf16};
 /// resulting connection in the handle. If `out_connection_string` is non-null
 /// the input connection string is echoed back (truncated if necessary).
 ///
+/// # The echo is verbatim, including credentials
+///
+/// *OutConnectionString* carries whatever the application passed in, with any
+/// keywords resolved from a DSN merged in — so a `PWD=` or a driver-specific
+/// credential keyword comes back in cleartext. This is deliberate, and the
+/// reason is what the argument is *for*: the spec's own description is a
+/// "completed connection string", and applications persist it to reconnect
+/// without prompting again. Redacting it would hand back a string that no
+/// longer connects, which is a silent failure at the next startup rather than a
+/// visible one now.
+///
+/// [`Backend::sensitive_connect_keywords`]
+/// does **not** govern this. It drives `Debug` redaction — see
+/// [`Redacted`](crate::types::Redacted) — which is a different threat: a log file is
+/// written to a path the application did not choose, is often collected
+/// centrally, and is read by people who never had the credential. The echo goes
+/// back to the caller that supplied the string in the first place, so it
+/// discloses nothing that caller did not already hold.
+///
+/// What follows from that split, for a driver author: a credential must be
+/// declared in `sensitive_connect_keywords` so it stays out of logs, and it
+/// will still appear in the echo. An application that persists
+/// *OutConnectionString* inherits responsibility for storing it as a secret —
+/// the same responsibility it already had for the string it passed in.
+///
 /// # Parameters
 ///
 /// - `connection_handle`: Connection handle.

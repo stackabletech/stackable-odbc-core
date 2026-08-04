@@ -175,8 +175,13 @@ fn zero_row_searched_dml<B: Backend>(stmt: &StatementHandle<B>) -> bool {
 /// - HY090: Invalid string or buffer length — only the first sentence, `TextLength <= 0` and
 ///   `!= SQL_NTS`, is `(DM)`-marked; it is guarded defensively here. The three sentences that
 ///   follow it are not marked and are the driver's: each describes a parameter length value
-///   set with `SQLBindParameter` that the row rules out. Those are propagated from the
-///   backend.
+///   set with `SQLBindParameter` that the row rules out. The sentence naming a non-null
+///   parameter value "and the parameter length value was less than 0, but not equal to
+///   `SQL_NTS`, `SQL_NULL_DATA`, `SQL_DATA_AT_EXEC`, `SQL_DEFAULT_PARAM`, or less than or equal
+///   to `SQL_LEN_DATA_AT_EXEC_OFFSET`" is **returned by this driver**, from
+///   `ffi::params::read_param_value`. Every such negative used to be folded into `SQL_NTS`,
+///   which bound the whole null-terminated string and answered `SUCCESS`. The remaining
+///   sentences are propagated from the backend.
 ///
 ///   **Also returned here**, for a condition none of those four sentences states: an
 ///   `SQL_NTS` argument whose null terminator is not within `MAX_NTS_SCAN` (1 048 576) units,
@@ -701,7 +706,12 @@ pub unsafe fn sql_prepare_w<B: Backend>(
 ///   check is guarded here for the same reason.
 /// - HY013: Memory management error — propagated from backend.
 /// - HY090: Invalid string or buffer length — propagated from backend (parameter buffer length
-///   validation). **Also returned here**, for a bound `SQL_C_CHAR` or `SQL_C_WCHAR`
+///   validation). **Also returned here** for a bound parameter whose length indicator is
+///   negative and names none of `SQL_NTS`, `SQL_NULL_DATA`, `SQL_DEFAULT_PARAM`,
+///   `SQL_DATA_AT_EXEC` or `SQL_LEN_DATA_AT_EXEC(n)` — the row's own third sentence. Such a
+///   value used to be folded into `SQL_NTS`, so `SQL_NO_TOTAL` and any stale negative bound
+///   the whole null-terminated string and answered `SUCCESS`. **And returned here**, for a
+///   bound `SQL_C_CHAR` or `SQL_C_WCHAR`
 ///   parameter whose `SQL_NTS` (or absent) length indicator sends core scanning and whose
 ///   null terminator is not within `MAX_NTS_SCAN` (1 048 576) units. Those two C types are the
 ///   complete set: every other bound type has a fixed width or an explicit indicator, and

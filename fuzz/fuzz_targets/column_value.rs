@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-use stackable_odbc_core::column_value::write_column_value;
+use stackable_odbc_core::column_value::{NumericTarget, write_column_value};
 use stackable_odbc_core::types::{CDataType, ColumnValue};
 use std::ffi::c_void;
 
@@ -102,6 +102,14 @@ struct Input {
     value: FuzzValue,
     target: u8,
     buf_len: u8,
+    // The ARD's SQL_DESC_PRECISION and SQL_DESC_SCALE, which only SQL_C_NUMERIC
+    // reads. Fuzzed rather than fixed: they drive a digit-string rescale and a
+    // u128 range check inside `to_numeric_struct`, so they are live input to
+    // the newest marshalling path rather than a constant to pass through.
+    // `i16` in full, including the negative values a real application can set,
+    // because rejecting those is part of what is under test.
+    precision: i16,
+    scale: i16,
 }
 
 fuzz_target!(|input: Input| {
@@ -157,6 +165,16 @@ fuzz_target!(|input: Input| {
         let buf = arena.as_mut_ptr().cast::<u8>().add(1);
         let ind = ind_arena.as_mut_ptr().cast::<u8>().add(1).cast::<isize>();
         debug_assert!(!ind.is_aligned(), "the point of the offset");
-        let _ = write_column_value(&value, target, buf as *mut c_void, buf_len, ind);
+        let _ = write_column_value(
+            &value,
+            target,
+            buf as *mut c_void,
+            buf_len,
+            ind,
+            NumericTarget {
+                precision: input.precision,
+                scale: input.scale,
+            },
+        );
     }
 });

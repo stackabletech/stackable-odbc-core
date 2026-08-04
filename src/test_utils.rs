@@ -4918,3 +4918,158 @@ impl Backend for MockCountingBackend {
 
     minimal_capability_decls!();
 }
+
+// ---------------------------------------------------------------------------
+// MockTruncatingBackend — a backend that reports its own precision loss
+// ---------------------------------------------------------------------------
+
+/// A statement whose `get_data` succeeds and then reports that it dropped
+/// fractional precision producing the value.
+///
+/// This is the shape `StatementBackend::take_value_warning` exists for: a
+/// driver converting a `timestamp(12)` to nine fractional digits loses those
+/// digits inside its own type conversion, before a `ColumnValue` exists, so
+/// core cannot detect the loss and used to answer `SQL_SUCCESS` with no
+/// diagnostic at all.
+///
+/// The warning is **taken**, not held: the flag is cleared on read, so a test
+/// can tell "drained once per value" from "reported forever". A mock that
+/// always returned `Some` would pass either way, which is the whole point of
+/// the `take_` naming on the trait method.
+#[derive(Default)]
+pub struct MockTruncatingStatement {
+    rows_left: u8,
+    /// Set by `get_data`, cleared by `take_value_warning`.
+    pending: Option<crate::types::ValueWarning>,
+}
+
+impl StatementBackend for MockTruncatingStatement {
+    type Error = OdbcError;
+
+    fn column_count(&self) -> i16 {
+        2
+    }
+
+    fn fetch(&mut self) -> Result<crate::types::FetchResult, OdbcError> {
+        if self.rows_left == 0 {
+            return Ok(crate::types::FetchResult::NoData);
+        }
+        self.rows_left -= 1;
+        Ok(crate::types::FetchResult::Row)
+    }
+
+    fn get_data(
+        &mut self,
+        col: u16,
+        _target_type: crate::types::CDataType,
+    ) -> Result<std::borrow::Cow<'_, crate::types::ColumnValue>, OdbcError> {
+        // Only column 1 loses precision, so a test can prove the warning
+        // belongs to the value rather than to the row.
+        if col == 1 {
+            self.pending = Some(crate::types::ValueWarning::FractionalTruncation);
+        }
+        Ok(std::borrow::Cow::Owned(crate::types::ColumnValue::I64(
+            i64::from(col),
+        )))
+    }
+
+    fn take_value_warning(&mut self) -> Option<crate::types::ValueWarning> {
+        self.pending.take()
+    }
+}
+
+/// Hands out [`MockTruncatingStatement`]s.
+pub struct MockTruncatingBackend;
+
+impl Backend for MockTruncatingBackend {
+    type Connection = MockConnection;
+    type Statement = MockTruncatingStatement;
+    type Error = OdbcError;
+    type CancelToken = MockCancelToken;
+
+    fn connect(_: &ConnectParams) -> Result<MockConnection, OdbcError> {
+        Ok(MockConnection)
+    }
+    fn disconnect(_: &mut MockConnection) -> Result<(), OdbcError> {
+        Ok(())
+    }
+    fn cancel_token(_conn: &Self::Connection) -> Self::CancelToken {
+        MockCancelToken::default()
+    }
+    fn exec_direct(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: &str,
+    ) -> Result<MockTruncatingStatement, OdbcError> {
+        Ok(MockTruncatingStatement {
+            rows_left: 2,
+            pending: None,
+        })
+    }
+    fn prepare(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: &str,
+    ) -> Result<MockTruncatingStatement, OdbcError> {
+        Ok(MockTruncatingStatement {
+            rows_left: 2,
+            pending: None,
+        })
+    }
+    fn execute(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: &mut MockTruncatingStatement,
+        _: &[crate::types::ColumnValue],
+    ) -> Result<crate::types::ExecuteOutcome, OdbcError> {
+        Ok(crate::types::ExecuteOutcome::default())
+    }
+    fn get_info(_: &MockConnection, _: crate::types::InfoType) -> Result<InfoValue, OdbcError> {
+        Err(OdbcError::NotImplemented {
+            feature: "get_info".into(),
+        })
+    }
+    fn get_functions() -> Cow<'static, [crate::function_id::FunctionId]> {
+        Cow::Borrowed(&[])
+    }
+    fn get_type_info(_conn: &Self::Connection) -> Cow<'static, [TypeInfoRow]> {
+        Cow::Borrowed(&[])
+    }
+    fn tables(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: &crate::types::TablesQuery<'_>,
+    ) -> Result<Vec<TableRow>, OdbcError> {
+        Err(OdbcError::NotImplemented {
+            feature: "tables".into(),
+        })
+    }
+    fn columns(
+        _: &MockConnection,
+        _: &Self::CancelToken,
+        _: &crate::types::ColumnsQuery<'_>,
+    ) -> Result<Vec<ColumnRow>, OdbcError> {
+        Err(OdbcError::NotImplemented {
+            feature: "columns".into(),
+        })
+    }
+    fn supports_catalogs(_conn: &Self::Connection) -> bool {
+        false
+    }
+    fn supports_schemas(_conn: &Self::Connection) -> bool {
+        false
+    }
+    fn alter_table_support(_conn: &Self::Connection) -> u32 {
+        0
+    }
+    fn outer_join_capabilities(_conn: &Self::Connection) -> u32 {
+        0
+    }
+    fn default_txn_isolation(_conn: &Self::Connection) -> u32 {
+        crate::types::SQL_TXN_SERIALIZABLE
+    }
+    fn txn_isolation_options(_conn: &Self::Connection) -> u32 {
+        crate::types::SQL_TXN_SERIALIZABLE
+    }
+    minimal_capability_decls!();
+}

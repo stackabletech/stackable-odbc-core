@@ -11,7 +11,7 @@ use crate::types::{
     CatalogResultColumnWidths, ColumnDescriptor, ColumnPrivilegeRow, ColumnRow, ColumnValue,
     ConnectParams, ExecuteOutcome, FetchResult, ForeignKeyRow, InfoValue, PrimaryKeyRow,
     ProcedureColumnRow, ProcedureRow, SpecialColumnRow, StatisticsRow, TablePrivilegeRow, TableRow,
-    TypeInfoRow,
+    TypeInfoRow, ValueWarning,
 };
 
 /// Core abstraction for database-specific logic.
@@ -1699,6 +1699,41 @@ pub trait StatementBackend: Send + Sync {
             feature: "get_data".into(),
         }
         .into())
+    }
+
+    /// A warning raised while producing the value [`Self::get_data`] just
+    /// returned, taken so it is reported once.
+    ///
+    /// Core calls this immediately after **every** `get_data`, on both paths
+    /// that read a value: `SQLGetData`, and `SQLFetch`'s bound-column loop.
+    /// A returned warning is posted to the statement's diagnostic queue and the
+    /// call reports `SQL_SUCCESS_WITH_INFO`.
+    ///
+    /// # When to use it
+    ///
+    /// Only for precision a backend dropped in its *own* conversion, before a
+    /// [`ColumnValue`] existed — which is precisely what core cannot see. A
+    /// backend delivering nine fractional digits for a `timestamp(12)` column
+    /// returns [`ValueWarning::FractionalTruncation`] here and caps its declared
+    /// `decimal_digits` to match.
+    ///
+    /// **This is not an error channel.** Returning a warning does not make the
+    /// call fail; a condition that should fail belongs in `get_data`'s `Err`
+    /// arm. And core raises `01S07` itself where *it* drops precision, so a
+    /// backend must not also report a loss core is going to detect — that
+    /// would post the record twice.
+    ///
+    /// # Taken, not read
+    ///
+    /// The name is `take_` because core calls it once per value and expects the
+    /// warning to be cleared: a backend that returns the same warning forever
+    /// attaches it to every subsequent column of every subsequent row.
+    ///
+    /// Returns `Option` rather than a collection deliberately — `get_data` is
+    /// the hottest path in the crate, and a `Vec` would allocate on every
+    /// column of every row to carry nothing in the overwhelming case.
+    fn take_value_warning(&mut self) -> Option<ValueWarning> {
+        None
     }
 
     /// Returns the number of columns in the result set.

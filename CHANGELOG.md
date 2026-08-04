@@ -156,6 +156,27 @@ call `SQLCloseCursor` or `SQLFreeStmt(SQL_CLOSE)` first, as it already must for
 
 ### Added
 
+- **`StatementBackend::take_value_warning`, so a backend can raise `01S07` for
+  precision it dropped itself.** Core already raises `01S07` where *it* drops
+  precision — a non-zero `ColumnValue::Time` fraction written to
+  `SQL_C_TYPE_TIME`, or a fraction lost reaching an exact-integer C type — but a
+  driver that loses precision in its own type conversion does so before a
+  `ColumnValue` exists, so core never saw it. A driver reporting
+  `decimal_digits = 12` for a `timestamp(12)` column and delivering nine
+  returned `SQL_SUCCESS` with no diagnostic at all, and could not be fixed
+  driver-side.
+
+  The method is defaulted to `None`, so no existing driver changes. Core drains
+  it immediately after every `get_data`, on both paths that read a value:
+  `SQLGetData`, and `SQLFetch`'s bound-column loop. A returned
+  `ValueWarning::FractionalTruncation` is posted to the statement's diagnostic
+  queue and the call reports `SQL_SUCCESS_WITH_INFO`.
+
+  This is the first mechanism by which a backend attaches a diagnostic to a
+  value it produced *successfully*; everything else is either a hard error or a
+  condition core detects itself. It is not an error channel — returning a
+  warning does not make the call fail. `ValueWarning` is `#[non_exhaustive]`.
+
 - **`into_values` on the ten catalog row types**, beside the existing
   `to_values`. It consumes the row, so the strings move instead of being cloned:
   measured at **0.40×** the borrowing form for a 50 000-row result set (3.28 ms →
@@ -1602,6 +1623,103 @@ call `SQLCloseCursor` or `SQLFreeStmt(SQL_CLOSE)` first, as it already must for
   compared against. Use `HeaderDiagnosticIdentifier::MessageText as i16`.
 
 ### Fixed
+
+- **`SQL_C_GUID` is a supported retrieval target.** `ColumnValue::Guid`
+  converted to `SQL_C_BINARY` and `SQL_C_CHAR` but its own C type answered
+  `07006`. The *SQL to C: GUID* table gives it one row — test "None", data
+  written, indicator 16, no SQLSTATE — and there is no failure case.
+
+  A character column read as `SQL_C_GUID` **keeps** `07006`, and that is
+  correct rather than a remaining gap: `SQL_C_GUID` appears in exactly one
+  conversion table, whose only source type is `SQL_GUID`, and the
+  *SQL to C: Character* table has no `SQL_C_GUID` row. The overview page
+  prescribes `07006` for "an identifier for an ODBC C data type not shown in
+  the table for a given ODBC SQL data type", so a `22018` bad-GUID-parse would
+  be inventing a cell the spec does not have.
+
+- **`SQL_C_NUMERIC` is a supported retrieval target.** It had no arm in
+  `write_column_value` at all, so every value returned `07006` through both
+  `SQLGetData` and `SQLBindCol`+`SQLFetch`, while the same C type worked as an
+  *input* parameter. `SQL_C_NUMERIC` shares the *SQL to C: Numeric* table's
+  exact-integer row with `SQL_C_SLONG` and `SQL_C_SBIGINT` — outcomes n/a,
+  `01S07` and `22003` — and the overview page states that drivers "are required
+  to support conversions to all ODBC C data types from the ODBC SQL data types
+  that they support". It is the natural C type for a `DECIMAL` column, so a
+  driver advertising one had no way to deliver it losslessly.
+
+  **Breaking:** `write_column_value` and `write_column_value_at` take a new
+  final `NumericTarget` argument carrying the ARD's `SQL_DESC_PRECISION` and
+  `SQL_DESC_SCALE`, which the spec makes the application's way of declaring a
+  `SQL_NUMERIC_STRUCT`'s layout ("**SQLSetDescField** is required to perform
+  manual binding with SQL_C_NUMERIC values"). Pass `NumericTarget::UNSPECIFIED`
+  where there is no descriptor; the value then describes itself. Only a driver
+  calling these helpers directly is affected.
+
+- **A float read as text renders within the display size ODBC defines for it.**
+  The *Display Size* appendix does not just give a number, it says what the
+  number is made of: `SQL_FLOAT`/`SQL_DOUBLE` is "24 (a sign, 15 digits, a
+  decimal point, the letter *E*, a sign, and 3 digits)" and `SQL_REAL` is "14 (a
+  sign, 7 digits, a decimal point, the letter *E*, a sign, and 2 digits)". Both
+  describe an **exponent** rendering, and `SQLColAttribute`/`SQLDescribeCol`
+  already reported 24 and 14 on the strength of those sentences.
+
+  Rust's `Display` for floats never emits an exponent, so core promised a
+  24-character exponent form and produced a positional one up to 326 characters
+  long. `f64::MAX` was a hard `22003` against a display-size buffer, and
+  `4.9e-324` was worse — its first 24 positional characters are
+  `0.00000000000000000000000`, so an application read **zero**, flagged `01004`
+  ("truncated"), which is a different claim from "wrong".
+
+  A float now switches to exponent notation only when its positional rendering
+  exceeds the display size, so `1.5` is still `"1.5"`. The exponent form keeps
+  shortest-round-trip precision rather than truncating to the 15 digits the
+  appendix names, because 24 is a maximum width rather than a precision and 17
+  digits are what an `f64` needs to survive the round trip.
+
+- **A bound parameter's undefined negative length indicator is `HY090`, not a
+  silent `SQL_NTS`.** `SQLBindParameter`'s *StrLen_or_IndPtr* defines exactly
+  five negative values — `SQL_NTS`, `SQL_NULL_DATA`, `SQL_DEFAULT_PARAM`,
+  `SQL_DATA_AT_EXEC` and `SQL_LEN_DATA_AT_EXEC(n)`. Both character arms folded
+  *every* negative into `SQL_NTS`, so `SQL_NO_TOTAL` (-4), -6 and -42 bound the
+  whole null-terminated string and returned `SQL_SUCCESS`: the application asked
+  for something undefined and got a value sent to the data source with no
+  diagnostic. `SQLExecDirect`'s and `SQLExecute`'s `HY090` rows state this
+  condition themselves and carry no Driver-Manager marker for it.
+
+  `SQLPutData` already refused the same class. **`SQL_DEFAULT_PARAM` now
+  resolves to NULL on the bound path too**, which is the ruling `SQLPutData`'s
+  documentation already recorded — it names a procedure parameter's default, and
+  core refuses `{call ...}` with `HYC00`, so no statement core executes has one.
+  It previously bound the null-terminated string at the buffer, like the
+  undefined values.
+
+- **`SQLGetData` range-checks the column ordinal itself, and answers `07009`.**
+  A column number greater than the number of columns in the result set reached
+  the backend, which answered with whatever its own error mapping produced —
+  usually `HY000`. The clause carries no Driver-Manager marker, so it is the
+  driver's to return.
+
+  The reason recorded for delegating it was that "a precise check would require
+  an extra round-trip to obtain the column count". That was false:
+  `StatementBackend::column_count` is a local accessor with no I/O behind it,
+  and core already range-checks `describe_col` against the same call. A driver
+  that worked around this in its own `get_data` can drop the workaround.
+
+- **`SQLColAttributeW` answers `HY091` for a field identifier that is not a
+  defined value.** It previously answered `HYC00` for every identifier it did
+  not recognise. The spec makes these two different claims, and neither row
+  carries a Driver-Manager marker, so both are the driver's to return: `HY091`
+  is "not one of the defined values and was not an implementation-defined
+  value", while `HYC00` is "not supported by the driver". Collapsing them left
+  an application unable to tell a garbage identifier from a valid extension the
+  driver has not implemented. `SQLGetDescFieldW` and `SQLSetDescFieldW` already
+  drew this line; `SQLColAttributeW` was the outlier.
+
+  `SQL_COLUMN_LENGTH` (3), `SQL_COLUMN_PRECISION` (4) and `SQL_COLUMN_SCALE` (5)
+  — the ODBC 2.x spellings of three fields — keep `HYC00`, because they *are*
+  defined identifiers. Core does not implement them yet; the spec's Backward
+  Compatibility section says an ODBC 3.x driver should, and their ODBC 2.x
+  semantics differ from their 3.x counterparts, so that is tracked separately.
 
 - **A chunked `SQLGetData` no longer re-reads and re-converts the whole column
   for every part.** Each call asked the backend for the value again and converted

@@ -386,6 +386,15 @@ pub(crate) const MAX_ODBC_DECIMAL_PRECISION: usize = 38;
 /// the second is outside the driver's trust boundary.
 pub(crate) const MAX_DECIMAL_EXPANSION_DIGITS: usize = 1 << 20;
 
+/// The most decimal digits a `u128` can hold, and so the most a
+/// `SQL_NUMERIC_STRUCT`'s 16-byte `val` can carry.
+///
+/// `u128::MAX` is 340282366920938463463374607431768211455 — 39 digits. Used by
+/// [`DecimalLiteral::to_numeric_struct`] to reject a shift before expanding it
+/// into a string, so a large exponent is `22003` rather than a multi-gigabyte
+/// allocation.
+const MAX_U128_DIGITS: usize = 39;
+
 /// A plain-decimal rendering of the widest exact numeric type any mainstream
 /// data source offers: PostgreSQL's `numeric`, documented at up to 131 072
 /// digits before the decimal point and 16 383 after it. Every other candidate
@@ -669,6 +678,109 @@ impl DecimalLiteral {
             .checked_sub(scale)
             .map_or(self.digits.as_str(), |point| &self.digits[point..]);
         fraction.bytes().all(|b| b == b'0')
+    }
+
+    /// Render as a `SQL_NUMERIC_STRUCT` for `SQL_C_NUMERIC`, plus whether
+    /// fractional digits were dropped doing it.
+    ///
+    /// Spec: <https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/sql-to-c-numeric>
+    ///
+    /// The struct is `±val × 10⁻ˢᶜᵃˡᵉ` with `val` a little-endian *unsigned*
+    /// magnitude and no decimal point, which is the same shape a
+    /// [`DecimalLiteral`] already has — so this is a rescale and a base
+    /// conversion, not a numeric conversion, and the digits never pass through a
+    /// float.
+    ///
+    /// `val` is exactly [`odbc_sys::MAX_NUMERIC_LEN`] = 16 bytes, so the
+    /// magnitude is a `u128` and "does it fit" is `u128::try_from`. A magnitude
+    /// that does not fit is the table's third outcome, `22003`; dropping a
+    /// non-zero fractional digit is its second, `01S07`, reported through the
+    /// returned flag because the row still writes the truncated data.
+    ///
+    /// Returning the flag rather than the SQLSTATE keeps this function about
+    /// the *number*: the caller owns which of the row's three outcomes it is,
+    /// and the caller is the one holding the output pointers.
+    pub(crate) fn to_numeric_struct(
+        &self,
+        target: crate::column_value::NumericTarget,
+    ) -> Result<(odbc_sys::Numeric, bool), OdbcError> {
+        let out_of_range = || {
+            OdbcError::general(
+                format!(
+                    "Numeric value out of range: {} does not fit a SQL_NUMERIC_STRUCT",
+                    self.to_decimal_string()
+                ),
+                SqlState::numeric_value_out_of_range(),
+            )
+        };
+
+        // A declared precision means the application dictated the layout; zero
+        // means it declared nothing, and the value describes itself. Zero is
+        // not a legal SQL_NUMERIC_STRUCT precision, which is what makes it
+        // usable as the "unspecified" marker.
+        let declared = target.precision != 0;
+        let scale = if declared {
+            i32::from(target.scale)
+        } else {
+            i32::try_from(self.required_scale()).map_err(|_| out_of_range())?
+        };
+
+        // `val` holds `value × 10^scale`, so the digit string shifts by the
+        // difference between the scale asked for and the one this literal
+        // carries.
+        let shift = scale.checked_sub(self.scale).ok_or_else(out_of_range)?;
+        let (digits, fraction_lost) = if shift >= 0 {
+            let pad = usize::try_from(shift).map_err(|_| out_of_range())?;
+            // A u128 holds 39 digits; anything past that cannot fit `val`, and
+            // this is also what stops a large exponent expanding into a
+            // multi-gigabyte string before the range check can reject it.
+            if pad > MAX_U128_DIGITS {
+                return Err(out_of_range());
+            }
+            let mut d = String::with_capacity(self.digits.len() + pad);
+            d.push_str(&self.digits);
+            d.extend(std::iter::repeat_n('0', pad));
+            (d, false)
+        } else {
+            let drop = usize::try_from(-shift).map_err(|_| out_of_range())?;
+            let keep = self.digits.len().saturating_sub(drop);
+            // Truncated toward zero, per the row's "truncation of fractional
+            // digits". Only a non-zero digit is a loss: `1.500` to scale 1 is
+            // exact.
+            let lost = self.digits[keep..].bytes().any(|b| b != b'0');
+            (self.digits[..keep].to_owned(), lost)
+        };
+
+        let magnitude: u128 = if digits.is_empty() {
+            0
+        } else {
+            digits.parse::<u128>().map_err(|_| out_of_range())?
+        };
+
+        // A declared precision is a hard limit on the digit count, not a hint:
+        // the application sized its reading of `val` by it.
+        let significant = digits.trim_start_matches('0').len();
+        if declared && significant > usize::try_from(target.precision).unwrap_or(0) {
+            return Err(out_of_range());
+        }
+
+        let precision = if declared {
+            u8::try_from(target.precision).map_err(|_| out_of_range())?
+        } else {
+            u8::try_from(significant.max(1)).map_err(|_| out_of_range())?
+        };
+
+        Ok((
+            odbc_sys::Numeric {
+                precision,
+                scale: i8::try_from(scale).map_err(|_| out_of_range())?,
+                // odbc-sys: "1 if positive, 0 if negative". The opposite of a
+                // sign bit, and the field most easily inverted by habit.
+                sign: u8::from(!self.negative),
+                val: magnitude.to_le_bytes(),
+            },
+            fraction_lost,
+        ))
     }
 
     /// The value truncated toward zero, or `None` if it does not fit `i128`.
@@ -1030,6 +1142,190 @@ fn retype_datetime_error(e: OdbcError, text: &str, sql_type: &str) -> OdbcError 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---------------------------------------------------------------------
+    // to_numeric_struct — the SQL to C: Numeric exact row, as a number
+    // ---------------------------------------------------------------------
+
+    use crate::column_value::NumericTarget;
+
+    /// Parse and convert in one step, for the tests below.
+    fn to_numeric(text: &str, target: NumericTarget) -> (odbc_sys::Numeric, bool) {
+        parse_numeric_literal(text)
+            .expect("test input must be a numeric literal")
+            .to_numeric_struct(target)
+            .expect("test input must fit a SQL_NUMERIC_STRUCT")
+    }
+
+    /// `val` is documented as "a little-endian array of bytes ... an unsigned
+    /// integer without any decimal point", and `odbc-sys` gives the canonical
+    /// example: "-123.45 with precision 5 and scale 2 is stored as 12345".
+    /// This is that example, verbatim.
+    #[test]
+    fn the_odbc_sys_worked_example_round_trips() {
+        let (n, lost) = to_numeric(
+            "-123.45",
+            NumericTarget {
+                precision: 5,
+                scale: 2,
+            },
+        );
+        assert_eq!(n.precision, 5);
+        assert_eq!(n.scale, 2);
+        assert_eq!(u128::from_le_bytes(n.val), 12345);
+        assert!(!lost, "the declared scale holds every digit");
+        assert_eq!(n.sign, 0, "negative");
+    }
+
+    /// The sign byte is the field most likely to be inverted by habit:
+    /// `odbc-sys` documents it as "1 if positive, 0 if negative", which is the
+    /// opposite of a sign *bit*. Both directions, so an inversion cannot pass.
+    #[test]
+    fn a_negative_value_sets_the_numeric_sign_byte_to_zero() {
+        let unspecified = NumericTarget::UNSPECIFIED;
+        assert_eq!(to_numeric("-1", unspecified).0.sign, 0, "negative is 0");
+        assert_eq!(to_numeric("1", unspecified).0.sign, 1, "positive is 1");
+        // Zero is not negative.
+        assert_eq!(to_numeric("0", unspecified).0.sign, 1);
+        // The magnitude is unsigned: -1 and 1 differ only in `sign`.
+        assert_eq!(
+            u128::from_le_bytes(to_numeric("-1", unspecified).0.val),
+            u128::from_le_bytes(to_numeric("1", unspecified).0.val),
+        );
+    }
+
+    /// With no declared precision the value describes itself, which is what the
+    /// struct's own `precision`/`scale` fields are for. Zero is not a legal
+    /// precision, so it is usable as the "application said nothing" marker.
+    #[test]
+    fn an_unspecified_target_takes_precision_and_scale_from_the_value() {
+        let (n, lost) = to_numeric("12.345", NumericTarget::UNSPECIFIED);
+        assert_eq!(n.scale, 3);
+        assert_eq!(n.precision, 5);
+        assert_eq!(u128::from_le_bytes(n.val), 12345);
+        assert!(!lost);
+    }
+
+    /// The row's second outcome: "Data converted with truncation of fractional
+    /// digits" → truncated data *and* `01S07`. The data is still written, so
+    /// this reports a flag rather than an error, and the caller decides.
+    #[test]
+    fn dropping_a_non_zero_fractional_digit_reports_truncation() {
+        let (n, lost) = to_numeric(
+            "1.239",
+            NumericTarget {
+                precision: 5,
+                scale: 2,
+            },
+        );
+        assert_eq!(u128::from_le_bytes(n.val), 123, "truncated toward zero");
+        assert_eq!(n.scale, 2);
+        assert!(lost, "the 9 was dropped and 01S07 says so");
+    }
+
+    /// The guard against a false `01S07`: dropping a *zero* loses nothing.
+    /// `1.500` at scale 1 is exactly `1.5`, and the spec's truncation test is
+    /// about what the conversion would lose.
+    #[test]
+    fn dropping_only_zeros_is_not_truncation() {
+        let (n, lost) = to_numeric(
+            "1.500",
+            NumericTarget {
+                precision: 5,
+                scale: 1,
+            },
+        );
+        assert_eq!(u128::from_le_bytes(n.val), 15);
+        assert!(!lost, "1.500 -> 1.5 loses nothing");
+    }
+
+    /// Scaling *up* pads with zeros and loses nothing: `1.5` at scale 4 is
+    /// `15000 × 10⁻⁴`.
+    #[test]
+    fn a_larger_declared_scale_pads_rather_than_truncates() {
+        let (n, lost) = to_numeric(
+            "1.5",
+            NumericTarget {
+                precision: 10,
+                scale: 4,
+            },
+        );
+        assert_eq!(u128::from_le_bytes(n.val), 15000);
+        assert_eq!(n.scale, 4);
+        assert!(!lost);
+    }
+
+    /// A negative literal scale is how an exponent larger than the fraction is
+    /// carried — `1.5e2` is digits `15` at scale `-1`. It must reach `val` as
+    /// 150, not 15.
+    #[test]
+    fn an_exponent_literal_expands_into_the_magnitude() {
+        let (n, _) = to_numeric("1.5e2", NumericTarget::UNSPECIFIED);
+        assert_eq!(u128::from_le_bytes(n.val), 150);
+        assert_eq!(n.scale, 0);
+    }
+
+    /// The row's third outcome, `22003`: a magnitude no `SQL_NUMERIC_STRUCT`
+    /// holds. `val` is 16 bytes, so the bound is `u128::MAX`.
+    ///
+    /// The digit *count* and the bound are not the same test, which is the
+    /// trap here. `u128::MAX` is 340282366920938463463374607431768211455 — 39
+    /// digits — but only the first ~3.4 of every 10 such numbers fit, so 39
+    /// nines (≈10³⁹) overflows while 38 nines (≈10³⁸) does not.
+    /// [`MAX_U128_DIGITS`] is therefore only a cheap pre-expansion guard
+    /// against a pathological exponent; the real bound is the `parse::<u128>`
+    /// itself.
+    #[test]
+    fn a_magnitude_past_u128_is_22003() {
+        for digits in [39, 40] {
+            let err = parse_numeric_literal(&"9".repeat(digits))
+                .expect("a numeric literal")
+                .to_numeric_struct(NumericTarget::UNSPECIFIED)
+                .expect_err("{digits} nines must not fit 16 bytes");
+            assert_eq!(
+                err.sqlstate().as_str(),
+                crate::types::sql_state::NUMERIC_VALUE_OUT_OF_RANGE,
+                "{digits} nines",
+            );
+        }
+        // 38 nines is the widest all-nines magnitude that does fit, so the
+        // boundary is exercised from both sides.
+        let (n, _) = to_numeric(&"9".repeat(38), NumericTarget::UNSPECIFIED);
+        assert_eq!(u128::from_le_bytes(n.val), 10u128.pow(38) - 1);
+    }
+
+    /// A declared precision is a limit the application sized its reading by,
+    /// not a hint: more significant digits than it allows is `22003`.
+    #[test]
+    fn more_digits_than_the_declared_precision_is_22003() {
+        let err = parse_numeric_literal("123456")
+            .expect("a numeric literal")
+            .to_numeric_struct(NumericTarget {
+                precision: 3,
+                scale: 0,
+            })
+            .expect_err("six digits do not fit a declared precision of three");
+        assert_eq!(
+            err.sqlstate().as_str(),
+            crate::types::sql_state::NUMERIC_VALUE_OUT_OF_RANGE
+        );
+    }
+
+    /// A pathological exponent must be rejected by the digit bound *before* it
+    /// is expanded into a string, or the range check is reached only after a
+    /// multi-gigabyte allocation. This is the same denial-of-service shape
+    /// `to_integer`'s own guards exist for.
+    #[test]
+    fn a_pathological_exponent_is_rejected_without_expanding_it() {
+        let err = parse_numeric_literal("1e2000000000")
+            .expect("a numeric literal")
+            .to_numeric_struct(NumericTarget::UNSPECIFIED)
+            .expect_err("must not expand two billion digits");
+        assert_eq!(
+            err.sqlstate().as_str(),
+            crate::types::sql_state::NUMERIC_VALUE_OUT_OF_RANGE
+        );
+    }
 
     /// Convert with no declared size, which is how most of these tests want it:
     /// a precision of 0 is not a legal decimal precision, so it reads as "the
