@@ -542,10 +542,12 @@ pub(crate) fn type_info_columns(widths: &CatalogResultColumnWidths) -> Vec<Colum
 ///   left to change.
 /// - 08S01 (communication link failure): propagated from the backend via `OdbcError`.
 /// - 24000 (invalid cursor state): **returned by this driver** when a cursor is already open
-///   on the statement. The row's first clause is the Driver Manager's, which answers while
-///   `SQLFetch` has not yet returned `SQL_NO_DATA`; the other two are the driver's, and
-///   Appendix B puts this function in one transition table with the ten catalog functions,
-///   whose cursor-states row is `24000` in all three columns.
+///   on the statement. The row carries no `(DM)` marker. It splits its first condition in
+///   prose instead, giving it to the Driver Manager while `SQLFetch` has not yet returned
+///   `SQL_NO_DATA` and to the driver once it has; its remaining condition, a result set open
+///   but never fetched from, is unattributed and so the driver's outright. Appendix B puts
+///   this function in one transition table with the ten catalog functions, whose
+///   cursor-states row is `24000` in all three columns.
 /// - 40001 (serialization failure): propagated from the backend via `OdbcError` if applicable.
 /// - 40003 (statement completion unknown): propagated from the backend via `OdbcError`.
 /// - HY000 (general error): propagated via `OdbcError` for unclassified failures.

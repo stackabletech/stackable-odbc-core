@@ -137,8 +137,12 @@ fn zero_row_searched_dml<B: Backend>(stmt: &StatementHandle<B>) -> bool {
 /// - 22019: Invalid escape character. Propagated from backend.
 /// - 22025: Invalid escape sequence. Propagated from backend.
 /// - 23000: Integrity constraint violation. Propagated from backend.
-/// - 24000: Invalid cursor state. Fails if a cursor is already open on this statement (checked
-///   here); also returned by backend for positioned-update/delete on improperly positioned cursor.
+/// - 24000: Invalid cursor state. **Returned here** when a cursor is already open on the
+///   statement. The row carries no `(DM)` marker. It splits its first condition in prose
+///   instead, giving it to the Driver Manager while `SQLFetch` has not yet returned
+///   `SQL_NO_DATA` and to the driver once it has; its remaining conditions are unattributed
+///   and so the driver's. Also propagated from the backend for a positioned update or delete
+///   on an improperly positioned cursor.
 /// - 34000: Invalid cursor name. Propagated from backend.
 /// - 3D000: Invalid catalog name. Propagated from backend.
 /// - 3F000: Invalid schema name. Propagated from backend.
@@ -677,9 +681,11 @@ pub unsafe fn sql_prepare_w<B: Backend>(
 /// - 24000: Invalid cursor state. **Returned here** when a cursor is already open on the
 ///   statement, which the Comments require the application to close first: "to execute a
 ///   SELECT statement more than once, the application must call SQLCloseCursor before
-///   reexecuting". The row's other clause is the Driver Manager's, and covers the case where
-///   `SQLFetch` has not yet returned `SQL_NO_DATA`. Also propagated from the backend for a
-///   positioned update or delete on an improperly positioned cursor.
+///   reexecuting". The row carries no `(DM)` marker. It splits its first condition in prose
+///   instead, giving it to the Driver Manager while `SQLFetch` has not yet returned
+///   `SQL_NO_DATA` and to the driver once it has; its remaining conditions are unattributed
+///   and so the driver's. Also propagated from the backend for a positioned update or delete
+///   on an improperly positioned cursor.
 /// - 40001: Serialization failure. Propagated from backend.
 /// - 40003: Statement completion unknown. Propagated from backend.
 /// - 42000: Syntax error or access violation. Propagated from backend.

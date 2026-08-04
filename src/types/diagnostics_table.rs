@@ -78,6 +78,25 @@
 //! directly (by its own tests, and by an embedder with no Driver Manager in
 //! front of it) and because several of those checks are load-bearing for memory
 //! safety rather than for the spec.
+//!
+//! # A third row shape the guard does not model
+//!
+//! [`DmMarking`] records `(DM)` *markers*, and some rows divide the work in
+//! prose without printing one. The `24000` rows of `SQLExecDirect`,
+//! `SQLExecute` and `SQLGetTypeInfo` all read "This error is returned by the
+//! Driver Manager if `SQLFetch` or `SQLFetchScroll` has not returned
+//! SQL_NO_DATA, and is returned by the driver if `SQLFetch` or
+//! `SQLFetchScroll` has returned SQL_NO_DATA." That splits one condition by
+//! outcome, so both sides own it at different moments, and the row still
+//! carries no marker anywhere. `SQLPrepare`'s `24000` is the contrast: same
+//! subject, an actual `(DM)` on its first sentence, hence [`DmMarking::Split`].
+//!
+//! Those three are transcribed [`DmMarking::None`], which is what the page
+//! prints, and their doc comments say in prose where the boundary falls. The
+//! guard cannot check that half, because the sentence it would have to read is
+//! English rather than a marker. Do not "fix" such a row to `Split` to make the
+//! prose match: `Split` names a `(DM)`-marked clause, and there is none to
+//! name.
 
 /// One row of a spec Diagnostics table.
 struct DiagnosticsRow {
