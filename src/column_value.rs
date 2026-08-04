@@ -3111,24 +3111,36 @@ unsafe fn write_interval(
         }
     }
 
+    // Initialised through the *wider* arm first, always, and only then
+    // overwritten with the year-month one where that is the target.
+    //
+    // `SQL_YEAR_MONTH_STRUCT` is two `SQLUINTEGER`s and
+    // `SQL_DAY_SECOND_STRUCT` is five, so writing the union through its
+    // year-month arm alone leaves the last twelve bytes uninitialised. This
+    // whole struct is then copied into the application's buffer, so those
+    // twelve bytes would be driver stack handed to the caller: uninitialised
+    // memory an application can read, and a disclosure however uninteresting
+    // its contents. Zeroing first costs one store and makes every byte of the
+    // value defined.
+    let mut interval_value = IntervalUnion {
+        day_second: DaySecond::default(),
+    };
+    if is_year_month_interval(target) {
+        // `split_year_month` returns years in `day` and months in `hour`.
+        interval_value.year_month = YearMonth {
+            year: parts.fields.day,
+            month: parts.fields.hour,
+        };
+    } else {
+        interval_value.day_second = parts.fields;
+    }
+
     let out = IntervalStruct {
         interval_type: target as c_int,
         // `SQL_INTERVAL_STRUCT` carries the sign out of band, in its own field,
         // and every union field is unsigned. 1 is SQL_TRUE.
         interval_sign: i16::from(parts.negative),
-        interval_value: if is_year_month_interval(target) {
-            // `split_year_month` returns years in `day` and months in `hour`.
-            IntervalUnion {
-                year_month: YearMonth {
-                    year: parts.fields.day,
-                    month: parts.fields.hour,
-                },
-            }
-        } else {
-            IntervalUnion {
-                day_second: parts.fields,
-            }
-        },
+        interval_value,
     };
     // The return is discarded on purpose: `write_fixed` answers SUCCESS or
     // errors, and the truncation verdict this row reports is decided below.
@@ -5201,8 +5213,18 @@ mod tests {
             )
         }
         .map_err(|e| sqlstate_of_err(&e).to_string())?;
-        // SAFETY: both arms are plain-old-data of the same allocation, and the
-        // test reads only the one its target wrote.
+        // SAFETY: reading *both* arms here is sound only because
+        // `write_interval` initialises the union through its widest arm before
+        // overwriting either, so all twenty bytes are defined whichever target
+        // was asked for. Reading the arm the target did not write yields a
+        // meaningless number, not undefined behaviour, and each test asserts on
+        // the arm its own target owns.
+        //
+        // This is a real dependency and not a restatement: the previous
+        // "read only the one its target wrote" was wrong, because building this
+        // struct reads both eagerly however few the caller goes on to inspect.
+        // Miri caught it as an uninitialised `DaySecond::minute` on the
+        // year-month tests.
         Ok(WrittenInterval {
             interval_type: out.interval_type,
             interval_sign: out.interval_sign,
@@ -5353,6 +5375,57 @@ mod tests {
         // As months: eighteen, not six.
         let w = get_interval(&v, CDataType::IntervalMonth, 0).expect("18 months");
         assert_eq!(w.year_month.month, 18);
+    }
+
+    /// Every byte of the union is written, including the twelve a year-month
+    /// interval does not use.
+    ///
+    /// `SQL_YEAR_MONTH_STRUCT` is two `SQLUINTEGER`s where
+    /// `SQL_DAY_SECOND_STRUCT` is five, and the whole `SQL_INTERVAL_STRUCT` is
+    /// copied into the application's buffer whichever arm the target names.
+    /// Writing only the year-month arm therefore hands the caller twelve bytes
+    /// of driver stack: uninitialised memory an application can read.
+    ///
+    /// **Miri is what actually catches a regression here, not this test.** The
+    /// skipped bytes would come from the driver's own stack, not from the
+    /// destination buffer, so nothing this test controls decides their value
+    /// and they may read back as zero anyway; reverting the fix does not
+    /// reliably fail it. Kept because it states and checks the post-condition
+    /// cheaply on every run, with the loud version reserved for the tool that
+    /// can see an uninitialised read for what it is. The `0xAA` fill is
+    /// therefore a lower bound: it proves the writer covered the tail at all.
+    #[test]
+    fn a_year_month_interval_writes_the_whole_union_not_only_its_own_arm() {
+        let v = ColumnValue::IntervalYearMonth {
+            years: 1,
+            months: 6,
+            precision: Interval::YearToMonth,
+        };
+        // Pre-poisoned, so a byte the writer skips keeps 0xAA and is visible.
+        let mut raw = [0xAAu8; size_of::<IntervalStruct>()];
+        let mut ind: isize = 0;
+        let ret = unsafe {
+            write_column_value(
+                &v,
+                CDataType::IntervalYearToMonth,
+                raw.as_mut_ptr().cast::<c_void>(),
+                size_of::<IntervalStruct>() as isize,
+                &mut ind,
+                NumericTarget::UNSPECIFIED,
+            )
+        }
+        .expect("1-06 fits");
+        assert_eq!(ret, SqlReturn::SUCCESS);
+
+        // The union starts after `interval_type` (c_int) and `interval_sign`
+        // (i16), rounded up to the union's 4-byte alignment.
+        let union_at = size_of::<c_int>() + size_of::<u32>();
+        let tail = &raw[union_at + size_of::<YearMonth>()..];
+        assert!(
+            tail.iter().all(|&b| b == 0),
+            "the twelve bytes past the year-month arm must be written, not left \
+             as whatever the stack held: {tail:02x?}"
+        );
     }
 
     /// A negative interval carries its sign in `interval_sign`, out of band,
