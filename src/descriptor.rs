@@ -299,10 +299,57 @@ impl DescriptorRecord {
     /// through here: `SQLBindCol`, `SQLBindParameter`, `SQLSetDescField` and
     /// `SQLSetDescRec` alike. A site that set the three itself would be one
     /// datetime bind away from failing its own consistency check.
+    ///
+    /// The ODBC 2.x datetime codes are promoted to their 3.x spellings first;
+    /// see [`promote_deprecated_datetime`].
     pub fn set_concise_type(&mut self, concise: i16) {
+        let concise = promote_deprecated_datetime(concise);
         self.concise_type = concise;
         self.verbose_type = crate::types::col_attr::verbose_type(SqlDataType(concise));
         self.datetime_interval_code = crate::types::col_attr::datetime_interval_subcode(concise);
+    }
+}
+
+/// Translate the ODBC 2.x datetime codes to their 3.x spellings.
+///
+/// `SQL_C_DATE`/`SQL_DATE` (9), `SQL_C_TIME`/`SQL_TIME` (10) and
+/// `SQL_C_TIMESTAMP`/`SQL_TIMESTAMP` (11) become `SQL_C_TYPE_DATE`/
+/// `SQL_TYPE_DATE` (91), `..._TIME` (92) and `..._TIMESTAMP` (93). Both of the
+/// spec's mapping tables in *Datetime Data Type Changes* give the same pair of
+/// values, one for the C type in `SQLBindCol`, `SQLGetData` and
+/// `SQLBindParameter`'s *ValueType*, the other for the SQL type in
+/// `SQLBindParameter`'s *ParameterType*, so one translation serves the ARD, the
+/// APD and the IPD alike.
+///
+/// **This is not core second-guessing the Driver Manager.** That table is the
+/// DM's own, and it maps 9, 10 and 11 to 91, 92 and 93 for an ODBC 3.x driver
+/// in both the "2.x app" and the "3.x app" column. Behind a Driver Manager the
+/// deprecated codes therefore never reach core at all, and doing the same thing
+/// here only extends that guarantee to an application linked directly against
+/// this crate, which it can be.
+///
+/// Without it the three codes behave three different ways, none of them chosen.
+/// `SQL_DATETIME` is itself 9 and `SQL_INTERVAL` is 10, so
+/// [`crate::types::col_attr::verbose_type`] passes both through unmapped and
+/// they compare equal to a verbose constant by identity: 9 then looks like a
+/// datetime whose subcode is missing and fails the consistency check with
+/// `HY021`, 10 looks like an interval and skips the check entirely, and 11 is an
+/// ordinary type that passes. Worse, 10 and 11 then reach a fetch, where
+/// [`crate::column_value`] has arms for the 3.x spellings only.
+fn promote_deprecated_datetime(concise: i16) -> i16 {
+    // 9, 10 and 11, under `CDataType`'s names because the ARD and APD case is a
+    // C type. The SQL type spellings `SQL_DATE`, `SQL_TIME` and `SQL_TIMESTAMP`
+    // carry the same three values, which is why one translation serves the IPD
+    // too.
+    const DATE_2X: i16 = CDataType::Date as i16;
+    const TIME_2X: i16 = CDataType::Time as i16;
+    const TIMESTAMP_2X: i16 = CDataType::TimeStamp as i16;
+
+    match concise {
+        DATE_2X => SqlDataType::DATE.0,
+        TIME_2X => SqlDataType::TIME.0,
+        TIMESTAMP_2X => SqlDataType::TIMESTAMP.0,
+        other => other,
     }
 }
 
@@ -1381,5 +1428,59 @@ mod tests {
             err.sqlstate().as_str(),
             crate::types::sql_state::INVALID_ATTRIBUTE_OPTION_IDENTIFIER
         );
+    }
+
+    /// The ODBC 2.x datetime codes are stored as their 3.x spellings.
+    ///
+    /// `SQL_DATETIME` is itself 9, so an unpromoted `SQL_C_DATE` compares equal
+    /// to the verbose datetime constant by identity and then fails the
+    /// consistency check for a subcode it never had. 10 and 11 fail differently
+    /// and more quietly, reaching a fetch that has no arm for them.
+    #[test]
+    fn the_deprecated_datetime_codes_are_promoted_to_their_3x_spellings() {
+        for (deprecated, expected) in [
+            (CDataType::Date, SqlDataType::DATE),
+            (CDataType::Time, SqlDataType::TIME),
+            (CDataType::TimeStamp, SqlDataType::TIMESTAMP),
+        ] {
+            let mut record = DescriptorRecord::default();
+            record.set_concise_type(deprecated as i16);
+            assert_eq!(
+                record.concise_type, expected.0,
+                "{deprecated:?} must be stored as the 3.x code the Driver Manager \
+                 would have passed"
+            );
+            consistency_check(&record, DescriptorRole::Ard).unwrap_or_else(|e| {
+                panic!("{deprecated:?} must pass the consistency check, got {e}")
+            });
+        }
+    }
+
+    /// No C data type this crate accepts may fail the consistency check on a
+    /// record shaped the way `SQLBindCol` shapes one.
+    ///
+    /// `SQLBindCol` sets the data pointer, the octet length, the indicator and
+    /// the type trio, and leaves precision, scale and the interval leading
+    /// precision at their defaults. Nothing an application can pass it should
+    /// then be rejected as *inconsistent*: an unusable C type is `HY003` at the
+    /// conversion, and `HY021` here would mean core built a contradictory record
+    /// out of a well-formed call. `SQL_C_DATE` did exactly that.
+    #[test]
+    #[cfg_attr(miri, ignore = "sweeps the whole i16 space; no unsafe to check")]
+    fn no_accepted_c_type_fails_the_consistency_check_as_bind_col_builds_it() {
+        for raw in i16::MIN..=i16::MAX {
+            let Some(c_type) = c_data_type_from_raw(raw) else {
+                continue;
+            };
+            let mut record = DescriptorRecord {
+                data_ptr: std::ptr::dangling_mut::<u8>().cast(),
+                octet_length: 8,
+                ..DescriptorRecord::default()
+            };
+            record.set_concise_type(c_type as i16);
+            if let Err(e) = consistency_check(&record, DescriptorRole::Ard) {
+                panic!("SQLBindCol({c_type:?}) would return HY021: {e}");
+            }
+        }
     }
 }

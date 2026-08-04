@@ -64,11 +64,19 @@ use crate::types::SqlReturn;
 ///   C data type identifier (`c_data_type_from_raw` returns `None`)
 /// - `HY010` Function sequence error: (driver-manager-handled; not returned here)
 /// - `HY021` Inconsistent descriptor information: **absent from this function's
-///   diagnostics table**, yet returned by this driver. `SQLSetDescRec`'s "Consistency
-///   Checks" section states the mandate: "This check is always performed when
-///   **SQLBindParameter** or **SQLBindCol** is called". The check runs before the record is
-///   inserted, so a rejected bind leaves the previous binding (or no binding) in place
-///   (`crate::descriptor::consistency_check`).
+///   diagnostics table**, and not reachable through this function today, though the
+///   check that would produce it does run. `SQLSetDescRec`'s "Consistency Checks"
+///   section states the mandate: "This check is always performed when
+///   **SQLBindParameter** or **SQLBindCol** is called", and
+///   `crate::descriptor::consistency_check` runs before the record is inserted, so a
+///   rejected bind would leave the previous binding (or no binding) in place. No
+///   argument this function accepts can fail it: an unusable C type is already
+///   `HY003` above, and the record is built with the precision, scale and interval
+///   leading precision left at defaults that every clause admits.
+///   `descriptor::tests::no_accepted_c_type_fails_the_consistency_check_as_bind_col_builds_it`
+///   sweeps every accepted C type to keep that true. `SQLSetDescField` and
+///   `SQLSetDescRec` are the doors that can reach it, because they set those fields
+///   directly.
 /// - `HY013` Memory management error: not applicable, for the same reason as `HY001`.
 ///   The row carries no `(DM)` marker.
 /// - `HY090` Invalid string or buffer length: (driver-manager-handled; not returned here;
