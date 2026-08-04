@@ -412,6 +412,37 @@ unsafe fn write_fixed_or_chunked(
         CDataType::Numeric => {
             return unsafe { write_numeric(value, target_ptr, len_ind_ptr, numeric) }.map(whole);
         }
+        // The *SQL to C: GUID* table's own row, and the only row that table
+        // gives for this C type: test "None", data written, indicator 16, no
+        // SQLSTATE — there is no failure case.
+        //
+        // Only `ColumnValue::Guid` reaches it. `SQL_C_GUID` appears in exactly
+        // one conversion table, whose single source type is `SQL_GUID`; the
+        // *SQL to C: Character* table has no `SQL_C_GUID` row, so a character
+        // column read as `SQL_C_GUID` is not a defined conversion and falls
+        // through to the `07006` the overview page prescribes for "an
+        // identifier for an ODBC C data type not shown in the table for a given
+        // ODBC SQL data type". Adding a text-parsing arm here with a `22018`
+        // for a bad parse would be inventing a cell the spec does not have.
+        CDataType::Guid => {
+            if let ColumnValue::Guid(bytes) = value {
+                // `SQLGUID`'s first three groups are integers whose textual
+                // form is the big-endian reading of the bytes — the same order
+                // `column_value_to_string` renders, where `data[0]` is the
+                // leading digit pair. Reading them natively would byte-swap the
+                // GUID on every little-endian machine, silently.
+                let out = odbc_sys::Guid {
+                    d1: u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+                    d2: u16::from_be_bytes([bytes[4], bytes[5]]),
+                    d3: u16::from_be_bytes([bytes[6], bytes[7]]),
+                    d4: [
+                        bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14],
+                        bytes[15],
+                    ],
+                };
+                return unsafe { write_fixed(target_ptr, len_ind_ptr, out) }.map(whole);
+            }
+        }
         _ => {}
     }
 
@@ -5644,6 +5675,117 @@ mod tests {
         let ts = unsafe { std::ptr::read_unaligned(out) };
         assert_eq!((ts.year, ts.month, ts.day), (2026, 8, 3));
         assert_eq!((ts.hour, ts.minute, ts.second), (10, 30, 15));
+    }
+
+    /// `SQL_GUID` → `SQL_C_GUID` is the *SQL to C: GUID* table's own row, and
+    /// the only one that table gives for this C type: test "None", data
+    /// written, indicator 16, no SQLSTATE. There is no failure case.
+    ///
+    /// `ColumnValue::Guid` already converted to `SQL_C_BINARY` and
+    /// `SQL_C_CHAR`; its *own* C type was a blanket `07006`.
+    #[test]
+    fn a_guid_column_converts_to_sql_c_guid() {
+        // 00112233-4455-6677-8899-aabbccddeeff
+        let bytes: [u8; 16] = [
+            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+            0xee, 0xff,
+        ];
+        let mut out = odbc_sys::Guid::default();
+        let mut ind: isize = -999;
+        let ret = unsafe {
+            write_column_value(
+                &ColumnValue::Guid(bytes),
+                CDataType::Guid,
+                (&raw mut out).cast::<c_void>(),
+                // Footnote [a]: BufferLength is ignored for this conversion.
+                0,
+                &mut ind,
+                NumericTarget::UNSPECIFIED,
+            )
+        }
+        .expect("SQL_GUID -> SQL_C_GUID is the table's own row");
+        assert_eq!(ret, SqlReturn::SUCCESS);
+        // The first three groups are integers whose textual form is the
+        // big-endian reading of the bytes, which is the order
+        // `column_value_to_string` already renders (data[0] is the first digit
+        // pair). Getting this wrong byte-swaps the GUID silently.
+        assert_eq!(out.d1, 0x0011_2233);
+        assert_eq!(out.d2, 0x4455);
+        assert_eq!(out.d3, 0x6677);
+        assert_eq!(out.d4, [0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
+        assert_eq!(ind, 16, "the table's indicator cell is 16");
+    }
+
+    /// The guard against over-reach, and the reason this task is smaller than
+    /// it was reported to be. `SQL_C_GUID` appears in **one** conversion table,
+    /// *SQL to C: GUID*, whose only source type is `SQL_GUID`. The
+    /// *SQL to C: Character* table has no `SQL_C_GUID` row at all, so a
+    /// character column read as `SQL_C_GUID` is not a defined conversion — and
+    /// the overview page says exactly what that is: "If the *TargetType*
+    /// argument ... contains an identifier for an ODBC C data type not shown in
+    /// the table for a given ODBC SQL data type, **SQLFetch**,
+    /// **SQLFetchScroll**, or **SQLGetData** returns SQLSTATE 07006".
+    ///
+    /// So `07006` here is correct rather than a gap, and a `22018` "bad GUID
+    /// parse" would be inventing a cell the spec does not have.
+    #[test]
+    fn a_character_column_read_as_sql_c_guid_is_07006() {
+        for value in [
+            ColumnValue::String("00112233-4455-6677-8899-aabbccddeeff".to_string()),
+            ColumnValue::String("not a guid".to_string()),
+            ColumnValue::I64(1),
+        ] {
+            let mut out = odbc_sys::Guid::default();
+            let mut ind: isize = 0;
+            let err = unsafe {
+                write_column_value(
+                    &value,
+                    CDataType::Guid,
+                    (&raw mut out).cast::<c_void>(),
+                    0,
+                    &mut ind,
+                    NumericTarget::UNSPECIFIED,
+                )
+            }
+            .expect_err("only SQL_GUID converts to SQL_C_GUID");
+            assert_eq!(
+                sqlstate_of_err(&err),
+                crate::types::sql_state::RESTRICTED_DATA_TYPE_ATTRIBUTE_VIOLATION,
+                "{value:?}",
+            );
+        }
+    }
+
+    /// `SQLGUID` leads with a `u32`, so it has alignment 4 and *can* be
+    /// misaligned — unlike `SQL_NUMERIC_STRUCT` below. Offset one byte into an
+    /// arena of the target type so this is misaligned on every platform.
+    #[test]
+    fn guid_target_may_be_misaligned() {
+        let mut arena = vec![odbc_sys::Guid::default(); 4];
+        // SAFETY: stays inside the allocation.
+        let out = unsafe { arena.as_mut_ptr().cast::<u8>().add(1) }.cast::<odbc_sys::Guid>();
+        assert!(!out.is_aligned(), "the test's premise");
+
+        let bytes: [u8; 16] = [
+            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+            0xee, 0xff,
+        ];
+        let mut ind: isize = 0;
+        let ret = unsafe {
+            write_column_value(
+                &ColumnValue::Guid(bytes),
+                CDataType::Guid,
+                out.cast::<c_void>(),
+                0,
+                &mut ind,
+                NumericTarget::UNSPECIFIED,
+            )
+        }
+        .expect("a misaligned target is legal");
+        assert_eq!(ret, SqlReturn::SUCCESS);
+        // SAFETY: read back through the same unaligned pointer.
+        let g = unsafe { std::ptr::read_unaligned(out) };
+        assert_eq!((g.d1, g.d2, g.d3), (0x0011_2233, 0x4455, 0x6677));
     }
 
     /// `SQL_NUMERIC_STRUCT` has **alignment 1**, so — alone among the fixed

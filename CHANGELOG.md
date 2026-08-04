@@ -1603,6 +1603,19 @@ call `SQLCloseCursor` or `SQLFreeStmt(SQL_CLOSE)` first, as it already must for
 
 ### Fixed
 
+- **`SQL_C_GUID` is a supported retrieval target.** `ColumnValue::Guid`
+  converted to `SQL_C_BINARY` and `SQL_C_CHAR` but its own C type answered
+  `07006`. The *SQL to C: GUID* table gives it one row — test "None", data
+  written, indicator 16, no SQLSTATE — and there is no failure case.
+
+  A character column read as `SQL_C_GUID` **keeps** `07006`, and that is
+  correct rather than a remaining gap: `SQL_C_GUID` appears in exactly one
+  conversion table, whose only source type is `SQL_GUID`, and the
+  *SQL to C: Character* table has no `SQL_C_GUID` row. The overview page
+  prescribes `07006` for "an identifier for an ODBC C data type not shown in
+  the table for a given ODBC SQL data type", so a `22018` bad-GUID-parse would
+  be inventing a cell the spec does not have.
+
 - **`SQL_C_NUMERIC` is a supported retrieval target.** It had no arm in
   `write_column_value` at all, so every value returned `07006` through both
   `SQLGetData` and `SQLBindCol`+`SQLFetch`, while the same C type worked as an
