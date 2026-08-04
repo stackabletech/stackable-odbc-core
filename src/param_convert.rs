@@ -51,13 +51,106 @@
 //! [C to SQL: Binary]: https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/c-to-sql-binary
 //! [C to SQL: Numeric]: https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/c-to-sql-numeric
 
-use odbc_sys::SqlDataType;
+use odbc_sys::{CDataType, SqlDataType};
 
 use crate::{
     column_value::{current_utc_date, parse_sql_time, parse_sql_timestamp},
     errors::OdbcError,
     types::{ColumnValue, SqlState, ULen},
 };
+
+// SQL_C_DEFAULT's resolution ------------------------------------------------
+
+/// The C type `SQL_C_DEFAULT` names for a given `ParameterType`.
+///
+/// The spec's [Default C Data Types] table, transcribed. `SQL_C_DEFAULT` is a
+/// legal `ValueType` that says "the parameter value be transferred from the
+/// default C data type for the SQL data type specified with *ParameterType*",
+/// so the driver, not the application, picks the type the buffer is read as.
+/// That makes this table the contract both sides read, and a driver that
+/// substitutes its own preference silently misreads the application's buffer.
+///
+/// `None` for a `ParameterType` the table does not cover, which is every
+/// driver-specific type and the ODBC 4.0 structured ones. The caller answers it
+/// with `07006`, because the table is what makes a `SQL_C_DEFAULT` binding
+/// well-defined and there is no default to fall back to.
+///
+/// # Two rows worth reading twice
+///
+/// **The character rows say `SQL_C_CHAR`, not `SQL_C_WCHAR`,** even though
+/// every entry point this crate exports is a `W` one. The `W` in
+/// `SQLDriverConnectW` is about the *function's own* string arguments; a bound
+/// parameter's buffer is described by `ValueType` alone and the Driver Manager
+/// does not transform it. An application that binds `SQL_C_DEFAULT` against
+/// `SQL_VARCHAR` filled a `SQLCHAR` buffer, and reading it as UTF-16 would
+/// interpret two of its bytes as one code unit.
+///
+/// **`SQL_FLOAT` maps to `SQL_C_DOUBLE`, not `SQL_C_FLOAT`.** `SQL_REAL` is the
+/// single-precision one; `SQL_FLOAT` and `SQL_DOUBLE` are both double. Reading
+/// eight application-supplied bytes as four is a silently wrong number.
+///
+/// # The interval rows resolve but do not convert
+///
+/// The table pairs each `SQL_INTERVAL_*` with its own `SQL_C_INTERVAL_*`, and
+/// those are returned here, faithfully. Core does not marshal an interval C
+/// type, so the caller then refuses the resolved type exactly as it refuses one
+/// the application named outright. Resolving first and refusing second is what
+/// keeps the two paths answering alike; short-circuiting to `None` here would
+/// make `SQL_C_DEFAULT` and `SQL_C_INTERVAL_DAY` fail for different stated
+/// reasons.
+///
+/// [Default C Data Types]: https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/default-c-data-types
+pub(crate) fn default_c_type_for_parameter(sql_type: SqlDataType) -> Option<CDataType> {
+    // The interval rows are a range rather than thirteen arms: the concise C
+    // type and the concise SQL type share a number for every one of them
+    // (`SQL_C_INTERVAL_YEAR` is *defined* as `SQL_INTERVAL_YEAR`), so the
+    // mapping is the identity and `c_data_type_from_raw` is the transcription.
+    if crate::types::is_interval_sql_type(sql_type) {
+        return crate::types::c_data_type_from_raw(sql_type.0);
+    }
+
+    Some(match sql_type {
+        SqlDataType::CHAR | SqlDataType::VARCHAR | SqlDataType::EXT_LONG_VARCHAR => CDataType::Char,
+        SqlDataType::EXT_W_CHAR | SqlDataType::EXT_W_VARCHAR | SqlDataType::EXT_W_LONG_VARCHAR => {
+            CDataType::WChar
+        }
+        // Both are delivered as text, which is the table's answer and also the
+        // only one that keeps a DECIMAL(38,10) off `f64`'s 53-bit mantissa.
+        SqlDataType::DECIMAL | SqlDataType::NUMERIC => CDataType::Char,
+        SqlDataType::EXT_BIT => CDataType::Bit,
+        // The table prints the deprecated unsuffixed spellings SQL_C_TINYINT,
+        // SQL_C_SHORT and SQL_C_LONG, all three of which default to signed.
+        // `c_data_type_from_raw` already normalises those codes onto these
+        // variants at the boundary, so naming the signed ones here is the same
+        // table, spelled the way the rest of the crate spells it.
+        SqlDataType::EXT_TINY_INT => CDataType::STinyInt,
+        SqlDataType::SMALLINT => CDataType::SShort,
+        SqlDataType::INTEGER => CDataType::SLong,
+        SqlDataType::EXT_BIG_INT => CDataType::SBigInt,
+        SqlDataType::REAL => CDataType::Float,
+        SqlDataType::FLOAT | SqlDataType::DOUBLE => CDataType::Double,
+        SqlDataType::EXT_BINARY
+        | SqlDataType::EXT_VAR_BINARY
+        | SqlDataType::EXT_LONG_VAR_BINARY => CDataType::Binary,
+        SqlDataType::DATE => CDataType::TypeDate,
+        SqlDataType::TIME => CDataType::TypeTime,
+        SqlDataType::TIMESTAMP => CDataType::TypeTimestamp,
+        // The ODBC 2.x concise codes 9, 10 and 11, which an application
+        // declaring SQL_OV_ODBC2 still sends. They name the same three types as
+        // the 91 / 92 / 93 rows above, and `SQL_C_DATE` and `SQL_C_TYPE_DATE`
+        // read the same struct, so the pairs resolve alike and
+        // `read_param_value` reads both spellings through one arm.
+        //
+        // `odbc-sys` calls 9 `DATETIME` after `SQL_DATETIME`, the *verbose*
+        // type identifier that shares the number. As a concise `ParameterType`,
+        // which is what this table is keyed on, 9 is `SQL_DATE`.
+        SqlDataType::DATETIME => CDataType::TypeDate,
+        SqlDataType::EXT_TIME_OR_INTERVAL => CDataType::TypeTime,
+        SqlDataType::EXT_TIMESTAMP => CDataType::TypeTimestamp,
+        SqlDataType::EXT_GUID => CDataType::Guid,
+        _ => return None,
+    })
+}
 
 // the four SQLSTATEs the table's third column names -------------------------
 

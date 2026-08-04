@@ -64,11 +64,26 @@ use crate::{
 ///
 /// - `01000` General warning: not returned here; core emits no driver-specific
 ///   informational message from this function. The row carries no `(DM)` marker.
-/// - `07006` Restricted data type attribute violation: returned here when `value_type` is
-///   `SQL_C_BINARY` and `parameter_type` is a target core cannot convert it to: the
-///   `DECIMAL`/`NUMERIC` and character rows of the "C to SQL: Binary" table, whose byte
-///   layout or encoding ODBC leaves unspecified (`crate::binary_convert`). That pairing is
-///   fixed at bind and needs no backend metadata, so it is refused before the query runs.
+/// - `07006` Restricted data type attribute violation: **returned by this driver**, for the
+///   four bind-time refusals below. Each is a property of the `value_type` /
+///   `parameter_type` pair alone, so it needs no backend metadata and is answered before
+///   the query runs rather than at execute:
+///     1. `value_type` is `SQL_C_BINARY` and `parameter_type` is a target the "C to SQL:
+///        Binary" table does not define, its `DECIMAL`/`NUMERIC` and character rows, whose
+///        byte layout or encoding ODBC leaves unspecified (`crate::binary_convert`).
+///     2. `value_type` is one of the "C to SQL: Numeric" table's fourteen sources and the
+///        pairing is not one of its rows, which is what the table's interval footnote makes
+///        a question about both types rather than the target alone
+///        (`numeric_convert::numeric_pairing_is_supported`).
+///     3. `value_type` names a C type core cannot read a parameter out of: the thirteen
+///        `SQL_C_INTERVAL_*` types and the `SQL_ARD_TYPE` / `SQL_APD_TYPE` sentinels
+///        (`parameter_c_type_is_marshalled`).
+///     4. `value_type` is `SQL_C_DEFAULT` and `parameter_type` has no row in the spec's
+///        *Default C Data Types* table, which leaves the buffer with no defined layout to
+///        read it by (`param_convert::default_c_type_for_parameter`). A `SQL_C_DEFAULT`
+///        that resolves to one of case 3's types is refused there, by the resolved type,
+///        so the two agree.
+///
 ///   Every other incompatibility is still detected at execute time by the data source, the
 ///   binding being stored without validating it here.
 /// - `07009` Invalid descriptor index: the spec annotates this `(DM)`, and its single
@@ -230,6 +245,22 @@ pub unsafe fn sql_bind_parameter<B: Backend>(
                     && !crate::numeric_convert::numeric_pairing_is_supported(c_data_type, sql_type)
                 {
                     return Err(crate::numeric_convert::unsupported_target(sql_type));
+                }
+                // The same reasoning and the same timing once more, for the
+                // `ValueType` itself rather than for a pairing: a C type core
+                // cannot read a parameter out of is fixed at bind and needs
+                // nothing from the backend, so the application learns before it
+                // runs its query instead of at execute.
+                //
+                // `SQL_C_DEFAULT` is resolved against the declared
+                // `ParameterType` first, exactly as `read_param_value` resolves
+                // it, so the two ends agree on what was bound. That is also
+                // what makes this gate reject `SQL_C_DEFAULT` for a
+                // `ParameterType` the spec's Default C Data Types table does
+                // not cover: the binding would have no defined buffer layout.
+                let resolved = resolve_c_type(c_data_type, sql_type)?;
+                if !parameter_c_type_is_marshalled(resolved) {
+                    return Err(unmarshalled_parameter_c_type(resolved));
                 }
                 // One call, two descriptors: the spec's own `SQLBindParameter`
                 // page maps the C-side arguments onto APD fields and the
@@ -759,6 +790,97 @@ fn undefined_negative_indicator(indicator: isize) -> OdbcError {
     )
 }
 
+/// `07006` for a `ValueType` core cannot read a parameter out of.
+///
+/// The spec's row for it on `SQLBindParameter`'s and `SQLExecute`'s Diagnostics
+/// tables alike: "Restricted data type attribute violation … The data value
+/// identified by the *ValueType* argument in **SQLBindParameter** for the bound
+/// parameter could not be converted to the data type identified by the
+/// *ParameterType* argument".
+///
+/// Shared by [`parameter_c_type_is_marshalled`]'s caller at bind and by
+/// [`read_param_value`]'s terminal arm at execute, which are the two ends of
+/// the same rule; see the former for why both exist.
+fn unmarshalled_parameter_c_type(c_type: odbc_sys::CDataType) -> OdbcError {
+    OdbcError::general(
+        format!("No conversion from {c_type:?} to a SQL type: core does not marshal that C type"),
+        SqlState::restricted_data_type_attribute_violation(),
+    )
+}
+
+/// Whether [`read_param_value`] can read a parameter out of this C type.
+///
+/// The allowlist is positive on purpose, and pairs with the terminal arm of
+/// [`read_param_value`], which errors rather than substituting a value. A C
+/// type absent from both lists is refused; the alternative shape, a wildcard
+/// answering `ColumnValue::Null`, sends a NULL to the data source under
+/// `SQL_SUCCESS` for every type nobody has got to yet, so the application's
+/// value never leaves the process and no diagnostic says so. Adding a C type
+/// to `read_param_value` means adding it here, and forgetting to costs a
+/// spurious `07006` rather than a silent NULL.
+///
+/// What it excludes, and why each is genuinely unreadable rather than merely
+/// unwritten:
+///
+/// - The thirteen `SQL_C_INTERVAL_*` types. `SQL_INTERVAL_STRUCT` is not
+///   marshalled in either direction (see [`crate::column_value`] for the
+///   retrieval side).
+/// - `SQL_ARD_TYPE` and `SQL_APD_TYPE`. Neither is a data type at all: they are
+///   `SQLGetData`'s and `SQLPutData`'s "use the type the descriptor already
+///   holds" sentinels, and naming one as a `ValueType` describes no buffer.
+/// - `SQL_C_DEFAULT` is *not* excluded and never reaches here: it is resolved
+///   to a concrete type by [`resolve_c_type`] before this is asked.
+fn parameter_c_type_is_marshalled(c_type: odbc_sys::CDataType) -> bool {
+    use odbc_sys::CDataType;
+    crate::numeric_convert::is_numeric_c_type(c_type)
+        || matches!(
+            c_type,
+            CDataType::Bit
+                | CDataType::Char
+                | CDataType::WChar
+                | CDataType::Binary
+                | CDataType::TypeTimestamp
+                | CDataType::TimeStamp
+                | CDataType::TypeDate
+                | CDataType::Date
+                | CDataType::TypeTime
+                | CDataType::Time
+                | CDataType::Guid
+        )
+}
+
+/// Turn a bound `ValueType` into the concrete C type the buffer is read as.
+///
+/// Only `SQL_C_DEFAULT` is not already concrete. It defers the choice to the
+/// declared `ParameterType`, and
+/// [`default_c_type_for_parameter`](crate::param_convert::default_c_type_for_parameter)
+/// is the spec table that makes the choice; a `ParameterType` outside that
+/// table leaves the binding with no defined C type at all, which is the `07006`
+/// below.
+///
+/// Note that this can resolve to a type the caller then refuses: an interval
+/// `ParameterType` resolves to its own interval C type, which
+/// [`parameter_c_type_is_marshalled`] rejects. That is deliberate, so
+/// `SQL_C_DEFAULT` against `SQL_INTERVAL_DAY` and an outright
+/// `SQL_C_INTERVAL_DAY` fail alike.
+fn resolve_c_type(
+    c_type: odbc_sys::CDataType,
+    sql_type: odbc_sys::SqlDataType,
+) -> Result<odbc_sys::CDataType, OdbcError> {
+    if c_type != odbc_sys::CDataType::Default {
+        return Ok(c_type);
+    }
+    crate::param_convert::default_c_type_for_parameter(sql_type).ok_or_else(|| {
+        OdbcError::general(
+            format!(
+                "SQL_C_DEFAULT names no C type for {sql_type:?}: it is absent from the spec's \
+                 Default C Data Types table, so the parameter buffer has no defined layout"
+            ),
+            SqlState::restricted_data_type_attribute_violation(),
+        )
+    })
+}
+
 pub(crate) unsafe fn read_param_value(rec: ParamRecord<'_>) -> Result<ParamValue, OdbcError> {
     use odbc_sys::CDataType;
 
@@ -803,7 +925,12 @@ pub(crate) unsafe fn read_param_value(rec: ParamRecord<'_>) -> Result<ParamValue
     //
     // `SQLBindParameter` has already refused any pairing this cannot convert,
     // so a target reaching here is one of the table's six rows.
-    let c_type = apd.c_type()?;
+    //
+    // `SQL_C_DEFAULT` is resolved first, because it is not a C type but a
+    // statement that the *declared SQL type* names one. Every check below,
+    // including the numeric guard on the next line, therefore asks its question
+    // of a concrete type and none has to special-case the deferral.
+    let c_type = resolve_c_type(apd.c_type()?, ipd.sql_type())?;
     if crate::numeric_convert::is_numeric_c_type(c_type) {
         // SAFETY: data_ptr is non-null (guarded above) and the caller
         // guarantees it points to a valid value of that C type.
@@ -1042,15 +1169,19 @@ pub(crate) unsafe fn read_param_value(rec: ParamRecord<'_>) -> Result<ParamValue
             let g = unsafe { std::ptr::read_unaligned(data_ptr as *const odbc_sys::Guid) };
             ColumnValue::Guid(guid_struct_to_bytes(&g))
         }
-        // Interval and SQL Server extended C types are not marshalled. Emitting
-        // NULL loses data silently, so warn rather than accept in silence.
-        _ => {
-            tracing::warn!(
-                c_type = ?apd.c_type()?,
-                "read_param_value: unsupported C data type for input parameter; treating as NULL"
-            );
-            ColumnValue::Null
-        }
+        // Every C type core cannot read a parameter out of, which is the
+        // interval family plus the two descriptor sentinels. See
+        // `parameter_c_type_is_marshalled`, whose list this arm is the other
+        // half of: that one refuses at `SQLBindParameter`, this one catches a
+        // binding assembled through `SQLSetDescField` instead, which never
+        // passes that gate.
+        //
+        // An error rather than a `ColumnValue::Null` and a `tracing::warn!`,
+        // because a log line is not a diagnostic: nothing the application can
+        // call surfaces one, so a substituted NULL would reach the data source
+        // under `SQL_SUCCESS` with an empty diagnostic queue. Failing the
+        // execution is the only answer that reaches the caller.
+        other => return Err(unmarshalled_parameter_c_type(other)),
     }))
 }
 
@@ -1332,6 +1463,18 @@ fn dae_buffer_to_value(
     buffer: &[u8],
 ) -> Result<ColumnValue, OdbcError> {
     use odbc_sys::CDataType;
+    // `SQL_C_DEFAULT` names its C type through the declared `ParameterType`,
+    // so it is resolved here for the same reason `read_param_value` resolves
+    // it: the arms below ask what the buffer holds, and `SQL_C_DEFAULT` is not
+    // an answer to that. Unresolved it would reach the text arm, so a
+    // `SQL_C_DEFAULT` parameter declared `SQL_LONGVARBINARY` and streamed
+    // through `SQLPutData` would be read as text, and any byte that is not
+    // valid UTF-8 replaced, where the same parameter sent in one piece is read
+    // as binary.
+    let c_type = match c_type {
+        Some(t) => Some(resolve_c_type(t, sql_type)?),
+        None => None,
+    };
     let text = match c_type {
         Some(CDataType::Binary) => {
             // The same table `read_param_value` applies, for the same reason:
@@ -3218,6 +3361,256 @@ mod tests {
         }
     }
 
+    /// A `ValueType` core cannot read a parameter out of is refused at bind.
+    ///
+    /// The C types here are the whole excluded set: the thirteen interval
+    /// ones, whose `SQL_INTERVAL_STRUCT` core does not marshal in either
+    /// direction, and the two descriptor sentinels, which name no buffer
+    /// layout at all. Binding one is an error the application sees before it
+    /// runs its query, rather than a NULL it discovers in its data later.
+    #[test]
+    fn bind_parameter_refuses_a_c_type_core_cannot_marshal_with_07006() {
+        for c_type in [
+            CDataType::IntervalYear,
+            CDataType::IntervalMonth,
+            CDataType::IntervalDay,
+            CDataType::IntervalHour,
+            CDataType::IntervalMinute,
+            CDataType::IntervalSecond,
+            CDataType::IntervalYearToMonth,
+            CDataType::IntervalDayToHour,
+            CDataType::IntervalDayToMinute,
+            CDataType::IntervalDayToSecond,
+            CDataType::IntervalHourToMinute,
+            CDataType::IntervalHourToSecond,
+            CDataType::IntervalMinuteToSecond,
+            CDataType::Ard,
+            CDataType::Apd,
+        ] {
+            unsafe {
+                let (env, conn, stmt) = alloc_env_conn_stmt();
+                let mut buf = [0u8; 32];
+                let ret = sql_bind_parameter::<MockBackend>(
+                    stmt,
+                    1,
+                    ParamType::Input as i16,
+                    c_type as i16,
+                    SqlDataType::VARCHAR.0,
+                    10,
+                    0,
+                    buf.as_mut_ptr().cast::<c_void>(),
+                    32,
+                    std::ptr::null_mut(),
+                );
+                assert_eq!(ret, SqlReturn::ERROR, "{c_type:?} must not bind");
+                assert_eq!(
+                    first_sqlstate::<MockBackend>(stmt),
+                    crate::types::sql_state::RESTRICTED_DATA_TYPE_ATTRIBUTE_VIOLATION,
+                    "{c_type:?}",
+                );
+                cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
+            }
+        }
+    }
+
+    /// The bind gate is not the only way a binding is made, so it cannot be the
+    /// only place the rule is enforced.
+    ///
+    /// `SQLSetDescField` writes `SQL_DESC_CONCISE_TYPE` on the APD directly and
+    /// never passes through `SQLBindParameter`, so a binding naming an interval
+    /// C type can exist despite the test above. `read_param_value`'s terminal
+    /// arm is what catches it, and this asserts the same `07006` from that end.
+    #[test]
+    fn reading_a_parameter_of_an_unmarshalled_c_type_is_07006() {
+        for c_type in [
+            odbc_sys::CDataType::IntervalDayToSecond,
+            odbc_sys::CDataType::IntervalYear,
+            odbc_sys::CDataType::Ard,
+        ] {
+            let buf = [0u8; 32];
+            let mut indicator: isize = 32;
+            let binding = BoundParam {
+                input_output_type: odbc_sys::ParamType::Input,
+                c_type,
+                sql_type: SqlDataType::VARCHAR,
+                col_size: 10,
+                decimal_digits: 0,
+                value_ptr: buf.as_ptr() as *mut c_void,
+                buffer_length: 32,
+                str_len_or_ind_ptr: &mut indicator,
+            };
+            let err = unsafe { read_bound_param(&binding) }
+                .expect_err("an unmarshalled C type must not bind as NULL");
+            assert_eq!(
+                err.sqlstate().as_str(),
+                crate::types::sql_state::RESTRICTED_DATA_TYPE_ATTRIBUTE_VIOLATION,
+                "{c_type:?}",
+            );
+        }
+    }
+
+    /// `SQL_C_DEFAULT` reads the buffer as the type its `ParameterType` names.
+    ///
+    /// The spec's *Default C Data Types* table is what makes a `SQL_C_DEFAULT`
+    /// binding well-defined, so this asserts the resolution end to end: the
+    /// same bytes bound against different `ParameterType`s must come back as
+    /// different `ColumnValue`s, and each must match what the C type named
+    /// outright would have produced.
+    ///
+    /// The three rows worth pinning are here for the reasons the table's own
+    /// transcription records. `SQL_VARCHAR` resolves to `SQL_C_CHAR` and not
+    /// `SQL_C_WCHAR`, even in a `W` driver, so `"hi"` stays two narrow bytes
+    /// instead of being read as one UTF-16 code unit. `SQL_FLOAT` resolves to
+    /// `SQL_C_DOUBLE` and not `SQL_C_FLOAT`, so eight bytes are read as eight.
+    /// `SQL_GUID` resolves to `SQL_C_GUID`, whose first three groups are
+    /// integers rather than bytes.
+    #[test]
+    fn sql_c_default_reads_the_buffer_as_its_parameter_type_names() {
+        /// One case: bytes, the declared SQL type, and the value expected out.
+        fn case(buf: &[u8], sql_type: SqlDataType, expected: ColumnValue) {
+            let mut indicator: isize = buf.len() as isize;
+            let binding = BoundParam {
+                input_output_type: odbc_sys::ParamType::Input,
+                c_type: odbc_sys::CDataType::Default,
+                sql_type,
+                col_size: 0,
+                decimal_digits: 0,
+                value_ptr: buf.as_ptr() as *mut c_void,
+                buffer_length: buf.len() as isize,
+                str_len_or_ind_ptr: &mut indicator,
+            };
+            let got = unsafe { read_bound_param(&binding) }
+                .unwrap_or_else(|e| panic!("{sql_type:?}: {e:?}"));
+            assert_eq!(got, expected, "SQL_C_DEFAULT against {sql_type:?}");
+        }
+
+        // SQL_C_CHAR: two narrow bytes, not one UTF-16 code unit.
+        case(
+            b"hi",
+            SqlDataType::VARCHAR,
+            ColumnValue::String("hi".to_string()),
+        );
+        // SQL_C_SLONG, four bytes.
+        case(
+            &1_234_567_i32.to_ne_bytes(),
+            SqlDataType::INTEGER,
+            ColumnValue::I32(1_234_567),
+        );
+        // SQL_C_DOUBLE, eight bytes: the row that is not SQL_C_FLOAT.
+        case(
+            &1.5_f64.to_ne_bytes(),
+            SqlDataType::FLOAT,
+            ColumnValue::F64(1.5),
+        );
+        // SQL_C_FLOAT, four bytes: SQL_REAL is the single-precision row.
+        case(
+            &1.5_f32.to_ne_bytes(),
+            SqlDataType::REAL,
+            ColumnValue::F32(1.5),
+        );
+        // SQL_C_BINARY passes the bytes through.
+        case(
+            &[0xDE, 0xAD],
+            SqlDataType::EXT_BINARY,
+            ColumnValue::Bytes(vec![0xDE, 0xAD]),
+        );
+        // SQL_C_GUID: `d1` is an integer, so the struct's little-endian bytes
+        // come back as the leading big-endian group of the GUID.
+        let guid = odbc_sys::Guid {
+            d1: 0x0011_2233,
+            d2: 0x4455,
+            d3: 0x6677,
+            d4: [0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+        };
+        // SAFETY: `Guid` is `repr(C)` and plain-old-data, so its bytes are
+        // initialised and readable for its own size.
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                (&raw const guid).cast::<u8>(),
+                std::mem::size_of::<odbc_sys::Guid>(),
+            )
+        };
+        case(
+            bytes,
+            SqlDataType::EXT_GUID,
+            ColumnValue::Guid([
+                0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+                0xee, 0xff,
+            ]),
+        );
+    }
+
+    /// A `ParameterType` the *Default C Data Types* table does not cover leaves
+    /// `SQL_C_DEFAULT` naming no C type, so the buffer has no defined layout
+    /// and there is nothing to read it as. `07006` at bind, before the
+    /// application runs a query whose parameter cannot be sent.
+    ///
+    /// `SQL_UNKNOWN_TYPE` stands for the driver-specific and ODBC 4.0
+    /// structured types, which are the rest of that set.
+    #[test]
+    fn bind_parameter_refuses_sql_c_default_for_a_type_with_no_default_c_type() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            let mut buf = [0u8; 8];
+            let ret = sql_bind_parameter::<MockBackend>(
+                stmt,
+                1,
+                ParamType::Input as i16,
+                CDataType::Default as i16,
+                SqlDataType::UNKNOWN_TYPE.0,
+                0,
+                0,
+                buf.as_mut_ptr().cast::<c_void>(),
+                8,
+                std::ptr::null_mut(),
+            );
+            assert_eq!(ret, SqlReturn::ERROR);
+            assert_eq!(
+                first_sqlstate::<MockBackend>(stmt),
+                crate::types::sql_state::RESTRICTED_DATA_TYPE_ATTRIBUTE_VIOLATION,
+            );
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
+        }
+    }
+
+    /// `SQL_C_DEFAULT` against an interval `ParameterType` resolves and is then
+    /// refused, rather than being refused for want of a resolution.
+    ///
+    /// The table pairs `SQL_INTERVAL_DAY` with `SQL_C_INTERVAL_DAY`, which core
+    /// does not marshal, so this fails with the same `07006` an outright
+    /// `SQL_C_INTERVAL_DAY` gets. Pinned because the alternative shape,
+    /// short-circuiting the interval rows to "no default", reaches the same
+    /// return code by a different route and would make the two disagree if the
+    /// interval C types were ever implemented.
+    #[test]
+    fn sql_c_default_for_an_interval_parameter_type_is_refused_like_the_c_type_itself() {
+        for c_type in [CDataType::Default, CDataType::IntervalDay] {
+            unsafe {
+                let (env, conn, stmt) = alloc_env_conn_stmt();
+                let mut buf = [0u8; 32];
+                let ret = sql_bind_parameter::<MockBackend>(
+                    stmt,
+                    1,
+                    ParamType::Input as i16,
+                    c_type as i16,
+                    crate::types::SQL_INTERVAL_DAY.0,
+                    0,
+                    0,
+                    buf.as_mut_ptr().cast::<c_void>(),
+                    32,
+                    std::ptr::null_mut(),
+                );
+                assert_eq!(ret, SqlReturn::ERROR, "{c_type:?}");
+                assert_eq!(
+                    first_sqlstate::<MockBackend>(stmt),
+                    crate::types::sql_state::RESTRICTED_DATA_TYPE_ATTRIBUTE_VIOLATION,
+                    "{c_type:?}",
+                );
+                cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
+            }
+        }
+    }
+
     /// Core converts SQL_C_BINARY only to the targets whose byte layout ODBC
     /// defines. The pairing is fixed at bind and needs no backend metadata, so
     /// the refusal is here rather than at execute time.
@@ -4393,6 +4786,43 @@ mod tests {
             dae_buffer_to_value(Some(CDataType::Char), SqlDataType::DECIMAL, 0, 0, b"12.34")
                 .unwrap(),
             ColumnValue::Decimal("12.34".to_string())
+        );
+    }
+
+    /// `SQL_C_DEFAULT` reaches the same arm the type it resolves to would.
+    ///
+    /// The binary case is the one that shows it: bytes that are not valid
+    /// UTF-8 survive only on the binary arm, so a `SQL_C_DEFAULT` parameter
+    /// declared `SQL_LONGVARBINARY` proves the resolution happened rather than
+    /// the text arm having been reached and got away with it. The character
+    /// case pins the other half, where text is the right answer and would also
+    /// have been reached without resolving, so it guards against a resolution
+    /// that overshoots.
+    #[test]
+    fn dae_buffer_to_value_resolves_sql_c_default_through_the_declared_type() {
+        assert_eq!(
+            dae_buffer_to_value(
+                Some(CDataType::Default),
+                SqlDataType::EXT_LONG_VAR_BINARY,
+                0,
+                0,
+                &[0xFF, 0xFE, 0x00],
+            )
+            .unwrap(),
+            ColumnValue::Bytes(vec![0xFF, 0xFE, 0x00]),
+            "SQL_LONGVARBINARY's default C type is SQL_C_BINARY, so the bytes pass through",
+        );
+        assert_eq!(
+            dae_buffer_to_value(
+                Some(CDataType::Default),
+                SqlDataType::DECIMAL,
+                0,
+                0,
+                b"12.34",
+            )
+            .unwrap(),
+            ColumnValue::Decimal("12.34".to_string()),
+            "SQL_DECIMAL's default C type is SQL_C_CHAR, so the text is converted",
         );
     }
 

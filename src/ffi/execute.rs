@@ -102,9 +102,14 @@ fn zero_row_searched_dml<B: Backend>(stmt: &StatementHandle<B>) -> bool {
 ///   padded with NULL (`ffi::params::collect_params`). The second clause, a binding whose
 ///   `ParameterValuePtr` is null with a non-`SQL_NULL_DATA`/`SQL_DATA_AT_EXEC` indicator, is
 ///   rejected by `SQLBindParameter` itself. Also propagated from backend.
-/// - 07006: Restricted data type attribute violation. `SQLBindParameter` refuses a
-///   `SQL_C_BINARY` parameter bound to a target core cannot convert it to, so it does not
-///   reach execution (`crate::binary_convert`). Also propagated from backend.
+/// - 07006: Restricted data type attribute violation. **Returned by this driver**, for a
+///   binding whose C type core cannot read a parameter out of: the thirteen
+///   `SQL_C_INTERVAL_*` types and the `SQL_ARD_TYPE` / `SQL_APD_TYPE` sentinels
+///   (`ffi::params::read_param_value`'s terminal arm). `SQLBindParameter` refuses those,
+///   along with a `SQL_C_BINARY` or numeric parameter bound to a target its conversion
+///   table does not define, so a binding made *through it* cannot reach execution carrying
+///   one; a binding assembled through `SQLSetDescField` never passes that gate and is
+///   caught here instead. Also propagated from backend.
 /// - 07007: Restricted parameter value violation. Propagated from backend.
 /// - 07S01: Invalid use of default parameter. Propagated from backend.
 /// - 08S01: Communication link failure. Propagated from backend.
@@ -644,9 +649,14 @@ pub unsafe fn sql_prepare_w<B: Backend>(
 ///   padded with NULL (`ffi::params::collect_params`). The second clause, a binding whose
 ///   `ParameterValuePtr` is null with a non-`SQL_NULL_DATA`/`SQL_DATA_AT_EXEC` indicator, is
 ///   rejected by `SQLBindParameter` itself. Also propagated from backend.
-/// - 07006: Restricted data type attribute violation. `SQLBindParameter` refuses a
-///   `SQL_C_BINARY` parameter bound to a target core cannot convert it to, so it does not
-///   reach execution (`crate::binary_convert`). Also propagated from backend.
+/// - 07006: Restricted data type attribute violation. **Returned by this driver**, for a
+///   binding whose C type core cannot read a parameter out of: the thirteen
+///   `SQL_C_INTERVAL_*` types and the `SQL_ARD_TYPE` / `SQL_APD_TYPE` sentinels
+///   (`ffi::params::read_param_value`'s terminal arm). `SQLBindParameter` refuses those,
+///   along with a `SQL_C_BINARY` or numeric parameter bound to a target its conversion
+///   table does not define, so a binding made *through it* cannot reach execution carrying
+///   one; a binding assembled through `SQLSetDescField` never passes that gate and is
+///   caught here instead. Also propagated from backend.
 /// - 07007: Restricted parameter value violation. Propagated from backend.
 /// - 07S01: Invalid use of default parameter. Propagated from backend.
 /// - 08S01: Communication link failure. Propagated from backend.
