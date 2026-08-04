@@ -742,9 +742,13 @@ impl From<ColumnValue> for ParamValue {
 /// ones `SQLBindParameter` defines.
 ///
 /// The complete legal set is `SQL_NTS`, `SQL_NULL_DATA`, `SQL_DEFAULT_PARAM`,
-/// `SQL_DATA_AT_EXEC` and `SQL_LEN_DATA_AT_EXEC(n)`. Shared by the two
-/// character arms of [`read_param_value`] so they cannot drift apart, which is
-/// how they came to share the bug: both folded every negative into `SQL_NTS`.
+/// `SQL_DATA_AT_EXEC` and `SQL_LEN_DATA_AT_EXEC(n)`.
+///
+/// Shared by the `SQL_C_CHAR`, `SQL_C_WCHAR` and `SQL_C_BINARY` arms of
+/// [`read_param_value`], which is what holds the three to one answer. They
+/// differ only in whether `SQL_NTS` is among the values they accept before
+/// reaching here: the two character arms take it as "scan for the terminator",
+/// and the binary arm has no terminator to scan for and refuses it.
 fn undefined_negative_indicator(indicator: isize) -> OdbcError {
     OdbcError::general(
         format!(
@@ -951,10 +955,27 @@ pub(crate) unsafe fn read_param_value(rec: ParamRecord<'_>) -> Result<ParamValue
                 // to a valid isize provided by the ODBC caller.
                 let l = unsafe { std::ptr::read_unaligned(indicator_ptr) };
                 if l < 0 {
-                    None
-                } else {
-                    Some(clamp_to_bound_buffer(l as usize, apd.octet_length))
+                    // The same `HY090` the `SQL_C_CHAR` and `SQL_C_WCHAR` arms
+                    // raise, and for the same reason: by the time control
+                    // reaches here every negative names none of the values
+                    // *StrLen_or_IndPtr* defines. `SQL_NULL_DATA` and
+                    // `SQL_DEFAULT_PARAM` returned at the top of this function
+                    // and the data-at-execution values were diverted by
+                    // `find_data_at_exec_params` before it was called.
+                    //
+                    // `SQL_NTS` is not an exception here as it is there:
+                    // "null-terminated" is a statement about character data,
+                    // and a binary value has no terminator to find. It is
+                    // undefined for this C type and refused with the rest.
+                    //
+                    // The refusal is what keeps these out of the no-indicator
+                    // case below, which answers `NULL`. A negative the
+                    // application did not mean, `SQL_NO_TOTAL` or a stale -42,
+                    // is a mistake to report, not a NULL to send in place of
+                    // the value it bound.
+                    return Err(undefined_negative_indicator(l));
                 }
+                Some(clamp_to_bound_buffer(l as usize, apd.octet_length))
             };
             match byte_len {
                 Some(n) => {
@@ -4742,10 +4763,19 @@ mod tests {
     /// `SQL_NULL_DATA` and the data-at-execution values cannot reach these arms:
     /// the first returns at the top of `read_param_value` and the second is
     /// diverted by `find_data_at_exec_params` before it is ever called.
+    ///
+    /// `SQL_C_BINARY` is in the loop because the rule is the same one for it:
+    /// its only other reading of a negative is the no-indicator case, which
+    /// answers `NULL`, so without the refusal an undefined indicator sends a
+    /// NULL in place of the value the application bound.
     #[test]
     fn an_undefined_negative_parameter_indicator_is_hy090() {
         const SQL_NO_TOTAL: isize = -4;
-        for c_type in [odbc_sys::CDataType::Char, odbc_sys::CDataType::WChar] {
+        for c_type in [
+            odbc_sys::CDataType::Char,
+            odbc_sys::CDataType::WChar,
+            odbc_sys::CDataType::Binary,
+        ] {
             for bad in [SQL_NO_TOTAL, -6, -42, -99] {
                 let s = [b'a' as u16, 0];
                 let mut indicator: isize = bad;
@@ -4768,6 +4798,54 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// `SQL_NTS` is where the binary arm and the character arms part company.
+    ///
+    /// "Null-terminated" is a statement about character data: the character
+    /// arms answer it by scanning for the terminator, and a binary value has
+    /// none to find, so `SQL_NTS` names no length for `SQL_C_BINARY` and is
+    /// undefined for it. Asserted against `SQL_C_CHAR` in the same breath so
+    /// the test states the *difference* rather than one half of it, and so
+    /// widening the binary refusal to cover characters too fails here.
+    #[test]
+    fn sql_nts_is_a_length_for_a_character_parameter_and_undefined_for_a_binary_one() {
+        const SQL_NTS: isize = -3;
+        let bytes = [b'h', b'i', 0];
+
+        let mut indicator: isize = SQL_NTS;
+        let binding = BoundParam {
+            input_output_type: odbc_sys::ParamType::Input,
+            c_type: odbc_sys::CDataType::Char,
+            sql_type: SqlDataType(12),
+            col_size: 10,
+            decimal_digits: 0,
+            value_ptr: bytes.as_ptr() as *mut c_void,
+            buffer_length: 3,
+            str_len_or_ind_ptr: &mut indicator,
+        };
+        assert_eq!(
+            unsafe { read_bound_param(&binding) }.expect("SQL_NTS is defined for SQL_C_CHAR"),
+            ColumnValue::String("hi".to_string()),
+        );
+
+        let mut indicator: isize = SQL_NTS;
+        let binding = BoundParam {
+            input_output_type: odbc_sys::ParamType::Input,
+            c_type: odbc_sys::CDataType::Binary,
+            sql_type: odbc_sys::SqlDataType::EXT_BINARY,
+            col_size: 10,
+            decimal_digits: 0,
+            value_ptr: bytes.as_ptr() as *mut c_void,
+            buffer_length: 3,
+            str_len_or_ind_ptr: &mut indicator,
+        };
+        let err = unsafe { read_bound_param(&binding) }
+            .expect_err("SQL_NTS names no length for SQL_C_BINARY");
+        assert_eq!(
+            err.sqlstate().as_str(),
+            crate::types::sql_state::INVALID_STRING_OR_BUFFER_LENGTH,
+        );
     }
 
     /// The guard against over-reach on the test above: `SQL_DEFAULT_PARAM` is a
