@@ -102,6 +102,7 @@ fn collect_bindings(ard: &Descriptor, bind_offset: crate::descriptor::BindOffset
             numeric: crate::column_value::NumericTarget {
                 precision: r.precision,
                 scale: r.scale,
+                interval_leading_precision: r.datetime_interval_precision,
             },
         })
         .collect();
@@ -261,7 +262,10 @@ unsafe fn report_rows_fetched_only<B: Backend>(
 ///   numeric overflow.
 /// - 22007 (invalid datetime format): returned via `write_column_value`.
 /// - 22012 (division by zero): propagated from the backend if the data source reports it.
-/// - 22015 (interval field overflow): returned via `write_column_value`.
+/// - 22015 (interval field overflow): returned via `write_column_value`, for the two interval
+///   tables' "leading precision of target is not big enough to hold data from source" row and
+///   the year-month page's multi-field exact-numeric row. See `sql_get_data` for the whole
+///   set, which is the same one: both funnel through `write_column_value`.
 /// - 22018 (invalid character value for cast specification): returned via `write_column_value`.
 /// - 24000 (invalid cursor state): **returned by this driver**. The row carries no `(DM)`
 ///   marker and has one clause, "the *StatementHandle* was in an executed state but no
@@ -989,8 +993,12 @@ pub unsafe fn sql_extended_fetch<B: Backend>(
 ///   at fetch time, before it ever reaches this function; stackable-odbc-core has no such
 ///   backend-specific knowledge.
 /// - 22012 (division by zero): propagated from the backend.
-/// - 22015 (interval field overflow): not returned; `write_column_value` has no interval C type
-///   arms, so a request for one falls through to the generic 07006 case above.
+/// - 22015 (interval field overflow): **returned by this driver**, via `write_column_value`,
+///   for the two interval tables' "leading precision of target is not big enough to hold data
+///   from source" row, and for the year-month page's "interval precision was not a single
+///   field" row against an exact-numeric target. The day-time page answers that second
+///   condition with 07006 instead; the disagreement is between the two spec pages and each
+///   is transcribed as written.
 /// - 22018 (invalid character value for cast specification): returned via `write_column_value`
 ///   when character data does not parse as the requested numeric or datetime C type.
 /// - 24000 (invalid cursor state): returned when no cursor is open (`stmt.cursor_open` is
@@ -1135,6 +1143,7 @@ pub unsafe fn sql_get_data<B: Backend>(
                     |r| crate::column_value::NumericTarget {
                         precision: r.precision,
                         scale: r.scale,
+                        interval_leading_precision: r.datetime_interval_precision,
                     },
                 )
             };

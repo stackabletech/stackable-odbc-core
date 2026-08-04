@@ -1259,6 +1259,7 @@ mod tests {
             NumericTarget {
                 precision: 5,
                 scale: 2,
+                interval_leading_precision: 0,
             },
         );
         assert_eq!(n.precision, 5);
@@ -1307,6 +1308,7 @@ mod tests {
             NumericTarget {
                 precision: 5,
                 scale: 2,
+                interval_leading_precision: 0,
             },
         );
         assert_eq!(u128::from_le_bytes(n.val), 123, "truncated toward zero");
@@ -1324,6 +1326,7 @@ mod tests {
             NumericTarget {
                 precision: 5,
                 scale: 1,
+                interval_leading_precision: 0,
             },
         );
         assert_eq!(u128::from_le_bytes(n.val), 15);
@@ -1339,6 +1342,7 @@ mod tests {
             NumericTarget {
                 precision: 10,
                 scale: 4,
+                interval_leading_precision: 0,
             },
         );
         assert_eq!(u128::from_le_bytes(n.val), 15000);
@@ -1394,6 +1398,7 @@ mod tests {
             .to_numeric_struct(NumericTarget {
                 precision: 3,
                 scale: 0,
+                interval_leading_precision: 0,
             })
             .expect_err("six digits do not fit a declared precision of three");
         assert_eq!(

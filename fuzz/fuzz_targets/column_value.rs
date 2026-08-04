@@ -31,8 +31,33 @@ enum FuzzValue {
     Decimal(String),
     TimestampTz { year: i16, month: u16, day: u16, hour: u16, minute: u16, second: u16, fraction: u32, timezone_offset_minutes: i16 },
     Json(String),
-    IntervalYearMonth { years: i32, months: i32 },
-    IntervalDayTime { total_milliseconds: i64 },
+    // `precision` is a fuzzed index rather than an `odbc_sys::Interval`, which
+    // is not `Arbitrary`; `interval_precision` maps it onto all thirteen.
+    IntervalYearMonth { years: i32, months: i32, precision: u8 },
+    IntervalDayTime { total_nanoseconds: i128, precision: u8 },
+}
+
+/// Map a fuzzed byte onto one of the thirteen interval precisions.
+///
+/// All thirteen are reachable, so the fuzzer explores every field span rather
+/// than only the one a fixed choice would pin.
+fn interval_precision(raw: u8) -> stackable_odbc_core::types::Interval {
+    use stackable_odbc_core::types::Interval::*;
+    match raw % 13 {
+        0 => Year,
+        1 => Month,
+        2 => Day,
+        3 => Hour,
+        4 => Minute,
+        5 => Second,
+        6 => YearToMonth,
+        7 => DayToHour,
+        8 => DayToMinute,
+        9 => DayToSecond,
+        10 => HourToMinute,
+        11 => HourToSecond,
+        _ => MinuteToSecond,
+    }
 }
 
 impl From<FuzzValue> for ColumnValue {
@@ -63,11 +88,18 @@ impl From<FuzzValue> for ColumnValue {
                 year, month, day, hour, minute, second, fraction, timezone_offset_minutes,
             },
             FuzzValue::Json(s) => ColumnValue::Json(s),
-            FuzzValue::IntervalYearMonth { years, months } => {
-                ColumnValue::IntervalYearMonth { years, months }
+            FuzzValue::IntervalYearMonth { years, months, precision } => {
+                ColumnValue::IntervalYearMonth {
+                    years,
+                    months,
+                    precision: interval_precision(precision),
+                }
             }
-            FuzzValue::IntervalDayTime { total_milliseconds } => {
-                ColumnValue::IntervalDayTime { total_milliseconds }
+            FuzzValue::IntervalDayTime { total_nanoseconds, precision } => {
+                ColumnValue::IntervalDayTime {
+                    total_nanoseconds,
+                    precision: interval_precision(precision),
+                }
             }
         }
     }
@@ -172,6 +204,7 @@ fuzz_target!(|input: Input| {
             buf_len,
             ind,
             NumericTarget {
+                interval_leading_precision: 0,
                 precision: input.precision,
                 scale: input.scale,
             },

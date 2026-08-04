@@ -44,7 +44,8 @@ use crate::{
     errors::OdbcError,
     param_convert::{DecimalLiteral, check_declared_char_size, parse_numeric_literal, truncation},
     types::{
-        ColumnValue, SQL_INTERVAL_SECOND, SQL_INTERVAL_YEAR, SqlState, ULen, interval_from_raw,
+        ColumnValue, NANOS_PER_DAY, NANOS_PER_HOUR, NANOS_PER_MINUTE, NANOS_PER_SECOND,
+        SQL_INTERVAL_SECOND, SQL_INTERVAL_YEAR, SqlState, ULen, interval_from_raw,
         is_interval_sql_type,
     },
 };
@@ -372,23 +373,29 @@ fn interval_from_exact(
         }
     }
 
+    // `field` is the target's own interval code, so it is also the precision
+    // the produced value carries: a `SQL_INTERVAL_HOUR` parameter is an
+    // hour-precision interval, and recording anything else here would let the
+    // read direction disagree with the declared type about what was sent.
     let value = match field {
         Interval::Year => ColumnValue::IntervalYearMonth {
             years: narrow_interval_field(signed, &text, sql_type)?,
             months: 0,
+            precision: field,
         },
         Interval::Month => ColumnValue::IntervalYearMonth {
             years: 0,
             months: narrow_interval_field(signed, &text, sql_type)?,
+            precision: field,
         },
-        // The day-time family is one signed total in milliseconds, so each
+        // The day-time family is one signed total in nanoseconds, so each
         // field is its own scale factor. An overflow here is a value the
         // representation cannot hold, which is the row's "data truncated"
         // rather than a wrap.
-        Interval::Day => day_time(signed, 86_400_000, &text, sql_type)?,
-        Interval::Hour => day_time(signed, 3_600_000, &text, sql_type)?,
-        Interval::Minute => day_time(signed, 60_000, &text, sql_type)?,
-        Interval::Second => day_time(signed, 1_000, &text, sql_type)?,
+        Interval::Day => day_time(signed, NANOS_PER_DAY, field, &text, sql_type)?,
+        Interval::Hour => day_time(signed, NANOS_PER_HOUR, field, &text, sql_type)?,
+        Interval::Minute => day_time(signed, NANOS_PER_MINUTE, field, &text, sql_type)?,
+        Interval::Second => day_time(signed, NANOS_PER_SECOND, field, &text, sql_type)?,
         // `single_field_interval_code` returns only the six above.
         _ => return Err(unsupported_target(sql_type)),
     };
@@ -404,20 +411,33 @@ fn narrow_interval_field(
     i32::try_from(signed).map_err(|_| interval_overflow(text, sql_type))
 }
 
-/// Scale a day-time field into the single signed millisecond total its variant
+/// Scale a day-time field into the single signed nanosecond total its variant
 /// carries.
 fn day_time(
     signed: i128,
-    millis_per_unit: i64,
+    nanos_per_unit: i128,
+    precision: Interval,
     text: &str,
     sql_type: SqlDataType,
 ) -> Result<ColumnValue, OdbcError> {
-    let total = i64::try_from(signed)
-        .ok()
-        .and_then(|v| v.checked_mul(millis_per_unit))
+    let total = signed
+        .checked_mul(nanos_per_unit)
         .ok_or_else(|| interval_overflow(text, sql_type))?;
+
+    // `i128` nanoseconds reach far past what an interval can hold, so the
+    // arithmetic not overflowing is no longer evidence that the value is
+    // representable. `SQL_DAY_SECOND_STRUCT`'s widest field is a `SQLUINTEGER`
+    // count of days, so anything beyond that many days is a value no interval
+    // struct can carry and no data source can be told about; it is the row's
+    // "data truncated" rather than a total to hand on.
+    const MAX: i128 = u32::MAX as i128 * NANOS_PER_DAY;
+    if !(-MAX..=MAX).contains(&total) {
+        return Err(interval_overflow(text, sql_type));
+    }
+
     Ok(ColumnValue::IntervalDayTime {
-        total_milliseconds: total,
+        total_nanoseconds: total,
+        precision,
     })
 }
 
@@ -1040,7 +1060,8 @@ mod tests {
             out.value,
             ColumnValue::IntervalYearMonth {
                 years: 5,
-                months: 0
+                months: 0,
+                precision: Interval::Year,
             }
         );
         assert!(out.warning.is_none());
@@ -1055,7 +1076,8 @@ mod tests {
             out.value,
             ColumnValue::IntervalYearMonth {
                 years: 0,
-                months: 18
+                months: 18,
+                precision: Interval::Month,
             }
         );
     }
@@ -1068,7 +1090,8 @@ mod tests {
                 .value,
             ColumnValue::IntervalYearMonth {
                 years: -5,
-                months: 0
+                months: 0,
+                precision: Interval::Year,
             }
         );
         assert_eq!(
@@ -1076,25 +1099,27 @@ mod tests {
                 .expect("-5")
                 .value,
             ColumnValue::IntervalDayTime {
-                total_milliseconds: -5 * 3_600_000
+                total_nanoseconds: -5 * NANOS_PER_HOUR,
+                precision: Interval::Hour,
             }
         );
     }
 
     #[test]
-    fn each_day_time_interval_scales_to_milliseconds() {
-        for (target, expected) in [
-            (SQL_INTERVAL_DAY, 3 * 86_400_000_i64),
-            (SQL_INTERVAL_HOUR, 3 * 3_600_000),
-            (SQL_INTERVAL_MINUTE, 3 * 60_000),
-            (SQL_INTERVAL_SECOND, 3 * 1_000),
+    fn each_day_time_interval_scales_to_nanoseconds() {
+        for (target, expected, precision) in [
+            (SQL_INTERVAL_DAY, 3 * NANOS_PER_DAY, Interval::Day),
+            (SQL_INTERVAL_HOUR, 3 * NANOS_PER_HOUR, Interval::Hour),
+            (SQL_INTERVAL_MINUTE, 3 * NANOS_PER_MINUTE, Interval::Minute),
+            (SQL_INTERVAL_SECOND, 3 * NANOS_PER_SECOND, Interval::Second),
         ] {
             assert_eq!(
                 numeric_to_sql_type(exact("3"), target, 0, 0, 2)
                     .expect("3 fits")
                     .value,
                 ColumnValue::IntervalDayTime {
-                    total_milliseconds: expected
+                    total_nanoseconds: expected,
+                    precision,
                 },
                 "{target:?}"
             );

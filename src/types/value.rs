@@ -3,7 +3,7 @@
 //! [`ColumnDescriptor`] (result-set column metadata) and [`TypeInfoRow`] (a
 //! `SQLGetTypeInfo` row).
 
-use odbc_sys::SqlDataType;
+use odbc_sys::{Interval, SqlDataType};
 
 // ---------------------------------------------------------------------------
 // Nullable
@@ -298,23 +298,67 @@ pub enum ColumnValue {
     Map(Vec<(ColumnValue, ColumnValue)>),
     /// ROW or struct, a set of ordered fields.
     Row(Vec<ColumnValue>),
-    /// INTERVAL YEAR TO MONTH
+    /// A year-month interval: `SQL_INTERVAL_YEAR`, `SQL_INTERVAL_MONTH` or
+    /// `SQL_INTERVAL_YEAR_TO_MONTH`.
     IntervalYearMonth {
         /// Whole years.
         years: i32,
         /// Whole months, not normalised into `years`.
         months: i32,
+        /// Which of the three year-month types this is.
+        ///
+        /// See [`ColumnValue::IntervalDayTime::precision`] for why the value
+        /// carries this rather than leaving it to be inferred.
+        precision: Interval,
     },
-    /// INTERVAL DAY TO SECOND, as a single signed total.
+    /// A day-time interval: `SQL_INTERVAL_DAY` through
+    /// `SQL_INTERVAL_MINUTE_TO_SECOND`, as a single signed total.
     ///
-    /// A split days/milliseconds representation admits states where the two
+    /// A split days/hours/minutes representation admits states where the fields
     /// carry different signs, and cannot represent a negative interval of less
-    /// than one day at all.
+    /// than one day at all. One signed magnitude has neither problem, and
+    /// [`crate::column_value`] splits it into `SQL_INTERVAL_STRUCT`'s fields at
+    /// the point of writing, where the target type says which fields exist.
     IntervalDayTime {
-        /// The whole interval as signed milliseconds.
-        total_milliseconds: i64,
+        /// The whole interval as signed nanoseconds.
+        ///
+        /// Nanoseconds because `SQL_INTERVAL_STRUCT`'s `fraction` field is a
+        /// count of billionths of a second, so a coarser unit here could not
+        /// round-trip a `SQL_INTERVAL_DAY_TO_SECOND` value. `i128` because
+        /// that field's `day` companion is a `SQLUINTEGER`, and `u32::MAX` days
+        /// in nanoseconds overflows `i64` by four orders of magnitude.
+        total_nanoseconds: i128,
+        /// Which of the ten day-time types this is.
+        ///
+        /// The spec's *SQL to C: Day-Time Intervals* table turns on it twice,
+        /// and neither question can be answered from the magnitude alone. Its
+        /// exact-numeric rows apply only when "interval precision was a single
+        /// field", so `SQL_INTERVAL_HOUR` converts to `SQL_C_SLONG` and
+        /// `SQL_INTERVAL_DAY_TO_HOUR` does not, however small the value; and
+        /// the interval-target rows report `01S07` when the "trailing fields
+        /// portion" is truncated, which is a statement about which fields the
+        /// source *had*, not about which are non-zero.
+        precision: Interval,
     },
 }
+
+/// Nanoseconds in one second, the unit
+/// [`ColumnValue::IntervalDayTime::total_nanoseconds`] counts in.
+///
+/// The four scale factors are stated once, here, because both directions of the
+/// interval conversion need them and a second copy is how the two come to
+/// disagree about what a day is.
+pub const NANOS_PER_SECOND: i128 = 1_000_000_000;
+/// Nanoseconds in one minute.
+pub const NANOS_PER_MINUTE: i128 = 60 * NANOS_PER_SECOND;
+/// Nanoseconds in one hour.
+pub const NANOS_PER_HOUR: i128 = 60 * NANOS_PER_MINUTE;
+/// Nanoseconds in one day.
+///
+/// A day is exactly 24 hours here. SQL interval arithmetic is calendar-free:
+/// the day-time family carries no date to hang a daylight-saving transition or
+/// a leap second on, so there is no shorter or longer day for it to mean.
+pub const NANOS_PER_DAY: i128 = 24 * NANOS_PER_HOUR;
 
 // ---------------------------------------------------------------------------
 // TypeInfoRow

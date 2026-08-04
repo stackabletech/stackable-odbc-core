@@ -131,7 +131,7 @@ Generic framework. Zero database-specific code.
 | `types/catalog_queries.rs` | The ten sealed `XxxQuery` argument objects the catalog hooks take |
 | `types/diagnostics_table.rs` | Every function's spec Diagnostics table transcribed, plus the guards that check the doc comments against it |
 | `types/redacted.rs` | `Redacted<T>`: a `Debug` wrapper that prints `*****` for sensitive fields (e.g. passwords) |
-| `column_value.rs` | `write_column_value()`: core data marshalling for `SQLGetData` (NULL, truncation, type coercion) |
+| `column_value.rs` | `write_column_value()`: core data marshalling for `SQLGetData` (NULL, truncation, type coercion). Also owns the spec's "SQL to C: Year-Month Intervals" and "SQL to C: Day-Time Intervals" tables, transcribed: the C interval targets, footnote [b]'s exact-numeric row, and the character and binary rows those two pages word differently from every other source |
 | `param_convert.rs` | `text_to_sql_type()`, the reverse direction: converts `SQL_C_CHAR`/`SQL_C_WCHAR` parameter text to the SQL type `SQLBindParameter` declared. The spec's "C to SQL: Character" table, transcribed. Also owns the size checks all three C-to-SQL tables share (`DecimalLiteral`, `check_declared_char_size`, `check_declared_decimal_size`, `check_declared_binary_size`) |
 | `binary_convert.rs` | The spec's "C to SQL: Binary" table, transcribed. `SQL_C_BINARY` to the targets whose byte layout ODBC defines; refuses the rest at bind with `07006` |
 | `numeric_convert.rs` | The spec's "C to SQL: Numeric" table, transcribed. Every numeric C type to any of its six target rows, including the interval row and footnote [b]'s optional `01S07`. `numeric_pairing_is_supported` is `SQLBindParameter`'s gate |

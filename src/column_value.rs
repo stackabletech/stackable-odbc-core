@@ -1,13 +1,37 @@
 //! `write_column_value` marshals a [`crate::types::ColumnValue`] into an
 //! application buffer for `SQLGetData` (NULL, truncation, type coercion).
+//!
+//! # The interval tables
+//!
+//! Two of the SQL-to-C pages are transcribed here in full rather than in a
+//! module of their own, because they share every writer the rest of this file
+//! already has: [SQL to C: Year-Month Intervals] and [SQL to C: Day-Time
+//! Intervals]. `write_interval` is their first row, the C interval targets;
+//! `write_interval_as_exact_numeric` is footnote \[b\]'s exact-numeric row;
+//! and their character and binary rows are carve-outs in
+//! `check_whole_digits_fit` and the `SQL_C_BINARY` arm, both of which differ
+//! from the corresponding row of every other source.
+//!
+//! The two pages disagree with each other in one cell, "interval precision was
+//! not a single field" against an exact numeric, which the year-month page
+//! calls `22015` and the day-time page `07006`. Each is answered with its own
+//! page's state; see `write_interval_as_exact_numeric`.
+//!
+//! [SQL to C: Year-Month Intervals]: https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/sql-to-c-year-month-intervals
+//! [SQL to C: Day-Time Intervals]: https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/sql-to-c-day-time-intervals
 
-use std::ffi::c_void;
+use std::ffi::{c_int, c_void};
 
-use odbc_sys::{Date, NULL_DATA, Time, Timestamp};
+use odbc_sys::{
+    Date, DaySecond, Interval, IntervalStruct, IntervalUnion, NULL_DATA, Time, Timestamp, YearMonth,
+};
 
 use crate::errors::OdbcError;
 use crate::param_convert::{DecimalLiteral, parse_numeric_literal};
-use crate::types::{CDataType, ColumnValue, SqlReturn, SqlState};
+use crate::types::{
+    CDataType, ColumnValue, NANOS_PER_DAY, NANOS_PER_HOUR, NANOS_PER_MINUTE, NANOS_PER_SECOND,
+    SqlReturn, SqlState,
+};
 
 // ---------------------------------------------------------------------------
 // Core marshalling function
@@ -81,13 +105,32 @@ pub struct NumericTarget {
     pub precision: i16,
     /// `SQL_DESC_SCALE`.
     pub scale: i16,
+    /// `SQL_DESC_DATETIME_INTERVAL_PRECISION`, the *leading field precision* of
+    /// an interval target. `0` means unspecified.
+    ///
+    /// Read only by the interval C targets, where it is half of the two
+    /// interval tables' "leading precision of target is not big enough to hold
+    /// data from source" row; the other half is whether the leading field fits
+    /// its `SQLUINTEGER` at all. Zero reads as "the application did not say",
+    /// the same convention `precision` above uses and the same one
+    /// `numeric_convert::interval_from_exact` already applies to this field in
+    /// the C-to-SQL direction, so the two directions agree about an undeclared
+    /// precision.
+    ///
+    /// It rides here, in a struct named for the numeric targets, because this
+    /// and `precision` are read from the same ARD record at the same moment and
+    /// a third argument of the same type is what the doc comment above warns
+    /// against.
+    pub interval_leading_precision: i32,
 }
 
 impl NumericTarget {
-    /// The application declared neither field; derive both from the value.
+    /// The application declared none of these fields; derive what is needed
+    /// from the value.
     pub const UNSPECIFIED: Self = Self {
         precision: 0,
         scale: 0,
+        interval_leading_precision: 0,
     };
 }
 
@@ -408,6 +451,25 @@ unsafe fn write_fixed_or_chunked(
         }
         CDataType::Binary => {
             let bytes = column_value_to_binary(value);
+            // Both interval tables' `SQL_C_BINARY` row is a two-way split with
+            // no truncating outcome at all: "Byte length of data <=
+            // *BufferLength*" writes the data, and "> *BufferLength*" is
+            // *Undefined* with `22003`. That is unlike every other source,
+            // whose binary row truncates with `01004`, and unlike them an
+            // interval has no meaningful prefix: half a `SQL_INTERVAL_STRUCT`
+            // is not a shorter interval. Checked before the write so nothing
+            // is delivered, which is what "Undefined" requires.
+            if is_interval_source(value) && !target_ptr.is_null() && buf_len < bytes.len() as isize
+            {
+                return Err(OdbcError::general(
+                    format!(
+                        "{value:?} needs {} bytes as SQL_C_BINARY, but the application supplied \
+                         a {buf_len}-byte buffer",
+                        bytes.len()
+                    ),
+                    SqlState::numeric_value_out_of_range(),
+                ));
+            }
             let (ret, delivered) =
                 unsafe { write_binary(&bytes, target_ptr, buf_len, len_ind_ptr, offset)? };
             return Ok(ChunkWrite {
@@ -420,8 +482,38 @@ unsafe fn write_fixed_or_chunked(
         // value's *text* rather than a numeric pivot, and ahead of the coercion
         // match for the same reason they are: it reads the rendered decimal.
         // Not chunkable: `SQL_NUMERIC_STRUCT` is fixed-width.
-        CDataType::Numeric => {
+        //
+        // An interval source is diverted before it gets here, because the two
+        // interval tables give `SQL_C_NUMERIC` a row of their own with a
+        // different failure set from the numeric table's.
+        CDataType::Numeric
+            if !matches!(
+                value,
+                ColumnValue::IntervalYearMonth { .. } | ColumnValue::IntervalDayTime { .. }
+            ) =>
+        {
             return unsafe { write_numeric(value, target_ptr, len_ind_ptr, numeric) }.map(whole);
+        }
+        // The interval C targets, both tables' first row. `SQL_C_INTERVAL_*`
+        // appears in no other conversion table, so a non-interval source asked
+        // for one falls through to the terminal `07006`.
+        CDataType::IntervalYear
+        | CDataType::IntervalMonth
+        | CDataType::IntervalDay
+        | CDataType::IntervalHour
+        | CDataType::IntervalMinute
+        | CDataType::IntervalSecond
+        | CDataType::IntervalYearToMonth
+        | CDataType::IntervalDayToHour
+        | CDataType::IntervalDayToMinute
+        | CDataType::IntervalDayToSecond
+        | CDataType::IntervalHourToMinute
+        | CDataType::IntervalHourToSecond
+        | CDataType::IntervalMinuteToSecond => {
+            if let Some(target) = interval_of_c_type(target_type) {
+                return unsafe { write_interval(value, target, target_ptr, len_ind_ptr, numeric) }
+                    .map(whole);
+            }
         }
         // The *SQL to C: GUID* table's own row, and the only row that table
         // gives for this C type: test "None", data written, indicator 16, no
@@ -617,6 +709,28 @@ unsafe fn write_fixed_or_chunked(
         //
         // column_value_as_numeric uses an exhaustive match (no wildcard), so adding a new
         // ColumnValue variant causes a compile error there, forcing an explicit decision.
+        // The two interval tables' exact-numeric row, ahead of the general
+        // numeric arm because its failure set is not the numeric table's.
+        //
+        // The target list is footnote [b]'s own and stops short of the numeric
+        // arm's: `SQL_C_FLOAT`, `SQL_C_DOUBLE` and `SQL_C_BIT` are absent from
+        // both interval pages, so an interval asked for one is not a defined
+        // conversion and falls to the terminal `07006` rather than being
+        // approximated.
+        (
+            ColumnValue::IntervalYearMonth { .. } | ColumnValue::IntervalDayTime { .. },
+            CDataType::STinyInt
+            | CDataType::UTinyInt
+            | CDataType::SShort
+            | CDataType::UShort
+            | CDataType::SLong
+            | CDataType::ULong
+            | CDataType::SBigInt
+            | CDataType::UBigInt
+            | CDataType::Numeric,
+        ) => unsafe {
+            write_interval_as_exact_numeric(value, target_type, target_ptr, len_ind_ptr, numeric)
+        },
         (
             _,
             CDataType::STinyInt
@@ -1287,10 +1401,16 @@ pub(crate) fn parse_sql_timestamp(s: &str) -> Result<Timestamp, OdbcError> {
 ///   TODO(spec): implement those minimum-width 22003 rows, "*BufferLength* <
 ///   20" for a timestamp and the analogous widths on the date and time pages.
 ///   Core returns 01004 for all of them today.
-/// - `String`, `Json`, `Bytes`, `Guid`, `Array`, `Map`, `Row` and the two
-///   interval variants (`IntervalYearMonth`, `IntervalDayTime`) are not numeric
-///   at all. *SQL to C: Character* has no 22003 row for SQL_C_CHAR whatsoever,
-///   so a character column that does not fit stays an ordinary 01004.
+/// - `String`, `Json`, `Bytes`, `Guid`, `Array`, `Map` and `Row` are not
+///   numeric at all. *SQL to C: Character* has no 22003 row for SQL_C_CHAR
+///   whatsoever, so a character column that does not fit stays an ordinary
+///   01004.
+/// - `IntervalYearMonth` and `IntervalDayTime` are not numeric either, but they
+///   are not exempt from the check: their own two pages give SQL_C_CHAR and
+///   SQL_C_WCHAR the same three-way split this table does, ending in the same
+///   22003. `check_whole_digits_fit` therefore admits them through
+///   `is_interval_source` alongside this predicate, and the value written is
+///   still governed by the interval pages rather than by this one.
 /// - `Null` never reaches here: `write_fixed_or_chunked` answers it with
 ///   `SQL_NULL_DATA` before the target type is examined. Listed for
 ///   completeness so the fifteen add up rather than leaving a reader to check.
@@ -1452,7 +1572,16 @@ fn check_whole_digits_fit(
     target_ptr: *mut c_void,
     buf_len: isize,
 ) -> Result<(), OdbcError> {
-    if !is_numeric_source(value) {
+    // Two families of source reach this check, for two tables that happen to
+    // word their character rows identically. *SQL to C: Numeric* is
+    // `is_numeric_source`'s; the two interval pages give `SQL_C_CHAR` and
+    // `SQL_C_WCHAR` the same three-way split, "Number of whole (as opposed to
+    // fractional) digits >= *BufferLength*" → `22003`, so an interval that
+    // cannot show its whole part is the same failure and not an ordinary
+    // `01004`. `whole_part` splits on the decimal point, which is the boundary
+    // in an interval literal too: `163 12:39:59.163` keeps everything before
+    // the fractional seconds.
+    if !is_numeric_source(value) && !is_interval_source(value) {
         return Ok(());
     }
 
@@ -2675,30 +2804,553 @@ fn column_value_to_string(value: &ColumnValue) -> String {
             let parts: Vec<String> = fields.iter().map(column_value_to_string).collect();
             format!("({})", parts.join(", "))
         }
-        ColumnValue::IntervalYearMonth { years, months } => {
-            // Both fields carry the same sign (see the parser that produces
-            // this variant), so either is a valid sign source; render the
-            // sign once up front rather than letting each field print its
-            // own, which would otherwise yield something like "-1--6".
-            let negative = *years < 0 || *months < 0;
-            let sign = if negative { "-" } else { "" };
-            format!("{sign}{}-{}", years.unsigned_abs(), months.unsigned_abs())
+        ColumnValue::IntervalYearMonth {
+            years,
+            months,
+            precision,
+        } => render_interval(
+            split_year_month(*years, *months, *precision),
+            *precision,
+            // The magnitude cannot exceed what `i32` years and months hold, and
+            // the year-month split only fails on a `u32` narrowing, so this is
+            // unreachable for any constructible value. Rendered as "0" rather
+            // than panicking: a `Display`-shaped path is the wrong place to
+            // abort, and the conversion arms report the overflow themselves.
+            "0",
+        ),
+        ColumnValue::IntervalDayTime {
+            total_nanoseconds,
+            precision,
+        } => render_interval(
+            split_day_time(*total_nanoseconds, *precision),
+            *precision,
+            "0",
+        ),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The interval field model
+// ---------------------------------------------------------------------------
+
+/// One of the six fields an interval is built from, ordered coarsest first.
+///
+/// Not an `odbc-sys` type: the ABI names the thirteen *combinations*
+/// (`odbc_sys::Interval`), and every rule in the two interval conversion tables
+/// is stated over the individual fields those combinations span. Deriving the
+/// span once, in [`interval_fields`], is what lets the rest of this module ask
+/// "is anything below the trailing field non-zero?" without thirteen arms.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+enum IntervalField {
+    Year,
+    Month,
+    Day,
+    Hour,
+    Minute,
+    Second,
+}
+
+/// The leading and trailing field each of the thirteen interval types spans.
+///
+/// The names say it: `SQL_IS_DAY_TO_MINUTE` spans `Day..=Minute`, and a
+/// single-field type spans one field twice. Exhaustive so a new
+/// `odbc_sys::Interval` variant is a compile error rather than a silent
+/// default.
+const fn interval_fields(precision: Interval) -> (IntervalField, IntervalField) {
+    use IntervalField::{Day, Hour, Minute, Month, Second, Year};
+    match precision {
+        Interval::Year => (Year, Year),
+        Interval::Month => (Month, Month),
+        Interval::Day => (Day, Day),
+        Interval::Hour => (Hour, Hour),
+        Interval::Minute => (Minute, Minute),
+        Interval::Second => (Second, Second),
+        Interval::YearToMonth => (Year, Month),
+        Interval::DayToHour => (Day, Hour),
+        Interval::DayToMinute => (Day, Minute),
+        Interval::DayToSecond => (Day, Second),
+        Interval::HourToMinute => (Hour, Minute),
+        Interval::HourToSecond => (Hour, Second),
+        Interval::MinuteToSecond => (Minute, Second),
+    }
+}
+
+/// Whether an interval type's precision is "a single field", the test both
+/// tables' exact-numeric rows turn on.
+///
+/// Footnote [b] on each page lists them by name, YEAR or MONTH on the
+/// year-month page and DAY, HOUR, MINUTE or SECOND on the day-time one, which
+/// is exactly the types whose leading and trailing fields coincide.
+const fn is_single_field(precision: Interval) -> bool {
+    let (leading, trailing) = interval_fields(precision);
+    leading as u8 == trailing as u8
+}
+
+/// Whether an interval type belongs to the year-month family.
+///
+/// The two tables are separate pages with separate source-type lists, and
+/// neither has a row for the other's C types, so a year-month value asked for a
+/// day-time C type is not a defined conversion. That is the overview page's
+/// `07006` rather than anything either table says.
+const fn is_year_month_interval(precision: Interval) -> bool {
+    matches!(
+        precision,
+        Interval::Year | Interval::Month | Interval::YearToMonth
+    )
+}
+
+/// A day-time interval split into `SQL_DAY_SECOND_STRUCT`'s fields.
+struct DayTimeParts {
+    /// The fields themselves, already reduced to the target's span.
+    fields: DaySecond,
+    /// Whether the value was negative, for `SQL_INTERVAL_STRUCT`'s own sign.
+    negative: bool,
+    /// Whether anything below the target's trailing field was non-zero, which
+    /// is the tables' "trailing fields portion truncated" and its `01S07`.
+    truncated: bool,
+}
+
+/// Split a signed nanosecond total into the fields `target` spans.
+///
+/// The leading field absorbs every coarser unit, which is what makes
+/// `SQL_INTERVAL_HOUR_TO_MINUTE` able to hold a three-day interval as 72 hours
+/// rather than overflowing. The trailing field is the finest one kept, and
+/// whatever falls below it is the truncation the caller reports.
+///
+/// `None` when the leading field does not fit its `SQLUINTEGER`, which is the
+/// tables' "leading precision of target is not big enough to hold data from
+/// source" and its `22015`. The application's declared
+/// `SQL_DESC_DATETIME_INTERVAL_PRECISION` is the other half of that row and is
+/// checked by the caller, which is the only one holding the descriptor.
+fn split_day_time(total_nanoseconds: i128, target: Interval) -> Option<DayTimeParts> {
+    let (leading, trailing) = interval_fields(target);
+    let negative = total_nanoseconds < 0;
+    let mut rest = total_nanoseconds.unsigned_abs();
+
+    // Peel the leading field first, then each finer one in turn. A field
+    // coarser than the leading one is never peeled, so its magnitude stays in
+    // `rest` and lands in the leading field, as the doc comment describes.
+    let mut fields = DaySecond::default();
+    let mut take = |unit: i128, field: IntervalField, out: &mut u32| -> Option<()> {
+        if leading > field || trailing < field {
+            return Some(());
         }
-        ColumnValue::IntervalDayTime { total_milliseconds } => {
-            let negative = *total_milliseconds < 0;
-            let sign = if negative { "-" } else { "" };
-            let total_ms = total_milliseconds.unsigned_abs();
-            let ms = total_ms % 1000;
-            let total_s = total_ms / 1000;
-            let s = total_s % 60;
-            let total_m = total_s / 60;
-            let m = total_m % 60;
-            let total_h = total_m / 60;
-            let h = total_h % 24;
-            let days = total_h / 24;
-            format!("{sign}{days} {h:02}:{m:02}:{s:02}.{ms:03}")
+        let unit = unit.unsigned_abs();
+        *out = u32::try_from(rest / unit).ok()?;
+        rest %= unit;
+        Some(())
+    };
+    take(NANOS_PER_DAY, IntervalField::Day, &mut fields.day)?;
+    take(NANOS_PER_HOUR, IntervalField::Hour, &mut fields.hour)?;
+    take(NANOS_PER_MINUTE, IntervalField::Minute, &mut fields.minute)?;
+    take(NANOS_PER_SECOND, IntervalField::Second, &mut fields.second)?;
+
+    // A SECOND-precision target carries the sub-second remainder in `fraction`,
+    // so nothing is lost there; every coarser trailing field drops it.
+    if trailing == IntervalField::Second {
+        fields.fraction = u32::try_from(rest).unwrap_or(u32::MAX);
+        rest = 0;
+    }
+
+    Some(DayTimeParts {
+        fields,
+        negative,
+        truncated: rest != 0,
+    })
+}
+
+/// The whole-year and whole-month fields a year-month value presents to
+/// `target`, and whether anything below the trailing field was dropped.
+///
+/// The variant carries years and months unnormalised, so the total months is
+/// the only reading that lets `SQL_IS_MONTH` see a year: `1-6` is eighteen
+/// months, and a `SQL_C_INTERVAL_MONTH` target must be handed 18 rather than 6.
+fn split_year_month(years: i32, months: i32, target: Interval) -> Option<DayTimeParts> {
+    let (leading, trailing) = interval_fields(target);
+    let total_months = i64::from(years) * 12 + i64::from(months);
+    let negative = total_months < 0;
+    let mut rest = total_months.unsigned_abs();
+
+    let mut year_month = YearMonth::default();
+    if leading == IntervalField::Year {
+        year_month.year = u32::try_from(rest / 12).ok()?;
+        rest %= 12;
+    }
+    if trailing == IntervalField::Month {
+        year_month.month = u32::try_from(rest).ok()?;
+        rest = 0;
+    }
+
+    // Reuse `DayTimeParts` as the carrier so both families answer the caller in
+    // one shape; the year-month fields ride in `day` and `hour`, which
+    // `interval_struct` reads back into the union's `year_month` arm.
+    Some(DayTimeParts {
+        fields: DaySecond {
+            day: year_month.year,
+            hour: year_month.month,
+            ..DaySecond::default()
+        },
+        negative,
+        truncated: rest != 0,
+    })
+}
+
+/// Whether a value is governed by one of the two interval conversion tables.
+const fn is_interval_source(value: &ColumnValue) -> bool {
+    matches!(
+        value,
+        ColumnValue::IntervalYearMonth { .. } | ColumnValue::IntervalDayTime { .. }
+    )
+}
+
+/// The `odbc_sys::Interval` an interval C type names, or `None` for any other
+/// C type.
+///
+/// The concise C type and the concise SQL type share a number for all thirteen
+/// (`SQL_C_INTERVAL_YEAR` is *defined* as `SQL_INTERVAL_YEAR`), and the
+/// `SQL_IS_*` subcode is that number less 100, which is the arithmetic
+/// `crate::types::constants` already records for the SQL side.
+const fn interval_of_c_type(c_type: CDataType) -> Option<Interval> {
+    Some(match c_type {
+        CDataType::IntervalYear => Interval::Year,
+        CDataType::IntervalMonth => Interval::Month,
+        CDataType::IntervalDay => Interval::Day,
+        CDataType::IntervalHour => Interval::Hour,
+        CDataType::IntervalMinute => Interval::Minute,
+        CDataType::IntervalSecond => Interval::Second,
+        CDataType::IntervalYearToMonth => Interval::YearToMonth,
+        CDataType::IntervalDayToHour => Interval::DayToHour,
+        CDataType::IntervalDayToMinute => Interval::DayToMinute,
+        CDataType::IntervalDayToSecond => Interval::DayToSecond,
+        CDataType::IntervalHourToMinute => Interval::HourToMinute,
+        CDataType::IntervalHourToSecond => Interval::HourToSecond,
+        CDataType::IntervalMinuteToSecond => Interval::MinuteToSecond,
+        _ => return None,
+    })
+}
+
+/// The `22015` both interval tables give for a target that cannot hold the
+/// source: "Leading precision of target is not big enough to hold data from
+/// source".
+fn interval_field_overflow(value: &ColumnValue, target: Interval) -> OdbcError {
+    OdbcError::general(
+        format!("{value:?} does not fit a {target:?} target's leading field precision"),
+        SqlState::interval_field_overflow(),
+    )
+}
+
+/// Write an interval value into a `SQL_INTERVAL_STRUCT`, the first row of the
+/// *SQL to C: Year-Month Intervals* and *SQL to C: Day-Time Intervals* tables.
+///
+/// Both pages give this row identically:
+///
+/// | Test | `*TargetValuePtr` | SQLSTATE |
+/// |---|---|---|
+/// | Trailing fields portion not truncated | Data | n/a |
+/// | Trailing fields portion truncated | Truncated data | `01S07` |
+/// | Leading precision of target is not big enough to hold data from source | Undefined | `22015` |
+///
+/// Footnote [a] on each page bounds which pairings reach it: "A year-month
+/// interval SQL type can be converted to any year-month interval C type", and
+/// the day-time page says the same of its own family. Neither page has a row
+/// for the other's C types, so a cross-family request is not a defined
+/// conversion and takes the overview page's `07006`, returned here rather than
+/// silently coercing months into days.
+///
+/// The `22015` case writes nothing and leaves the indicator alone, which is
+/// what the row's two "Undefined" cells require.
+unsafe fn write_interval(
+    value: &ColumnValue,
+    target: Interval,
+    target_ptr: *mut c_void,
+    len_ind_ptr: *mut isize,
+    numeric: NumericTarget,
+) -> Result<SqlReturn, OdbcError> {
+    let (parts, source_precision) = match value {
+        ColumnValue::IntervalYearMonth {
+            years,
+            months,
+            precision,
+        } => (split_year_month(*years, *months, target), *precision),
+        ColumnValue::IntervalDayTime {
+            total_nanoseconds,
+            precision,
+        } => (split_day_time(*total_nanoseconds, target), *precision),
+        // Only the two interval variants have a row on either page.
+        _ => return Err(unsupported_conversion(value, target)),
+    };
+
+    // Footnote [a]'s bound, checked before the split's own outcome so a
+    // cross-family request reports the conversion that does not exist rather
+    // than an overflow of one that does.
+    if is_year_month_interval(source_precision) != is_year_month_interval(target) {
+        return Err(unsupported_conversion(value, target));
+    }
+
+    let parts = parts.ok_or_else(|| interval_field_overflow(value, target))?;
+
+    // The application's own declared leading precision, the other half of the
+    // `22015` row. Zero means it declared none, so only the field's
+    // `SQLUINTEGER` bound applies, which `split_*` already enforced. The same
+    // reading `numeric_convert::interval_from_exact` gives this field in the
+    // C-to-SQL direction.
+    if numeric.interval_leading_precision > 0 {
+        let (leading, _) = interval_fields(target);
+        let magnitude = match leading {
+            IntervalField::Year | IntervalField::Day => parts.fields.day,
+            IntervalField::Month | IntervalField::Hour => parts.fields.hour,
+            IntervalField::Minute => parts.fields.minute,
+            IntervalField::Second => parts.fields.second,
+        };
+        let limit = u32::try_from(numeric.interval_leading_precision)
+            .ok()
+            .and_then(|p| 10_u64.checked_pow(p))
+            .unwrap_or(u64::MAX);
+        if u64::from(magnitude) >= limit {
+            return Err(interval_field_overflow(value, target));
         }
     }
+
+    let out = IntervalStruct {
+        interval_type: target as c_int,
+        // `SQL_INTERVAL_STRUCT` carries the sign out of band, in its own field,
+        // and every union field is unsigned. 1 is SQL_TRUE.
+        interval_sign: i16::from(parts.negative),
+        interval_value: if is_year_month_interval(target) {
+            // `split_year_month` returns years in `day` and months in `hour`.
+            IntervalUnion {
+                year_month: YearMonth {
+                    year: parts.fields.day,
+                    month: parts.fields.hour,
+                },
+            }
+        } else {
+            IntervalUnion {
+                day_second: parts.fields,
+            }
+        },
+    };
+    // The return is discarded on purpose: `write_fixed` answers SUCCESS or
+    // errors, and the truncation verdict this row reports is decided below.
+    let _ = unsafe { write_fixed(target_ptr, len_ind_ptr, out) }?;
+
+    if parts.truncated {
+        // "Trailing fields portion truncated": the data is written and the
+        // warning rides alongside it, which is what `FractionalTruncation`
+        // means everywhere else in this module.
+        return Err(OdbcError::FractionalTruncation);
+    }
+    Ok(SqlReturn::SUCCESS)
+}
+
+/// Write an interval into an exact-numeric C target, the second row of each
+/// interval table.
+///
+/// Footnote [b] gates the whole row: "If the interval precision is a single
+/// field ... the interval SQL type can be converted to any exact numeric". The
+/// value written is the count of that one field, so `INTERVAL '90' MINUTE` is
+/// 90 and not 1.
+///
+/// The two pages then differ, and the difference is transcribed rather than
+/// reconciled:
+///
+/// | Test | Year-month | Day-time |
+/// |---|---|---|
+/// | single field, converted without truncation | n/a | n/a |
+/// | single field, truncated fractional | *(no such row)* | `01S07` |
+/// | single field, truncated whole | `22003` | `22003` |
+/// | **not a single field** | **`22015`** | **`07006`** |
+///
+/// The last row is a genuine disagreement between two pages of one appendix,
+/// not a transcription slip: the year-month page calls it an interval field
+/// overflow and the day-time page calls it an undefined conversion. Each is
+/// answered with its own page's state, because a driver's caller reads the page
+/// for the type it asked about.
+///
+/// A year-month interval has no fractional row because years and months are
+/// whole by construction; only the day-time family can carry a remainder below
+/// its single field.
+unsafe fn write_interval_as_exact_numeric(
+    value: &ColumnValue,
+    target_type: CDataType,
+    target_ptr: *mut c_void,
+    len_ind_ptr: *mut isize,
+    numeric: NumericTarget,
+) -> Result<SqlReturn, OdbcError> {
+    let (units, remainder, precision) = match value {
+        ColumnValue::IntervalYearMonth {
+            years,
+            months,
+            precision,
+        } => {
+            let total_months = i128::from(*years) * 12 + i128::from(*months);
+            let units = match precision {
+                Interval::Year => total_months / 12,
+                _ => total_months,
+            };
+            (units, 0i128, *precision)
+        }
+        ColumnValue::IntervalDayTime {
+            total_nanoseconds,
+            precision,
+        } => {
+            let unit = match precision {
+                Interval::Day => NANOS_PER_DAY,
+                Interval::Hour => NANOS_PER_HOUR,
+                Interval::Minute => NANOS_PER_MINUTE,
+                // Only the single-field types reach the arithmetic, and the
+                // guard below rejects the rest before the value is used.
+                _ => NANOS_PER_SECOND,
+            };
+            (
+                total_nanoseconds / unit,
+                total_nanoseconds % unit,
+                *precision,
+            )
+        }
+        _ => unreachable!("only the two interval variants reach this function"),
+    };
+
+    if !is_single_field(precision) {
+        return Err(if is_year_month_interval(precision) {
+            interval_field_overflow(value, precision)
+        } else {
+            OdbcError::general(
+                format!(
+                    "{value:?} has a multi-field interval precision, which the SQL to C: \
+                     Day-Time Intervals table does not convert to {target_type:?}"
+                ),
+                SqlState::restricted_data_type_attribute_violation(),
+            )
+        });
+    }
+
+    // "Truncated whole" is the narrowing failing, and its cell is `22003` with
+    // nothing written.
+    let out_of_range = || {
+        OdbcError::general(
+            format!("{value:?} exceeds the range of {target_type:?}"),
+            SqlState::numeric_value_out_of_range(),
+        )
+    };
+    let written = if target_type == CDataType::Numeric {
+        // `SQL_C_NUMERIC` reads a rendered decimal rather than a machine
+        // integer, so the field count is handed over as one. Its own precision
+        // and scale still come from the ARD, exactly as for a `Decimal` column,
+        // which is why `numeric` is threaded this far.
+        unsafe {
+            write_numeric(
+                &ColumnValue::Decimal(units.to_string()),
+                target_ptr,
+                len_ind_ptr,
+                numeric,
+            )
+        }?
+    } else {
+        // Routed through the same pivot every other numeric target uses, so an
+        // interval and an integer of the same magnitude answer alike.
+        unsafe {
+            write_numeric_pivot(
+                NumericPivot::Int(i64::try_from(units).map_err(|_| out_of_range())?),
+                target_type,
+                target_ptr,
+                len_ind_ptr,
+            )
+        }?
+    };
+
+    if remainder != 0 {
+        // "Interval precision was a single field and truncated fractional":
+        // the data is written and `01S07` rides alongside it.
+        return Err(OdbcError::FractionalTruncation);
+    }
+    Ok(written)
+}
+
+/// The overview page's `07006` for a pairing neither interval table defines.
+fn unsupported_conversion(value: &ColumnValue, target: Interval) -> OdbcError {
+    OdbcError::general(
+        format!("Unsupported conversion from {value:?} to a {target:?} C interval target"),
+        SqlState::restricted_data_type_attribute_violation(),
+    )
+}
+
+/// Render an interval in the literal form its own precision defines.
+///
+/// The spec's [Interval Literals] page gives one form per type, and the form is
+/// the type's field span: `SQL_INTERVAL_HOUR` is a bare hour count,
+/// `SQL_INTERVAL_DAY_TO_MINUTE` is `d hh:mm`. Rendering every value in the
+/// widest form instead would make an hour interval print as `0 05:00:00.000`,
+/// which is not a literal of its type, and would put the character rows' "number
+/// of whole digits" test on digits the value does not have.
+///
+/// Only the leading field is unpadded, because it is the only one whose width
+/// the value decides; every trailing field has a fixed width in its literal.
+/// The fractional part is emitted only for a SECOND-trailing type, and only when
+/// non-zero, so `INTERVAL '5' SECOND` renders as `5` rather than
+/// `5.000000000`.
+///
+/// [Interval Literals]: https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/interval-literals
+fn render_interval(parts: Option<DayTimeParts>, precision: Interval, on_overflow: &str) -> String {
+    let Some(parts) = parts else {
+        return on_overflow.to_string();
+    };
+    let (leading, trailing) = interval_fields(precision);
+    let sign = if parts.negative { "-" } else { "" };
+    let f = &parts.fields;
+
+    if is_year_month_interval(precision) {
+        // `split_year_month` puts years in `day` and months in `hour`.
+        return match (leading, trailing) {
+            (IntervalField::Year, IntervalField::Year) => format!("{sign}{}", f.day),
+            (IntervalField::Month, IntervalField::Month) => format!("{sign}{}", f.hour),
+            _ => format!("{sign}{}-{:02}", f.day, f.hour),
+        };
+    }
+
+    // Build the day-time form left to right, so each type's literal is the
+    // concatenation of the fields it spans and nothing else.
+    let mut out = String::from(sign);
+    let mut first = true;
+    for field in [
+        IntervalField::Day,
+        IntervalField::Hour,
+        IntervalField::Minute,
+        IntervalField::Second,
+    ] {
+        if leading > field || trailing < field {
+            continue;
+        }
+        let value = match field {
+            IntervalField::Day => f.day,
+            IntervalField::Hour => f.hour,
+            IntervalField::Minute => f.minute,
+            _ => f.second,
+        };
+        if first {
+            out.push_str(&value.to_string());
+            first = false;
+        } else {
+            // A day is separated from the clock by a space, the clock fields
+            // from each other by a colon: `d hh:mm:ss`.
+            out.push(
+                if field == IntervalField::Hour && leading == IntervalField::Day {
+                    ' '
+                } else {
+                    ':'
+                },
+            );
+            out.push_str(&format!("{value:02}"));
+        }
+    }
+    if trailing == IntervalField::Second && f.fraction != 0 {
+        // Nine digits, then trimmed: `fraction` counts billionths, so a
+        // half-second is 500000000 and must render as `.5`, not `.500000000`.
+        let frac = format!("{:09}", f.fraction);
+        out.push('.');
+        out.push_str(frac.trim_end_matches('0'));
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -4403,49 +5055,570 @@ mod tests {
         assert_eq!(column_value_to_string(&v), "(42, hello)");
     }
 
+    /// One nanosecond total, for building day-time cases readably.
+    fn day_time(days: i128, hours: i128, minutes: i128, seconds: i128, nanos: i128) -> i128 {
+        days * NANOS_PER_DAY
+            + hours * NANOS_PER_HOUR
+            + minutes * NANOS_PER_MINUTE
+            + seconds * NANOS_PER_SECOND
+            + nanos
+    }
+
+    /// Every interval type renders in the literal form its own precision
+    /// defines, which is the form the spec's [Interval Literals] page gives.
+    ///
+    /// The expected strings are that page's own worked examples wherever it has
+    /// one, so this is a transcription check rather than a restatement of the
+    /// code. Its rules, quoted:
+    ///
+    /// - "The string contains a decimal value for every field that is implied
+    ///   by the *interval qualifier*", so `SQL_IS_HOUR` is a bare hour count
+    ///   and not `0 05:00:00`.
+    /// - YEAR and MONTH "are separated by a minus sign", DAY and HOUR "by a
+    ///   space", HOUR and the lower order fields "by a colon".
+    /// - "No field can be more than two digits long, except: the value of the
+    ///   leading field can be as long as the ... interval leading precision",
+    ///   which is why only the leading field is unpadded.
+    /// - The fractional part is introduced by a period and, being bounded by
+    ///   the seconds precision rather than fixed, is trimmed: `223.16`, not
+    ///   `223.160000000`.
+    ///
+    /// [Interval Literals]: https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/interval-literals
     #[test]
-    fn interval_year_month_positive() {
+    fn every_interval_type_renders_in_its_own_literal_form() {
+        use Interval::*;
+
+        // Year-month. The `163-11` case is the page's own example.
+        for (years, months, precision, expected) in [
+            (163, 11, YearToMonth, "163-11"),
+            (2, 6, YearToMonth, "2-06"),
+            (-2, -6, YearToMonth, "-2-06"),
+            // A single-field type shows only its own field, and the value is
+            // the total in that unit: 2 years is 24 months.
+            (326, 0, Year, "326"),
+            (2, 0, Year, "2"),
+            (0, 326, Month, "326"),
+            (2, 0, Month, "24"),
+            (-2, 0, Year, "-2"),
+        ] {
+            let v = ColumnValue::IntervalYearMonth {
+                years,
+                months,
+                precision,
+            };
+            assert_eq!(column_value_to_string(&v), expected, "{precision:?}");
+        }
+
+        // Day-time. Every one of these but the negative cases and the
+        // fraction-trimming one is a literal from the page's example table.
+        for (total, precision, expected) in [
+            (day_time(3261, 0, 0, 0, 0), Day, "3261"),
+            (day_time(0, 163, 0, 0, 0), Hour, "163"),
+            (day_time(0, 0, 163, 0, 0), Minute, "163"),
+            (day_time(0, 0, 0, 223, 160_000_000), Second, "223.16"),
+            (day_time(163, 12, 0, 0, 0), DayToHour, "163 12"),
+            (day_time(163, 12, 39, 0, 0), DayToMinute, "163 12:39"),
+            (
+                day_time(163, 12, 39, 59, 163_000_000),
+                DayToSecond,
+                "163 12:39:59.163",
+            ),
+            (day_time(0, 163, 39, 0, 0), HourToMinute, "163:39"),
+            (
+                day_time(0, 163, 39, 59, 163_000_000),
+                HourToSecond,
+                "163:39:59.163",
+            ),
+            (
+                day_time(0, 0, 163, 59, 163_000_000),
+                MinuteToSecond,
+                "163:59.163",
+            ),
+            (
+                -day_time(16, 23, 39, 56, 230_000_000),
+                DayToSecond,
+                "-16 23:39:56.23",
+            ),
+            // A whole-second value emits no fractional part at all.
+            (day_time(0, 0, 0, 5, 0), Second, "5"),
+            // Negative and under a day, the state a split days/milliseconds
+            // representation could not express.
+            (
+                -day_time(0, 0, 0, 0, 500_000_000),
+                DayToSecond,
+                "-0 00:00:00.5",
+            ),
+            // The leading field absorbs every coarser unit: three days asked
+            // for as hours is 72, not an overflow.
+            (day_time(3, 0, 0, 0, 0), Hour, "72"),
+        ] {
+            let v = ColumnValue::IntervalDayTime {
+                total_nanoseconds: total,
+                precision,
+            };
+            assert_eq!(column_value_to_string(&v), expected, "{precision:?}");
+        }
+    }
+
+    /// A written `SQL_INTERVAL_STRUCT`, flattened so it can be compared and
+    /// printed. The struct itself holds a union, so it is neither `Debug` nor
+    /// `PartialEq`, and reading the arm the target did not write is undefined.
+    #[derive(Debug)]
+    struct WrittenInterval {
+        interval_type: i32,
+        interval_sign: i16,
+        day_second: DaySecond,
+        year_month: YearMonth,
+        ret: SqlReturn,
+        indicator: isize,
+    }
+
+    /// Read an interval into a `SQL_INTERVAL_STRUCT` and report what happened.
+    fn get_interval(
+        value: &ColumnValue,
+        target: CDataType,
+        leading_precision: i32,
+    ) -> Result<WrittenInterval, String> {
+        let mut out = IntervalStruct {
+            interval_type: 0,
+            interval_sign: 0,
+            interval_value: IntervalUnion {
+                day_second: DaySecond::default(),
+            },
+        };
+        let mut ind: isize = -999;
+        let ret = unsafe {
+            write_column_value(
+                value,
+                target,
+                (&raw mut out).cast::<c_void>(),
+                size_of::<IntervalStruct>() as isize,
+                &mut ind,
+                NumericTarget {
+                    interval_leading_precision: leading_precision,
+                    ..NumericTarget::UNSPECIFIED
+                },
+            )
+        }
+        .map_err(|e| sqlstate_of_err(&e).to_string())?;
+        // SAFETY: both arms are plain-old-data of the same allocation, and the
+        // test reads only the one its target wrote.
+        Ok(WrittenInterval {
+            interval_type: out.interval_type,
+            interval_sign: out.interval_sign,
+            day_second: unsafe { out.interval_value.day_second },
+            year_month: unsafe { out.interval_value.year_month },
+            ret,
+            indicator: ind,
+        })
+    }
+
+    /// The first row of both interval tables: an interval SQL type converts to
+    /// any C interval type *of its own family*, and the trailing fields it
+    /// cannot carry are a `01S07`.
+    ///
+    /// Footnote [a] is the family bound: "A year-month interval SQL type can be
+    /// converted to any year-month interval C type", and the day-time page says
+    /// the same of its own ten. Neither page has a row for the other's C types.
+    #[test]
+    fn an_interval_converts_to_any_c_interval_type_of_its_own_family() {
+        // 1 day, 2 hours, 3 minutes, no seconds: representable exactly by
+        // DAY_TO_MINUTE and everything wider.
+        let v = ColumnValue::IntervalDayTime {
+            total_nanoseconds: day_time(1, 2, 3, 0, 0),
+            precision: Interval::DayToSecond,
+        };
+
+        let w = get_interval(&v, CDataType::IntervalDayToMinute, 0).expect("nothing is lost");
+        assert_eq!(w.ret, SqlReturn::SUCCESS);
+        assert_eq!(w.indicator, size_of::<IntervalStruct>() as isize);
+        assert_eq!(w.interval_type, Interval::DayToMinute as i32);
+        assert_eq!(w.interval_sign, 0, "a positive interval");
+        let ds = w.day_second;
+        assert_eq!((ds.day, ds.hour, ds.minute), (1, 2, 3));
+
+        // The leading field absorbs the coarser ones: as HOUR_TO_MINUTE the
+        // same value is 26 hours, not an overflow.
+        let w = get_interval(&v, CDataType::IntervalHourToMinute, 0).expect("26:03 fits");
+        assert_eq!(w.ret, SqlReturn::SUCCESS);
+        assert_eq!(
+            (w.day_second.day, w.day_second.hour, w.day_second.minute),
+            (0, 26, 3)
+        );
+    }
+
+    /// "Trailing fields portion truncated" → *Truncated data* with `01S07`.
+    ///
+    /// The data is still written, which is what separates this row from the
+    /// `22015` one below it, so the struct is asserted as well as the state.
+    #[test]
+    fn an_interval_losing_its_trailing_fields_is_01s07_with_the_data_written() {
+        let v = ColumnValue::IntervalDayTime {
+            total_nanoseconds: day_time(1, 2, 3, 4, 0),
+            precision: Interval::DayToSecond,
+        };
+        let mut out = IntervalStruct {
+            interval_type: 0,
+            interval_sign: 0,
+            interval_value: IntervalUnion {
+                day_second: DaySecond::default(),
+            },
+        };
+        let mut ind: isize = -999;
+        let err = unsafe {
+            write_column_value(
+                &v,
+                CDataType::IntervalDayToMinute,
+                (&raw mut out).cast::<c_void>(),
+                size_of::<IntervalStruct>() as isize,
+                &mut ind,
+                NumericTarget::UNSPECIFIED,
+            )
+        }
+        .expect_err("four seconds cannot be carried by DAY TO MINUTE");
+        assert_eq!(
+            sqlstate_of_err(&err),
+            crate::types::sql_state::FRACTIONAL_TRUNCATION,
+        );
+        let ds = unsafe { out.interval_value.day_second };
+        assert_eq!(
+            (ds.day, ds.hour, ds.minute),
+            (1, 2, 3),
+            "the row writes truncated data, it does not leave the target undefined"
+        );
+    }
+
+    /// "Leading precision of target is not big enough to hold data from
+    /// source" → *Undefined* with `22015`.
+    ///
+    /// Both halves of the row are covered: the application's declared
+    /// `SQL_DESC_DATETIME_INTERVAL_PRECISION`, and the field's own
+    /// `SQLUINTEGER` bound when it declared none.
+    #[test]
+    fn an_interval_too_wide_for_its_targets_leading_precision_is_22015() {
+        let v = ColumnValue::IntervalDayTime {
+            total_nanoseconds: day_time(100, 0, 0, 0, 0),
+            precision: Interval::Day,
+        };
+        assert_eq!(
+            get_interval(&v, CDataType::IntervalDay, 2).unwrap_err(),
+            crate::types::sql_state::INTERVAL_FIELD_OVERFLOW,
+            "100 days needs three digits and the application declared two",
+        );
+        // The same value with no declared precision is fine, the convention
+        // `numeric_convert::interval_from_exact` already uses for this field.
+        assert!(
+            get_interval(&v, CDataType::IntervalDay, 0).is_ok(),
+            "a leading precision of 0 declares none",
+        );
+    }
+
+    /// Footnote [a]'s bound: neither page has a row for the other family's C
+    /// types, so a cross-family request is the overview page's `07006`.
+    #[test]
+    fn an_interval_asked_for_the_other_familys_c_type_is_07006() {
+        let ym = ColumnValue::IntervalYearMonth {
+            years: 1,
+            months: 2,
+            precision: Interval::YearToMonth,
+        };
+        let dt = ColumnValue::IntervalDayTime {
+            total_nanoseconds: day_time(1, 0, 0, 0, 0),
+            precision: Interval::Day,
+        };
+        assert_eq!(
+            get_interval(&ym, CDataType::IntervalDayToSecond, 0).unwrap_err(),
+            crate::types::sql_state::RESTRICTED_DATA_TYPE_ATTRIBUTE_VIOLATION,
+        );
+        assert_eq!(
+            get_interval(&dt, CDataType::IntervalYearToMonth, 0).unwrap_err(),
+            crate::types::sql_state::RESTRICTED_DATA_TYPE_ATTRIBUTE_VIOLATION,
+        );
+    }
+
+    /// A year-month interval fills the union's *other* arm, and the total is
+    /// read in months so a `SQL_C_INTERVAL_MONTH` target sees the years too.
+    #[test]
+    fn a_year_month_interval_fills_the_year_month_arm() {
         let v = ColumnValue::IntervalYearMonth {
-            years: 2,
+            years: 1,
             months: 6,
+            precision: Interval::YearToMonth,
         };
-        assert_eq!(column_value_to_string(&v), "2-6");
+        let w = get_interval(&v, CDataType::IntervalYearToMonth, 0).expect("1-06");
+        assert_eq!(w.ret, SqlReturn::SUCCESS);
+        assert_eq!(w.interval_type, Interval::YearToMonth as i32);
+        assert_eq!((w.year_month.year, w.year_month.month), (1, 6));
+
+        // As months: eighteen, not six.
+        let w = get_interval(&v, CDataType::IntervalMonth, 0).expect("18 months");
+        assert_eq!(w.year_month.month, 18);
     }
 
+    /// A negative interval carries its sign in `interval_sign`, out of band,
+    /// because every field of the union is unsigned.
     #[test]
-    fn interval_year_month_negative() {
-        let v = ColumnValue::IntervalYearMonth {
-            years: -2,
-            months: -6,
-        };
-        assert_eq!(column_value_to_string(&v), "-2-6");
-    }
-
-    #[test]
-    fn interval_day_time_positive() {
+    fn a_negative_interval_sets_the_structs_own_sign_field() {
         let v = ColumnValue::IntervalDayTime {
-            // 1 day + 1h 1m 1s 0ms
-            total_milliseconds: 86_400_000 + 3_661_000,
+            total_nanoseconds: -day_time(2, 3, 0, 0, 0),
+            precision: Interval::DayToHour,
         };
-        assert_eq!(column_value_to_string(&v), "1 01:01:01.000");
+        let w = get_interval(&v, CDataType::IntervalDayToHour, 0).expect("-2 03");
+        assert_eq!(w.ret, SqlReturn::SUCCESS);
+        assert_eq!(w.interval_sign, 1, "SQL_TRUE means negative");
+        let ds = w.day_second;
+        assert_eq!(
+            (ds.day, ds.hour),
+            (2, 3),
+            "the magnitude is unsigned; the sign rides in interval_sign"
+        );
     }
 
+    /// Footnote [b]: an exact numeric target is defined only when "the interval
+    /// precision is a single field", and the value is that field's own count.
     #[test]
-    fn interval_day_time_negative_days() {
+    fn a_single_field_interval_converts_to_an_exact_numeric() {
         let v = ColumnValue::IntervalDayTime {
-            total_milliseconds: -86_400_000,
+            total_nanoseconds: day_time(0, 0, 90, 0, 0),
+            precision: Interval::Minute,
         };
-        assert_eq!(column_value_to_string(&v), "-1 00:00:00.000");
+        let mut out: i32 = 0;
+        let mut ind: isize = 0;
+        let ret = unsafe {
+            write_column_value(
+                &v,
+                CDataType::SLong,
+                (&raw mut out).cast::<c_void>(),
+                4,
+                &mut ind,
+                NumericTarget::UNSPECIFIED,
+            )
+        }
+        .expect("90 minutes is 90");
+        assert_eq!(ret, SqlReturn::SUCCESS);
+        assert_eq!(out, 90, "the count of its own field, not of hours");
     }
 
+    /// The one place the two pages disagree, transcribed rather than
+    /// reconciled: "Interval precision was not a single field" is `22015` on
+    /// the year-month page and `07006` on the day-time one.
     #[test]
-    fn interval_day_time_negative_sub_day() {
-        // Less than one full day, still negative: the split days/milliseconds
-        // representation could not express this state at all.
-        let v = ColumnValue::IntervalDayTime {
-            total_milliseconds: -500,
+    fn a_multi_field_interval_to_an_exact_numeric_takes_each_pages_own_state() {
+        let ym = ColumnValue::IntervalYearMonth {
+            years: 1,
+            months: 2,
+            precision: Interval::YearToMonth,
         };
-        assert_eq!(column_value_to_string(&v), "-0 00:00:00.500");
+        let dt = ColumnValue::IntervalDayTime {
+            total_nanoseconds: day_time(1, 2, 0, 0, 0),
+            precision: Interval::DayToHour,
+        };
+        for (value, expected) in [
+            (&ym, crate::types::sql_state::INTERVAL_FIELD_OVERFLOW),
+            (
+                &dt,
+                crate::types::sql_state::RESTRICTED_DATA_TYPE_ATTRIBUTE_VIOLATION,
+            ),
+        ] {
+            let mut out: i32 = 0;
+            let mut ind: isize = 0;
+            let err = unsafe {
+                write_column_value(
+                    value,
+                    CDataType::SLong,
+                    (&raw mut out).cast::<c_void>(),
+                    4,
+                    &mut ind,
+                    NumericTarget::UNSPECIFIED,
+                )
+            }
+            .expect_err("a multi-field interval has no exact-numeric row");
+            assert_eq!(sqlstate_of_err(&err), expected, "{value:?}");
+        }
+    }
+
+    /// The day-time page has a fractional row the year-month page does not:
+    /// "Interval precision was a single field and truncated fractional" →
+    /// *Truncated data* with `01S07`. Years and months are whole by
+    /// construction, so only this family can carry a remainder.
+    #[test]
+    fn a_single_field_interval_with_a_remainder_is_01s07_with_the_data_written() {
+        let v = ColumnValue::IntervalDayTime {
+            total_nanoseconds: day_time(0, 0, 90, 30, 0),
+            precision: Interval::Minute,
+        };
+        let mut out: i32 = 0;
+        let mut ind: isize = 0;
+        let err = unsafe {
+            write_column_value(
+                &v,
+                CDataType::SLong,
+                (&raw mut out).cast::<c_void>(),
+                4,
+                &mut ind,
+                NumericTarget::UNSPECIFIED,
+            )
+        }
+        .expect_err("thirty seconds is below MINUTE");
+        assert_eq!(
+            sqlstate_of_err(&err),
+            crate::types::sql_state::FRACTIONAL_TRUNCATION,
+        );
+        assert_eq!(out, 90, "the row writes truncated data");
+    }
+
+    /// `SQL_C_FLOAT`, `SQL_C_DOUBLE` and `SQL_C_BIT` appear on neither interval
+    /// page, so an interval asked for one is not a defined conversion.
+    ///
+    /// The guard against over-reach on the exact-numeric row above: reading
+    /// footnote [b]'s "any exact numeric" as "any numeric" would approximate an
+    /// interval into a float that the spec never sanctions.
+    #[test]
+    fn an_interval_to_an_approximate_or_bit_target_is_07006() {
+        let v = ColumnValue::IntervalDayTime {
+            total_nanoseconds: day_time(0, 1, 0, 0, 0),
+            precision: Interval::Hour,
+        };
+        for target in [CDataType::Float, CDataType::Double, CDataType::Bit] {
+            let mut out = [0u8; 8];
+            let mut ind: isize = 0;
+            let err = unsafe {
+                write_column_value(
+                    &v,
+                    target,
+                    out.as_mut_ptr().cast::<c_void>(),
+                    8,
+                    &mut ind,
+                    NumericTarget::UNSPECIFIED,
+                )
+            }
+            .expect_err("neither interval page has this row");
+            assert_eq!(
+                sqlstate_of_err(&err),
+                crate::types::sql_state::RESTRICTED_DATA_TYPE_ATTRIBUTE_VIOLATION,
+                "{target:?}",
+            );
+        }
+    }
+
+    /// A non-interval source asked for a C interval target is `07006`.
+    ///
+    /// `SQL_C_INTERVAL_*` appears in no conversion table but the two interval
+    /// pages, whose only source types are intervals, so this is the overview
+    /// page's rule rather than anything either table says.
+    #[test]
+    fn a_non_interval_source_read_as_a_c_interval_type_is_07006() {
+        for value in [
+            ColumnValue::I64(5),
+            ColumnValue::String("1 02:03:04".to_string()),
+            ColumnValue::Timestamp {
+                year: 2026,
+                month: 8,
+                day: 4,
+                hour: 1,
+                minute: 2,
+                second: 3,
+                fraction: 0,
+            },
+        ] {
+            assert_eq!(
+                get_interval(&value, CDataType::IntervalDayToSecond, 0).unwrap_err(),
+                crate::types::sql_state::RESTRICTED_DATA_TYPE_ATTRIBUTE_VIOLATION,
+                "{value:?}",
+            );
+        }
+    }
+
+    /// The character rows' third cell: "Number of whole ... digits >=
+    /// *BufferLength*" → *Undefined* with `22003`, not the `01004` a character
+    /// column would get.
+    #[test]
+    fn an_interval_whose_whole_part_does_not_fit_a_character_target_is_22003() {
+        let v = ColumnValue::IntervalDayTime {
+            total_nanoseconds: day_time(163, 12, 39, 59, 163_000_000),
+            precision: Interval::DayToSecond,
+        };
+        // "163 12:39:59.163": the whole part alone is twelve characters.
+        let mut buf = [0u8; 8];
+        let mut ind: isize = 0;
+        let err = unsafe {
+            write_column_value(
+                &v,
+                CDataType::Char,
+                buf.as_mut_ptr().cast::<c_void>(),
+                8,
+                &mut ind,
+                NumericTarget::UNSPECIFIED,
+            )
+        }
+        .expect_err("the whole part does not fit");
+        assert_eq!(
+            sqlstate_of_err(&err),
+            crate::types::sql_state::NUMERIC_VALUE_OUT_OF_RANGE,
+        );
+
+        // Room for the whole part but not the fraction is the middle cell:
+        // truncated data with 01004.
+        let mut buf = [0u8; 16];
+        let mut ind: isize = 0;
+        let ret = unsafe {
+            write_column_value(
+                &v,
+                CDataType::Char,
+                buf.as_mut_ptr().cast::<c_void>(),
+                16,
+                &mut ind,
+                NumericTarget::UNSPECIFIED,
+            )
+        }
+        .expect("the whole part fits");
+        assert_eq!(ret, SqlReturn::SUCCESS_WITH_INFO);
+    }
+
+    /// The interval pages' `SQL_C_BINARY` row has no truncating outcome: over
+    /// `BufferLength` is *Undefined* with `22003`, where every other source
+    /// truncates with `01004`.
+    #[test]
+    fn an_interval_too_long_for_a_binary_target_is_22003_not_truncated() {
+        let v = ColumnValue::IntervalDayTime {
+            total_nanoseconds: day_time(163, 12, 39, 59, 163_000_000),
+            precision: Interval::DayToSecond,
+        };
+        let mut buf = [0u8; 4];
+        let mut ind: isize = 0;
+        let err = unsafe {
+            write_column_value(
+                &v,
+                CDataType::Binary,
+                buf.as_mut_ptr().cast::<c_void>(),
+                4,
+                &mut ind,
+                NumericTarget::UNSPECIFIED,
+            )
+        }
+        .expect_err("half an interval is not a shorter interval");
+        assert_eq!(
+            sqlstate_of_err(&err),
+            crate::types::sql_state::NUMERIC_VALUE_OUT_OF_RANGE,
+        );
+    }
+
+    /// A trailing field is dropped rather than rounded, and the renderer says
+    /// so by simply not printing it.
+    ///
+    /// This is the same truncation the conversion arms report as `01S07`; here
+    /// it is only that the text and the struct agree about which fields exist.
+    #[test]
+    fn rendering_drops_the_fields_below_a_types_trailing_field() {
+        let v = ColumnValue::IntervalDayTime {
+            total_nanoseconds: day_time(1, 2, 3, 4, 500_000_000),
+            precision: Interval::DayToMinute,
+        };
+        assert_eq!(
+            column_value_to_string(&v),
+            "1 02:03",
+            "seconds and the fraction are below DAY TO MINUTE's trailing field"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -7785,6 +8958,7 @@ mod tests {
             NumericTarget {
                 precision: 5,
                 scale: 2,
+                interval_leading_precision: 0,
             },
         )
         .expect("the conversion is defined by the SQL to C: Numeric table");
@@ -7823,6 +8997,7 @@ mod tests {
             NumericTarget {
                 precision: 5,
                 scale: 2,
+                interval_leading_precision: 0,
             },
         )
         .expect_err("a dropped fractional digit is 01S07");
@@ -7841,6 +9016,7 @@ mod tests {
             NumericTarget {
                 precision: 3,
                 scale: 0,
+                interval_leading_precision: 0,
             },
         )
         .expect_err("six digits do not fit a declared precision of three");

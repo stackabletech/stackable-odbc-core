@@ -1424,6 +1424,7 @@ pub(crate) unsafe fn write_output_params(
                 crate::column_value::NumericTarget {
                     precision: rec.apd.precision,
                     scale: rec.apd.scale,
+                    interval_leading_precision: rec.apd.datetime_interval_precision,
                 },
             )
         }?;
@@ -4746,7 +4747,8 @@ mod tests {
             read.value,
             ColumnValue::IntervalYearMonth {
                 years: 100,
-                months: 0
+                months: 0,
+                precision: odbc_sys::Interval::Year,
             }
         );
     }

@@ -124,8 +124,9 @@ pub use conversions::*;
 
 mod value;
 pub use value::{
-    ColumnDescriptor, ColumnValue, ExecuteOutcome, FetchResult, IdentifierType, Nullable,
-    OutputParam, ParamDescriptor, Scope, TypeInfoRow, ValueWarning,
+    ColumnDescriptor, ColumnValue, ExecuteOutcome, FetchResult, IdentifierType, NANOS_PER_DAY,
+    NANOS_PER_HOUR, NANOS_PER_MINUTE, NANOS_PER_SECOND, Nullable, OutputParam, ParamDescriptor,
+    Scope, TypeInfoRow, ValueWarning,
 };
 
 mod column_size;
