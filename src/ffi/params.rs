@@ -738,6 +738,23 @@ impl From<ColumnValue> for ParamValue {
 /// `SQL_ATTR_PARAM_BIND_OFFSET_PTR` names as well as at the bound address —
 /// which is the application's undertaking, the spec making the sum its
 /// responsibility to keep in bounds exactly as the unoffset pointer is.
+/// `HY090` for a bound *StrLen_or_Ind* whose negative value names none of the
+/// ones `SQLBindParameter` defines.
+///
+/// The complete legal set is `SQL_NTS`, `SQL_NULL_DATA`, `SQL_DEFAULT_PARAM`,
+/// `SQL_DATA_AT_EXEC` and `SQL_LEN_DATA_AT_EXEC(n)`. Shared by the two
+/// character arms of [`read_param_value`] so they cannot drift apart, which is
+/// how they came to share the bug: both folded every negative into `SQL_NTS`.
+fn undefined_negative_indicator(indicator: isize) -> OdbcError {
+    OdbcError::general(
+        format!(
+            "Invalid string or buffer length: {indicator} is not one of SQL_NTS, \
+             SQL_NULL_DATA, SQL_DEFAULT_PARAM, SQL_DATA_AT_EXEC or SQL_LEN_DATA_AT_EXEC(n)"
+        ),
+        SqlState::invalid_string_or_buffer_length(),
+    )
+}
+
 pub(crate) unsafe fn read_param_value(rec: ParamRecord<'_>) -> Result<ParamValue, OdbcError> {
     use odbc_sys::CDataType;
 
@@ -754,10 +771,18 @@ pub(crate) unsafe fn read_param_value(rec: ParamRecord<'_>) -> Result<ParamValue
     let indicator_ptr = rec.indicator_ptr();
 
     // Check indicator for NULL.
+    //
+    // `SQL_DEFAULT_PARAM` is answered here beside it, and resolves to NULL for
+    // the reason `sql_put_data`'s doc comment already records: it names a
+    // *procedure* parameter's default, and `crate::escape` refuses `{call ...}`
+    // with `HYC00`, so no statement core executes has one. Handling it at the
+    // top rather than per-arm is what lets the character arms below treat every
+    // remaining negative as undefined — it is a defined value, and would
+    // otherwise be refused by the `HY090` check they now make.
     if !indicator_ptr.is_null() {
         // SAFETY: str_len_or_ind_ptr is non-null and the caller guarantees it points to a valid isize.
         let indicator = unsafe { std::ptr::read_unaligned(indicator_ptr) };
-        if indicator == SQL_NULL_DATA {
+        if indicator == SQL_NULL_DATA || indicator == SQL_DEFAULT_PARAM {
             return Ok(ColumnValue::Null.into());
         }
     }
@@ -804,8 +829,23 @@ pub(crate) unsafe fn read_param_value(rec: ParamRecord<'_>) -> Result<ParamValue
                 // SAFETY: str_len_or_ind_ptr is non-null and the caller guarantees it points
                 // to a valid isize provided by the ODBC caller.
                 let l = unsafe { std::ptr::read_unaligned(indicator_ptr) };
-                if l == SQL_NTS as isize || l < 0 {
+                if l == SQL_NTS as isize {
                     None
+                } else if l < 0 {
+                    // Every other negative names none of the values
+                    // `SQLBindParameter`'s *StrLen_or_IndPtr* defines. Folding
+                    // them into `SQL_NTS` bound the whole null-terminated
+                    // string and answered SUCCESS, so an application that
+                    // passed `SQL_NO_TOTAL` -- or a stale -42 -- sent a value it
+                    // never asked to send. `SQLPutData` already refused the
+                    // same class with `HY090`.
+                    //
+                    // The two legal negatives that are not `SQL_NTS` cannot be
+                    // here: `SQL_NULL_DATA` and `SQL_DEFAULT_PARAM` return at
+                    // the top of this function, and the data-at-execution
+                    // values are diverted by `find_data_at_exec_params` before
+                    // it is called.
+                    return Err(undefined_negative_indicator(l));
                 } else {
                     Some(clamp_to_bound_buffer(l as usize, apd.octet_length))
                 }
@@ -862,7 +902,12 @@ pub(crate) unsafe fn read_param_value(rec: ParamRecord<'_>) -> Result<ParamValue
                 // SAFETY: str_len_or_ind_ptr is non-null and the caller guarantees it points
                 // to a valid isize provided by the ODBC caller.
                 let l = unsafe { std::ptr::read_unaligned(indicator_ptr) };
-                if l == SQL_NTS as isize || l < 0 {
+                if l < 0 && l != SQL_NTS as isize {
+                    // See the `SQL_C_CHAR` arm above: every negative but
+                    // `SQL_NTS` is undefined by the time it reaches here.
+                    return Err(undefined_negative_indicator(l));
+                }
+                if l == SQL_NTS as isize {
                     // Null-terminated: delegate to bounded NTS scan helper.
                     // Its `HY090` is propagated, for the reason above.
                     // SAFETY: caller guarantees ptr is a valid, null-terminated UTF-16 string.
@@ -4665,6 +4710,81 @@ mod tests {
         };
         let val = unsafe { read_bound_param(&binding) }.unwrap();
         assert_eq!(val, ColumnValue::String("hello".to_string()));
+    }
+
+    /// A negative *StrLen_or_Ind* that names none of the spec's defined values
+    /// is `HY090`, not a silent `SQL_NTS`.
+    ///
+    /// `SQLBindParameter`'s *StrLen_or_IndPtr* takes `SQL_NTS`, `SQL_NULL_DATA`,
+    /// `SQL_DEFAULT_PARAM`, `SQL_DATA_AT_EXEC` or `SQL_LEN_DATA_AT_EXEC(n)`.
+    /// Both character arms folded *every* negative into `SQL_NTS`, so
+    /// `SQL_NO_TOTAL` (-4), -5's neighbours and -42 all bound the whole
+    /// null-terminated string and answered `SUCCESS` — the application asked
+    /// for something undefined and got a value with no diagnostic.
+    ///
+    /// `SQLPutData` already refused the same class: its doc records `HY090` for
+    /// "negative and none of `SQL_NTS`, `SQL_NULL_DATA` or
+    /// `SQL_DEFAULT_PARAM`". This is the bound path agreeing with it.
+    ///
+    /// `SQL_NULL_DATA` and the data-at-execution values cannot reach these arms:
+    /// the first returns at the top of `read_param_value` and the second is
+    /// diverted by `find_data_at_exec_params` before it is ever called.
+    #[test]
+    fn an_undefined_negative_parameter_indicator_is_hy090() {
+        const SQL_NO_TOTAL: isize = -4;
+        for c_type in [odbc_sys::CDataType::Char, odbc_sys::CDataType::WChar] {
+            for bad in [SQL_NO_TOTAL, -6, -42, -99] {
+                let s = [b'a' as u16, 0];
+                let mut indicator: isize = bad;
+                let binding = BoundParam {
+                    input_output_type: odbc_sys::ParamType::Input,
+                    c_type,
+                    sql_type: SqlDataType(12),
+                    col_size: 10,
+                    decimal_digits: 0,
+                    value_ptr: s.as_ptr() as *mut c_void,
+                    buffer_length: 4,
+                    str_len_or_ind_ptr: &mut indicator,
+                };
+                let err = unsafe { read_bound_param(&binding) }
+                    .expect_err("an undefined negative indicator must not bind as SQL_NTS");
+                assert_eq!(
+                    err.sqlstate().as_str(),
+                    crate::types::sql_state::INVALID_STRING_OR_BUFFER_LENGTH,
+                    "{c_type:?} with indicator {bad}",
+                );
+            }
+        }
+    }
+
+    /// The guard against over-reach on the test above: `SQL_DEFAULT_PARAM` is a
+    /// *defined* negative and must not be swept up with the undefined ones.
+    ///
+    /// It resolves to NULL, which is the only value it can take in core, and
+    /// for the reason `sql_put_data`'s doc comment already gives:
+    /// `SQL_DEFAULT_PARAM` names a *procedure* parameter's default, and
+    /// `crate::escape` refuses `{call ...}` with `HYC00`, so no statement core
+    /// executes has one. The two entry points now agree on that as well as on
+    /// the refusal.
+    #[test]
+    fn sql_default_param_resolves_to_null_rather_than_hy090() {
+        for c_type in [odbc_sys::CDataType::Char, odbc_sys::CDataType::WChar] {
+            let s = [b'a' as u16, 0];
+            let mut indicator: isize = SQL_DEFAULT_PARAM;
+            let binding = BoundParam {
+                input_output_type: odbc_sys::ParamType::Input,
+                c_type,
+                sql_type: SqlDataType(12),
+                col_size: 10,
+                decimal_digits: 0,
+                value_ptr: s.as_ptr() as *mut c_void,
+                buffer_length: 4,
+                str_len_or_ind_ptr: &mut indicator,
+            };
+            let val = unsafe { read_bound_param(&binding) }
+                .expect("SQL_DEFAULT_PARAM is a defined indicator value");
+            assert_eq!(val, ColumnValue::Null, "{c_type:?}");
+        }
     }
 
     /// A bound `SQL_C_CHAR` parameter whose `SQL_NTS` buffer runs to

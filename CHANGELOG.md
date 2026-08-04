@@ -1603,6 +1603,23 @@ call `SQLCloseCursor` or `SQLFreeStmt(SQL_CLOSE)` first, as it already must for
 
 ### Fixed
 
+- **A bound parameter's undefined negative length indicator is `HY090`, not a
+  silent `SQL_NTS`.** `SQLBindParameter`'s *StrLen_or_IndPtr* defines exactly
+  five negative values — `SQL_NTS`, `SQL_NULL_DATA`, `SQL_DEFAULT_PARAM`,
+  `SQL_DATA_AT_EXEC` and `SQL_LEN_DATA_AT_EXEC(n)`. Both character arms folded
+  *every* negative into `SQL_NTS`, so `SQL_NO_TOTAL` (-4), -6 and -42 bound the
+  whole null-terminated string and returned `SQL_SUCCESS`: the application asked
+  for something undefined and got a value sent to the data source with no
+  diagnostic. `SQLExecDirect`'s and `SQLExecute`'s `HY090` rows state this
+  condition themselves and carry no Driver-Manager marker for it.
+
+  `SQLPutData` already refused the same class. **`SQL_DEFAULT_PARAM` now
+  resolves to NULL on the bound path too**, which is the ruling `SQLPutData`'s
+  documentation already recorded — it names a procedure parameter's default, and
+  core refuses `{call ...}` with `HYC00`, so no statement core executes has one.
+  It previously bound the null-terminated string at the buffer, like the
+  undefined values.
+
 - **`SQLGetData` range-checks the column ordinal itself, and answers `07009`.**
   A column number greater than the number of columns in the result set reached
   the backend, which answered with whatever its own error mapping produced —
