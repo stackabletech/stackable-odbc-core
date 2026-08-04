@@ -1603,6 +1603,27 @@ call `SQLCloseCursor` or `SQLFreeStmt(SQL_CLOSE)` first, as it already must for
 
 ### Fixed
 
+- **A float read as text renders within the display size ODBC defines for it.**
+  The *Display Size* appendix does not just give a number, it says what the
+  number is made of: `SQL_FLOAT`/`SQL_DOUBLE` is "24 (a sign, 15 digits, a
+  decimal point, the letter *E*, a sign, and 3 digits)" and `SQL_REAL` is "14 (a
+  sign, 7 digits, a decimal point, the letter *E*, a sign, and 2 digits)". Both
+  describe an **exponent** rendering, and `SQLColAttribute`/`SQLDescribeCol`
+  already reported 24 and 14 on the strength of those sentences.
+
+  Rust's `Display` for floats never emits an exponent, so core promised a
+  24-character exponent form and produced a positional one up to 326 characters
+  long. `f64::MAX` was a hard `22003` against a display-size buffer, and
+  `4.9e-324` was worse — its first 24 positional characters are
+  `0.00000000000000000000000`, so an application read **zero**, flagged `01004`
+  ("truncated"), which is a different claim from "wrong".
+
+  A float now switches to exponent notation only when its positional rendering
+  exceeds the display size, so `1.5` is still `"1.5"`. The exponent form keeps
+  shortest-round-trip precision rather than truncating to the 15 digits the
+  appendix names, because 24 is a maximum width rather than a precision and 17
+  digits are what an `f64` needs to survive the round trip.
+
 - **A bound parameter's undefined negative length indicator is `HY090`, not a
   silent `SQL_NTS`.** `SQLBindParameter`'s *StrLen_or_IndPtr* defines exactly
   five negative values — `SQL_NTS`, `SQL_NULL_DATA`, `SQL_DEFAULT_PARAM`,

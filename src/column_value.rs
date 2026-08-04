@@ -2237,6 +2237,82 @@ const fn infinity_text(negative: bool) -> &'static str {
     if negative { "-Infinity" } else { "Infinity" }
 }
 
+/// The display size ODBC defines for `SQL_REAL`, in characters.
+///
+/// Spec ("Display Size" appendix): "SQL_REAL | 14 (a sign, 7 digits, a decimal
+/// point, the letter *E*, a sign, and 2 digits)."
+const DISPLAY_SIZE_REAL: usize = 14;
+
+/// The display size ODBC defines for `SQL_FLOAT` and `SQL_DOUBLE`, in
+/// characters.
+///
+/// Spec ("Display Size" appendix): "SQL_FLOAT SQL_DOUBLE | 24 (a sign, 15
+/// digits, a decimal point, the letter *E*, a sign, and 3 digits)."
+const DISPLAY_SIZE_FLOAT_DOUBLE: usize = 24;
+
+/// Render a float for a character target, within the display size ODBC defines
+/// for its SQL type.
+///
+/// Spec: <https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/display-size>
+///
+/// The *Display Size* appendix does not just give a number, it says what the
+/// number is made of — "a sign, 15 digits, a decimal point, the letter *E*, a
+/// sign, and 3 digits" — so the size it fixes is the size of an **exponent**
+/// rendering. `col_attr::display_size_for` already reports 24 and 14 on the
+/// strength of exactly those sentences.
+///
+/// Rust's `Display` for `f32`/`f64` never emits an exponent, so core promised a
+/// 24-character exponent form and delivered a positional one up to 326
+/// characters long. Two things followed, and the second is the worse:
+///
+/// - **Large magnitudes were a hard error.** 309 positional digits against a
+///   display-size buffer trips the *SQL to C: Numeric* whole-digit rule, so
+///   `f64::MAX` was `22003` — loud, at least.
+/// - **Small magnitudes were silently wrong.** `4.9e-324` is 326 characters
+///   whose first 24 are `0.00000000000000000000000`, so the application read
+///   **zero**, flagged `01004` ("truncated"), which is not the same claim as
+///   "wrong".
+///
+/// # Why the switch is conditional
+///
+/// Rendering *every* float in exponent form would satisfy the display size too,
+/// and would turn `1.5` into `1.5E0` for every application reading a float as
+/// text. The spec fixes the size, not the notation, so the notation is chosen
+/// to keep the familiar rendering wherever it already fits — which is every
+/// value an application is likely to see. `an_ordinary_float_keeps_its_positional_rendering`
+/// pins that half.
+///
+/// This is also what the neighbouring drivers do, though neither could be
+/// confirmed to the "read the source" standard this crate prefers: MySQL
+/// Connector/ODBC formats through `my_gcvt`, whose `gcvt` lineage is the C
+/// general-format conversion that switches to an exponent when the value does
+/// not fit; and psqlODBC does not format at all, passing PostgreSQL's own
+/// `float8` text through, which is a shortest round-trip rendering that uses an
+/// exponent for extreme magnitudes. Both are consistent with the conditional
+/// switch and neither was read end-to-end, so the deciding argument here is the
+/// spec's own definition of the display size, not the survey.
+///
+/// # Precision
+///
+/// The exponent form keeps Rust's shortest-round-trip digits rather than
+/// truncating to the 15 the appendix names, because the appendix is describing
+/// a *maximum* width and 17 significant digits are what an `f64` needs to
+/// survive the round trip: `f64::MAX` renders as `1.7976931348623157E308`, 22
+/// characters, inside the 24. Truncating to 15 would fit a budget that is not
+/// binding and lose the value's identity, which is the defect this function
+/// exists to fix.
+fn render_float<T>(v: T, display_size: usize) -> String
+where
+    T: std::fmt::Display + std::fmt::UpperExp,
+{
+    let positional = v.to_string();
+    if positional.len() <= display_size {
+        positional
+    } else {
+        format!("{v:E}")
+    }
+}
+
 fn column_value_to_string(value: &ColumnValue) -> String {
     match value {
         ColumnValue::Null => String::new(),
@@ -2249,9 +2325,9 @@ fn column_value_to_string(value: &ColumnValue) -> String {
         // would change every *finite* value too, since `0.1f32` prints as "0.1"
         // but `0.1f32 as f64` prints as "0.10000000149011612".
         ColumnValue::F32(v) if v.is_infinite() => infinity_text(v.is_sign_negative()).to_string(),
-        ColumnValue::F32(v) => v.to_string(),
+        ColumnValue::F32(v) => render_float(*v, DISPLAY_SIZE_REAL),
         ColumnValue::F64(v) if v.is_infinite() => infinity_text(v.is_sign_negative()).to_string(),
-        ColumnValue::F64(v) => v.to_string(),
+        ColumnValue::F64(v) => render_float(*v, DISPLAY_SIZE_FLOAT_DOUBLE),
         ColumnValue::Bool(v) => {
             if *v {
                 "1".to_string()
@@ -7031,6 +7107,88 @@ mod tests {
         assert_eq!(ind, 7);
 
         assert_22003_writes_nothing(&ColumnValue::F64(-123.45), CDataType::Char, 4);
+    }
+
+    /// A double whose positional rendering exceeds the display size ODBC
+    /// defines for it switches to exponent notation.
+    ///
+    /// The *Display Size* appendix does not merely give a number, it says what
+    /// the number is made of: "SQL_FLOAT SQL_DOUBLE | 24 (a sign, 15 digits, a
+    /// decimal point, the letter *E*, a sign, and 3 digits)". That is an
+    /// exponent rendering, and `col_attr::display_size_for` already reports 24
+    /// on the strength of it. Rust's `Display` for floats never emits an
+    /// exponent, so core promised a 24-character exponent form and produced a
+    /// 309-character positional one.
+    #[test]
+    fn a_double_too_wide_for_its_display_size_renders_as_an_exponent() {
+        for v in [f64::MAX, f64::MIN, 1.0e30, -1.0e30] {
+            let s = column_value_to_string(&ColumnValue::F64(v));
+            assert!(
+                s.len() <= 24,
+                "{v:e} rendered {} chars, over SQL_DOUBLE's display size: {s}",
+                s.len(),
+            );
+            assert_eq!(
+                s.parse::<f64>().expect("the rendering must parse back"),
+                v,
+                "rendering {s} must round-trip",
+            );
+        }
+    }
+
+    /// The subnormal case, which is the one that delivered *wrong data* rather
+    /// than an error. Positional `4.9e-324` is 326 characters whose first 24
+    /// are `0.00000000000000000000000`, so an application sizing its buffer
+    /// from the display size read **zero** — under `01004`, which says
+    /// "truncated", not "wrong".
+    ///
+    /// Its large-magnitude sibling was at least loud: the *SQL to C: Numeric*
+    /// whole-digit rule made `f64::MAX` a hard `22003`.
+    #[test]
+    fn a_subnormal_double_does_not_render_as_zero() {
+        let s = column_value_to_string(&ColumnValue::F64(4.9e-324));
+        assert!(s.len() <= 24, "rendered {} chars: {s}", s.len());
+        assert_ne!(
+            s.parse::<f64>().expect("must parse back"),
+            0.0,
+            "rendering {s} lost the whole value",
+        );
+    }
+
+    /// The `f32` half, against its own display size. `SQL_REAL` is 14 — "a
+    /// sign, 7 digits, a decimal point, the letter *E*, a sign, and 2 digits" —
+    /// so an `f32` is measured against 14 and not against the double's 24.
+    #[test]
+    fn a_real_is_measured_against_its_own_display_size() {
+        for v in [f32::MAX, f32::MIN, 1.0e20, -1.0e20] {
+            let s = column_value_to_string(&ColumnValue::F32(v));
+            assert!(
+                s.len() <= 14,
+                "{v:e} rendered {} chars, over SQL_REAL's display size: {s}",
+                s.len(),
+            );
+            assert_eq!(s.parse::<f32>().expect("must parse back"), v);
+        }
+    }
+
+    /// The guard against over-reach: an ordinary value keeps the rendering it
+    /// has always had. Switching every float to exponent form would satisfy the
+    /// display size too, and would turn `1.5` into `1.5E0` for every
+    /// application in the world.
+    #[test]
+    fn an_ordinary_float_keeps_its_positional_rendering() {
+        assert_eq!(column_value_to_string(&ColumnValue::F64(1.5)), "1.5");
+        assert_eq!(
+            column_value_to_string(&ColumnValue::F64(-123.45)),
+            "-123.45"
+        );
+        assert_eq!(column_value_to_string(&ColumnValue::F64(0.0)), "0");
+        assert_eq!(column_value_to_string(&ColumnValue::F32(0.1)), "0.1");
+        // Exactly at the boundary: 17 characters, well inside 24.
+        assert_eq!(
+            column_value_to_string(&ColumnValue::F64(1.0e16)),
+            "10000000000000000"
+        );
     }
 
     #[test]
