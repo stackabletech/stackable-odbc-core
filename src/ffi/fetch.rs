@@ -891,9 +891,12 @@ pub unsafe fn sql_extended_fetch<B: Backend>(
 /// - 07009 (invalid descriptor index): the row's first three clauses carry no `(DM)` marker
 ///   and are the driver's. The column-0 one is **returned by this driver**, when
 ///   `col_or_param_num` is 0 (bookmark). The one naming a column number greater than the number
-///   of columns in the result set is delegated to the backend, which returns `HY000` rather
-///   than `07009`; a precise check would require an extra round-trip to obtain the column
-///   count. The third names a parameter ordinal, which cannot arise because core returns no
+///   of columns in the result set is **also returned by this driver**, checked against
+///   [`StatementBackend::column_count`]. It was delegated to the backend — which answered
+///   `HY000` — on the recorded grounds that "a precise check would require an extra round-trip
+///   to obtain the column count". That was false: `column_count` is a local accessor with no
+///   I/O behind it, and `describe_col` is already range-checked against the same call. The
+///   third clause names a parameter ordinal, which cannot arise because core returns no
 ///   streamed output parameters. The five clauses that follow — bound column, column ordering,
 ///   ARD consistency and ARD count — are all `(DM)`-marked and not returned here.
 /// - 08S01 (communication link failure): propagated from the backend.
@@ -1060,6 +1063,35 @@ pub unsafe fn sql_get_data<B: Backend>(
             if col_or_param_num == 0 {
                 return Err(OdbcError::general(
                     "Column number 0 (bookmark) is not supported",
+                    SqlState::invalid_descriptor_index(),
+                ));
+            }
+
+            // Spec 07009, the clause naming "a column number greater than the
+            // number of columns in the result set". It carries no `(DM)`
+            // marker, so it is the driver's.
+            //
+            // This was delegated to the backend for years on the stated
+            // grounds that "a precise check would require an extra round-trip
+            // to obtain the column count" — which was false.
+            // `StatementBackend::column_count` is a local accessor with no I/O
+            // behind it, and `describe_col` is already range-checked against
+            // that very call (see its doc comment). The cost was imagined; the
+            // consequence was that every backend answered this with whatever
+            // its error mapping produced, usually `HY000`.
+            //
+            // Compared as `i32` so a `col_or_param_num` above `i16::MAX` is out
+            // of range rather than wrapping negative: `column_count` returns
+            // `i16` because that is what `SQLNumResultCols` writes through,
+            // while the ordinal arrives as `u16`, and the two do not share a
+            // range.
+            let column_count = i32::from(statement.column_count());
+            if i32::from(col_or_param_num) > column_count {
+                return Err(OdbcError::general(
+                    format!(
+                        "Invalid descriptor index: column {col_or_param_num} of a \
+                         {column_count}-column result set"
+                    ),
                     SqlState::invalid_descriptor_index(),
                 ));
             }
@@ -3231,17 +3263,19 @@ mod tests {
         }
     }
 
-    /// A column ordinal at `u16::MAX` with a row fetched. **Not `07009`**: this
-    /// function's own doc records that the row's "greater than the number of
-    /// columns" clause is delegated to the backend rather than checked here,
-    /// because a precise check would cost an extra round-trip, and the backend
-    /// answers `HY000`.
+    /// A column ordinal at `u16::MAX` with a row fetched is `07009`.
     ///
-    /// Pinned so that changing it is a decision rather than an accident — the
-    /// audit expected `07009` here, which is what the spec would give if core
-    /// did the check itself.
+    /// This test previously pinned the opposite — the backend's `HY000` — and
+    /// said so "so that changing it is a decision rather than an accident".
+    /// This is that decision. The reason recorded for delegating the check was
+    /// that "a precise check would cost an extra round-trip", and that was
+    /// simply false: [`StatementBackend::column_count`] is a local accessor
+    /// with no I/O behind it, and core already range-checks `describe_col`
+    /// against exactly that call. The clause naming "a column number greater
+    /// than the number of columns in the result set" carries no Driver-Manager
+    /// marker, so it is the driver's to answer, and now does.
     #[test]
-    fn get_data_with_a_huge_ordinal_is_the_backends_hy000_not_07009() {
+    fn get_data_past_the_last_column_is_07009() {
         unsafe {
             let (env, conn, stmt) = alloc_env_conn_stmt();
             with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
@@ -3266,9 +3300,44 @@ mod tests {
             assert_eq!(ret, SqlReturn::ERROR);
             assert_eq!(
                 first_sqlstate::<MockBackend>(stmt),
-                crate::types::sql_state::GENERAL_ERROR,
-                "delegated to the backend, per this function's doc comment"
+                crate::types::sql_state::INVALID_DESCRIPTOR_INDEX,
+                "a column past the end of the result set is what 07009 is for"
             );
+
+            cleanup_stmt_for::<MockBackend>(env, conn, stmt);
+        }
+    }
+
+    /// The guard against over-reach on the test above: the *last* column is in
+    /// range, so the boundary must be `>` and not `>=`. A one-column result set
+    /// makes the off-by-one the only thing this can catch.
+    #[test]
+    fn get_data_of_the_last_column_is_in_range() {
+        unsafe {
+            let (env, conn, stmt) = alloc_env_conn_stmt();
+            with_handle::<MockBackend, StatementHandle<MockBackend>, _>(stmt, |handle| {
+                handle.set_result_set(crate::handles::StatementData::Synthetic(
+                    crate::test_utils::synthetic_result_set(vec![vec![
+                        crate::types::ColumnValue::I32(42),
+                    ]]),
+                ));
+            });
+            assert_eq!(sql_fetch::<MockBackend>(stmt), SqlReturn::SUCCESS);
+
+            let mut buf: i64 = 0;
+            let mut ind: isize = 0;
+            assert_eq!(
+                sql_get_data::<MockBackend>(
+                    stmt,
+                    1, // the one and only column
+                    CDataType::SLong as i16,
+                    std::ptr::from_mut(&mut buf).cast::<c_void>(),
+                    8,
+                    &mut ind,
+                ),
+                SqlReturn::SUCCESS,
+            );
+            assert_eq!(buf, 42);
 
             cleanup_stmt_for::<MockBackend>(env, conn, stmt);
         }

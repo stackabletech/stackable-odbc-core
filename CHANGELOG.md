@@ -1603,6 +1603,18 @@ call `SQLCloseCursor` or `SQLFreeStmt(SQL_CLOSE)` first, as it already must for
 
 ### Fixed
 
+- **`SQLGetData` range-checks the column ordinal itself, and answers `07009`.**
+  A column number greater than the number of columns in the result set reached
+  the backend, which answered with whatever its own error mapping produced —
+  usually `HY000`. The clause carries no Driver-Manager marker, so it is the
+  driver's to return.
+
+  The reason recorded for delegating it was that "a precise check would require
+  an extra round-trip to obtain the column count". That was false:
+  `StatementBackend::column_count` is a local accessor with no I/O behind it,
+  and core already range-checks `describe_col` against the same call. A driver
+  that worked around this in its own `get_data` can drop the workaround.
+
 - **`SQLColAttributeW` answers `HY091` for a field identifier that is not a
   defined value.** It previously answered `HYC00` for every identifier it did
   not recognise. The spec makes these two different claims, and neither row
