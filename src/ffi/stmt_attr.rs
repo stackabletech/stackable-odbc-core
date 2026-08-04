@@ -1645,6 +1645,14 @@ mod tests {
                     0,
                 );
                 assert_eq!(ret, SqlReturn::SUCCESS_WITH_INFO, "attr {attribute}");
+                // Read before the `with_descriptor` below, which goes through
+                // `panic_safe` and clears the queue on entry like every other
+                // entry point.
+                assert_eq!(
+                    first_sqlstate::<MockBackend>(stmt),
+                    crate::types::sql_state::OPTION_VALUE_CHANGED,
+                    "attr {attribute}: a substitution is 01S02, not a bare warning",
+                );
 
                 // Both attributes name `SQL_DESC_ARRAY_SIZE`; which descriptor
                 // it lands on is what tells the two apart.
@@ -3418,6 +3426,10 @@ mod tests {
         }
     }
 
+    /// The asymmetry with `set_unknown_attr_returns_success` above is
+    /// deliberate: a set of an unrecognised attribute is accepted silently for
+    /// Driver Manager and tool compatibility, while a *get* has nothing to
+    /// report and says so with `HYC00`.
     #[test]
     fn get_stmt_attr_unsupported_returns_error() {
         unsafe {
@@ -3432,6 +3444,11 @@ mod tests {
                 std::ptr::null_mut(),
             );
             assert_eq!(ret, SqlReturn::ERROR);
+            assert_eq!(
+                first_sqlstate::<MockBackend>(stmt),
+                crate::types::sql_state::OPTIONAL_FEATURE_NOT_IMPLEMENTED,
+                "an unreadable attribute is HYC00, not a generic HY000",
+            );
             cleanup_env_conn_stmt(env, conn, stmt);
         }
     }

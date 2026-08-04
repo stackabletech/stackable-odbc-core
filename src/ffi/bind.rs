@@ -505,6 +505,10 @@ mod tests {
         }
     }
 
+    /// `HY003`, decided by this function: a `target_type` that
+    /// `c_data_type_from_raw` cannot name is rejected before the record is
+    /// built, so the consistency check's clause 1 (a concise type that is not a
+    /// C type) is never reached from here.
     #[test]
     fn bind_col_invalid_c_type_returns_error() {
         unsafe {
@@ -519,6 +523,11 @@ mod tests {
                 std::ptr::null_mut(),
             );
             assert_eq!(ret, SqlReturn::ERROR);
+            assert_eq!(
+                first_sqlstate::<MockBackend>(stmt),
+                crate::types::sql_state::INVALID_APPLICATION_BUFFER_TYPE,
+                "an unrecognised C data type is HY003, not a generic HY000",
+            );
             cleanup_env_conn_stmt(env, conn, stmt);
         }
     }

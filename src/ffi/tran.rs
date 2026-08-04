@@ -544,30 +544,13 @@ mod tests {
     use crate::synthetic::SyntheticStatement;
     use crate::test_utils::{
         MockBackend, MockFailingCloseBackend, MockFailingCloseStatement, MockTxnCloseBackend,
-        MockTxnDeleteBackend, MockTxnNotConnectedBackend, MockTxnPreserveBackend, with_descriptor,
-        with_handle,
+        MockTxnDeleteBackend, MockTxnNotConnectedBackend, MockTxnPreserveBackend,
+        alloc_env_conn_for, cleanup_env_conn_for, with_descriptor, with_handle,
     };
     use crate::types::{
         ColumnDescriptor, ColumnValue, CompletionType, FetchResult, Nullable, SQL_NTS, SqlDataType,
         SqlState,
     };
-
-    unsafe fn alloc_env_conn() -> (*mut c_void, *mut c_void) {
-        let mut env: *mut c_void = std::ptr::null_mut();
-        let _ = unsafe {
-            sql_alloc_handle::<MockBackend>(HandleType::Env as i16, std::ptr::null_mut(), &mut env)
-        };
-        let mut conn: *mut c_void = std::ptr::null_mut();
-        let _ = unsafe { sql_alloc_handle::<MockBackend>(HandleType::Dbc as i16, env, &mut conn) };
-        (env, conn)
-    }
-
-    unsafe fn cleanup(env: *mut c_void, conn: *mut c_void) {
-        unsafe {
-            let _ = sql_free_handle::<MockBackend>(HandleType::Dbc as i16, conn);
-            let _ = sql_free_handle::<MockBackend>(HandleType::Env as i16, env);
-        }
-    }
 
     /// The first SQLSTATE on a connection handle, so a test can assert the state
     /// its name claims rather than only the return code. Same six-line shape as
@@ -597,7 +580,7 @@ mod tests {
     fn end_tran_commit_dbc_not_connected_returns_08003() {
         // Spec 08003: SQLEndTran on SQL_HANDLE_DBC when no connection is open.
         unsafe {
-            let (env, conn) = alloc_env_conn();
+            let (env, conn) = alloc_env_conn_for::<MockBackend>();
             let ret = sql_end_tran::<MockBackend>(
                 HandleType::Dbc as i16,
                 conn,
@@ -609,14 +592,14 @@ mod tests {
                 crate::types::sql_state::CONNECTION_NOT_OPEN,
                 "the state this test's name claims"
             );
-            cleanup(env, conn);
+            cleanup_env_conn_for::<MockBackend>(env, conn);
         }
     }
 
     #[test]
     fn end_tran_rollback_dbc_not_connected_returns_08003() {
         unsafe {
-            let (env, conn) = alloc_env_conn();
+            let (env, conn) = alloc_env_conn_for::<MockBackend>();
             let ret = sql_end_tran::<MockBackend>(
                 HandleType::Dbc as i16,
                 conn,
@@ -628,31 +611,31 @@ mod tests {
                 crate::types::sql_state::CONNECTION_NOT_OPEN,
                 "the state this test's name claims"
             );
-            cleanup(env, conn);
+            cleanup_env_conn_for::<MockBackend>(env, conn);
         }
     }
 
     #[test]
     fn end_tran_env_handle_returns_success() {
         unsafe {
-            let (env, conn) = alloc_env_conn();
+            let (env, conn) = alloc_env_conn_for::<MockBackend>();
             let ret = sql_end_tran::<MockBackend>(
                 HandleType::Env as i16,
                 env,
                 CompletionType::Commit as i16,
             );
             assert_eq!(ret, SqlReturn::SUCCESS);
-            cleanup(env, conn);
+            cleanup_env_conn_for::<MockBackend>(env, conn);
         }
     }
 
     #[test]
     fn end_tran_invalid_completion_type_returns_error() {
         unsafe {
-            let (env, conn) = alloc_env_conn();
+            let (env, conn) = alloc_env_conn_for::<MockBackend>();
             let ret = sql_end_tran::<MockBackend>(HandleType::Dbc as i16, conn, 99);
             assert_eq!(ret, SqlReturn::ERROR);
-            cleanup(env, conn);
+            cleanup_env_conn_for::<MockBackend>(env, conn);
         }
     }
 
@@ -661,10 +644,10 @@ mod tests {
         // SQL_HANDLE_STMT is not a valid handle type for SQLEndTran; spec
         // requires SQL_INVALID_HANDLE.
         unsafe {
-            let (env, conn) = alloc_env_conn();
+            let (env, conn) = alloc_env_conn_for::<MockBackend>();
             let ret = sql_end_tran::<MockBackend>(HandleType::Stmt as i16, conn, 0);
             assert_eq!(ret, SqlReturn::INVALID_HANDLE);
-            cleanup(env, conn);
+            cleanup_env_conn_for::<MockBackend>(env, conn);
         }
     }
 

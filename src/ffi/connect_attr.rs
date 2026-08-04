@@ -1025,54 +1025,14 @@ mod tests {
     use crate::test_utils::{
         MockAltBackend, MockBackend, MockCancelAwareBackend, MockCatalogRejectingBackend,
         MockConnection, MockIsolationBackend, MockIsolationConnection,
-        MockUnappliedIsolationBackend, with_handle,
+        MockUnappliedIsolationBackend, alloc_env_conn_for, cleanup_env_conn_for, with_handle,
     };
     use odbc_sys::HandleType;
-
-    /// Allocate an environment and connection handle **for the backend the
-    /// test then calls through**.
-    ///
-    /// The type parameter is load-bearing, not decoration. A handle is a
-    /// `ConnectionHandle<B>`, whose `connection: Option<B::Connection>` field
-    /// has a different layout for every backend, while validation is a
-    /// registry slot, generation and kind compare that never dereferences the
-    /// caller's value and so has no way to know which backend allocated the
-    /// handle. Allocating as one backend and calling as another therefore
-    /// passes that compare and then reads memory laid out for a different
-    /// type, which is undefined behaviour that Miri catches and a plain
-    /// `cargo test` does not.
-    unsafe fn alloc_env_conn_for<B: Backend>() -> (*mut c_void, *mut c_void) {
-        let mut env: *mut c_void = std::ptr::null_mut();
-        let _ = unsafe {
-            sql_alloc_handle::<B>(HandleType::Env as i16, std::ptr::null_mut(), &mut env)
-        };
-        let mut conn: *mut c_void = std::ptr::null_mut();
-        let _ = unsafe { sql_alloc_handle::<B>(HandleType::Dbc as i16, env, &mut conn) };
-        (env, conn)
-    }
-
-    unsafe fn alloc_env_conn() -> (*mut c_void, *mut c_void) {
-        unsafe { alloc_env_conn_for::<MockBackend>() }
-    }
-
-    unsafe fn cleanup_for<B: Backend>(env: *mut c_void, conn: *mut c_void) {
-        unsafe {
-            // A connected handle cannot be freed; disconnect first so the
-            // connection is not leaked. Harmless when never connected.
-            let _ = crate::ffi::connect::sql_disconnect::<B>(conn);
-            let _ = sql_free_handle::<B>(HandleType::Dbc as i16, conn);
-            let _ = sql_free_handle::<B>(HandleType::Env as i16, env);
-        }
-    }
-
-    unsafe fn cleanup(env: *mut c_void, conn: *mut c_void) {
-        unsafe { cleanup_for::<MockBackend>(env, conn) }
-    }
 
     #[test]
     fn set_and_get_autocommit() {
         unsafe {
-            let (env, conn) = alloc_env_conn();
+            let (env, conn) = alloc_env_conn_for::<MockBackend>();
 
             // Set autocommit OFF (0)
             let ret = sql_set_connect_attr_w::<MockBackend>(
@@ -1095,14 +1055,14 @@ mod tests {
             assert_eq!(ret, SqlReturn::SUCCESS);
             assert_eq!(val, 0);
 
-            cleanup(env, conn);
+            cleanup_env_conn_for::<MockBackend>(env, conn);
         }
     }
 
     #[test]
     fn get_autocommit_default_is_on() {
         unsafe {
-            let (env, conn) = alloc_env_conn();
+            let (env, conn) = alloc_env_conn_for::<MockBackend>();
             let mut val: u32 = 99;
             let ret = sql_get_connect_attr_w::<MockBackend>(
                 conn,
@@ -1113,7 +1073,7 @@ mod tests {
             );
             assert_eq!(ret, SqlReturn::SUCCESS);
             assert_eq!(val, SQL_AUTOCOMMIT_ON as u32);
-            cleanup(env, conn);
+            cleanup_env_conn_for::<MockBackend>(env, conn);
         }
     }
 
@@ -1595,11 +1555,11 @@ mod tests {
     #[test]
     fn get_connection_dead_on_an_unconnected_handle_is_false() {
         // A handle that never had a connection has not *lost* one, and
-        // SQL_CD_TRUE asserts exactly that it was lost. `alloc_env_conn` does
+        // SQL_CD_TRUE asserts exactly that it was lost. `alloc_env_conn_for` does
         // not connect, so this is the no-connection branch specifically; the
         // two tests below cover the branches that reach the backend.
         unsafe {
-            let (env, conn) = alloc_env_conn();
+            let (env, conn) = alloc_env_conn_for::<MockBackend>();
             let mut val: u32 = 99;
             let ret = sql_get_connect_attr_w::<MockBackend>(
                 conn,
@@ -1610,7 +1570,7 @@ mod tests {
             );
             assert_eq!(ret, SqlReturn::SUCCESS);
             assert_eq!(val, SQL_CD_FALSE as u32);
-            cleanup(env, conn);
+            cleanup_env_conn_for::<MockBackend>(env, conn);
         }
     }
 
@@ -1663,18 +1623,22 @@ mod tests {
     #[test]
     fn set_unknown_attr_returns_success() {
         unsafe {
-            let (env, conn) = alloc_env_conn();
+            let (env, conn) = alloc_env_conn_for::<MockBackend>();
             // Driver-specific attribute, must not fail
             let ret = sql_set_connect_attr_w::<MockBackend>(conn, 9999, std::ptr::null_mut(), 0);
             assert_eq!(ret, SqlReturn::SUCCESS);
-            cleanup(env, conn);
+            cleanup_env_conn_for::<MockBackend>(env, conn);
         }
     }
 
+    /// `SQL_ATTR_CONNECTION_DEAD` is read-only, and the state core posts for a
+    /// write is `HY024`: the identifier names a real connection attribute, so
+    /// `HY092` would be the wrong half of the pair, and the objection is to the
+    /// value having anywhere to go at all.
     #[test]
     fn set_connection_dead_is_error() {
         unsafe {
-            let (env, conn) = alloc_env_conn();
+            let (env, conn) = alloc_env_conn_for::<MockBackend>();
             let ret = sql_set_connect_attr_w::<MockBackend>(
                 conn,
                 ConnectionAttribute::CONNECTION_DEAD.0,
@@ -1682,7 +1646,12 @@ mod tests {
                 0,
             );
             assert_eq!(ret, SqlReturn::ERROR);
-            cleanup(env, conn);
+            assert_eq!(
+                first_sqlstate::<MockBackend>(conn),
+                crate::types::sql_state::INVALID_ATTRIBUTE_VALUE,
+                "a write to a read-only attribute is HY024, not a generic HY000",
+            );
+            cleanup_env_conn_for::<MockBackend>(env, conn);
         }
     }
 
@@ -1693,7 +1662,7 @@ mod tests {
     #[test]
     fn packet_size_after_connect_reports_hy011() {
         unsafe {
-            let (env, conn) = alloc_env_conn();
+            let (env, conn) = alloc_env_conn_for::<MockBackend>();
 
             // Before connecting it is an ordinary stored attribute.
             assert_eq!(
@@ -1729,7 +1698,7 @@ mod tests {
                 );
             });
 
-            cleanup(env, conn);
+            cleanup_env_conn_for::<MockBackend>(env, conn);
         }
     }
 
@@ -1754,7 +1723,7 @@ mod tests {
         ];
         for (attribute, name, value) in cases {
             unsafe {
-                let (env, conn) = alloc_env_conn();
+                let (env, conn) = alloc_env_conn_for::<MockBackend>();
                 let ret = sql_set_connect_attr_w::<MockBackend>(
                     conn,
                     *attribute,
@@ -1774,7 +1743,7 @@ mod tests {
                         "{name} posted the wrong SQLSTATE"
                     );
                 });
-                cleanup(env, conn);
+                cleanup_env_conn_for::<MockBackend>(env, conn);
             }
         }
     }
@@ -1819,7 +1788,7 @@ mod tests {
                 "SQL_DATABASE_NAME and SQL_ATTR_CURRENT_CATALOG disagree"
             );
 
-            cleanup_for::<MockAltBackend>(env, conn);
+            cleanup_env_conn_for::<MockAltBackend>(env, conn);
         }
     }
 
@@ -1834,7 +1803,7 @@ mod tests {
     #[test]
     fn a_null_value_ptr_for_current_catalog_is_hy009() {
         unsafe {
-            let (env, conn) = alloc_env_conn();
+            let (env, conn) = alloc_env_conn_for::<MockBackend>();
 
             assert_eq!(
                 sql_set_connect_attr_w::<MockBackend>(
@@ -1856,7 +1825,7 @@ mod tests {
                 );
             });
 
-            cleanup(env, conn);
+            cleanup_env_conn_for::<MockBackend>(env, conn);
         }
     }
 
@@ -1890,7 +1859,7 @@ mod tests {
                 "alt_catalog",
             );
 
-            cleanup_for::<MockAltBackend>(env, conn);
+            cleanup_env_conn_for::<MockAltBackend>(env, conn);
         }
     }
 
@@ -1917,7 +1886,7 @@ mod tests {
             ),
         ] {
             unsafe {
-                let (env, conn) = alloc_env_conn();
+                let (env, conn) = alloc_env_conn_for::<MockBackend>();
                 let mut value: usize = usize::MAX;
                 let ret = sql_get_connect_attr_w::<MockBackend>(
                     conn,
@@ -1931,7 +1900,7 @@ mod tests {
                     value, expected,
                     "{name}: the high half of the SQLULEN buffer kept its poison"
                 );
-                cleanup(env, conn);
+                cleanup_env_conn_for::<MockBackend>(env, conn);
             }
         }
     }
@@ -1988,7 +1957,7 @@ mod tests {
         ];
         for (attribute, name, value) in cases {
             unsafe {
-                let (env, conn) = alloc_env_conn();
+                let (env, conn) = alloc_env_conn_for::<MockBackend>();
                 assert_eq!(
                     sql_set_connect_attr_w::<MockBackend>(
                         conn,
@@ -2017,7 +1986,7 @@ mod tests {
                     "{name} was stored but cannot be read back"
                 );
                 assert_eq!(out, *value, "{name} read back a different value");
-                cleanup(env, conn);
+                cleanup_env_conn_for::<MockBackend>(env, conn);
             }
         }
     }
@@ -2053,7 +2022,7 @@ mod tests {
         // manual-commit mode. Accepting it would let an application believe a
         // rollback is available when every statement is already committed.
         unsafe {
-            let (env, conn) = alloc_env_conn();
+            let (env, conn) = alloc_env_conn_for::<MockBackend>();
             connect(conn);
             let ret = sql_set_connect_attr_w::<MockBackend>(
                 conn,
@@ -2070,14 +2039,14 @@ mod tests {
                 );
             });
 
-            cleanup(env, conn);
+            cleanup_env_conn_for::<MockBackend>(env, conn);
         }
     }
 
     #[test]
     fn set_autocommit_on_is_accepted() {
         unsafe {
-            let (env, conn) = alloc_env_conn();
+            let (env, conn) = alloc_env_conn_for::<MockBackend>();
             connect(conn);
             let ret = sql_set_connect_attr_w::<MockBackend>(
                 conn,
@@ -2086,7 +2055,7 @@ mod tests {
                 0,
             );
             assert_eq!(ret, SqlReturn::SUCCESS);
-            cleanup(env, conn);
+            cleanup_env_conn_for::<MockBackend>(env, conn);
         }
     }
 
@@ -2097,7 +2066,7 @@ mod tests {
         // the backend, so the connect itself fails for a backend that cannot
         // honour manual-commit.
         unsafe {
-            let (env, conn) = alloc_env_conn();
+            let (env, conn) = alloc_env_conn_for::<MockBackend>();
             assert_eq!(
                 sql_set_connect_attr_w::<MockBackend>(
                     conn,
@@ -2129,14 +2098,14 @@ mod tests {
                 "deferred manual-commit was silently dropped at connect"
             );
 
-            cleanup(env, conn);
+            cleanup_env_conn_for::<MockBackend>(env, conn);
         }
     }
 
     #[test]
     fn set_autocommit_invalid_value_returns_hy024() {
         unsafe {
-            let (env, conn) = alloc_env_conn();
+            let (env, conn) = alloc_env_conn_for::<MockBackend>();
             let ret = sql_set_connect_attr_w::<MockBackend>(
                 conn,
                 ConnectionAttribute::AUTOCOMMIT.0,
@@ -2149,14 +2118,14 @@ mod tests {
                 crate::types::sql_state::INVALID_ATTRIBUTE_VALUE,
                 "the state this test's name claims"
             );
-            cleanup(env, conn);
+            cleanup_env_conn_for::<MockBackend>(env, conn);
         }
     }
 
     #[test]
     fn set_access_mode_invalid_value_returns_hy024() {
         unsafe {
-            let (env, conn) = alloc_env_conn();
+            let (env, conn) = alloc_env_conn_for::<MockBackend>();
             let ret = sql_set_connect_attr_w::<MockBackend>(
                 conn,
                 ConnectionAttribute::ACCESS_MODE.0,
@@ -2169,14 +2138,14 @@ mod tests {
                 crate::types::sql_state::INVALID_ATTRIBUTE_VALUE,
                 "the state this test's name claims"
             );
-            cleanup(env, conn);
+            cleanup_env_conn_for::<MockBackend>(env, conn);
         }
     }
 
     #[test]
     fn set_trace_invalid_value_returns_hy024() {
         unsafe {
-            let (env, conn) = alloc_env_conn();
+            let (env, conn) = alloc_env_conn_for::<MockBackend>();
             let ret = sql_set_connect_attr_w::<MockBackend>(
                 conn,
                 ConnectionAttribute::TRACE.0,
@@ -2189,14 +2158,14 @@ mod tests {
                 crate::types::sql_state::INVALID_ATTRIBUTE_VALUE,
                 "the state this test's name claims"
             );
-            cleanup(env, conn);
+            cleanup_env_conn_for::<MockBackend>(env, conn);
         }
     }
 
     #[test]
     fn set_odbc_cursors_invalid_value_returns_hy024() {
         unsafe {
-            let (env, conn) = alloc_env_conn();
+            let (env, conn) = alloc_env_conn_for::<MockBackend>();
             let ret = sql_set_connect_attr_w::<MockBackend>(
                 conn,
                 ConnectionAttribute::ODBC_CURSORS.0,
@@ -2209,14 +2178,14 @@ mod tests {
                 crate::types::sql_state::INVALID_ATTRIBUTE_VALUE,
                 "the state this test's name claims"
             );
-            cleanup(env, conn);
+            cleanup_env_conn_for::<MockBackend>(env, conn);
         }
     }
 
     #[test]
     fn set_discrete_attrs_valid_values_succeed() {
         unsafe {
-            let (env, conn) = alloc_env_conn();
+            let (env, conn) = alloc_env_conn_for::<MockBackend>();
             // ACCESS_MODE: 0 (read/write) and 1 (read-only) are valid.
             // Value 0: null_mut encodes integer zero (ODBC integer-as-pointer convention).
             let ret = sql_set_connect_attr_w::<MockBackend>(
@@ -2272,7 +2241,7 @@ mod tests {
                 0,
             );
             assert_eq!(ret, SqlReturn::SUCCESS, "ODBC_CURSORS=2 should succeed");
-            cleanup(env, conn);
+            cleanup_env_conn_for::<MockBackend>(env, conn);
         }
     }
 
@@ -2293,7 +2262,7 @@ mod tests {
     fn get_unknown_attribute_returns_hy092() {
         // Spec HY092: unrecognised attribute identifiers return ERROR.
         unsafe {
-            let (env, conn) = alloc_env_conn();
+            let (env, conn) = alloc_env_conn_for::<MockBackend>();
             let mut val: u32 = 0;
             let ret = sql_get_connect_attr_w::<MockBackend>(
                 conn,
@@ -2308,7 +2277,7 @@ mod tests {
                 crate::types::sql_state::INVALID_ATTRIBUTE_OPTION_IDENTIFIER,
                 "the state this test's name claims"
             );
-            cleanup(env, conn);
+            cleanup_env_conn_for::<MockBackend>(env, conn);
         }
     }
 
@@ -2321,7 +2290,7 @@ mod tests {
     #[test]
     fn a_valid_but_unsupported_connection_attribute_is_hyc00() {
         unsafe {
-            let (env, conn) = alloc_env_conn();
+            let (env, conn) = alloc_env_conn_for::<MockBackend>();
             for (attribute, name) in [
                 (ConnectionAttribute::QUIET_MODE, "SQL_ATTR_QUIET_MODE"),
                 (ConnectionAttribute::TRACEFILE, "SQL_ATTR_TRACEFILE"),
@@ -2357,7 +2326,7 @@ mod tests {
                     );
                 });
             }
-            cleanup(env, conn);
+            cleanup_env_conn_for::<MockBackend>(env, conn);
         }
     }
 
@@ -2369,7 +2338,7 @@ mod tests {
         const NOT_A_CONNECTION_ATTRIBUTE: i32 = 424_242;
 
         unsafe {
-            let (env, conn) = alloc_env_conn();
+            let (env, conn) = alloc_env_conn_for::<MockBackend>();
             let mut value: u32 = 0;
             assert_eq!(
                 sql_get_connect_attr_w::<MockBackend>(
@@ -2391,7 +2360,7 @@ mod tests {
                     "HY092",
                 );
             });
-            cleanup(env, conn);
+            cleanup_env_conn_for::<MockBackend>(env, conn);
         }
     }
 
@@ -2465,7 +2434,7 @@ mod tests {
     #[test]
     fn get_txn_isolation_default_comes_from_the_backend() {
         unsafe {
-            let (env, conn) = alloc_env_conn();
+            let (env, conn) = alloc_env_conn_for::<MockBackend>();
             assert_eq!(driver_connect::<MockBackend>(conn), SqlReturn::SUCCESS);
             let mut val: u32 = 99;
             let ret = sql_get_connect_attr_w::<MockBackend>(
@@ -2485,7 +2454,7 @@ mod tests {
                 val, SQL_TXN_READ_COMMITTED,
                 "reported a constant rather than the backend's declared level"
             );
-            cleanup(env, conn);
+            cleanup_env_conn_for::<MockBackend>(env, conn);
         }
     }
 
@@ -2500,7 +2469,7 @@ mod tests {
     #[test]
     fn set_txn_isolation_rejects_a_level_the_backend_does_not_support() {
         unsafe {
-            let (env, conn) = alloc_env_conn();
+            let (env, conn) = alloc_env_conn_for::<MockBackend>();
             assert_eq!(driver_connect::<MockBackend>(conn), SqlReturn::SUCCESS);
             // MockBackend declares SERIALIZABLE only.
             let ret = sql_set_connect_attr_w::<MockBackend>(
@@ -2511,7 +2480,7 @@ mod tests {
             );
             assert_eq!(ret, SqlReturn::ERROR);
             assert_eq!(first_sqlstate::<MockBackend>(conn), "HY024");
-            cleanup(env, conn);
+            cleanup_env_conn_for::<MockBackend>(env, conn);
         }
     }
 
@@ -2531,7 +2500,7 @@ mod tests {
             );
             assert_eq!(ret, SqlReturn::ERROR);
             assert_eq!(first_sqlstate::<MockIsolationBackend>(conn), "HY024");
-            cleanup_for::<MockIsolationBackend>(env, conn);
+            cleanup_env_conn_for::<MockIsolationBackend>(env, conn);
         }
     }
 
@@ -2539,7 +2508,7 @@ mod tests {
     #[test]
     fn set_txn_isolation_accepts_a_supported_level() {
         unsafe {
-            let (env, conn) = alloc_env_conn();
+            let (env, conn) = alloc_env_conn_for::<MockBackend>();
             let ret = sql_set_connect_attr_w::<MockBackend>(
                 conn,
                 ConnectionAttribute::TXN_ISOLATION.0,
@@ -2558,7 +2527,7 @@ mod tests {
             );
             assert_eq!(ret, SqlReturn::SUCCESS);
             assert_eq!(val, SQL_TXN_SERIALIZABLE);
-            cleanup(env, conn);
+            cleanup_env_conn_for::<MockBackend>(env, conn);
         }
     }
 
@@ -2588,7 +2557,7 @@ mod tests {
                 "the level never reached the backend"
             );
 
-            cleanup_for::<MockIsolationBackend>(env, conn);
+            cleanup_env_conn_for::<MockIsolationBackend>(env, conn);
         }
     }
 
@@ -2619,7 +2588,7 @@ mod tests {
                 "deferred isolation level was silently dropped at connect"
             );
 
-            cleanup_for::<MockIsolationBackend>(env, conn);
+            cleanup_env_conn_for::<MockIsolationBackend>(env, conn);
         }
     }
 
@@ -2646,7 +2615,7 @@ mod tests {
                 "accepted a level the backend has no way to apply"
             );
 
-            cleanup_for::<MockUnappliedIsolationBackend>(env, conn);
+            cleanup_env_conn_for::<MockUnappliedIsolationBackend>(env, conn);
         }
     }
 
@@ -2684,7 +2653,7 @@ mod tests {
     #[test]
     fn set_current_catalog_refuses_an_nts_value_that_runs_to_the_scan_cap() {
         unsafe {
-            let (env, conn) = alloc_env_conn();
+            let (env, conn) = alloc_env_conn_for::<MockBackend>();
             let wide = vec![b'a' as u16; crate::utf16::MAX_NTS_SCAN];
 
             assert_eq!(
@@ -2708,7 +2677,7 @@ mod tests {
                 );
             });
 
-            cleanup(env, conn);
+            cleanup_env_conn_for::<MockBackend>(env, conn);
         }
     }
 
@@ -2735,7 +2704,7 @@ mod tests {
                 "the data source's verdict on the catalog name, not a state core invented",
             );
 
-            cleanup_for::<MockCatalogRejectingBackend>(env, conn);
+            cleanup_env_conn_for::<MockCatalogRejectingBackend>(env, conn);
         }
     }
 
@@ -2771,7 +2740,7 @@ mod tests {
                 "core stores the value only once the data source agreed to it",
             );
 
-            cleanup_for::<MockCatalogRejectingBackend>(env, conn);
+            cleanup_env_conn_for::<MockCatalogRejectingBackend>(env, conn);
         }
     }
 
@@ -2811,7 +2780,7 @@ mod tests {
             });
             assert_eq!(state.as_deref(), Some("3D000"));
 
-            cleanup_for::<MockCatalogRejectingBackend>(env, conn);
+            cleanup_env_conn_for::<MockCatalogRejectingBackend>(env, conn);
         }
     }
 }

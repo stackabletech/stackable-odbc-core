@@ -865,25 +865,22 @@ mod tests {
     use crate::ffi::handle::{sql_alloc_handle, sql_free_handle};
     use crate::handles::StatementHandle;
     use crate::test_utils::{
-        MockBackend, MockFunctionsBackend, MockTxnDeleteCloseBackend, with_handle,
+        MockBackend, MockFunctionsBackend, MockTxnDeleteCloseBackend,
+        alloc_connected_env_conn_stmt, alloc_env_conn_for, alloc_env_conn_stmt,
+        cleanup_connected_env_conn_stmt, cleanup_env_conn_for, with_handle,
     };
 
     /// Drives `SQLGetFunctions` for the ODBC 2.x `SQL_API_ALL_FUNCTIONS` array.
     fn all_functions_2x<B: Backend>() -> [u16; 100] {
         let mut buf = [0u16; 100];
         unsafe {
-            // Allocated inline rather than via `alloc_env_and_conn`, which is
-            // fixed to `MockBackend`. `SQLGetFunctions` needs only an allocated
-            // connection, not a connected one.
-            let mut env: *mut c_void = std::ptr::null_mut();
-            let _ = sql_alloc_handle::<B>(HandleType::Env as i16, std::ptr::null_mut(), &mut env);
-            let mut conn: *mut c_void = std::ptr::null_mut();
-            let _ = sql_alloc_handle::<B>(HandleType::Dbc as i16, env, &mut conn);
+            // Unconnected: `SQLGetFunctions` needs only an allocated
+            // connection, and the answer must not depend on having one open.
+            let (env, conn) = alloc_env_conn_for::<B>();
 
             let ret = sql_get_functions::<B>(conn, 0, buf.as_mut_ptr());
             assert_eq!(ret, crate::types::SqlReturn::SUCCESS);
-            let _ = sql_free_handle::<B>(HandleType::Dbc as i16, conn);
-            let _ = sql_free_handle::<B>(HandleType::Env as i16, env);
+            cleanup_env_conn_for::<B>(env, conn);
         }
         buf
     }
@@ -938,96 +935,6 @@ mod tests {
     };
     use odbc_sys::HandleType;
 
-    /// Helper: allocate env + connection handles.
-    unsafe fn alloc_env_and_conn() -> (*mut c_void, *mut c_void) {
-        let mut env: *mut c_void = std::ptr::null_mut();
-        let _ = unsafe {
-            sql_alloc_handle::<MockBackend>(HandleType::Env as i16, std::ptr::null_mut(), &mut env)
-        };
-        let mut conn: *mut c_void = std::ptr::null_mut();
-        let _ = unsafe { sql_alloc_handle::<MockBackend>(HandleType::Dbc as i16, env, &mut conn) };
-        (env, conn)
-    }
-
-    /// Helper: allocate env + connection + statement handles.
-    unsafe fn alloc_env_conn_stmt() -> (*mut c_void, *mut c_void, *mut c_void) {
-        let (env, conn) = unsafe { alloc_env_and_conn() };
-        let mut stmt: *mut c_void = std::ptr::null_mut();
-        let _ =
-            unsafe { sql_alloc_handle::<MockBackend>(HandleType::Stmt as i16, conn, &mut stmt) };
-        (env, conn, stmt)
-    }
-
-    /// Generic counterparts of the `MockBackend`-fixed helpers above, for tests
-    /// that need a different backend.
-    /// Allocates the handle chain and connects it. `SQLGetTypeInfo` reports the
-    /// data source's types, so it needs an open connection to read them from.
-    unsafe fn alloc_env_conn_stmt_for<B: Backend>() -> (*mut c_void, *mut c_void, *mut c_void) {
-        unsafe {
-            let mut env: *mut c_void = std::ptr::null_mut();
-            let _ = sql_alloc_handle::<B>(HandleType::Env as i16, std::ptr::null_mut(), &mut env);
-            let mut conn: *mut c_void = std::ptr::null_mut();
-            let _ = sql_alloc_handle::<B>(HandleType::Dbc as i16, env, &mut conn);
-            let wide: Vec<u16> = "Host=localhost;Database=test".encode_utf16().collect();
-            assert_eq!(
-                crate::ffi::connect::sql_driver_connect_w::<B>(
-                    conn,
-                    std::ptr::null_mut(),
-                    wide.as_ptr(),
-                    wide.len() as i16,
-                    std::ptr::null_mut(),
-                    0,
-                    std::ptr::null_mut(),
-                    0,
-                ),
-                SqlReturn::SUCCESS,
-            );
-            let mut stmt: *mut c_void = std::ptr::null_mut();
-            let _ = sql_alloc_handle::<B>(HandleType::Stmt as i16, conn, &mut stmt);
-            (env, conn, stmt)
-        }
-    }
-
-    unsafe fn cleanup_for<B: Backend>(env: *mut c_void, conn: *mut c_void, stmt: *mut c_void) {
-        unsafe {
-            let _ = sql_free_handle::<B>(HandleType::Stmt as i16, stmt);
-            // A connected handle cannot be freed.
-            let _ = crate::ffi::connect::sql_disconnect::<B>(conn);
-            let _ = sql_free_handle::<B>(HandleType::Dbc as i16, conn);
-            let _ = sql_free_handle::<B>(HandleType::Env as i16, env);
-        }
-    }
-
-    /// Helper: connect a handle using a valid connection string. `MockBackend::connect`
-    /// always succeeds, so this establishes `handle.connection = Some(_)`, putting
-    /// `sql_get_info_w` on the connected (`B::get_info`) path rather than the
-    /// pre-connect (`B::get_info_pre_connect`) path.
-    unsafe fn connect_handle(conn: *mut c_void) -> SqlReturn {
-        let input = "Host=localhost;Port=8080;Database=test;User=me";
-        let wide: Vec<u16> = input.encode_utf16().collect();
-        unsafe {
-            crate::ffi::connect::sql_driver_connect_w::<MockBackend>(
-                conn,
-                std::ptr::null_mut(),
-                wide.as_ptr(),
-                wide.len() as i16,
-                std::ptr::null_mut(),
-                0,
-                std::ptr::null_mut(),
-                0,
-            )
-        }
-    }
-
-    unsafe fn cleanup(env: *mut c_void, conn: *mut c_void, stmt: *mut c_void) {
-        unsafe {
-            let _ = sql_free_handle::<MockBackend>(HandleType::Stmt as i16, stmt);
-            let _ = crate::ffi::connect::sql_disconnect::<MockBackend>(conn);
-            let _ = sql_free_handle::<MockBackend>(HandleType::Dbc as i16, conn);
-            let _ = sql_free_handle::<MockBackend>(HandleType::Env as i16, env);
-        }
-    }
-
     /// Reads a `SQLUSMALLINT`-shaped info type through the full
     /// `sql_get_info_w` path, asserting that exactly 2 bytes were written and
     /// that `StringLengthPtr` reports 2. A sentinel-filled buffer makes a
@@ -1068,9 +975,7 @@ mod tests {
     #[test]
     fn smallint_shaped_info_types_unmodelled_by_odbc_sys_still_answer_in_two_bytes() {
         unsafe {
-            let (env, conn, stmt) = alloc_env_conn_stmt();
-            let ret = connect_handle(conn);
-            assert_eq!(ret, SqlReturn::SUCCESS);
+            let (env, conn, stmt) = alloc_connected_env_conn_stmt::<MockBackend>();
 
             for (info_type, name) in [
                 (
@@ -1093,7 +998,7 @@ mod tests {
                 let _ = read_u16_info::<MockBackend>(conn, info_type, name);
             }
 
-            cleanup(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -1189,7 +1094,7 @@ mod tests {
         use crate::test_utils::MockTypeInfoBackend;
 
         unsafe {
-            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockTypeInfoBackend>();
+            let (env, conn, stmt) = alloc_connected_env_conn_stmt::<MockTypeInfoBackend>();
             let ret = sql_get_type_info::<MockTypeInfoBackend>(
                 stmt,
                 crate::types::SqlDataType::UNKNOWN_TYPE.0,
@@ -1239,7 +1144,7 @@ mod tests {
                 "the mock must declare enough rows to order"
             );
 
-            cleanup_for::<MockTypeInfoBackend>(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockTypeInfoBackend>(env, conn, stmt);
         }
     }
 
@@ -1260,7 +1165,7 @@ mod tests {
         use crate::test_utils::MockTypeInfoBackend;
 
         unsafe {
-            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockTypeInfoBackend>();
+            let (env, conn, stmt) = alloc_connected_env_conn_stmt::<MockTypeInfoBackend>();
 
             assert_eq!(
                 sql_get_type_info::<MockTypeInfoBackend>(
@@ -1303,7 +1208,7 @@ mod tests {
             );
             assert_eq!(String::from_utf16_lossy(&state[..5]), "24000");
 
-            cleanup_for::<MockTypeInfoBackend>(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockTypeInfoBackend>(env, conn, stmt);
         }
     }
 
@@ -1313,8 +1218,7 @@ mod tests {
         // With no record there it cannot tell truncation from any other
         // informational condition.
         unsafe {
-            let (env, conn, stmt) = alloc_env_conn_stmt();
-            assert_eq!(connect_handle(conn), SqlReturn::SUCCESS);
+            let (env, conn, stmt) = alloc_connected_env_conn_stmt::<MockBackend>();
 
             // Two bytes: room for one UTF-16 unit, i.e. the terminator only.
             let mut buf = [0u16; 4];
@@ -1336,7 +1240,7 @@ mod tests {
                 assert_eq!(rec.sqlstate.as_str(), "01004");
             });
 
-            cleanup(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -1443,7 +1347,7 @@ mod tests {
                 "pre-connect SQL_DRIVER_ODBC_VER must report core's version, not \"\""
             );
 
-            cleanup(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -1451,14 +1355,13 @@ mod tests {
     fn get_functions_single_query_returns_false_for_mock() {
         // MockBackend returns empty function list
         unsafe {
-            let (env, conn) = alloc_env_and_conn();
+            let (env, conn) = alloc_env_conn_for::<MockBackend>();
             let mut result: u16 = 99;
             let ret = sql_get_functions::<MockBackend>(conn, 1, &mut result);
             assert_eq!(ret, SqlReturn::SUCCESS);
             assert_eq!(result, 0); // not supported
 
-            let _ = sql_free_handle::<MockBackend>(HandleType::Dbc as i16, conn);
-            let _ = sql_free_handle::<MockBackend>(HandleType::Env as i16, env);
+            cleanup_env_conn_for::<MockBackend>(env, conn);
         }
     }
 
@@ -1467,7 +1370,7 @@ mod tests {
         // MockBackend returns an empty function list, so the bitmap should be all zeros.
         unsafe {
             use crate::function_id::SQL_API_ODBC3_ALL_FUNCTIONS_SIZE;
-            let (env, conn) = alloc_env_and_conn();
+            let (env, conn) = alloc_env_conn_for::<MockBackend>();
             let mut bitmap = [0xFFFFu16; SQL_API_ODBC3_ALL_FUNCTIONS_SIZE];
             let ret = sql_get_functions::<MockBackend>(
                 conn,
@@ -1479,8 +1382,7 @@ mod tests {
                 assert_eq!(*val, 0);
             }
 
-            let _ = sql_free_handle::<MockBackend>(HandleType::Dbc as i16, conn);
-            let _ = sql_free_handle::<MockBackend>(HandleType::Env as i16, env);
+            cleanup_env_conn_for::<MockBackend>(env, conn);
         }
     }
 
@@ -1488,25 +1390,9 @@ mod tests {
     fn get_type_info_sets_synthetic_statement() {
         // MockBackend returns empty type info, so the result set should have 0 rows
         unsafe {
-            let (env, conn) = alloc_env_and_conn();
             // The type list is the data source's, so SQLGetTypeInfo needs an
             // open connection to read it from.
-            let wide: Vec<u16> = "Host=localhost;Database=test".encode_utf16().collect();
-            assert_eq!(
-                crate::ffi::connect::sql_driver_connect_w::<MockBackend>(
-                    conn,
-                    std::ptr::null_mut(),
-                    wide.as_ptr(),
-                    wide.len() as i16,
-                    std::ptr::null_mut(),
-                    0,
-                    std::ptr::null_mut(),
-                    0,
-                ),
-                SqlReturn::SUCCESS,
-            );
-            let mut stmt: *mut c_void = std::ptr::null_mut();
-            let _ = sql_alloc_handle::<MockBackend>(HandleType::Stmt as i16, conn, &mut stmt);
+            let (env, conn, stmt) = alloc_connected_env_conn_stmt::<MockBackend>();
 
             let ret = sql_get_type_info::<MockBackend>(stmt, 0);
             assert_eq!(ret, SqlReturn::SUCCESS);
@@ -1516,10 +1402,7 @@ mod tests {
                 assert!(handle.statement.is_some());
             });
 
-            let _ = sql_free_handle::<MockBackend>(HandleType::Stmt as i16, stmt);
-            let _ = crate::ffi::connect::sql_disconnect::<MockBackend>(conn);
-            let _ = sql_free_handle::<MockBackend>(HandleType::Dbc as i16, conn);
-            let _ = sql_free_handle::<MockBackend>(HandleType::Env as i16, env);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -1560,7 +1443,7 @@ mod tests {
         // read would itself be the shape bug this test suite exists to catch (the
         // shape-aware fallback in `info_type_default_response`'s doc comment).
         unsafe {
-            let (env, conn) = alloc_env_and_conn();
+            let (env, conn) = alloc_env_conn_for::<MockBackend>();
             let mut buf = [0xEEu16; 8];
             let mut str_len: i16 = -1;
 
@@ -1575,8 +1458,7 @@ mod tests {
             assert_eq!(str_len, 0, "SQL_DBMS_NAME default must be the empty string");
             assert_eq!(buf[0], 0, "empty string must be null-terminated at index 0");
 
-            let _ = sql_free_handle::<MockBackend>(HandleType::Dbc as i16, conn);
-            let _ = sql_free_handle::<MockBackend>(HandleType::Env as i16, env);
+            cleanup_env_conn_for::<MockBackend>(env, conn);
         }
     }
 
@@ -1593,8 +1475,7 @@ mod tests {
         // handle exercises exactly the "backend reports NotImplemented" fallback path
         // that a real driver's incomplete `get_info` match would hit.
         unsafe {
-            let (env, conn, stmt) = alloc_env_conn_stmt();
-            assert_eq!(connect_handle(conn), SqlReturn::SUCCESS);
+            let (env, conn, stmt) = alloc_connected_env_conn_stmt::<MockBackend>();
 
             // SqlFileUsage (84) is outside the SQL_CONVERT_* range and is
             // `U16`-shaped, so the shape-aware fallback in
@@ -1651,7 +1532,7 @@ mod tests {
             assert_eq!(ret, SqlReturn::SUCCESS, "StringFunctions must not error");
             assert_eq!(string_functions, 0);
 
-            cleanup(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -1661,8 +1542,7 @@ mod tests {
         // Windows Driver Manager blocks SQLGetData with HYC00 (AGENTS.md's
         // Windows Driver Manager compatibility checklist).
         unsafe {
-            let (env, conn, stmt) = alloc_env_conn_stmt();
-            assert_eq!(connect_handle(conn), SqlReturn::SUCCESS);
+            let (env, conn, stmt) = alloc_connected_env_conn_stmt::<MockBackend>();
 
             // SQL_CONVERT_BIGINT (53): the first info type in the real range.
             let mut convert_bigint: u32 = 0;
@@ -1751,7 +1631,7 @@ mod tests {
                 "SQL_CONVERT_WVARCHAR must not regress to 0"
             );
 
-            cleanup(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -1794,8 +1674,7 @@ mod tests {
     #[test]
     fn string_shaped_info_types_without_an_odbc_sys_variant_return_strings() {
         unsafe {
-            let (env, conn, stmt) = alloc_env_conn_stmt();
-            assert_eq!(connect_handle(conn), SqlReturn::SUCCESS);
+            let (env, conn, stmt) = alloc_connected_env_conn_stmt::<MockBackend>();
 
             for (info_type, expected, name) in STRING_SHAPED_WITHOUT_INFOTYPE_VARIANT {
                 // Sentinel-filled, so a U32(0) answer (4 bytes of zero, then
@@ -1826,7 +1705,7 @@ mod tests {
                 );
             }
 
-            cleanup(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -1837,8 +1716,7 @@ mod tests {
     #[test]
     fn database_name_follows_the_current_catalog_attribute() {
         unsafe {
-            let (env, conn, stmt) = alloc_env_conn_stmt();
-            assert_eq!(connect_handle(conn), SqlReturn::SUCCESS);
+            let (env, conn, stmt) = alloc_connected_env_conn_stmt::<MockBackend>();
 
             let read = |buf: &mut [u16; 32]| {
                 let mut str_len: i16 = -1;
@@ -1875,7 +1753,7 @@ mod tests {
             let mut buf = [0xEEu16; 32];
             assert_eq!(read(&mut buf), (18, "analytics".to_string()));
 
-            cleanup(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -1886,8 +1764,7 @@ mod tests {
         // and must still surface as SQL_ERROR, never be silently replaced with a
         // benign default.
         unsafe {
-            let (env, conn, stmt) = alloc_env_conn_stmt();
-            assert_eq!(connect_handle(conn), SqlReturn::SUCCESS);
+            let (env, conn, stmt) = alloc_connected_env_conn_stmt::<MockBackend>();
 
             let ret = info_type_or_default::<MockBackend>(
                 Err(OdbcError::general(
@@ -1900,7 +1777,7 @@ mod tests {
             );
             assert!(matches!(ret, Err(OdbcError::General { .. })));
 
-            cleanup(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 

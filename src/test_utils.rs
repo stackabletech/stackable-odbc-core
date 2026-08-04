@@ -29,6 +29,18 @@ use crate::types::{
 // ---------------------------------------------------------------------------
 // Handle allocation helpers
 // ---------------------------------------------------------------------------
+//
+// The `B` on the generic helpers below is load-bearing, not decoration, and it
+// must be the backend the test then calls through.
+//
+// A handle is a `ConnectionHandle<B>`, whose `connection: Option<B::Connection>`
+// field has a different layout for every backend. Validation is a registry slot,
+// generation and kind compare that never dereferences the caller's value, so it
+// has no way to know which backend allocated the handle. Allocating as one
+// backend and calling as another therefore passes that compare and then reads
+// memory laid out for a different type. That is undefined behaviour, and it is
+// the kind Miri catches and a plain `cargo test` does not, so a mismatch here
+// surfaces as a red CI job rather than as a failing assertion.
 
 /// Allocate an environment, a connection on it, and a statement on that
 /// connection, all against [`MockBackend`].
@@ -136,6 +148,103 @@ pub(crate) unsafe fn cleanup_connected_env_conn_stmt<B: Backend>(
         let _ = crate::ffi::connect::sql_disconnect::<B>(conn);
         let _ = sql_free_handle::<B>(HandleType::Dbc as i16, conn);
         let _ = sql_free_handle::<B>(HandleType::Env as i16, env);
+    }
+}
+
+/// [`alloc_env_conn_stmt`] for an arbitrary backend, with the connection left
+/// **unconnected**.
+///
+/// The generic counterpart of [`alloc_env_conn_stmt`], for a test that needs a
+/// backend other than [`MockBackend`] but is exercising a path that runs before
+/// or without a connection. Where the path does consult the backend, use
+/// [`alloc_connected_env_conn_stmt`] instead: this helper leaves
+/// `ConnectionHandle::connection` as `None`, so a hook guarded by "is there a
+/// connection to ask?" is never reached and a test written to prove the hook
+/// runs passes on the fallback it meant to rule out.
+///
+/// # Safety
+///
+/// As [`alloc_env_conn_stmt`]: the caller must free the three tokens with
+/// [`cleanup_connected_env_conn_stmt`] before the test ends. That one
+/// disconnects first, which is harmless here and correct if the test connected
+/// in the meantime.
+pub(crate) unsafe fn alloc_env_conn_stmt_for<B: Backend>() -> (*mut c_void, *mut c_void, *mut c_void)
+{
+    unsafe {
+        let mut env: *mut c_void = std::ptr::null_mut();
+        let _ = sql_alloc_handle::<B>(HandleType::Env as i16, std::ptr::null_mut(), &mut env);
+        let mut conn: *mut c_void = std::ptr::null_mut();
+        let _ = sql_alloc_handle::<B>(HandleType::Dbc as i16, env, &mut conn);
+        let mut stmt: *mut c_void = std::ptr::null_mut();
+        let _ = sql_alloc_handle::<B>(HandleType::Stmt as i16, conn, &mut stmt);
+        (env, conn, stmt)
+    }
+}
+
+/// An environment and a connection on it, with no statement, for an arbitrary
+/// backend.
+///
+/// The connection-level counterpart of [`alloc_env_conn_stmt_for`], for the
+/// connection attribute and transaction tests, which have no statement to
+/// allocate.
+///
+/// # Safety
+///
+/// The caller must free both tokens with [`cleanup_env_conn_for`] before the
+/// test ends.
+pub(crate) unsafe fn alloc_env_conn_for<B: Backend>() -> (*mut c_void, *mut c_void) {
+    unsafe {
+        let mut env: *mut c_void = std::ptr::null_mut();
+        let _ = sql_alloc_handle::<B>(HandleType::Env as i16, std::ptr::null_mut(), &mut env);
+        let mut conn: *mut c_void = std::ptr::null_mut();
+        let _ = sql_alloc_handle::<B>(HandleType::Dbc as i16, env, &mut conn);
+        (env, conn)
+    }
+}
+
+/// Tear down a pair from [`alloc_env_conn_for`].
+///
+/// Disconnects first, because a connected handle cannot be freed and the
+/// connection and environment would leak, turning the Miri job red. The
+/// disconnect is a no-op on a connection that was never opened.
+///
+/// # Safety
+///
+/// Each non-null token must be live and not already freed.
+pub(crate) unsafe fn cleanup_env_conn_for<B: Backend>(env: *mut c_void, conn: *mut c_void) {
+    unsafe {
+        let _ = crate::ffi::connect::sql_disconnect::<B>(conn);
+        let _ = sql_free_handle::<B>(HandleType::Dbc as i16, conn);
+        let _ = sql_free_handle::<B>(HandleType::Env as i16, env);
+    }
+}
+
+/// Connect an already-allocated connection handle with a valid connection
+/// string, and hand back what `SQLDriverConnectW` answered.
+///
+/// The companion to [`alloc_env_conn_stmt`] for a test that needs the
+/// allocation and the connect as two separate steps, either because it asserts
+/// on the connect's own return code or because it does something to the handle
+/// in between. Where neither applies, [`alloc_connected_env_conn_stmt`] does
+/// both at once.
+///
+/// # Safety
+///
+/// `conn` must be a live connection token that has not already been freed.
+pub(crate) unsafe fn connect_handle(conn: *mut c_void) -> SqlReturn {
+    let input = "Host=localhost;Port=8080;Database=test;User=me";
+    let wide: Vec<u16> = input.encode_utf16().collect();
+    unsafe {
+        crate::ffi::connect::sql_driver_connect_w::<MockBackend>(
+            conn,
+            std::ptr::null_mut(),
+            wide.as_ptr(),
+            i16::try_from(wide.len()).expect("the fixed test connection string is short"),
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null_mut(),
+            0,
+        )
     }
 }
 

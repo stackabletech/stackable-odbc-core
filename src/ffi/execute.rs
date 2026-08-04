@@ -920,84 +920,15 @@ pub unsafe fn sql_execute<B: Backend>(statement_handle: *mut c_void) -> SqlRetur
 mod tests {
     use super::*;
     use crate::descriptor::DescriptorRole;
-    use crate::ffi::handle::sql_free_handle;
     use crate::handles::ConnectionHandle;
     use crate::handles::StatementHandle;
     use crate::test_utils::{
         MockBackend, MockBlockingBackend, MockCancelAwareBackend, MockConnection,
         MockCoreCancelsTimeoutBackend, MockLongDataBackend, MockRecordingBackend,
-        MockRowCountBackend, alloc_env_conn_stmt, with_descriptor, with_handle,
+        MockRowCountBackend, alloc_env_conn_stmt, alloc_env_conn_stmt_for,
+        cleanup_connected_env_conn_stmt, connect_handle, with_descriptor, with_handle,
     };
     use odbc_sys::{CDataType, HandleType, ParamType, SqlDataType};
-
-    /// As [`alloc_env_conn_stmt`], but generic over `B`. Needed for
-    /// [`MockRecordingBackend`], which is not `MockBackend`.
-    unsafe fn alloc_env_conn_stmt_for<B: Backend>() -> (*mut c_void, *mut c_void, *mut c_void) {
-        unsafe {
-            let mut env: *mut c_void = std::ptr::null_mut();
-            let _ = crate::ffi::handle::sql_alloc_handle::<B>(
-                HandleType::Env as i16,
-                std::ptr::null_mut(),
-                &mut env,
-            );
-            let mut conn: *mut c_void = std::ptr::null_mut();
-            let _ =
-                crate::ffi::handle::sql_alloc_handle::<B>(HandleType::Dbc as i16, env, &mut conn);
-            let mut stmt: *mut c_void = std::ptr::null_mut();
-            let _ =
-                crate::ffi::handle::sql_alloc_handle::<B>(HandleType::Stmt as i16, conn, &mut stmt);
-            (env, conn, stmt)
-        }
-    }
-
-    /// As `cleanup`, but generic over `B`, for `alloc_env_conn_stmt_for`.
-    ///
-    /// Disconnects before freeing the connection, exactly as `cleanup` below
-    /// does: `free_connection` refuses HY010 while `conn.connection.is_some()`
-    /// (spec-correct, since `SQLDisconnect` must run first), so a caller that sets
-    /// `connection` directly (as the cancel-token tests do, via
-    /// `with_handle`) and skips this leaks the connection box, and then the
-    /// environment box behind it, since `free_environment` also correctly
-    /// refuses while it still has a live child.
-    unsafe fn cleanup_env_conn_stmt_for<B: Backend>(
-        env: *mut c_void,
-        conn: *mut c_void,
-        stmt: *mut c_void,
-    ) {
-        unsafe {
-            let _ = sql_free_handle::<B>(HandleType::Stmt as i16, stmt);
-            let _ = crate::ffi::connect::sql_disconnect::<B>(conn);
-            let _ = sql_free_handle::<B>(HandleType::Dbc as i16, conn);
-            let _ = sql_free_handle::<B>(HandleType::Env as i16, env);
-        }
-    }
-
-    /// Helper: connect a handle using a valid connection string.
-    unsafe fn connect_handle(conn: *mut c_void) -> SqlReturn {
-        let input = "Host=localhost;Port=8080;Database=test;User=me";
-        let wide: Vec<u16> = input.encode_utf16().collect();
-        unsafe {
-            crate::ffi::connect::sql_driver_connect_w::<MockBackend>(
-                conn,
-                std::ptr::null_mut(),
-                wide.as_ptr(),
-                wide.len() as i16,
-                std::ptr::null_mut(),
-                0,
-                std::ptr::null_mut(),
-                0,
-            )
-        }
-    }
-
-    unsafe fn cleanup(env: *mut c_void, conn: *mut c_void, stmt: *mut c_void) {
-        unsafe {
-            let _ = sql_free_handle::<MockBackend>(HandleType::Stmt as i16, stmt);
-            let _ = crate::ffi::connect::sql_disconnect::<MockBackend>(conn);
-            let _ = sql_free_handle::<MockBackend>(HandleType::Dbc as i16, conn);
-            let _ = sql_free_handle::<MockBackend>(HandleType::Env as i16, env);
-        }
-    }
 
     #[test]
     fn exec_direct_not_connected_returns_error() {
@@ -1008,7 +939,12 @@ mod tests {
             let wide: Vec<u16> = sql.encode_utf16().collect();
             let ret = sql_exec_direct_w::<MockBackend>(stmt, wide.as_ptr(), wide.len() as i32);
             assert_eq!(ret, SqlReturn::ERROR);
-            cleanup(env, conn, stmt);
+            assert_eq!(
+                first_diag_state::<MockBackend>(stmt).as_deref(),
+                Some("HY010"),
+                "no open connection is a function sequence error",
+            );
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -1021,7 +957,12 @@ mod tests {
 
             let ret = sql_exec_direct_w::<MockBackend>(stmt, std::ptr::null(), 0);
             assert_eq!(ret, SqlReturn::ERROR);
-            cleanup(env, conn, stmt);
+            assert_eq!(
+                first_diag_state::<MockBackend>(stmt).as_deref(),
+                Some("HY009"),
+                "a null StatementText is an invalid use of a null pointer",
+            );
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -1037,7 +978,12 @@ mod tests {
             // -5 is not SQL_NTS (-3) and not >= 0
             let ret = sql_exec_direct_w::<MockBackend>(stmt, wide.as_ptr(), -5);
             assert_eq!(ret, SqlReturn::ERROR);
-            cleanup(env, conn, stmt);
+            assert_eq!(
+                first_diag_state::<MockBackend>(stmt).as_deref(),
+                Some("HY090"),
+                "a TextLength that is neither SQL_NTS nor non-negative is HY090",
+            );
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -1054,7 +1000,7 @@ mod tests {
             let ret = sql_exec_direct_w::<MockBackend>(stmt, wide.as_ptr(), wide.len() as i32);
             // MockBackend::exec_direct returns Err, so we get ERROR
             assert_eq!(ret, SqlReturn::ERROR);
-            cleanup(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -1067,7 +1013,12 @@ mod tests {
             let wide: Vec<u16> = sql.encode_utf16().collect();
             let ret = sql_prepare_w::<MockBackend>(stmt, wide.as_ptr(), wide.len() as i32);
             assert_eq!(ret, SqlReturn::ERROR);
-            cleanup(env, conn, stmt);
+            assert_eq!(
+                first_diag_state::<MockBackend>(stmt).as_deref(),
+                Some("HY010"),
+                "no open connection is a function sequence error",
+            );
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -1079,7 +1030,12 @@ mod tests {
             assert_eq!(ret, SqlReturn::SUCCESS);
             let ret = sql_prepare_w::<MockBackend>(stmt, std::ptr::null(), 0);
             assert_eq!(ret, SqlReturn::ERROR);
-            cleanup(env, conn, stmt);
+            assert_eq!(
+                first_diag_state::<MockBackend>(stmt).as_deref(),
+                Some("HY009"),
+                "a null StatementText is an invalid use of a null pointer",
+            );
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -1103,7 +1059,7 @@ mod tests {
                 },
             );
 
-            cleanup(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -1116,7 +1072,12 @@ mod tests {
             // No SQLPrepare called
             let ret = sql_execute::<MockBackend>(stmt);
             assert_eq!(ret, SqlReturn::ERROR);
-            cleanup(env, conn, stmt);
+            assert_eq!(
+                first_diag_state::<MockBackend>(stmt).as_deref(),
+                Some("HY010"),
+                "an unprepared statement is a function sequence error",
+            );
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -1135,7 +1096,7 @@ mod tests {
             let ret = sql_execute::<MockBackend>(stmt);
             assert_eq!(ret, SqlReturn::SUCCESS);
 
-            cleanup(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -1167,7 +1128,7 @@ mod tests {
                 |h| assert!(h.noscan_enabled()),
             );
 
-            cleanup(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -1236,7 +1197,7 @@ mod tests {
                 },
             );
 
-            cleanup(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
     #[test]
@@ -1277,7 +1238,7 @@ mod tests {
                 "SQLCloseCursor reported success with no cursor open"
             );
 
-            cleanup(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -1304,7 +1265,7 @@ mod tests {
                 },
             );
 
-            cleanup(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -1367,7 +1328,7 @@ mod tests {
                 },
             );
 
-            cleanup(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -1448,7 +1409,7 @@ mod tests {
                 Some("01S07")
             );
 
-            cleanup_env_conn_stmt_for::<MockRecordingBackend>(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockRecordingBackend>(env, conn, stmt);
         }
     }
 
@@ -1483,7 +1444,7 @@ mod tests {
                 Some("01S07")
             );
 
-            cleanup_env_conn_stmt_for::<MockRecordingBackend>(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockRecordingBackend>(env, conn, stmt);
         }
     }
 
@@ -1510,7 +1471,7 @@ mod tests {
             );
             assert_eq!(first_diag_state::<MockRecordingBackend>(stmt), None);
 
-            cleanup_env_conn_stmt_for::<MockRecordingBackend>(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockRecordingBackend>(env, conn, stmt);
         }
     }
 
@@ -1569,7 +1530,7 @@ mod tests {
                 "SQL_ATTR_PARAM_STATUS_PTR was not written"
             );
 
-            cleanup_env_conn_stmt_for::<MockRecordingBackend>(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockRecordingBackend>(env, conn, stmt);
         }
     }
 
@@ -1614,7 +1575,7 @@ mod tests {
             assert_eq!(processed, 1);
             assert_eq!(status, crate::types::SQL_PARAM_ERROR);
 
-            cleanup_env_conn_stmt_for::<MockBackend>(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -1655,7 +1616,7 @@ mod tests {
                 "exec_direct must receive the same token the statement carries"
             );
 
-            cleanup_env_conn_stmt_for::<MockRecordingBackend>(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockRecordingBackend>(env, conn, stmt);
         }
     }
 
@@ -1710,7 +1671,7 @@ mod tests {
                  cannot leak into the next, which is what makes a cancelled statement reusable"
             );
 
-            cleanup_env_conn_stmt_for::<MockRecordingBackend>(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockRecordingBackend>(env, conn, stmt);
         }
     }
 
@@ -1765,7 +1726,7 @@ mod tests {
                 },
             );
 
-            cleanup_env_conn_stmt_for::<MockRecordingBackend>(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockRecordingBackend>(env, conn, stmt);
         }
     }
 
@@ -1790,7 +1751,7 @@ mod tests {
                 SqlReturn::SUCCESS
             );
 
-            cleanup_env_conn_stmt_for::<MockRecordingBackend>(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockRecordingBackend>(env, conn, stmt);
         }
     }
 
@@ -1842,7 +1803,7 @@ mod tests {
                  not a length the driver may refuse",
             );
 
-            cleanup_env_conn_stmt_for::<MockRecordingBackend>(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockRecordingBackend>(env, conn, stmt);
         }
     }
 
@@ -1875,7 +1836,7 @@ mod tests {
                 SqlReturn::SUCCESS
             );
 
-            cleanup_env_conn_stmt_for::<MockRecordingBackend>(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockRecordingBackend>(env, conn, stmt);
         }
     }
 
@@ -1906,7 +1867,7 @@ mod tests {
                 |s| assert!(s.statement.is_none(), "nothing may be prepared"),
             );
 
-            cleanup_env_conn_stmt_for::<MockRecordingBackend>(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockRecordingBackend>(env, conn, stmt);
         }
     }
 
@@ -1965,7 +1926,7 @@ mod tests {
                     );
                 },
             );
-            cleanup_env_conn_stmt_for::<MockBlockingBackend>(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBlockingBackend>(env, conn, stmt);
         }
     }
 
@@ -2022,7 +1983,7 @@ mod tests {
             assert_eq!(ret, SqlReturn::ERROR);
             assert_eq!(first_sqlstate(stmt), "HY008");
 
-            cleanup_env_conn_stmt_for::<MockCancelAwareBackend>(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockCancelAwareBackend>(env, conn, stmt);
         }
     }
 
@@ -2041,7 +2002,7 @@ mod tests {
             assert_eq!(ret, SqlReturn::ERROR);
             assert_ne!(first_sqlstate(stmt), "HY008");
 
-            cleanup_env_conn_stmt_for::<MockCancelAwareBackend>(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockCancelAwareBackend>(env, conn, stmt);
         }
     }
 
@@ -2061,7 +2022,7 @@ mod tests {
             assert_eq!(ret, SqlReturn::ERROR);
             assert_eq!(first_sqlstate(stmt), "HY008");
 
-            cleanup_env_conn_stmt_for::<MockCancelAwareBackend>(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockCancelAwareBackend>(env, conn, stmt);
         }
     }
 
@@ -2089,7 +2050,7 @@ mod tests {
             );
             assert_eq!(first_sqlstate(stmt), "HY008");
 
-            cleanup_env_conn_stmt_for::<MockCancelAwareBackend>(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockCancelAwareBackend>(env, conn, stmt);
         }
     }
 
@@ -2134,7 +2095,7 @@ mod tests {
                 "a cancel aimed at a finished execution must not reach the one that replaced it",
             );
 
-            cleanup_env_conn_stmt_for::<MockCancelAwareBackend>(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockCancelAwareBackend>(env, conn, stmt);
         }
     }
 
@@ -2202,7 +2163,7 @@ mod tests {
                 "an expired deadline is a timeout, not the HY008 a SQLCancel would give",
             );
 
-            cleanup_env_conn_stmt_for::<MockCoreCancelsTimeoutBackend>(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockCoreCancelsTimeoutBackend>(env, conn, stmt);
         }
     }
 

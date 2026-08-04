@@ -1113,75 +1113,140 @@ mod tests {
         }
     }
 
+    /// Bind column 1 to `buf`, so a following `SQL_UNBIND` has something to
+    /// clear. Returning the record count from the ARD is what lets the caller
+    /// state the precondition rather than assume it.
+    unsafe fn bind_one_column(stmt: *mut c_void, buf: &mut i64) {
+        let ret = unsafe {
+            crate::ffi::bind::sql_bind_col::<MockBackend>(
+                stmt,
+                1,
+                odbc_sys::CDataType::SBigInt as i16,
+                std::ptr::from_mut(buf).cast::<c_void>(),
+                isize::try_from(std::mem::size_of::<i64>()).expect("8 fits"),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(ret, SqlReturn::SUCCESS, "precondition: a bound column");
+    }
+
+    /// Bind parameter 1 to `buf`, the precondition for `SQL_RESET_PARAMS`.
+    unsafe fn bind_one_parameter(stmt: *mut c_void, buf: &mut i64) {
+        let ret = unsafe {
+            crate::ffi::params::sql_bind_parameter::<MockBackend>(
+                stmt,
+                1,
+                odbc_sys::ParamType::Input as i16,
+                odbc_sys::CDataType::SBigInt as i16,
+                odbc_sys::SqlDataType::EXT_BIG_INT.0,
+                0,
+                0,
+                std::ptr::from_mut(buf).cast::<c_void>(),
+                isize::try_from(std::mem::size_of::<i64>()).expect("8 fits"),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(ret, SqlReturn::SUCCESS, "precondition: a bound parameter");
+    }
+
+    /// How many records each of a statement's four descriptors holds. The IRD
+    /// stores none by construction, so only the other three can be non-empty.
+    fn record_counts(stmt: *mut c_void) -> (usize, usize, usize) {
+        use crate::test_utils::with_descriptor;
+        (
+            with_descriptor::<MockBackend, _>(stmt, DescriptorRole::Ard, |d| d.records.len()),
+            with_descriptor::<MockBackend, _>(stmt, DescriptorRole::Apd, |d| d.records.len()),
+            with_descriptor::<MockBackend, _>(stmt, DescriptorRole::Ipd, |d| d.records.len()),
+        )
+    }
+
+    /// `SQL_CLOSE` succeeds with no cursor open, which the spec states in as
+    /// many words: the option "has no effect for the application" then.
+    ///
+    /// It must also leave the bindings alone. `SQL_CLOSE` closes the cursor;
+    /// clearing a column or parameter binding is what the *other two* options
+    /// are for, and an application reuses a statement by closing the cursor and
+    /// executing again against the buffers it already bound.
     #[test]
     fn free_stmt_close_option_succeeds() {
-        // SQL_CLOSE should succeed even when no cursor is open.
         unsafe {
-            let mut env: *mut c_void = std::ptr::null_mut();
-            let _ = sql_alloc_handle::<MockBackend>(
-                HandleType::Env as i16,
-                std::ptr::null_mut(),
-                &mut env,
-            );
-            let mut conn: *mut c_void = std::ptr::null_mut();
-            let _ = sql_alloc_handle::<MockBackend>(HandleType::Dbc as i16, env, &mut conn);
-            let mut stmt: *mut c_void = std::ptr::null_mut();
-            let _ = sql_alloc_handle::<MockBackend>(HandleType::Stmt as i16, conn, &mut stmt);
+            let (env, conn, stmt) = crate::test_utils::alloc_env_conn_stmt();
+            let mut col_buf: i64 = 0;
+            let mut param_buf: i64 = 0;
+            bind_one_column(stmt, &mut col_buf);
+            bind_one_parameter(stmt, &mut param_buf);
+            assert_eq!(record_counts(stmt), (1, 1, 1), "precondition");
 
             let ret = sql_free_stmt::<MockBackend>(stmt, FreeStmtOption::Close as u16);
             assert_eq!(ret, SqlReturn::SUCCESS);
 
-            let _ = sql_free_handle::<MockBackend>(HandleType::Stmt as i16, stmt);
-            let _ = sql_free_handle::<MockBackend>(HandleType::Dbc as i16, conn);
-            let _ = sql_free_handle::<MockBackend>(HandleType::Env as i16, env);
+            assert_eq!(
+                record_counts(stmt),
+                (1, 1, 1),
+                "SQL_CLOSE closes the cursor; it does not unbind anything"
+            );
+
+            crate::test_utils::cleanup_env_conn_stmt(env, conn, stmt);
         }
     }
 
+    /// `SQL_UNBIND` "releases all column buffers bound by `SQLBindCol`", which
+    /// is one storage with the ARD: the spec makes binding a column *be*
+    /// setting ARD fields, so the assertion is that the ARD's records are gone.
+    ///
+    /// The parameter descriptors must survive: `SQL_RESET_PARAMS` is a separate
+    /// option precisely because the two sets are cleared independently.
     #[test]
     fn free_stmt_unbind_option_succeeds() {
-        // SQL_UNBIND should clear column bindings.
         unsafe {
-            let mut env: *mut c_void = std::ptr::null_mut();
-            let _ = sql_alloc_handle::<MockBackend>(
-                HandleType::Env as i16,
-                std::ptr::null_mut(),
-                &mut env,
-            );
-            let mut conn: *mut c_void = std::ptr::null_mut();
-            let _ = sql_alloc_handle::<MockBackend>(HandleType::Dbc as i16, env, &mut conn);
-            let mut stmt: *mut c_void = std::ptr::null_mut();
-            let _ = sql_alloc_handle::<MockBackend>(HandleType::Stmt as i16, conn, &mut stmt);
+            let (env, conn, stmt) = crate::test_utils::alloc_env_conn_stmt();
+            let mut col_buf: i64 = 0;
+            let mut param_buf: i64 = 0;
+            bind_one_column(stmt, &mut col_buf);
+            bind_one_parameter(stmt, &mut param_buf);
+            assert_eq!(record_counts(stmt), (1, 1, 1), "precondition");
 
             let ret = sql_free_stmt::<MockBackend>(stmt, FreeStmtOption::Unbind as u16);
             assert_eq!(ret, SqlReturn::SUCCESS);
 
-            let _ = sql_free_handle::<MockBackend>(HandleType::Stmt as i16, stmt);
-            let _ = sql_free_handle::<MockBackend>(HandleType::Dbc as i16, conn);
-            let _ = sql_free_handle::<MockBackend>(HandleType::Env as i16, env);
+            assert_eq!(
+                record_counts(stmt),
+                (0, 1, 1),
+                "SQL_UNBIND clears the ARD and only the ARD"
+            );
+
+            crate::test_utils::cleanup_env_conn_stmt(env, conn, stmt);
         }
     }
 
+    /// `SQL_RESET_PARAMS` "releases all parameter buffers set by
+    /// `SQLBindParameter`", and that bind writes **two** descriptors: the
+    /// C-side buffer into the APD and the declared SQL type into the IPD.
+    /// Clearing one and not the other leaves the split state `ParamRecords::get`
+    /// reports as an internal error, so both are asserted.
+    ///
+    /// The column bindings must survive, for the mirror of the reason
+    /// `SQL_UNBIND` leaves the parameters alone.
     #[test]
     fn free_stmt_reset_params_option_succeeds() {
-        // SQL_RESET_PARAMS should clear parameter bindings.
         unsafe {
-            let mut env: *mut c_void = std::ptr::null_mut();
-            let _ = sql_alloc_handle::<MockBackend>(
-                HandleType::Env as i16,
-                std::ptr::null_mut(),
-                &mut env,
-            );
-            let mut conn: *mut c_void = std::ptr::null_mut();
-            let _ = sql_alloc_handle::<MockBackend>(HandleType::Dbc as i16, env, &mut conn);
-            let mut stmt: *mut c_void = std::ptr::null_mut();
-            let _ = sql_alloc_handle::<MockBackend>(HandleType::Stmt as i16, conn, &mut stmt);
+            let (env, conn, stmt) = crate::test_utils::alloc_env_conn_stmt();
+            let mut col_buf: i64 = 0;
+            let mut param_buf: i64 = 0;
+            bind_one_column(stmt, &mut col_buf);
+            bind_one_parameter(stmt, &mut param_buf);
+            assert_eq!(record_counts(stmt), (1, 1, 1), "precondition");
 
             let ret = sql_free_stmt::<MockBackend>(stmt, FreeStmtOption::ResetParams as u16);
             assert_eq!(ret, SqlReturn::SUCCESS);
 
-            let _ = sql_free_handle::<MockBackend>(HandleType::Stmt as i16, stmt);
-            let _ = sql_free_handle::<MockBackend>(HandleType::Dbc as i16, conn);
-            let _ = sql_free_handle::<MockBackend>(HandleType::Env as i16, env);
+            assert_eq!(
+                record_counts(stmt),
+                (1, 0, 0),
+                "SQL_RESET_PARAMS clears both parameter descriptors, not the ARD"
+            );
+
+            crate::test_utils::cleanup_env_conn_stmt(env, conn, stmt);
         }
     }
 

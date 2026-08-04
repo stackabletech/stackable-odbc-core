@@ -2164,36 +2164,11 @@ mod tests {
         handles::ConnectionHandle,
         test_utils::{
             MockBackend, MockCancelAwareBackend, MockConnection, MockLongDataBackend,
-            MockRecordingBackend, alloc_env_conn_stmt, with_descriptor, with_handle,
+            MockRecordingBackend, alloc_env_conn_stmt, cleanup_connected_env_conn_stmt,
+            connect_handle, with_descriptor, with_handle,
         },
         types::{CDataType, ParamType, SQL_INTERVAL_YEAR, SQL_INTERVAL_YEAR_TO_MONTH},
     };
-
-    unsafe fn cleanup(env: *mut c_void, conn: *mut c_void, stmt: *mut c_void) {
-        unsafe {
-            let _ = sql_free_handle::<MockBackend>(HandleType::Stmt as i16, stmt);
-            let _ = crate::ffi::connect::sql_disconnect::<MockBackend>(conn);
-            let _ = sql_free_handle::<MockBackend>(HandleType::Dbc as i16, conn);
-            let _ = sql_free_handle::<MockBackend>(HandleType::Env as i16, env);
-        }
-    }
-
-    unsafe fn connect_handle(conn: *mut c_void) -> SqlReturn {
-        let input = "Host=localhost;Port=8080;Database=test;User=me";
-        let wide: Vec<u16> = input.encode_utf16().collect();
-        unsafe {
-            crate::ffi::connect::sql_driver_connect_w::<MockBackend>(
-                conn,
-                std::ptr::null_mut(),
-                wide.as_ptr(),
-                wide.len() as i16,
-                std::ptr::null_mut(),
-                0,
-                std::ptr::null_mut(),
-                0,
-            )
-        }
-    }
 
     unsafe fn prepare_sql(stmt: *mut c_void, sql: &str) -> SqlReturn {
         let wide: Vec<u16> = sql.encode_utf16().collect();
@@ -2206,7 +2181,8 @@ mod tests {
     ///
     /// # Safety
     ///
-    /// The caller must free the three tokens with [`cleanup`].
+    /// The caller must free the three tokens with
+    /// [`cleanup_connected_env_conn_stmt`].
     unsafe fn connected_stmt() -> (*mut c_void, *mut c_void, *mut c_void) {
         unsafe {
             let (env, conn, stmt) = alloc_env_conn_stmt();
@@ -2287,14 +2263,6 @@ mod tests {
         })
     }
 
-    /// `SQL_NTS` must be resolved in the C type the parameter was bound with:
-    /// "The data must be in the C data type specified in the ValueType argument
-    /// of SQLBindParameter."
-    ///
-    /// A byte-wise scan stops inside the first character of any ASCII text,
-    /// because "Hello" in UTF-16LE carries a zero byte at index 1, and
-    /// `dae_buffer_to_value`'s `chunks_exact(2)` then has nothing to pair, so
-    /// the parameter would arrive as an empty string with no diagnostic at all.
     /// The first SQLSTATE on a statement handle, so a test can assert the state
     /// its name claims rather than only the return code. Same six-line shape as
     /// the helper in `ffi/execute.rs`.
@@ -2319,6 +2287,14 @@ mod tests {
         String::from_utf16_lossy(&state[..5])
     }
 
+    /// `SQL_NTS` must be resolved in the C type the parameter was bound with:
+    /// "The data must be in the C data type specified in the ValueType argument
+    /// of SQLBindParameter."
+    ///
+    /// A byte-wise scan stops inside the first character of any ASCII text,
+    /// because "Hello" in UTF-16LE carries a zero byte at index 1, and
+    /// `dae_buffer_to_value`'s `chunks_exact(2)` then has nothing to pair, so
+    /// the parameter would arrive as an empty string with no diagnostic at all.
     #[test]
     fn put_data_resolves_sql_nts_in_the_bound_c_type() {
         unsafe {
@@ -2354,7 +2330,7 @@ mod tests {
                 .collect();
             assert_eq!(String::from_utf16_lossy(&units), "Hello");
 
-            cleanup(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -2385,7 +2361,7 @@ mod tests {
 
             assert_eq!(dae_buffer(stmt), b"Hello".to_vec());
 
-            cleanup(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -2424,7 +2400,7 @@ mod tests {
                 assert_eq!(rec.sqlstate.as_str(), "HY020");
             });
 
-            cleanup(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -2459,7 +2435,7 @@ mod tests {
                 assert_eq!(rec.sqlstate.as_str(), "HY020");
             });
 
-            cleanup(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -2491,7 +2467,7 @@ mod tests {
             );
             assert_eq!(dae_buffer(stmt), b"abcd".to_vec());
 
-            cleanup(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -2530,7 +2506,7 @@ mod tests {
                 );
             });
 
-            cleanup(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -2605,7 +2581,7 @@ mod tests {
                 );
             });
 
-            cleanup(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -2674,7 +2650,7 @@ mod tests {
                 assert_eq!(dae.collected_values.get(&1), Some(&ColumnValue::Null));
             });
 
-            cleanup(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -2721,7 +2697,7 @@ mod tests {
                 assert!(dae.buffer.is_empty(), "no data may be left to concatenate");
             });
 
-            cleanup(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -2757,7 +2733,7 @@ mod tests {
                 assert_eq!(rec.sqlstate.as_str(), "HY020");
             });
 
-            cleanup(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -2786,7 +2762,7 @@ mod tests {
                 assert_eq!(rec.sqlstate.as_str(), "HY090");
             });
 
-            cleanup(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -2817,7 +2793,7 @@ mod tests {
                 "a zero-length put appends nothing",
             );
 
-            cleanup(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -2844,7 +2820,7 @@ mod tests {
                 assert_eq!(rec.sqlstate.as_str(), "HY009");
             });
 
-            cleanup(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -2891,7 +2867,7 @@ mod tests {
                 "a refused chunk must not be appended to the value",
             );
 
-            cleanup(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -2922,7 +2898,7 @@ mod tests {
             );
             assert_eq!(dae_buffer(stmt).len(), crate::utf16::MAX_NTS_SCAN - 1);
 
-            cleanup(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -3065,7 +3041,7 @@ mod tests {
                 std::ptr::null_mut(),
             );
             assert_eq!(ret, SqlReturn::SUCCESS);
-            cleanup(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -3119,7 +3095,7 @@ mod tests {
                 assert_eq!(ipd.parameter_type, ParamType::Input);
             });
 
-            cleanup(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -3170,7 +3146,7 @@ mod tests {
                 });
             }
 
-            cleanup(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -3217,7 +3193,7 @@ mod tests {
                 });
             }
 
-            cleanup(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -3247,7 +3223,7 @@ mod tests {
                 crate::types::sql_state::RESTRICTED_DATA_TYPE_ATTRIBUTE_VIOLATION,
                 "the state this test's name claims"
             );
-            cleanup(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -3274,7 +3250,7 @@ mod tests {
                 crate::types::sql_state::RESTRICTED_DATA_TYPE_ATTRIBUTE_VIOLATION,
                 "the state this test's name claims"
             );
-            cleanup(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -3304,7 +3280,7 @@ mod tests {
                 crate::types::sql_state::RESTRICTED_DATA_TYPE_ATTRIBUTE_VIOLATION,
                 "the state this test's name claims"
             );
-            cleanup(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -3334,7 +3310,7 @@ mod tests {
                 crate::types::sql_state::RESTRICTED_DATA_TYPE_ATTRIBUTE_VIOLATION,
                 "the state this test's name claims"
             );
-            cleanup(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -3357,7 +3333,7 @@ mod tests {
                 std::ptr::null_mut(),
             );
             assert_eq!(ret, SqlReturn::SUCCESS);
-            cleanup(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -3386,7 +3362,7 @@ mod tests {
                 crate::types::sql_state::RESTRICTED_DATA_TYPE_ATTRIBUTE_VIOLATION,
                 "the state this test's name claims"
             );
-            cleanup(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -3408,7 +3384,7 @@ mod tests {
                 std::ptr::null_mut(),
             );
             assert_eq!(ret, SqlReturn::SUCCESS);
-            cleanup(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -3433,7 +3409,7 @@ mod tests {
                 std::ptr::null_mut(),
             );
             assert_eq!(ret, SqlReturn::SUCCESS);
-            cleanup(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -3485,7 +3461,7 @@ mod tests {
                 );
             });
 
-            cleanup(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -3517,7 +3493,7 @@ mod tests {
                 SqlReturn::SUCCESS,
                 "the row's only clause is the (DM) lower bound"
             );
-            cleanup(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -3539,7 +3515,12 @@ mod tests {
                 std::ptr::null_mut(),
             );
             assert_eq!(ret, SqlReturn::ERROR);
-            cleanup(env, conn, stmt);
+            assert_eq!(
+                first_sqlstate::<MockBackend>(stmt),
+                crate::types::sql_state::INVALID_DESCRIPTOR_INDEX,
+                "parameter number 0 is 07009",
+            );
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -3575,7 +3556,7 @@ mod tests {
                 std::ptr::null_mut(),
             );
             assert_eq!(ret, SqlReturn::SUCCESS);
-            cleanup(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -3596,7 +3577,12 @@ mod tests {
                 std::ptr::null_mut(),
             );
             assert_eq!(ret, SqlReturn::ERROR);
-            cleanup(env, conn, stmt);
+            assert_eq!(
+                first_sqlstate::<MockBackend>(stmt),
+                crate::types::sql_state::INVALID_APPLICATION_BUFFER_TYPE,
+                "an unrecognised ValueType is HY003, not the 07009 of the check above it",
+            );
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -3607,7 +3593,12 @@ mod tests {
             let mut count: i16 = 0;
             let ret = sql_num_params::<MockBackend>(stmt, &mut count);
             assert_eq!(ret, SqlReturn::ERROR);
-            cleanup(env, conn, stmt);
+            assert_eq!(
+                first_sqlstate::<MockBackend>(stmt),
+                "HY010",
+                "no prepared statement is a function sequence error",
+            );
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -3623,7 +3614,7 @@ mod tests {
             let ret = sql_num_params::<MockBackend>(stmt, &mut count);
             assert_eq!(ret, SqlReturn::SUCCESS);
             assert_eq!(count, 2);
-            cleanup(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -3636,7 +3627,7 @@ mod tests {
             let _ret = prepare_sql(stmt, "INSERT INTO t VALUES (?)");
             let ret = sql_num_params::<MockBackend>(stmt, std::ptr::null_mut());
             assert_eq!(ret, SqlReturn::SUCCESS);
-            cleanup(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -3749,7 +3740,7 @@ mod tests {
             assert_eq!(param_size, SQL_DEFAULT_PARAM_SIZE as ULen);
             assert_eq!(decimal_digits, 0);
             assert_eq!(nullable, crate::types::Nullable::SqlNullable as i16);
-            cleanup(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -3896,7 +3887,12 @@ mod tests {
                 &mut nullable,
             );
             assert_eq!(ret, SqlReturn::ERROR);
-            cleanup(env, conn, stmt);
+            assert_eq!(
+                first_sqlstate::<MockBackend>(stmt),
+                crate::types::sql_state::INVALID_DESCRIPTOR_INDEX,
+                "an ordinal above the prepared parameter count is 07009",
+            );
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -3918,7 +3914,12 @@ mod tests {
                 &mut nullable,
             );
             assert_eq!(ret, SqlReturn::ERROR);
-            cleanup(env, conn, stmt);
+            assert_eq!(
+                first_sqlstate::<MockBackend>(stmt),
+                "HY010",
+                "the no-prepared-statement check runs before the ordinal is looked at",
+            );
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -3944,7 +3945,12 @@ mod tests {
                 &mut nullable,
             );
             assert_eq!(ret, SqlReturn::ERROR);
-            cleanup(env, conn, stmt);
+            assert_eq!(
+                first_sqlstate::<MockBackend>(stmt),
+                crate::types::sql_state::INVALID_DESCRIPTOR_INDEX,
+                "ordinal 0 is the other clause of the same 07009 row",
+            );
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -3966,7 +3972,7 @@ mod tests {
                 std::ptr::null_mut(),
             );
             assert_eq!(ret, SqlReturn::SUCCESS);
-            cleanup(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -5273,7 +5279,7 @@ mod tests {
         let mut value_ptr: *mut c_void = std::ptr::null_mut();
         let ret = unsafe { sql_param_data::<MockBackend>(stmt, &mut value_ptr) };
         assert_eq!(ret, SqlReturn::ERROR); // HY010
-        unsafe { cleanup(env, conn, stmt) };
+        unsafe { cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt) };
     }
 
     /// A stale record from a failed iteration must not be reported by the next
@@ -5304,7 +5310,7 @@ mod tests {
                 );
             });
 
-            cleanup(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -5320,7 +5326,7 @@ mod tests {
             )
         };
         assert_eq!(ret, SqlReturn::ERROR); // HY010
-        unsafe { cleanup(env, conn, stmt) };
+        unsafe { cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt) };
     }
 
     #[test]

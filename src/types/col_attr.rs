@@ -807,18 +807,6 @@ mod tests {
         }
     }
 
-    fn bigint_desc() -> ColumnDescriptor {
-        ColumnDescriptor {
-            name: "big".into(),
-            type_name: String::new(),
-            sql_type: SqlDataType::EXT_BIG_INT,
-            precision: 19,
-            scale: 0,
-            nullable: Nullable::SqlNoNulls,
-            ..Default::default()
-        }
-    }
-
     fn tinyint_desc() -> ColumnDescriptor {
         ColumnDescriptor {
             name: "tiny".into(),
@@ -839,42 +827,6 @@ mod tests {
             precision: 15,
             scale: 0,
             nullable: Nullable::SqlNullable,
-            ..Default::default()
-        }
-    }
-
-    fn real_desc() -> ColumnDescriptor {
-        ColumnDescriptor {
-            name: "flt".into(),
-            type_name: String::new(),
-            sql_type: SqlDataType::REAL,
-            precision: 7,
-            scale: 0,
-            nullable: Nullable::SqlNullable,
-            ..Default::default()
-        }
-    }
-
-    fn float_desc() -> ColumnDescriptor {
-        ColumnDescriptor {
-            name: "flt".into(),
-            type_name: String::new(),
-            sql_type: SqlDataType::FLOAT,
-            precision: 15,
-            scale: 0,
-            nullable: Nullable::SqlNullable,
-            ..Default::default()
-        }
-    }
-
-    fn bit_desc() -> ColumnDescriptor {
-        ColumnDescriptor {
-            name: "flag".into(),
-            type_name: String::new(),
-            sql_type: SqlDataType::EXT_BIT,
-            precision: 1,
-            scale: 0,
-            nullable: Nullable::SqlNoNulls,
             ..Default::default()
         }
     }
@@ -1031,65 +983,13 @@ mod tests {
     }
 
     #[test]
-    fn display_size_integer() {
-        let desc = int_desc();
-        let n = expect_numeric(get_column_attribute(&desc, 5, Desc::DisplaySize).unwrap());
-        assert_eq!(n, 11);
-    }
-
-    #[test]
-    fn display_size_smallint() {
-        let desc = smallint_desc();
-        let n = expect_numeric(get_column_attribute(&desc, 5, Desc::DisplaySize).unwrap());
-        assert_eq!(n, 6);
-    }
-
-    #[test]
-    fn display_size_bigint() {
-        let desc = bigint_desc();
-        let n = expect_numeric(get_column_attribute(&desc, 5, Desc::DisplaySize).unwrap());
-        assert_eq!(n, 20);
-    }
-
-    #[test]
-    fn display_size_tinyint() {
-        let desc = tinyint_desc();
-        let n = expect_numeric(get_column_attribute(&desc, 5, Desc::DisplaySize).unwrap());
-        assert_eq!(n, 4);
-    }
-
-    #[test]
-    fn display_size_double() {
-        let desc = double_desc();
-        let n = expect_numeric(get_column_attribute(&desc, 5, Desc::DisplaySize).unwrap());
-        assert_eq!(n, 24);
-    }
-
-    #[test]
-    fn display_size_real() {
-        // REAL reports a fixed DISPLAY_SIZE (14: sign, 7 digits, '.', 'E',
-        // sign, 2 digits) from the appendix, not the generic "uses precision"
-        // fallback (7), which would under-report it.
-        let desc = real_desc();
-        let n = expect_numeric(get_column_attribute(&desc, 5, Desc::DisplaySize).unwrap());
-        assert_eq!(n, 14);
-    }
-
-    #[test]
-    fn display_size_float() {
-        // FLOAT reports the appendix's dedicated DISPLAY_SIZE value (24,
-        // shared with SQL_DOUBLE), not the generic "uses precision" fallback
-        // (15).
-        let desc = float_desc();
-        let n = expect_numeric(get_column_attribute(&desc, 5, Desc::DisplaySize).unwrap());
-        assert_eq!(n, 24);
-    }
-
-    #[test]
     fn display_size_bit() {
-        let desc = bit_desc();
+        // The descriptor's precision must differ from the answer, or the test
+        // cannot tell `DISPLAY_SIZE_BIT` from a fallback that returned the
+        // precision. `typed_col`'s precision is 10.
+        let desc = typed_col(SqlDataType::EXT_BIT);
         let n = expect_numeric(get_column_attribute(&desc, 5, Desc::DisplaySize).unwrap());
-        assert_eq!(n, 1);
+        assert_eq!(n, DISPLAY_SIZE_BIT);
     }
 
     #[test]
@@ -1156,20 +1056,6 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn octet_length_varchar_is_precision_times_4() {
-        let desc = varchar_desc();
-        let n = expect_numeric(get_column_attribute(&desc, 5, Desc::OctetLength).unwrap());
-        assert_eq!(n, 255 * 4); // UTF-8 max bytes per char
-    }
-
-    #[test]
-    fn octet_length_integer() {
-        let desc = int_desc();
-        let n = expect_numeric(get_column_attribute(&desc, 5, Desc::OctetLength).unwrap());
-        assert_eq!(n, 4);
-    }
-
-    #[test]
     fn octet_length_smallint() {
         let desc = smallint_desc();
         let n = expect_numeric(get_column_attribute(&desc, 5, Desc::OctetLength).unwrap());
@@ -1177,29 +1063,8 @@ mod tests {
     }
 
     #[test]
-    fn octet_length_bigint() {
-        let desc = bigint_desc();
-        let n = expect_numeric(get_column_attribute(&desc, 5, Desc::OctetLength).unwrap());
-        assert_eq!(n, 8);
-    }
-
-    #[test]
     fn octet_length_tinyint() {
         let desc = tinyint_desc();
-        let n = expect_numeric(get_column_attribute(&desc, 5, Desc::OctetLength).unwrap());
-        assert_eq!(n, 1);
-    }
-
-    #[test]
-    fn octet_length_double() {
-        let desc = double_desc();
-        let n = expect_numeric(get_column_attribute(&desc, 5, Desc::OctetLength).unwrap());
-        assert_eq!(n, 8);
-    }
-
-    #[test]
-    fn octet_length_bit() {
-        let desc = bit_desc();
         let n = expect_numeric(get_column_attribute(&desc, 5, Desc::OctetLength).unwrap());
         assert_eq!(n, 1);
     }
@@ -1389,13 +1254,6 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn case_sensitive_varchar_returns_true() {
-        let desc = varchar_desc();
-        let n = expect_numeric(get_column_attribute(&desc, 5, Desc::CaseSensitive).unwrap());
-        assert_eq!(n, 1);
-    }
-
-    #[test]
     fn case_sensitive_integer_returns_false() {
         let desc = int_desc();
         let n = expect_numeric(get_column_attribute(&desc, 5, Desc::CaseSensitive).unwrap());
@@ -1493,24 +1351,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn type_name_varchar() {
-        assert_eq!(type_name_for(SqlDataType::VARCHAR), "VARCHAR");
-    }
-
-    #[test]
-    fn type_name_bigint() {
-        assert_eq!(type_name_for(SqlDataType::EXT_BIG_INT), "BIGINT");
-    }
-
-    #[test]
-    fn type_name_unknown_falls_back() {
-        // Not a spec-defined type code, a deliberately unrecognized sentinel.
-        // Spec, SQL_DESC_TYPE_NAME: "If the type is unknown, an empty string
-        // is returned."
-        assert_eq!(type_name_for(SqlDataType(9999)), "");
-    }
-
     // -----------------------------------------------------------------------
     // Named-constant sanity checks
     // -----------------------------------------------------------------------
@@ -1588,6 +1428,9 @@ mod tests {
 
     #[test]
     fn constants_display_size_real_equals_14() {
+        // REAL reports a fixed DISPLAY_SIZE (14: sign, 7 digits, '.', 'E',
+        // sign, 2 digits) from the appendix, not the generic "uses precision"
+        // fallback, which would under-report it.
         assert_eq!(DISPLAY_SIZE_REAL, 14);
         let n = expect_numeric(
             get_column_attribute(&typed_col(SqlDataType::REAL), 1, Desc::DisplaySize).unwrap(),
@@ -1597,6 +1440,8 @@ mod tests {
 
     #[test]
     fn constants_display_size_float_equals_24() {
+        // FLOAT reports the appendix's dedicated DISPLAY_SIZE value (24,
+        // shared with SQL_DOUBLE), not the generic "uses precision" fallback.
         let n = expect_numeric(
             get_column_attribute(&typed_col(SqlDataType::FLOAT), 1, Desc::DisplaySize).unwrap(),
         );

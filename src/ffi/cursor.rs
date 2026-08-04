@@ -1201,8 +1201,8 @@ mod tests {
     use super::*;
     use crate::ffi::handle::{sql_alloc_handle, sql_free_handle};
     use crate::test_utils::{
-        MockBackend, MockFailingCloseBackend, alloc_env_conn_stmt, cleanup_env_conn_stmt,
-        with_handle,
+        MockBackend, MockFailingCloseBackend, alloc_env_conn_stmt, alloc_env_conn_stmt_for,
+        cleanup_connected_env_conn_stmt, cleanup_env_conn_stmt, with_handle,
     };
     use odbc_sys::{BulkOperation, HandleType};
 
@@ -1213,6 +1213,11 @@ mod tests {
             let mut count: i16 = 0;
             let ret = sql_num_result_cols::<MockBackend>(stmt, &mut count);
             assert_eq!(ret, SqlReturn::ERROR);
+            assert_eq!(
+                first_sqlstate(stmt),
+                "HY010",
+                "no result set is a function sequence error",
+            );
             cleanup_env_conn_stmt(env, conn, stmt);
         }
     }
@@ -1226,6 +1231,11 @@ mod tests {
             // No statement executed → HY010, regardless of output pointer.
             let ret = sql_num_result_cols::<MockBackend>(stmt, std::ptr::null_mut());
             assert_eq!(ret, SqlReturn::ERROR);
+            assert_eq!(
+                first_sqlstate(stmt),
+                "HY010",
+                "the no-result-set check runs before the output pointer is looked at",
+            );
             cleanup_env_conn_stmt(env, conn, stmt);
         }
     }
@@ -1374,6 +1384,11 @@ mod tests {
             let (env, conn, stmt) = alloc_env_conn_stmt();
             let ret = sql_close_cursor::<MockBackend>(stmt);
             assert_eq!(ret, SqlReturn::ERROR);
+            assert_eq!(
+                first_sqlstate(stmt),
+                "24000",
+                "closing with no cursor open is an invalid cursor state",
+            );
             cleanup_env_conn_stmt(env, conn, stmt);
         }
     }
@@ -1523,6 +1538,7 @@ mod tests {
             // Closing an already-closed cursor returns 24000.
             let ret2 = sql_close_cursor::<MockBackend>(stmt);
             assert_eq!(ret2, SqlReturn::ERROR);
+            assert_eq!(first_sqlstate(stmt), "24000");
 
             cleanup_env_conn_stmt(env, conn, stmt);
         }
@@ -1571,16 +1587,6 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn cancel_valid_handle_returns_success() {
-        unsafe {
-            let (env, conn, stmt) = alloc_env_conn_stmt();
-            let ret = sql_cancel::<MockBackend>(stmt);
-            assert_eq!(ret, SqlReturn::SUCCESS);
-            cleanup_env_conn_stmt(env, conn, stmt);
-        }
-    }
-
-    #[test]
     fn cancel_with_open_cursor_returns_success() {
         unsafe {
             let (env, conn, stmt) = alloc_env_conn_stmt();
@@ -1605,57 +1611,6 @@ mod tests {
             });
 
             cleanup_env_conn_stmt(env, conn, stmt);
-        }
-    }
-
-    /// As [`alloc_env_conn_stmt`], but generic over `B`. Needed for a backend
-    /// other than `MockBackend`, specifically one whose `Error` is
-    /// `OdbcError` directly, so `Backend::cancel` can return something other
-    /// than the `NotImplemented` every `MockError` collapses to.
-    unsafe fn alloc_env_conn_stmt_for<B: Backend>() -> (*mut c_void, *mut c_void, *mut c_void) {
-        unsafe {
-            let mut env: *mut c_void = std::ptr::null_mut();
-            let _ = crate::ffi::handle::sql_alloc_handle::<B>(
-                odbc_sys::HandleType::Env as i16,
-                std::ptr::null_mut(),
-                &mut env,
-            );
-            let mut conn: *mut c_void = std::ptr::null_mut();
-            let _ = crate::ffi::handle::sql_alloc_handle::<B>(
-                odbc_sys::HandleType::Dbc as i16,
-                env,
-                &mut conn,
-            );
-            let mut stmt: *mut c_void = std::ptr::null_mut();
-            let _ = crate::ffi::handle::sql_alloc_handle::<B>(
-                odbc_sys::HandleType::Stmt as i16,
-                conn,
-                &mut stmt,
-            );
-            (env, conn, stmt)
-        }
-    }
-
-    /// As [`cleanup_env_conn_stmt`], but generic over `B`, for
-    /// [`alloc_env_conn_stmt_for`].
-    unsafe fn cleanup_env_conn_stmt_for<B: Backend>(
-        env: *mut c_void,
-        conn: *mut c_void,
-        stmt: *mut c_void,
-    ) {
-        unsafe {
-            let _ =
-                crate::ffi::handle::sql_free_handle::<B>(odbc_sys::HandleType::Stmt as i16, stmt);
-            // Disconnect first: `free_connection` refuses a still-open
-            // connection with `HY010` and frees nothing, so a test that
-            // connected would leak the handle and whatever its diagnostic
-            // queue holds, which Miri reports as a leak and CI fails on.
-            // Harmless when nothing is connected: that answers `08003`,
-            // which this discards like the frees below.
-            let _ = crate::ffi::connect::sql_disconnect::<B>(conn);
-            let _ =
-                crate::ffi::handle::sql_free_handle::<B>(odbc_sys::HandleType::Dbc as i16, conn);
-            let _ = crate::ffi::handle::sql_free_handle::<B>(odbc_sys::HandleType::Env as i16, env);
         }
     }
 
@@ -1748,7 +1703,9 @@ mod tests {
                 "SQLCancel must reach the token the execution stored, not fail its downcast",
             );
 
-            cleanup_env_conn_stmt_for::<crate::test_utils::MockCancelAwareBackend>(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<crate::test_utils::MockCancelAwareBackend>(
+                env, conn, stmt,
+            );
         }
     }
 
@@ -1778,7 +1735,7 @@ mod tests {
             let ret = sql_cancel::<crate::test_utils::MockFailingCloseBackend>(stmt);
             assert_eq!(ret, SqlReturn::ERROR);
 
-            cleanup_env_conn_stmt_for::<crate::test_utils::MockFailingCloseBackend>(
+            cleanup_connected_env_conn_stmt::<crate::test_utils::MockFailingCloseBackend>(
                 env, conn, stmt,
             );
         }
@@ -2357,12 +2314,21 @@ mod tests {
         }
     }
 
+    /// The null-pointer refusal with an explicit length, as distinct from the
+    /// `SQL_NTS` spelling that
+    /// `set_cursor_name_still_reports_hy009_for_a_null_pointer` covers: both
+    /// reach `utf16_to_string`, and neither may reach the emptiness check and
+    /// come back as `34000`.
     #[test]
     fn set_cursor_name_null_pointer_returns_error() {
         unsafe {
             let (env, conn, stmt) = alloc_env_conn_stmt();
             let ret = sql_set_cursor_name_w::<MockBackend>(stmt, std::ptr::null(), 0);
             assert_eq!(ret, SqlReturn::ERROR);
+            assert_eq!(
+                first_sqlstate(stmt),
+                crate::types::sql_state::INVALID_USE_OF_NULL_POINTER,
+            );
             cleanup_env_conn_stmt(env, conn, stmt);
         }
     }

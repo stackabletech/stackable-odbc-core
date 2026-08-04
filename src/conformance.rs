@@ -375,21 +375,8 @@ pub unsafe fn info_group_inconsistencies<B: Backend>(
 mod tests {
     use super::*;
     use crate::ffi::connect::sql_driver_connect_w;
-    use crate::ffi::handle::{sql_alloc_handle, sql_free_handle};
-    use crate::test_utils::MockBackend;
-    use crate::types::{HandleType, expected_kind};
-
-    /// Allocates env + connection handles, leaving the connection
-    /// unconnected, the pre-connect path (`Backend::get_info_pre_connect`).
-    unsafe fn alloc_env_and_conn() -> (*mut c_void, *mut c_void) {
-        let mut env: *mut c_void = std::ptr::null_mut();
-        let _ = unsafe {
-            sql_alloc_handle::<MockBackend>(HandleType::Env as i16, std::ptr::null_mut(), &mut env)
-        };
-        let mut conn: *mut c_void = std::ptr::null_mut();
-        let _ = unsafe { sql_alloc_handle::<MockBackend>(HandleType::Dbc as i16, env, &mut conn) };
-        (env, conn)
-    }
+    use crate::test_utils::{MockBackend, alloc_env_conn_for, cleanup_env_conn_for};
+    use crate::types::expected_kind;
 
     /// Connects the handle so `sql_get_info_w` takes the connected
     /// (`Backend::get_info`) path. `MockBackend::connect` always succeeds.
@@ -410,14 +397,6 @@ mod tests {
         }
     }
 
-    unsafe fn cleanup(env: *mut c_void, conn: *mut c_void) {
-        unsafe {
-            let _ = crate::ffi::connect::sql_disconnect::<MockBackend>(conn);
-            let _ = sql_free_handle::<MockBackend>(HandleType::Dbc as i16, conn);
-            let _ = sql_free_handle::<MockBackend>(HandleType::Env as i16, env);
-        }
-    }
-
     /// Property 1 (pre-connect path): `MockBackend::get_info_pre_connect`
     /// answers nothing (`NotImplemented` for every info type, the default
     /// `Backend` trait method), so this exercises exactly
@@ -429,7 +408,7 @@ mod tests {
     #[test]
     fn property1_shape_holds_pre_connect_for_every_named_info_type() {
         unsafe {
-            let (env, conn) = alloc_env_and_conn();
+            let (env, conn) = alloc_env_conn_for::<MockBackend>();
 
             for info_type in all_info_types() {
                 let (ret, kind, _string_length) =
@@ -450,8 +429,7 @@ mod tests {
                 );
             }
 
-            let _ = sql_free_handle::<MockBackend>(HandleType::Dbc as i16, conn);
-            let _ = sql_free_handle::<MockBackend>(HandleType::Env as i16, env);
+            cleanup_env_conn_for::<MockBackend>(env, conn);
         }
     }
 
@@ -463,7 +441,7 @@ mod tests {
     #[test]
     fn property1_shape_holds_connected_for_every_named_info_type() {
         unsafe {
-            let (env, conn) = alloc_env_and_conn();
+            let (env, conn) = alloc_env_conn_for::<MockBackend>();
             assert_eq!(connect(conn), SqlReturn::SUCCESS);
 
             for info_type in all_info_types() {
@@ -484,7 +462,7 @@ mod tests {
                 );
             }
 
-            cleanup(env, conn);
+            cleanup_env_conn_for::<MockBackend>(env, conn);
         }
     }
 
@@ -495,7 +473,7 @@ mod tests {
     #[test]
     fn cores_own_answers_are_group_consistent() {
         unsafe {
-            let (env, conn) = alloc_env_and_conn();
+            let (env, conn) = alloc_env_conn_for::<MockBackend>();
             assert_eq!(connect(conn), SqlReturn::SUCCESS);
 
             // Every invariant above is an implication or a biconditional
@@ -531,7 +509,7 @@ mod tests {
                 violations.join("\n  ")
             );
 
-            cleanup(env, conn);
+            cleanup_env_conn_for::<MockBackend>(env, conn);
         }
     }
 
@@ -545,7 +523,7 @@ mod tests {
     #[test]
     fn property2_no_genuine_convert_info_type_ever_returns_zero() {
         unsafe {
-            let (env, conn) = alloc_env_and_conn();
+            let (env, conn) = alloc_env_conn_for::<MockBackend>();
             assert_eq!(connect(conn), SqlReturn::SUCCESS);
 
             for info_type in genuine_convert_info_types() {
@@ -563,7 +541,7 @@ mod tests {
                 );
             }
 
-            cleanup(env, conn);
+            cleanup_env_conn_for::<MockBackend>(env, conn);
         }
     }
 
@@ -573,7 +551,7 @@ mod tests {
     #[test]
     fn property2_no_genuine_convert_info_type_ever_returns_zero_pre_connect() {
         unsafe {
-            let (env, conn) = alloc_env_and_conn();
+            let (env, conn) = alloc_env_conn_for::<MockBackend>();
 
             for info_type in genuine_convert_info_types() {
                 let (ret, value) = observe_u32_value::<MockBackend>(conn, info_type);
@@ -588,8 +566,7 @@ mod tests {
                 );
             }
 
-            let _ = sql_free_handle::<MockBackend>(HandleType::Dbc as i16, conn);
-            let _ = sql_free_handle::<MockBackend>(HandleType::Env as i16, env);
+            cleanup_env_conn_for::<MockBackend>(env, conn);
         }
     }
 

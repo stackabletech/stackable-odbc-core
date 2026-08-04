@@ -3619,23 +3619,6 @@ mod tests {
     }
 
     #[test]
-    fn null_target_ptr_just_reports_length() {
-        let mut ind: isize = 0;
-        let ret = unsafe {
-            write_column_value(
-                &ColumnValue::String("hello".into()),
-                CDataType::WChar,
-                std::ptr::null_mut(),
-                0,
-                &mut ind,
-                NumericTarget::UNSPECIFIED,
-            )
-        };
-        assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
-        assert_eq!(ind, 10); // 5 chars * 2 bytes
-    }
-
-    #[test]
     fn default_type_for_string_infers_wchar() {
         let mut buf = [0u16; 20];
         let mut ind: isize = 0;

@@ -1250,7 +1250,7 @@ mod tests {
 
     use crate::ffi::handle::{sql_alloc_handle, sql_free_handle};
     use crate::test_utils::{
-        MockBackend, MockBrowseBackend, MockFailBackend, MockNoCatalogBackend,
+        MockBackend, MockBrowseBackend, MockFailBackend, MockNoCatalogBackend, connect_handle,
     };
     use crate::types::ConnectionAttribute;
 
@@ -1701,6 +1701,10 @@ mod tests {
             // Spec 08003: Disconnect without connecting should return ERROR.
             let ret = sql_disconnect::<MockBackend>(conn);
             assert_eq!(ret, SqlReturn::ERROR);
+            assert_eq!(
+                dbc_sqlstate(conn),
+                crate::types::sql_state::CONNECTION_NOT_OPEN,
+            );
 
             let _ = sql_free_handle::<MockBackend>(HandleType::Dbc as i16, conn);
             let _ = sql_free_handle::<MockBackend>(HandleType::Env as i16, env);
@@ -1736,24 +1740,6 @@ mod tests {
         }
     }
 
-    /// Helper: connect a handle using a valid connection string.
-    unsafe fn connect_handle(conn: *mut c_void) -> SqlReturn {
-        let input = "Host=localhost;Port=8080;Database=test;User=me";
-        let wide: Vec<u16> = input.encode_utf16().collect();
-        unsafe {
-            sql_driver_connect_w::<MockBackend>(
-                conn,
-                std::ptr::null_mut(),
-                wide.as_ptr(),
-                wide.len() as i16,
-                std::ptr::null_mut(),
-                0,
-                std::ptr::null_mut(),
-                0,
-            )
-        }
-    }
-
     #[test]
     fn connect_when_already_connected_returns_error() {
         // Spec 08002: Connection name in use.
@@ -1766,6 +1752,10 @@ mod tests {
             // Second connect should fail with 08002.
             let ret = connect_handle(conn);
             assert_eq!(ret, SqlReturn::ERROR);
+            assert_eq!(
+                dbc_sqlstate(conn),
+                crate::types::sql_state::CONNECTION_IN_USE,
+            );
 
             let _ = sql_disconnect::<MockBackend>(conn);
             let _ = sql_free_handle::<MockBackend>(HandleType::Dbc as i16, conn);
@@ -1792,6 +1782,10 @@ mod tests {
                 0,
             );
             assert_eq!(ret, SqlReturn::ERROR);
+            assert_eq!(
+                dbc_sqlstate(conn),
+                crate::types::sql_state::INVALID_STRING_OR_BUFFER_LENGTH,
+            );
 
             let _ = sql_free_handle::<MockBackend>(HandleType::Dbc as i16, conn);
             let _ = sql_free_handle::<MockBackend>(HandleType::Env as i16, env);
@@ -2213,6 +2207,11 @@ mod tests {
                 std::ptr::null_mut(),
             );
             assert_eq!(ret, SqlReturn::ERROR);
+            assert_eq!(
+                dbc_sqlstate(conn),
+                crate::types::sql_state::CONNECTION_NOT_OPEN,
+                "the connection is bound before the null-pointer check, so 08003 wins",
+            );
 
             let _ = sql_free_handle::<MockBackend>(HandleType::Dbc as i16, conn);
             let _ = sql_free_handle::<MockBackend>(HandleType::Env as i16, env);
@@ -2234,6 +2233,10 @@ mod tests {
                 std::ptr::null_mut(),
             );
             assert_eq!(ret, SqlReturn::ERROR);
+            assert_eq!(
+                dbc_sqlstate(conn),
+                crate::types::sql_state::INVALID_USE_OF_NULL_POINTER,
+            );
 
             let _ = sql_disconnect::<MockBackend>(conn);
             let _ = sql_free_handle::<MockBackend>(HandleType::Dbc as i16, conn);
@@ -2312,6 +2315,10 @@ mod tests {
                 std::ptr::null_mut(),
             );
             assert_eq!(ret, SqlReturn::ERROR);
+            assert_eq!(
+                dbc_sqlstate(conn),
+                crate::types::sql_state::CONNECTION_IN_USE,
+            );
 
             let _ = sql_disconnect::<MockBackend>(conn);
             let _ = sql_free_handle::<MockBackend>(HandleType::Dbc as i16, conn);
@@ -2334,6 +2341,10 @@ mod tests {
                 std::ptr::null_mut(),
             );
             assert_eq!(ret, SqlReturn::ERROR);
+            assert_eq!(
+                dbc_sqlstate(conn),
+                crate::types::sql_state::INVALID_USE_OF_NULL_POINTER,
+            );
 
             let _ = sql_free_handle::<MockBackend>(HandleType::Dbc as i16, conn);
             let _ = sql_free_handle::<MockBackend>(HandleType::Env as i16, env);

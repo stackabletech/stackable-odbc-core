@@ -3028,7 +3028,8 @@ mod tests {
     use crate::test_utils::{
         MockBackend, MockCancelAwareBackend, MockCatalogArgsBackend, MockCatalogBackend,
         MockConnection, MockFailingDescribeBackend, MockNegativeColumnCountBackend,
-        MockNoCatalogBackend, alloc_env_conn_stmt, with_handle,
+        MockNoCatalogBackend, alloc_connected_env_conn_stmt, alloc_env_conn_stmt,
+        cleanup_connected_env_conn_stmt, with_handle,
     };
     use crate::types::{
         CDataType, ColumnsResultCol, Desc, ForeignKeysResultCol, Nullable, PrimaryKeysResultCol,
@@ -3181,54 +3182,6 @@ mod tests {
         }
     }
 
-    unsafe fn cleanup(env: *mut c_void, conn: *mut c_void, stmt: *mut c_void) {
-        unsafe {
-            let _ = sql_free_handle::<MockBackend>(HandleType::Stmt as i16, stmt);
-            let _ = crate::ffi::connect::sql_disconnect::<MockBackend>(conn);
-            let _ = sql_free_handle::<MockBackend>(HandleType::Dbc as i16, conn);
-            let _ = sql_free_handle::<MockBackend>(HandleType::Env as i16, env);
-        }
-    }
-
-    /// Generic counterpart of `alloc_env_conn_stmt` + `cleanup` above, for a
-    /// test that needs a backend other than `MockBackend`. The catalog
-    /// functions all require an open connection, so this connects too.
-    unsafe fn alloc_env_conn_stmt_for<B: Backend>() -> (*mut c_void, *mut c_void, *mut c_void) {
-        unsafe {
-            let mut env: *mut c_void = std::ptr::null_mut();
-            let _ = sql_alloc_handle::<B>(HandleType::Env as i16, std::ptr::null_mut(), &mut env);
-            let mut conn: *mut c_void = std::ptr::null_mut();
-            let _ = sql_alloc_handle::<B>(HandleType::Dbc as i16, env, &mut conn);
-            let wide: Vec<u16> = "Host=localhost;Database=test".encode_utf16().collect();
-            assert_eq!(
-                crate::ffi::connect::sql_driver_connect_w::<B>(
-                    conn,
-                    std::ptr::null_mut(),
-                    wide.as_ptr(),
-                    i16::try_from(wide.len()).expect("connection string fits in i16"),
-                    std::ptr::null_mut(),
-                    0,
-                    std::ptr::null_mut(),
-                    0,
-                ),
-                SqlReturn::SUCCESS,
-            );
-            let mut stmt: *mut c_void = std::ptr::null_mut();
-            let _ = sql_alloc_handle::<B>(HandleType::Stmt as i16, conn, &mut stmt);
-            (env, conn, stmt)
-        }
-    }
-
-    unsafe fn cleanup_for<B: Backend>(env: *mut c_void, conn: *mut c_void, stmt: *mut c_void) {
-        unsafe {
-            let _ = sql_free_handle::<B>(HandleType::Stmt as i16, stmt);
-            // A connected handle cannot be freed.
-            let _ = crate::ffi::connect::sql_disconnect::<B>(conn);
-            let _ = sql_free_handle::<B>(HandleType::Dbc as i16, conn);
-            let _ = sql_free_handle::<B>(HandleType::Env as i16, env);
-        }
-    }
-
     /// Fetch every row of the statement's open cursor, collecting one column
     /// as a string. A NULL value is collected as the empty string; no test
     /// here distinguishes the two.
@@ -3360,7 +3313,7 @@ mod tests {
     #[test]
     fn all_catalogs_enumeration_returns_catalog_names_only() {
         unsafe {
-            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCatalogBackend>();
+            let (env, conn, stmt) = alloc_connected_env_conn_stmt::<MockCatalogBackend>();
             let catalog = utf16_of(SQL_ALL_CATALOGS);
             let empty = utf16_of("");
             let ret = sql_tables_w::<MockCatalogBackend>(
@@ -3379,7 +3332,7 @@ mod tests {
                 enumeration_values::<MockCatalogBackend>(stmt, TABLE_CAT_COLUMN),
                 vec!["cat_a", "cat_b"],
             );
-            cleanup_for::<MockCatalogBackend>(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockCatalogBackend>(env, conn, stmt);
         }
     }
 
@@ -3390,7 +3343,7 @@ mod tests {
     #[test]
     fn all_schemas_enumeration_returns_schema_names_only() {
         unsafe {
-            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCatalogBackend>();
+            let (env, conn, stmt) = alloc_connected_env_conn_stmt::<MockCatalogBackend>();
             let schema = utf16_of(SQL_ALL_SCHEMAS);
             let empty = utf16_of("");
             let ret = sql_tables_w::<MockCatalogBackend>(
@@ -3409,7 +3362,7 @@ mod tests {
                 enumeration_values::<MockCatalogBackend>(stmt, TABLE_SCHEM_COLUMN),
                 vec!["sch_a", "sch_b"],
             );
-            cleanup_for::<MockCatalogBackend>(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockCatalogBackend>(env, conn, stmt);
         }
     }
 
@@ -3420,7 +3373,7 @@ mod tests {
     #[test]
     fn all_table_types_enumeration_returns_table_types_only() {
         unsafe {
-            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCatalogBackend>();
+            let (env, conn, stmt) = alloc_connected_env_conn_stmt::<MockCatalogBackend>();
             let table_type = utf16_of(SQL_ALL_TABLE_TYPES);
             let empty = utf16_of("");
             let ret = sql_tables_w::<MockCatalogBackend>(
@@ -3439,7 +3392,7 @@ mod tests {
                 enumeration_values::<MockCatalogBackend>(stmt, TABLE_TYPE_COLUMN),
                 vec!["TABLE", "VIEW"],
             );
-            cleanup_for::<MockCatalogBackend>(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockCatalogBackend>(env, conn, stmt);
         }
     }
 
@@ -3449,7 +3402,7 @@ mod tests {
     #[test]
     fn a_pattern_in_every_argument_is_not_an_enumeration() {
         unsafe {
-            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCatalogBackend>();
+            let (env, conn, stmt) = alloc_connected_env_conn_stmt::<MockCatalogBackend>();
             let pattern = utf16_of("%");
             let ret = sql_tables_w::<MockCatalogBackend>(
                 stmt,
@@ -3468,7 +3421,7 @@ mod tests {
                 vec!["b_table", "z_table", "a_view"],
                 "must be the ordinary table list, not a catalog enumeration"
             );
-            cleanup_for::<MockCatalogBackend>(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockCatalogBackend>(env, conn, stmt);
         }
     }
 
@@ -3480,7 +3433,7 @@ mod tests {
     #[test]
     fn all_catalogs_is_empty_when_the_backend_has_no_catalogs() {
         unsafe {
-            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockNoCatalogBackend>();
+            let (env, conn, stmt) = alloc_connected_env_conn_stmt::<MockNoCatalogBackend>();
             let catalog = utf16_of(SQL_ALL_CATALOGS);
             let empty = utf16_of("");
             let ret = sql_tables_w::<MockNoCatalogBackend>(
@@ -3498,7 +3451,7 @@ mod tests {
             assert!(
                 fetch_column_as_strings::<MockNoCatalogBackend>(stmt, TABLE_CAT_COLUMN).is_empty()
             );
-            cleanup_for::<MockNoCatalogBackend>(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockNoCatalogBackend>(env, conn, stmt);
         }
     }
 
@@ -3507,7 +3460,7 @@ mod tests {
     #[test]
     fn all_schemas_is_empty_when_the_backend_has_no_schemas() {
         unsafe {
-            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockNoCatalogBackend>();
+            let (env, conn, stmt) = alloc_connected_env_conn_stmt::<MockNoCatalogBackend>();
             let schema = utf16_of(SQL_ALL_SCHEMAS);
             let empty = utf16_of("");
             let ret = sql_tables_w::<MockNoCatalogBackend>(
@@ -3526,7 +3479,7 @@ mod tests {
                 fetch_column_as_strings::<MockNoCatalogBackend>(stmt, TABLE_SCHEM_COLUMN)
                     .is_empty()
             );
-            cleanup_for::<MockNoCatalogBackend>(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockNoCatalogBackend>(env, conn, stmt);
         }
     }
 
@@ -3536,7 +3489,7 @@ mod tests {
     #[test]
     fn tables_result_is_sorted_by_spec_keys() {
         unsafe {
-            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCatalogBackend>();
+            let (env, conn, stmt) = alloc_connected_env_conn_stmt::<MockCatalogBackend>();
             let ret = sql_tables_w::<MockCatalogBackend>(
                 stmt,
                 std::ptr::null(),
@@ -3557,7 +3510,7 @@ mod tests {
                 "TABLE_TYPE must dominate TABLE_NAME"
             );
 
-            cleanup_for::<MockCatalogBackend>(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockCatalogBackend>(env, conn, stmt);
         }
     }
 
@@ -3568,7 +3521,7 @@ mod tests {
     #[test]
     fn columns_result_is_sorted_by_spec_keys() {
         unsafe {
-            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCatalogBackend>();
+            let (env, conn, stmt) = alloc_connected_env_conn_stmt::<MockCatalogBackend>();
             let ret = sql_columns_w::<MockCatalogBackend>(
                 stmt,
                 std::ptr::null(),
@@ -3590,7 +3543,7 @@ mod tests {
                 "TABLE_NAME must dominate, and ORDINAL_POSITION must compare numerically"
             );
 
-            cleanup_for::<MockCatalogBackend>(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockCatalogBackend>(env, conn, stmt);
         }
     }
 
@@ -3599,7 +3552,7 @@ mod tests {
     #[test]
     fn primary_keys_result_is_sorted_by_spec_keys() {
         unsafe {
-            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCatalogBackend>();
+            let (env, conn, stmt) = alloc_connected_env_conn_stmt::<MockCatalogBackend>();
             let ret = sql_primary_keys_w::<MockCatalogBackend>(
                 stmt,
                 std::ptr::null(),
@@ -3619,7 +3572,7 @@ mod tests {
                 "TABLE_NAME must dominate KEY_SEQ"
             );
 
-            cleanup_for::<MockCatalogBackend>(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockCatalogBackend>(env, conn, stmt);
         }
     }
 
@@ -3629,7 +3582,7 @@ mod tests {
     #[test]
     fn foreign_keys_result_is_fk_ordered_when_pk_table_is_supplied() {
         unsafe {
-            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCatalogBackend>();
+            let (env, conn, stmt) = alloc_connected_env_conn_stmt::<MockCatalogBackend>();
             let pk_table: Vec<u16> = "p_a".encode_utf16().collect();
             let ret = sql_foreign_keys_w::<MockCatalogBackend>(
                 stmt,
@@ -3656,7 +3609,7 @@ mod tests {
                 "FKTABLE_NAME must order the result set"
             );
 
-            cleanup_for::<MockCatalogBackend>(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockCatalogBackend>(env, conn, stmt);
         }
     }
 
@@ -3666,7 +3619,7 @@ mod tests {
     #[test]
     fn foreign_keys_result_is_pk_ordered_when_only_fk_table_is_supplied() {
         unsafe {
-            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCatalogBackend>();
+            let (env, conn, stmt) = alloc_connected_env_conn_stmt::<MockCatalogBackend>();
             let fk_table: Vec<u16> = "f_a".encode_utf16().collect();
             let ret = sql_foreign_keys_w::<MockCatalogBackend>(
                 stmt,
@@ -3693,7 +3646,7 @@ mod tests {
                 "PKTABLE_NAME must order the result set"
             );
 
-            cleanup_for::<MockCatalogBackend>(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockCatalogBackend>(env, conn, stmt);
         }
     }
 
@@ -3703,7 +3656,7 @@ mod tests {
     #[test]
     fn statistics_result_is_sorted_by_spec_keys() {
         unsafe {
-            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCatalogBackend>();
+            let (env, conn, stmt) = alloc_connected_env_conn_stmt::<MockCatalogBackend>();
             // A real TableName: `SQLStatistics` is one of the two catalog
             // functions whose null-`TableName` `HY009` is the driver's.
             let table = utf16_of("t");
@@ -3728,7 +3681,7 @@ mod tests {
                 "NON_UNIQUE must dominate, then INDEX_NAME, then ORDINAL_POSITION"
             );
 
-            cleanup_for::<MockCatalogBackend>(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockCatalogBackend>(env, conn, stmt);
         }
     }
 
@@ -3737,7 +3690,7 @@ mod tests {
     #[test]
     fn special_columns_result_is_sorted_by_spec_keys() {
         unsafe {
-            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCatalogBackend>();
+            let (env, conn, stmt) = alloc_connected_env_conn_stmt::<MockCatalogBackend>();
             // A real TableName: `SQLSpecialColumns` is the other catalog
             // function whose null-`TableName` `HY009` is the driver's.
             let table = utf16_of("t");
@@ -3763,7 +3716,7 @@ mod tests {
                 "SCOPE must order the result set"
             );
 
-            cleanup_for::<MockCatalogBackend>(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockCatalogBackend>(env, conn, stmt);
         }
     }
 
@@ -3774,7 +3727,7 @@ mod tests {
     #[test]
     fn procedures_result_is_sorted_by_spec_keys() {
         unsafe {
-            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCatalogBackend>();
+            let (env, conn, stmt) = alloc_connected_env_conn_stmt::<MockCatalogBackend>();
             let ret = sql_procedures_w::<MockCatalogBackend>(
                 stmt,
                 std::ptr::null(),
@@ -3789,7 +3742,7 @@ mod tests {
             let names = fetch_column_as_strings::<MockCatalogBackend>(stmt, PROCEDURE_NAME_COLUMN);
             assert_eq!(names, vec!["a_proc", "m_proc", "z_proc"]);
 
-            cleanup_for::<MockCatalogBackend>(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockCatalogBackend>(env, conn, stmt);
         }
     }
 
@@ -3799,7 +3752,7 @@ mod tests {
     #[test]
     fn procedure_columns_result_is_sorted_by_spec_keys() {
         unsafe {
-            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCatalogBackend>();
+            let (env, conn, stmt) = alloc_connected_env_conn_stmt::<MockCatalogBackend>();
             let ret = sql_procedure_columns_w::<MockCatalogBackend>(
                 stmt,
                 std::ptr::null(),
@@ -3821,7 +3774,7 @@ mod tests {
                 "COLUMN_TYPE orders the rows, not COLUMN_NAME"
             );
 
-            cleanup_for::<MockCatalogBackend>(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockCatalogBackend>(env, conn, stmt);
         }
     }
 
@@ -3831,7 +3784,7 @@ mod tests {
     #[test]
     fn column_privileges_result_is_sorted_by_spec_keys() {
         unsafe {
-            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCatalogBackend>();
+            let (env, conn, stmt) = alloc_connected_env_conn_stmt::<MockCatalogBackend>();
             // `TableName` must not be null: the spec makes that HY009 here.
             let table = utf16_of("t");
             let ret = sql_column_privileges_w::<MockCatalogBackend>(
@@ -3855,7 +3808,7 @@ mod tests {
                 "COLUMN_NAME dominates, and PRIVILEGE breaks the tie within a column"
             );
 
-            cleanup_for::<MockCatalogBackend>(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockCatalogBackend>(env, conn, stmt);
         }
     }
 
@@ -3866,7 +3819,7 @@ mod tests {
     #[test]
     fn table_privileges_result_is_sorted_by_spec_keys() {
         unsafe {
-            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCatalogBackend>();
+            let (env, conn, stmt) = alloc_connected_env_conn_stmt::<MockCatalogBackend>();
             let ret = sql_table_privileges_w::<MockCatalogBackend>(
                 stmt,
                 std::ptr::null(),
@@ -3886,7 +3839,7 @@ mod tests {
                 "PRIVILEGE dominates GRANTEE"
             );
 
-            cleanup_for::<MockCatalogBackend>(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockCatalogBackend>(env, conn, stmt);
         }
     }
 
@@ -3899,7 +3852,7 @@ mod tests {
     #[test]
     fn column_privileges_checks_null_table_name_unconditionally() {
         unsafe {
-            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCatalogBackend>();
+            let (env, conn, stmt) = alloc_connected_env_conn_stmt::<MockCatalogBackend>();
             let ret = sql_column_privileges_w::<MockCatalogBackend>(
                 stmt,
                 std::ptr::null(),
@@ -3916,7 +3869,7 @@ mod tests {
                 let rec = h.diagnostics.get(0).expect("record 1 exists");
                 assert_eq!(rec.sqlstate.as_str(), "HY009");
             });
-            cleanup_for::<MockCatalogBackend>(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockCatalogBackend>(env, conn, stmt);
         }
     }
 
@@ -3927,7 +3880,7 @@ mod tests {
     #[test]
     fn table_privileges_does_not_check_null_table_name() {
         unsafe {
-            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCatalogBackend>();
+            let (env, conn, stmt) = alloc_connected_env_conn_stmt::<MockCatalogBackend>();
             let ret = sql_table_privileges_w::<MockCatalogBackend>(
                 stmt,
                 std::ptr::null(),
@@ -3938,7 +3891,7 @@ mod tests {
                 0,
             );
             assert_eq!(ret, SqlReturn::SUCCESS);
-            cleanup_for::<MockCatalogBackend>(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockCatalogBackend>(env, conn, stmt);
         }
     }
 
@@ -3949,7 +3902,7 @@ mod tests {
     #[test]
     fn the_procedure_functions_do_not_check_null_name_arguments() {
         unsafe {
-            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCatalogBackend>();
+            let (env, conn, stmt) = alloc_connected_env_conn_stmt::<MockCatalogBackend>();
             assert_eq!(
                 sql_procedures_w::<MockCatalogBackend>(
                     stmt,
@@ -3979,7 +3932,7 @@ mod tests {
                 ),
                 SqlReturn::SUCCESS,
             );
-            cleanup_for::<MockCatalogBackend>(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockCatalogBackend>(env, conn, stmt);
         }
     }
 
@@ -4003,7 +3956,7 @@ mod tests {
             };
             let empty = utf16_of("");
 
-            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCatalogBackend>();
+            let (env, conn, stmt) = alloc_connected_env_conn_stmt::<MockCatalogBackend>();
             set_metadata_id_true::<MockCatalogBackend>(stmt);
             expect_hy009(
                 stmt,
@@ -4063,7 +4016,7 @@ mod tests {
                 ),
                 "SQLTablePrivilegesW",
             );
-            cleanup_for::<MockCatalogBackend>(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockCatalogBackend>(env, conn, stmt);
         }
     }
 
@@ -4081,7 +4034,7 @@ mod tests {
 
             // Each function gets its own statement: a call leaves a cursor
             // open, and a second on the same statement would fail 24000.
-            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCatalogArgsBackend>();
+            let (env, conn, stmt) = alloc_connected_env_conn_stmt::<MockCatalogArgsBackend>();
             set_metadata_id_true::<MockCatalogArgsBackend>(stmt);
             assert_eq!(
                 sql_procedures_w::<MockCatalogArgsBackend>(
@@ -4099,9 +4052,9 @@ mod tests {
             assert_eq!(args.catalog.as_deref(), Some("MY\\_CAT"));
             assert_eq!(args.schema.as_deref(), Some("MY\\_SCH"));
             assert_eq!(args.proc.as_deref(), Some("MY\\_NAME"));
-            cleanup_for::<MockCatalogArgsBackend>(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockCatalogArgsBackend>(env, conn, stmt);
 
-            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCatalogArgsBackend>();
+            let (env, conn, stmt) = alloc_connected_env_conn_stmt::<MockCatalogArgsBackend>();
             set_metadata_id_true::<MockCatalogArgsBackend>(stmt);
             assert_eq!(
                 sql_procedure_columns_w::<MockCatalogArgsBackend>(
@@ -4123,9 +4076,9 @@ mod tests {
             assert_eq!(args.schema.as_deref(), Some("MY\\_SCH"));
             assert_eq!(args.proc.as_deref(), Some("MY\\_NAME"));
             assert_eq!(args.column.as_deref(), Some("MY\\_COL"));
-            cleanup_for::<MockCatalogArgsBackend>(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockCatalogArgsBackend>(env, conn, stmt);
 
-            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCatalogArgsBackend>();
+            let (env, conn, stmt) = alloc_connected_env_conn_stmt::<MockCatalogArgsBackend>();
             set_metadata_id_true::<MockCatalogArgsBackend>(stmt);
             assert_eq!(
                 sql_column_privileges_w::<MockCatalogArgsBackend>(
@@ -4147,9 +4100,9 @@ mod tests {
             assert_eq!(args.schema.as_deref(), Some("MY\\_SCH"));
             assert_eq!(args.table.as_deref(), Some("MY\\_NAME"));
             assert_eq!(args.column.as_deref(), Some("MY\\_COL"));
-            cleanup_for::<MockCatalogArgsBackend>(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockCatalogArgsBackend>(env, conn, stmt);
 
-            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCatalogArgsBackend>();
+            let (env, conn, stmt) = alloc_connected_env_conn_stmt::<MockCatalogArgsBackend>();
             set_metadata_id_true::<MockCatalogArgsBackend>(stmt);
             assert_eq!(
                 sql_table_privileges_w::<MockCatalogArgsBackend>(
@@ -4168,7 +4121,7 @@ mod tests {
             assert_eq!(args.catalog.as_deref(), Some("MY\\_CAT"));
             assert_eq!(args.schema.as_deref(), Some("MY\\_SCH"));
             assert_eq!(args.table.as_deref(), Some("MY\\_NAME"));
-            cleanup_for::<MockCatalogArgsBackend>(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockCatalogArgsBackend>(env, conn, stmt);
         }
     }
 
@@ -4180,7 +4133,7 @@ mod tests {
     #[test]
     fn a_cancelled_catalog_call_reports_hy008() {
         unsafe {
-            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCancelAwareBackend>();
+            let (env, conn, stmt) = alloc_connected_env_conn_stmt::<MockCancelAwareBackend>();
             MockCancelAwareBackend::fail_next_execution();
             MockCancelAwareBackend::cancel_before_returning();
 
@@ -4203,7 +4156,7 @@ mod tests {
                     assert_eq!(rec.sqlstate.as_str(), "HY008");
                 },
             );
-            cleanup_for::<MockCancelAwareBackend>(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockCancelAwareBackend>(env, conn, stmt);
         }
     }
 
@@ -4220,7 +4173,7 @@ mod tests {
     #[test]
     fn an_unimplemented_catalog_method_is_not_reclassified_as_cancelled() {
         unsafe {
-            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCancelAwareBackend>();
+            let (env, conn, stmt) = alloc_connected_env_conn_stmt::<MockCancelAwareBackend>();
             // The mock's `statistics` signals its own token and then answers
             // `NotImplemented`, which is the exact collision this pins.
             MockCancelAwareBackend::cancel_before_returning();
@@ -4242,7 +4195,7 @@ mod tests {
                 SqlReturn::SUCCESS,
                 "an unimplemented catalog method still yields the spec's empty result set"
             );
-            cleanup_for::<MockCancelAwareBackend>(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockCancelAwareBackend>(env, conn, stmt);
         }
     }
 
@@ -4274,7 +4227,7 @@ mod tests {
     #[test]
     fn metadata_id_folds_and_escapes_the_table_argument() {
         unsafe {
-            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCatalogArgsBackend>();
+            let (env, conn, stmt) = alloc_connected_env_conn_stmt::<MockCatalogArgsBackend>();
             set_metadata_id_true::<MockCatalogArgsBackend>(stmt);
 
             let empty = utf16_of("");
@@ -4298,7 +4251,7 @@ mod tests {
                 Some("MY\\_TABLE"),
                 "folded to upper case (SQL_IC_UPPER) and the _ escaped"
             );
-            cleanup_for::<MockCatalogArgsBackend>(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockCatalogArgsBackend>(env, conn, stmt);
         }
     }
 
@@ -4309,7 +4262,7 @@ mod tests {
     #[test]
     fn without_metadata_id_the_table_argument_is_passed_through_verbatim() {
         unsafe {
-            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCatalogArgsBackend>();
+            let (env, conn, stmt) = alloc_connected_env_conn_stmt::<MockCatalogArgsBackend>();
 
             let empty = utf16_of("");
             let name = utf16_of("my_table");
@@ -4328,7 +4281,7 @@ mod tests {
 
             let args = MockCatalogArgsBackend::recorded().expect("Backend::tables was called");
             assert_eq!(args.table.as_deref(), Some("my_table"));
-            cleanup_for::<MockCatalogArgsBackend>(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockCatalogArgsBackend>(env, conn, stmt);
         }
     }
 
@@ -4343,7 +4296,7 @@ mod tests {
     #[test]
     fn sql_tables_fills_each_query_field_from_its_own_argument() {
         unsafe {
-            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCatalogArgsBackend>();
+            let (env, conn, stmt) = alloc_connected_env_conn_stmt::<MockCatalogArgsBackend>();
 
             let catalog = utf16_of("cat");
             let schema = utf16_of("sch");
@@ -4367,7 +4320,7 @@ mod tests {
             assert_eq!(args.schema.as_deref(), Some("sch"));
             assert_eq!(args.table.as_deref(), Some("tbl"));
             assert_eq!(args.table_types, vec![String::from("VIEW")]);
-            cleanup_for::<MockCatalogArgsBackend>(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockCatalogArgsBackend>(env, conn, stmt);
         }
     }
 
@@ -4407,7 +4360,7 @@ mod tests {
     #[test]
     fn metadata_id_set_on_the_connection_reaches_a_statement_allocated_afterwards() {
         unsafe {
-            let (env, conn, first) = alloc_env_conn_stmt_for::<MockCatalogArgsBackend>();
+            let (env, conn, first) = alloc_connected_env_conn_stmt::<MockCatalogArgsBackend>();
             set_connection_metadata_id_true::<MockCatalogArgsBackend>(conn);
             let stmt = alloc_stmt_on::<MockCatalogArgsBackend>(conn);
 
@@ -4434,7 +4387,7 @@ mod tests {
             );
 
             let _ = sql_free_handle::<MockCatalogArgsBackend>(HandleType::Stmt as i16, stmt);
-            cleanup_for::<MockCatalogArgsBackend>(env, conn, first);
+            cleanup_connected_env_conn_stmt::<MockCatalogArgsBackend>(env, conn, first);
         }
     }
 
@@ -4445,7 +4398,7 @@ mod tests {
     #[test]
     fn metadata_id_set_on_the_connection_leaves_an_existing_statement_alone() {
         unsafe {
-            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCatalogArgsBackend>();
+            let (env, conn, stmt) = alloc_connected_env_conn_stmt::<MockCatalogArgsBackend>();
             set_connection_metadata_id_true::<MockCatalogArgsBackend>(conn);
 
             let empty = utf16_of("");
@@ -4469,7 +4422,7 @@ mod tests {
                 Some("my_table"),
                 "the statement predates the connection-level set and keeps SQL_FALSE"
             );
-            cleanup_for::<MockCatalogArgsBackend>(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockCatalogArgsBackend>(env, conn, stmt);
         }
     }
 
@@ -4479,7 +4432,7 @@ mod tests {
     #[test]
     fn a_statement_level_metadata_id_overrides_the_inherited_connection_value() {
         unsafe {
-            let (env, conn, first) = alloc_env_conn_stmt_for::<MockCatalogArgsBackend>();
+            let (env, conn, first) = alloc_connected_env_conn_stmt::<MockCatalogArgsBackend>();
             set_connection_metadata_id_true::<MockCatalogArgsBackend>(conn);
             let stmt = alloc_stmt_on::<MockCatalogArgsBackend>(conn);
 
@@ -4514,7 +4467,7 @@ mod tests {
             );
 
             let _ = sql_free_handle::<MockCatalogArgsBackend>(HandleType::Stmt as i16, stmt);
-            cleanup_for::<MockCatalogArgsBackend>(env, conn, first);
+            cleanup_connected_env_conn_stmt::<MockCatalogArgsBackend>(env, conn, first);
         }
     }
 
@@ -4525,7 +4478,7 @@ mod tests {
     #[test]
     fn metadata_id_does_not_touch_the_table_type_argument() {
         unsafe {
-            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCatalogArgsBackend>();
+            let (env, conn, stmt) = alloc_connected_env_conn_stmt::<MockCatalogArgsBackend>();
             set_metadata_id_true::<MockCatalogArgsBackend>(stmt);
 
             let empty = utf16_of("");
@@ -4554,7 +4507,7 @@ mod tests {
                 "TableType is a value list, so only the list syntax is stripped: \
                  no case folding and no pattern escaping"
             );
-            cleanup_for::<MockCatalogArgsBackend>(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockCatalogArgsBackend>(env, conn, stmt);
         }
     }
 
@@ -4565,7 +4518,7 @@ mod tests {
     #[test]
     fn table_type_list_reaches_the_backend_parsed() {
         unsafe {
-            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCatalogArgsBackend>();
+            let (env, conn, stmt) = alloc_connected_env_conn_stmt::<MockCatalogArgsBackend>();
             // Mixes both spellings the spec's example gives, and pads with
             // whitespace, so a parser that handles only one of them fails here.
             let table_type = utf16_of("'TABLE', VIEW");
@@ -4588,7 +4541,7 @@ mod tests {
                 vec!["TABLE".to_string(), "VIEW".to_string()],
                 "quoted and unquoted values both arrive parsed and trimmed"
             );
-            cleanup_for::<MockCatalogArgsBackend>(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockCatalogArgsBackend>(env, conn, stmt);
         }
     }
 
@@ -4598,7 +4551,7 @@ mod tests {
     #[test]
     fn an_absent_table_type_argument_is_an_empty_slice() {
         unsafe {
-            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCatalogArgsBackend>();
+            let (env, conn, stmt) = alloc_connected_env_conn_stmt::<MockCatalogArgsBackend>();
             let ret = sql_tables_w::<MockCatalogArgsBackend>(
                 stmt,
                 std::ptr::null(),
@@ -4614,7 +4567,7 @@ mod tests {
 
             let args = MockCatalogArgsBackend::recorded().expect("Backend::tables was called");
             assert!(args.table_types.is_empty());
-            cleanup_for::<MockCatalogArgsBackend>(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockCatalogArgsBackend>(env, conn, stmt);
         }
     }
 
@@ -4626,7 +4579,7 @@ mod tests {
     #[test]
     fn metadata_id_normalises_the_column_argument_too() {
         unsafe {
-            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCatalogArgsBackend>();
+            let (env, conn, stmt) = alloc_connected_env_conn_stmt::<MockCatalogArgsBackend>();
             set_metadata_id_true::<MockCatalogArgsBackend>(stmt);
 
             let empty = utf16_of("");
@@ -4648,7 +4601,7 @@ mod tests {
             let args = MockCatalogArgsBackend::recorded().expect("Backend::columns was called");
             assert_eq!(args.table.as_deref(), Some("MY\\_TABLE"));
             assert_eq!(args.column.as_deref(), Some("COL\\_1"));
-            cleanup_for::<MockCatalogArgsBackend>(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockCatalogArgsBackend>(env, conn, stmt);
         }
     }
 
@@ -4661,7 +4614,7 @@ mod tests {
     #[test]
     fn sql_columns_fills_each_query_field_from_its_own_argument() {
         unsafe {
-            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCatalogArgsBackend>();
+            let (env, conn, stmt) = alloc_connected_env_conn_stmt::<MockCatalogArgsBackend>();
 
             let catalog = utf16_of("cat");
             let schema = utf16_of("sch");
@@ -4685,7 +4638,7 @@ mod tests {
             assert_eq!(args.schema.as_deref(), Some("sch"));
             assert_eq!(args.table.as_deref(), Some("tbl"));
             assert_eq!(args.column.as_deref(), Some("col"));
-            cleanup_for::<MockCatalogArgsBackend>(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockCatalogArgsBackend>(env, conn, stmt);
         }
     }
 
@@ -4695,7 +4648,7 @@ mod tests {
     #[test]
     fn metadata_id_normalises_both_foreign_key_trios() {
         unsafe {
-            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCatalogArgsBackend>();
+            let (env, conn, stmt) = alloc_connected_env_conn_stmt::<MockCatalogArgsBackend>();
             set_metadata_id_true::<MockCatalogArgsBackend>(stmt);
 
             let empty = utf16_of("");
@@ -4722,7 +4675,7 @@ mod tests {
                 MockCatalogArgsBackend::recorded().expect("Backend::foreign_keys was called");
             assert_eq!(args.table.as_deref(), Some("PK\\_T"));
             assert_eq!(args.fk_table.as_deref(), Some("FK\\_T"));
-            cleanup_for::<MockCatalogArgsBackend>(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockCatalogArgsBackend>(env, conn, stmt);
         }
     }
 
@@ -4734,7 +4687,7 @@ mod tests {
     #[test]
     fn an_enumeration_still_works_with_metadata_id_set() {
         unsafe {
-            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCatalogArgsBackend>();
+            let (env, conn, stmt) = alloc_connected_env_conn_stmt::<MockCatalogArgsBackend>();
             set_metadata_id_true::<MockCatalogArgsBackend>(stmt);
 
             let catalog = utf16_of(SQL_ALL_CATALOGS);
@@ -4756,7 +4709,7 @@ mod tests {
                 vec!["cat_a"],
                 "normalising before detecting the enumeration would have escaped the sentinel"
             );
-            cleanup_for::<MockCatalogArgsBackend>(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockCatalogArgsBackend>(env, conn, stmt);
         }
     }
 
@@ -4769,7 +4722,7 @@ mod tests {
     #[test]
     fn metadata_id_with_null_catalog_returns_hy009() {
         unsafe {
-            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCatalogBackend>();
+            let (env, conn, stmt) = alloc_connected_env_conn_stmt::<MockCatalogBackend>();
             set_metadata_id_true::<MockCatalogBackend>(stmt);
 
             let empty = utf16_of("");
@@ -4789,7 +4742,7 @@ mod tests {
                 let rec = h.diagnostics.get(0).expect("record 1 exists");
                 assert_eq!(rec.sqlstate.as_str(), "HY009");
             });
-            cleanup_for::<MockCatalogBackend>(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockCatalogBackend>(env, conn, stmt);
         }
     }
 
@@ -4802,7 +4755,7 @@ mod tests {
     #[test]
     fn metadata_id_null_catalog_is_accepted_without_catalog_support() {
         unsafe {
-            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockNoCatalogBackend>();
+            let (env, conn, stmt) = alloc_connected_env_conn_stmt::<MockNoCatalogBackend>();
             set_metadata_id_true::<MockNoCatalogBackend>(stmt);
 
             let table = utf16_of("t");
@@ -4822,7 +4775,7 @@ mod tests {
                 SqlReturn::SUCCESS,
                 "the catalog HY009 clause is conditional on catalogs being supported"
             );
-            cleanup_for::<MockNoCatalogBackend>(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockNoCatalogBackend>(env, conn, stmt);
         }
     }
 
@@ -4834,7 +4787,7 @@ mod tests {
     #[test]
     fn primary_keys_does_not_check_null_table_name() {
         unsafe {
-            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCatalogBackend>();
+            let (env, conn, stmt) = alloc_connected_env_conn_stmt::<MockCatalogBackend>();
             let ret = sql_primary_keys_w::<MockCatalogBackend>(
                 stmt,
                 std::ptr::null(),
@@ -4849,7 +4802,7 @@ mod tests {
                 SqlReturn::ERROR,
                 "null TableName is (DM) for SQLPrimaryKeys; the driver must not reject it"
             );
-            cleanup_for::<MockCatalogBackend>(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockCatalogBackend>(env, conn, stmt);
         }
     }
 
@@ -4859,7 +4812,7 @@ mod tests {
     #[test]
     fn foreign_keys_does_not_check_null_table_names() {
         unsafe {
-            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCatalogBackend>();
+            let (env, conn, stmt) = alloc_connected_env_conn_stmt::<MockCatalogBackend>();
             let ret = sql_foreign_keys_w::<MockCatalogBackend>(
                 stmt,
                 std::ptr::null(),
@@ -4880,7 +4833,7 @@ mod tests {
                 SqlReturn::ERROR,
                 "both table names null is (DM) for SQLForeignKeys; the driver must not reject it"
             );
-            cleanup_for::<MockCatalogBackend>(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockCatalogBackend>(env, conn, stmt);
         }
     }
 
@@ -4890,7 +4843,7 @@ mod tests {
     #[test]
     fn statistics_does_check_null_table_name() {
         unsafe {
-            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCatalogBackend>();
+            let (env, conn, stmt) = alloc_connected_env_conn_stmt::<MockCatalogBackend>();
             let ret = sql_statistics_w::<MockCatalogBackend>(
                 stmt,
                 std::ptr::null(),
@@ -4907,7 +4860,7 @@ mod tests {
                 let rec = h.diagnostics.get(0).expect("record 1 exists");
                 assert_eq!(rec.sqlstate.as_str(), "HY009");
             });
-            cleanup_for::<MockCatalogBackend>(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockCatalogBackend>(env, conn, stmt);
         }
     }
 
@@ -4916,7 +4869,7 @@ mod tests {
     #[test]
     fn special_columns_does_check_null_table_name() {
         unsafe {
-            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCatalogBackend>();
+            let (env, conn, stmt) = alloc_connected_env_conn_stmt::<MockCatalogBackend>();
             let ret = sql_special_columns_w::<MockCatalogBackend>(
                 stmt,
                 SQL_BEST_ROWID,
@@ -4934,7 +4887,7 @@ mod tests {
                 let rec = h.diagnostics.get(0).expect("record 1 exists");
                 assert_eq!(rec.sqlstate.as_str(), "HY009");
             });
-            cleanup_for::<MockCatalogBackend>(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockCatalogBackend>(env, conn, stmt);
         }
     }
 
@@ -4998,7 +4951,7 @@ mod tests {
             );
             assert_eq!(ret, SqlReturn::SUCCESS);
             assert_eq!(len, 10, "5 characters is 10 bytes in UTF-16");
-            cleanup(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -5021,7 +4974,7 @@ mod tests {
             );
             assert_eq!(ret, SqlReturn::SUCCESS);
             assert_eq!(len, 10);
-            cleanup(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -5073,7 +5026,7 @@ mod tests {
             );
             assert_eq!(std::ptr::read_unaligned(name), 'a' as u16, "\"abcde\"");
 
-            cleanup(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -5103,7 +5056,7 @@ mod tests {
             );
             assert_eq!(ret, SqlReturn::SUCCESS);
             assert_eq!(name_len, 5, "5 characters, not 10 bytes");
-            cleanup(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -5140,7 +5093,7 @@ mod tests {
                 col_size, 0,
                 "spec says 0 when the column size cannot be determined"
             );
-            cleanup(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -5158,7 +5111,12 @@ mod tests {
                 0,
             );
             assert_eq!(ret, SqlReturn::ERROR);
-            cleanup(env, conn, stmt);
+            assert_eq!(
+                first_sqlstate::<MockBackend>(stmt),
+                crate::types::sql_state::FUNCTION_SEQUENCE_ERROR,
+                "a catalog call before connect is the spec's HY010, not a generic HY000",
+            );
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -5182,7 +5140,12 @@ mod tests {
                 0,
             );
             assert_eq!(ret, SqlReturn::ERROR);
-            cleanup(env, conn, stmt);
+            assert_eq!(
+                first_sqlstate::<MockBackend>(stmt),
+                crate::types::sql_state::FUNCTION_SEQUENCE_ERROR,
+                "a catalog call before connect is the spec's HY010, not a generic HY000",
+            );
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -5202,7 +5165,12 @@ mod tests {
                 0,
             );
             assert_eq!(ret, SqlReturn::ERROR);
-            cleanup(env, conn, stmt);
+            assert_eq!(
+                first_sqlstate::<MockBackend>(stmt),
+                crate::types::sql_state::FUNCTION_SEQUENCE_ERROR,
+                "a catalog call before connect is the spec's HY010, not a generic HY000",
+            );
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -5222,54 +5190,18 @@ mod tests {
                 0,
             );
             assert_eq!(ret, SqlReturn::ERROR);
-            cleanup(env, conn, stmt);
+            assert_eq!(
+                first_sqlstate::<MockBackend>(stmt),
+                crate::types::sql_state::FUNCTION_SEQUENCE_ERROR,
+                "a catalog call before connect is the spec's HY010, not a generic HY000",
+            );
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
     // -----------------------------------------------------------------------
     // SQLStatisticsW / SQLSpecialColumnsW
     // -----------------------------------------------------------------------
-
-    #[test]
-    fn statistics_w_not_connected_returns_error() {
-        unsafe {
-            let (env, conn, stmt) = alloc_env_conn_stmt();
-            let ret = sql_statistics_w::<MockBackend>(
-                stmt,
-                std::ptr::null(),
-                0,
-                std::ptr::null(),
-                0,
-                std::ptr::null(),
-                0,
-                0,
-                0,
-            );
-            assert_eq!(ret, SqlReturn::ERROR);
-            cleanup(env, conn, stmt);
-        }
-    }
-
-    #[test]
-    fn special_columns_w_not_connected_returns_error() {
-        unsafe {
-            let (env, conn, stmt) = alloc_env_conn_stmt();
-            let ret = sql_special_columns_w::<MockBackend>(
-                stmt,
-                0,
-                std::ptr::null(),
-                0,
-                std::ptr::null(),
-                0,
-                std::ptr::null(),
-                0,
-                0,
-                0,
-            );
-            assert_eq!(ret, SqlReturn::ERROR);
-            cleanup(env, conn, stmt);
-        }
-    }
 
     #[test]
     fn statistics_falls_back_to_empty_result_set_when_unimplemented() {
@@ -5304,7 +5236,7 @@ mod tests {
                 crate::ffi::fetch::sql_fetch::<MockBackend>(stmt),
                 SqlReturn::NO_DATA
             );
-            cleanup(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -5341,7 +5273,7 @@ mod tests {
                 crate::ffi::fetch::sql_fetch::<MockBackend>(stmt),
                 SqlReturn::NO_DATA
             );
-            cleanup(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -5361,7 +5293,12 @@ mod tests {
                 0,
             );
             assert_eq!(ret, SqlReturn::ERROR);
-            cleanup(env, conn, stmt);
+            assert_eq!(
+                first_sqlstate::<MockBackend>(stmt),
+                crate::types::sql_state::FUNCTION_SEQUENCE_ERROR,
+                "a catalog call before connect is the spec's HY010, not a generic HY000",
+            );
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -5382,7 +5319,12 @@ mod tests {
                 Nullable::SqlNullable as u16,
             );
             assert_eq!(ret, SqlReturn::ERROR);
-            cleanup(env, conn, stmt);
+            assert_eq!(
+                first_sqlstate::<MockBackend>(stmt),
+                crate::types::sql_state::FUNCTION_SEQUENCE_ERROR,
+                "a catalog call before connect is the spec's HY010, not a generic HY000",
+            );
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -5409,7 +5351,12 @@ mod tests {
                 &mut nullable,
             );
             assert_eq!(ret, SqlReturn::ERROR);
-            cleanup(env, conn, stmt);
+            assert_eq!(
+                first_sqlstate::<MockBackend>(stmt),
+                crate::types::sql_state::PREPARED_STATEMENT_NOT_CURSOR_SPEC,
+                "a statement that has produced no result set is 07005",
+            );
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -5446,7 +5393,7 @@ mod tests {
             );
             // MockBackend::columns returns Err, so we get ERROR from the backend, not a crash.
             assert_eq!(ret, SqlReturn::ERROR);
-            cleanup(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -5466,7 +5413,12 @@ mod tests {
                 &mut num_attr,
             );
             assert_eq!(ret, SqlReturn::ERROR);
-            cleanup(env, conn, stmt);
+            assert_eq!(
+                first_sqlstate::<MockBackend>(stmt),
+                crate::types::sql_state::PREPARED_STATEMENT_NOT_CURSOR_SPEC,
+                "a statement that has produced no result set is 07005",
+            );
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -5500,7 +5452,7 @@ mod tests {
                 crate::types::sql_state::INVALID_DESCRIPTOR_INDEX,
             );
 
-            cleanup(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -5537,7 +5489,7 @@ mod tests {
                 first_sqlstate::<MockBackend>(stmt),
                 crate::types::sql_state::INVALID_DESCRIPTOR_INDEX,
             );
-            cleanup(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -5575,7 +5527,7 @@ mod tests {
                 crate::types::sql_state::PREPARED_STATEMENT_NOT_CURSOR_SPEC,
                 "the no-result-set check precedes the column-number one"
             );
-            cleanup(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -5583,30 +5535,10 @@ mod tests {
     // SQLProceduresW / SQLProcedureColumnsW
     // -----------------------------------------------------------------------
 
-    /// Helper: connect a connection handle using MockBackend.
-    unsafe fn connect_handle(conn: *mut c_void) -> SqlReturn {
-        let input = "Host=localhost;Port=8080;Database=test;User=me";
-        let wide: Vec<u16> = input.encode_utf16().collect();
-        unsafe {
-            crate::ffi::connect::sql_driver_connect_w::<MockBackend>(
-                conn,
-                std::ptr::null_mut(),
-                wide.as_ptr(),
-                wide.len() as i16,
-                std::ptr::null_mut(),
-                0,
-                std::ptr::null_mut(),
-                0,
-            )
-        }
-    }
-
     #[test]
     fn procedures_returns_success_with_connected_handle() {
         unsafe {
-            let (env, conn, stmt) = alloc_env_conn_stmt();
-            let cr = connect_handle(conn);
-            assert_eq!(cr, SqlReturn::SUCCESS);
+            let (env, conn, stmt) = alloc_connected_env_conn_stmt::<MockBackend>();
 
             let ret = sql_procedures_w::<MockBackend>(
                 stmt,
@@ -5629,7 +5561,7 @@ mod tests {
                 });
             assert_eq!(col_count, 8);
 
-            cleanup(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -5647,16 +5579,19 @@ mod tests {
                 0,
             );
             assert_eq!(ret, SqlReturn::ERROR);
-            cleanup(env, conn, stmt);
+            assert_eq!(
+                first_sqlstate::<MockBackend>(stmt),
+                crate::types::sql_state::FUNCTION_SEQUENCE_ERROR,
+                "a catalog call before connect is the spec's HY010, not a generic HY000",
+            );
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
     #[test]
     fn procedure_columns_returns_success_with_connected_handle() {
         unsafe {
-            let (env, conn, stmt) = alloc_env_conn_stmt();
-            let cr = connect_handle(conn);
-            assert_eq!(cr, SqlReturn::SUCCESS);
+            let (env, conn, stmt) = alloc_connected_env_conn_stmt::<MockBackend>();
 
             let ret = sql_procedure_columns_w::<MockBackend>(
                 stmt,
@@ -5681,16 +5616,14 @@ mod tests {
                 });
             assert_eq!(col_count, 19);
 
-            cleanup(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
     #[test]
     fn column_privileges_returns_success_with_connected_handle() {
         unsafe {
-            let (env, conn, stmt) = alloc_env_conn_stmt();
-            let cr = connect_handle(conn);
-            assert_eq!(cr, SqlReturn::SUCCESS);
+            let (env, conn, stmt) = alloc_connected_env_conn_stmt::<MockBackend>();
 
             // `TableName` must not be null here: the spec states that clause
             // without a `(DM)` marker, so the driver rejects it with HY009.
@@ -5718,16 +5651,14 @@ mod tests {
                 });
             assert_eq!(col_count, 8);
 
-            cleanup(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
     #[test]
     fn table_privileges_returns_success_with_connected_handle() {
         unsafe {
-            let (env, conn, stmt) = alloc_env_conn_stmt();
-            let cr = connect_handle(conn);
-            assert_eq!(cr, SqlReturn::SUCCESS);
+            let (env, conn, stmt) = alloc_connected_env_conn_stmt::<MockBackend>();
 
             let ret = sql_table_privileges_w::<MockBackend>(
                 stmt,
@@ -5750,7 +5681,7 @@ mod tests {
                 });
             assert_eq!(col_count, 7);
 
-            cleanup(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -5762,7 +5693,7 @@ mod tests {
     /// backend, so a describe reaches the backend at all.
     unsafe fn described_stmt_for<B: Backend>() -> (*mut c_void, *mut c_void, *mut c_void) {
         unsafe {
-            let (env, conn, stmt) = crate::test_utils::alloc_connected_env_conn_stmt::<B>();
+            let (env, conn, stmt) = alloc_connected_env_conn_stmt::<B>();
             let sql: Vec<u16> = "SELECT 1".encode_utf16().collect();
             assert_eq!(
                 crate::ffi::execute::sql_exec_direct_w::<B>(
@@ -5778,15 +5709,30 @@ mod tests {
     }
 
     /// Read the first diagnostic's SQLSTATE off a statement handle.
+    ///
+    /// Through `SQLGetDiagRecW` rather than off the queue directly, so the
+    /// assertion covers what an application can actually observe: a state
+    /// pushed but never readable through the diagnostic entry point would
+    /// still pass a test that read `StatementHandle::diagnostics` itself.
     fn first_sqlstate<B: Backend>(stmt: *mut c_void) -> String {
-        with_handle::<B, StatementHandle<B>, _>(stmt, |h| {
-            h.diagnostics
-                .get(0)
-                .expect("a diagnostic record")
-                .sqlstate
-                .as_str()
-                .to_owned()
-        })
+        let mut state = [0u16; 6];
+        let mut native_err: i32 = 0;
+        let mut msg = [0u16; 256];
+        let mut msg_len: i16 = 0;
+        let ret = unsafe {
+            crate::ffi::diag::sql_get_diag_rec_w::<B>(
+                HandleType::Stmt as i16,
+                stmt,
+                1,
+                state.as_mut_ptr(),
+                &mut native_err,
+                msg.as_mut_ptr(),
+                i16::try_from(msg.len()).expect("the fixed message buffer fits in i16"),
+                &mut msg_len,
+            )
+        };
+        assert_eq!(ret, SqlReturn::SUCCESS, "expected a diagnostic record");
+        String::from_utf16_lossy(&state[..5])
     }
 
     /// The whole catalog family resolves its name arguments through one helper,
@@ -5804,7 +5750,7 @@ mod tests {
     #[test]
     fn tables_refuses_an_nts_filter_that_runs_to_the_scan_cap() {
         unsafe {
-            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockBackend>();
+            let (env, conn, stmt) = alloc_connected_env_conn_stmt::<MockBackend>();
             let wide = vec![b'a' as u16; crate::utf16::MAX_NTS_SCAN];
 
             assert_eq!(
@@ -5826,7 +5772,7 @@ mod tests {
                 crate::types::sql_state::INVALID_STRING_OR_BUFFER_LENGTH
             );
 
-            cleanup_for::<MockBackend>(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -5837,7 +5783,7 @@ mod tests {
     #[test]
     fn foreign_keys_names_the_argument_whose_nts_scan_overran() {
         unsafe {
-            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockBackend>();
+            let (env, conn, stmt) = alloc_connected_env_conn_stmt::<MockBackend>();
             let wide = vec![b'a' as u16; crate::utf16::MAX_NTS_SCAN];
             let nts = crate::types::SQL_NTS as i16;
 
@@ -5871,7 +5817,7 @@ mod tests {
                 "the diagnostic must name the overrunning argument, got: {message}"
             );
 
-            cleanup_for::<MockBackend>(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -5880,7 +5826,7 @@ mod tests {
     #[test]
     fn tables_accepts_an_nts_filter_terminated_at_the_last_scannable_position() {
         unsafe {
-            let (env, conn, stmt) = alloc_env_conn_stmt_for::<MockCatalogBackend>();
+            let (env, conn, stmt) = alloc_connected_env_conn_stmt::<MockCatalogBackend>();
             let mut wide = vec![b'a' as u16; crate::utf16::MAX_NTS_SCAN];
             wide[crate::utf16::MAX_NTS_SCAN - 1] = 0;
 
@@ -5899,7 +5845,7 @@ mod tests {
                 SqlReturn::SUCCESS,
             );
 
-            cleanup_for::<MockCatalogBackend>(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockCatalogBackend>(env, conn, stmt);
         }
     }
 
@@ -5936,9 +5882,7 @@ mod tests {
                 "a link failure must not be reported as a bad column number",
             );
 
-            crate::test_utils::cleanup_connected_env_conn_stmt::<MockFailingDescribeBackend>(
-                env, conn, stmt,
-            );
+            cleanup_connected_env_conn_stmt::<MockFailingDescribeBackend>(env, conn, stmt);
         }
     }
 
@@ -5972,9 +5916,7 @@ mod tests {
                 "a column past the end is the one case 07009 is for",
             );
 
-            crate::test_utils::cleanup_connected_env_conn_stmt::<MockFailingDescribeBackend>(
-                env, conn, stmt,
-            );
+            cleanup_connected_env_conn_stmt::<MockFailingDescribeBackend>(env, conn, stmt);
         }
     }
 
@@ -6015,9 +5957,7 @@ mod tests {
                 "a cancelled describe reports the cancellation, not its symptom",
             );
 
-            crate::test_utils::cleanup_connected_env_conn_stmt::<MockFailingDescribeBackend>(
-                env, conn, stmt,
-            );
+            cleanup_connected_env_conn_stmt::<MockFailingDescribeBackend>(env, conn, stmt);
         }
     }
 
@@ -6051,9 +5991,7 @@ mod tests {
                 "a link failure must not be reported as a bad column number",
             );
 
-            crate::test_utils::cleanup_connected_env_conn_stmt::<MockFailingDescribeBackend>(
-                env, conn, stmt,
-            );
+            cleanup_connected_env_conn_stmt::<MockFailingDescribeBackend>(env, conn, stmt);
         }
     }
 
@@ -6082,9 +6020,7 @@ mod tests {
                 "a column past the end is the one case 07009 is for",
             );
 
-            crate::test_utils::cleanup_connected_env_conn_stmt::<MockFailingDescribeBackend>(
-                env, conn, stmt,
-            );
+            cleanup_connected_env_conn_stmt::<MockFailingDescribeBackend>(env, conn, stmt);
         }
     }
 
@@ -6129,7 +6065,7 @@ mod tests {
                 crate::types::sql_state::INVALID_DESCRIPTOR_FIELD_IDENTIFIER,
             );
 
-            cleanup(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -6179,7 +6115,7 @@ mod tests {
                 );
             }
 
-            cleanup(env, conn, stmt);
+            cleanup_connected_env_conn_stmt::<MockBackend>(env, conn, stmt);
         }
     }
 
@@ -6214,9 +6150,7 @@ mod tests {
                 "a cancelled describe reports the cancellation, not its symptom",
             );
 
-            crate::test_utils::cleanup_connected_env_conn_stmt::<MockFailingDescribeBackend>(
-                env, conn, stmt,
-            );
+            cleanup_connected_env_conn_stmt::<MockFailingDescribeBackend>(env, conn, stmt);
         }
     }
 
@@ -6287,9 +6221,7 @@ mod tests {
                 "a negative backend column count must not reject every column as 07009",
             );
 
-            crate::test_utils::cleanup_connected_env_conn_stmt::<MockNegativeColumnCountBackend>(
-                env, conn, stmt,
-            );
+            cleanup_connected_env_conn_stmt::<MockNegativeColumnCountBackend>(env, conn, stmt);
         }
     }
 
@@ -6315,9 +6247,7 @@ mod tests {
                 "a negative backend column count must not reject every column as 07009",
             );
 
-            crate::test_utils::cleanup_connected_env_conn_stmt::<MockNegativeColumnCountBackend>(
-                env, conn, stmt,
-            );
+            cleanup_connected_env_conn_stmt::<MockNegativeColumnCountBackend>(env, conn, stmt);
         }
     }
 }
