@@ -308,7 +308,16 @@ unsafe fn write_fixed_or_chunked(
             // (the offset is dropped).
             ColumnValue::TimestampTz { .. } => CDataType::TypeTimestamp,
             ColumnValue::Bytes(_) => CDataType::Binary,
-            ColumnValue::Guid(_) => CDataType::Binary,
+            // The spec's *Default C Data Types* table pairs `SQL_GUID` with
+            // `SQL_C_GUID`, not with `SQL_C_BINARY`. The distinction is not
+            // cosmetic even though both write sixteen bytes: `SQL_C_GUID`
+            // reassembles the first three groups as integers, so the
+            // `SQL_C_BINARY` reading byte-swaps them on every little-endian
+            // machine. An application that binds `SQL_C_DEFAULT` on a GUID
+            // column allocates a `SQLGUID` and reads `d1` from it, so the
+            // wrong choice here is a silently wrong value under `SQL_SUCCESS`
+            // rather than a diagnosable error.
+            ColumnValue::Guid(_) => CDataType::Guid,
             // ColumnValue::Null is handled by the early return above and never
             // reaches this match; it falls into the catch-all harmlessly.
             // New complex variants: default to string serialization via WChar.
@@ -1016,6 +1025,10 @@ fn default_target_width(c_type: CDataType) -> Option<usize> {
         CDataType::TypeDate => size_of::<Date>(),
         CDataType::TypeTime => size_of::<Time>(),
         CDataType::TypeTimestamp => size_of::<Timestamp>(),
+        // `SQL_C_GUID` is fixed-width and its arm calls `write_fixed` without
+        // consulting `buf_len`, so without this row the inference could write
+        // sixteen bytes into a smaller buffer.
+        CDataType::Guid => size_of::<odbc_sys::Guid>(),
         // WChar and Binary are the other two inference results; both are
         // variable-length and already respect buf_len.
         _ => return None,
@@ -5699,6 +5712,76 @@ mod tests {
         assert_eq!(out.d3, 0x6677);
         assert_eq!(out.d4, [0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
         assert_eq!(ind, 16, "the table's indicator cell is 16");
+    }
+
+    /// The spec's *Default C Data Types* table pairs `SQL_GUID` with
+    /// `SQL_C_GUID`. Inferring `SQL_C_BINARY` instead writes the same sixteen
+    /// bytes, so the indicator and the return value agree either way and only
+    /// the *reading* of the first three groups differs: `SQL_C_BINARY` passes
+    /// them through, `SQL_C_GUID` reassembles them as big-endian integers.
+    ///
+    /// That makes `d1` the one assertion that can tell the two apart, and the
+    /// failure it guards is a silent one: an application binding
+    /// `SQL_C_DEFAULT` on a GUID column allocates a `SQLGUID` and reads `d1`
+    /// from it, so inferring the wrong type hands it a byte-swapped GUID under
+    /// `SQL_SUCCESS` with nothing in the diagnostic queue.
+    #[test]
+    fn sql_c_default_on_a_guid_column_selects_sql_c_guid_not_binary() {
+        // 00112233-4455-6677-8899-aabbccddeeff
+        let bytes: [u8; 16] = [
+            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+            0xee, 0xff,
+        ];
+        let mut out = odbc_sys::Guid::default();
+        let mut ind: isize = -999;
+        let ret = unsafe {
+            write_column_value(
+                &ColumnValue::Guid(bytes),
+                CDataType::Default,
+                (&raw mut out).cast::<c_void>(),
+                size_of::<odbc_sys::Guid>() as isize,
+                &mut ind,
+                NumericTarget::UNSPECIFIED,
+            )
+        }
+        .expect("SQL_C_DEFAULT resolves to the GUID table's own row");
+        assert_eq!(ret, SqlReturn::SUCCESS);
+        assert_eq!(
+            out.d1, 0x0011_2233,
+            "inferring SQL_C_BINARY would leave 0x33221100 here"
+        );
+        assert_eq!(out.d2, 0x4455);
+        assert_eq!(out.d3, 0x6677);
+        assert_eq!(out.d4, [0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
+        assert_eq!(ind, 16);
+    }
+
+    /// `SQL_C_GUID`'s arm calls `write_fixed`, which does not consult
+    /// `buf_len`, because for an *explicitly named* fixed C type the spec has
+    /// the driver ignore `BufferLength`. `SQL_C_DEFAULT` inverts that: core
+    /// picked the type, so the application's buffer size is the only evidence
+    /// of how much room there is. Without `SQL_C_GUID` in
+    /// `default_target_width` this writes sixteen bytes into eight.
+    #[test]
+    fn sql_c_default_on_a_guid_column_refuses_a_buffer_too_small_for_a_sqlguid() {
+        let bytes = [0u8; 16];
+        let mut arena = [0u8; size_of::<odbc_sys::Guid>()];
+        let mut ind: isize = 0;
+        let err = unsafe {
+            write_column_value(
+                &ColumnValue::Guid(bytes),
+                CDataType::Default,
+                arena.as_mut_ptr().cast::<c_void>(),
+                8,
+                &mut ind,
+                NumericTarget::UNSPECIFIED,
+            )
+        }
+        .expect_err("eight bytes cannot hold a SQLGUID");
+        assert_eq!(
+            sqlstate_of_err(&err),
+            crate::types::sql_state::RESTRICTED_DATA_TYPE_ATTRIBUTE_VIOLATION,
+        );
     }
 
     /// The guard against over-reach. `SQL_C_GUID` appears in **one** conversion
