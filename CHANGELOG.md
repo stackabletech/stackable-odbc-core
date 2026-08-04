@@ -1603,6 +1603,22 @@ call `SQLCloseCursor` or `SQLFreeStmt(SQL_CLOSE)` first, as it already must for
 
 ### Fixed
 
+- **`SQLColAttributeW` answers `HY091` for a field identifier that is not a
+  defined value.** It previously answered `HYC00` for every identifier it did
+  not recognise. The spec makes these two different claims, and neither row
+  carries a Driver-Manager marker, so both are the driver's to return: `HY091`
+  is "not one of the defined values and was not an implementation-defined
+  value", while `HYC00` is "not supported by the driver". Collapsing them left
+  an application unable to tell a garbage identifier from a valid extension the
+  driver has not implemented. `SQLGetDescFieldW` and `SQLSetDescFieldW` already
+  drew this line; `SQLColAttributeW` was the outlier.
+
+  `SQL_COLUMN_LENGTH` (3), `SQL_COLUMN_PRECISION` (4) and `SQL_COLUMN_SCALE` (5)
+  — the ODBC 2.x spellings of three fields — keep `HYC00`, because they *are*
+  defined identifiers. Core does not implement them yet; the spec's Backward
+  Compatibility section says an ODBC 3.x driver should, and their ODBC 2.x
+  semantics differ from their 3.x counterparts, so that is tracked separately.
+
 - **A chunked `SQLGetData` no longer re-reads and re-converts the whole column
   for every part.** Each call asked the backend for the value again and converted
   it again, so draining an N-byte column through a K-byte buffer cost O(N²/K).

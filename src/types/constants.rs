@@ -727,6 +727,40 @@ pub const SQL_NAMED: isize = 0;
 pub const SQL_UNNAMED: isize = 1;
 
 // ---------------------------------------------------------------------------
+// SQLColAttribute ODBC 2.x FieldIdentifier values (sqlext.h)
+// ---------------------------------------------------------------------------
+//
+// These three are the ODBC 2.x spellings of `SQL_DESC_LENGTH`,
+// `SQL_DESC_PRECISION` and `SQL_DESC_SCALE`. Their `#define` values differ from
+// their 3.x counterparts, and `SQLColAttribute`'s Backward Compatibility
+// section says why: "These values are different because precision, scale, and
+// length are defined differently in ODBC 3.x than they were in ODBC 2.x."
+//
+// They are **defined** identifiers, which is the only fact `SQLColAttributeW`
+// needs from them today: it separates `HYC00` ("not supported by the driver")
+// from `HY091` ("not one of the defined values"), and these take the first.
+// They are deliberately *not* in `desc_from_raw`, which is shared with
+// `SQLGetDescField`/`SQLSetDescField` — descriptor handles are an ODBC 3.0
+// feature and the 2.x spellings never name a descriptor field there.
+//
+// The same section requires a 3.x driver to *support* all three
+// ("An ODBC 3.x driver must support both 'SQL_COLUMN' and 'SQL_DESC' values for
+// these three FieldIdentifiers"). Core does not yet; see
+// `col_attribute_odbc_2x_column_field_identifiers_are_hyc00_not_hy091`.
+
+/// `SQL_COLUMN_LENGTH` — the ODBC 2.x `FieldIdentifier` whose ODBC 3.x
+/// counterpart is `SQL_DESC_OCTET_LENGTH` (transfer octet length).
+pub const SQL_COLUMN_LENGTH: u16 = 3;
+
+/// `SQL_COLUMN_PRECISION` — the ODBC 2.x `FieldIdentifier` whose ODBC 3.x
+/// counterpart is `SQL_DESC_LENGTH` (column size).
+pub const SQL_COLUMN_PRECISION: u16 = 4;
+
+/// `SQL_COLUMN_SCALE` — the ODBC 2.x `FieldIdentifier` whose ODBC 3.x
+/// counterpart is `SQL_DESC_SCALE` (decimal digits).
+pub const SQL_COLUMN_SCALE: u16 = 5;
+
+// ---------------------------------------------------------------------------
 // SQL_CURSOR_COMMIT_BEHAVIOR / SQL_CURSOR_ROLLBACK_BEHAVIOR values (sql.h)
 // ---------------------------------------------------------------------------
 
