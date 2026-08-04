@@ -1603,6 +1603,24 @@ call `SQLCloseCursor` or `SQLFreeStmt(SQL_CLOSE)` first, as it already must for
 
 ### Fixed
 
+- **`SQL_C_NUMERIC` is a supported retrieval target.** It had no arm in
+  `write_column_value` at all, so every value returned `07006` through both
+  `SQLGetData` and `SQLBindCol`+`SQLFetch`, while the same C type worked as an
+  *input* parameter. `SQL_C_NUMERIC` shares the *SQL to C: Numeric* table's
+  exact-integer row with `SQL_C_SLONG` and `SQL_C_SBIGINT` — outcomes n/a,
+  `01S07` and `22003` — and the overview page states that drivers "are required
+  to support conversions to all ODBC C data types from the ODBC SQL data types
+  that they support". It is the natural C type for a `DECIMAL` column, so a
+  driver advertising one had no way to deliver it losslessly.
+
+  **Breaking:** `write_column_value` and `write_column_value_at` take a new
+  final `NumericTarget` argument carrying the ARD's `SQL_DESC_PRECISION` and
+  `SQL_DESC_SCALE`, which the spec makes the application's way of declaring a
+  `SQL_NUMERIC_STRUCT`'s layout ("**SQLSetDescField** is required to perform
+  manual binding with SQL_C_NUMERIC values"). Pass `NumericTarget::UNSPECIFIED`
+  where there is no descriptor; the value then describes itself. Only a driver
+  calling these helpers directly is affected.
+
 - **A float read as text renders within the display size ODBC defines for it.**
   The *Display Size* appendix does not just give a number, it says what the
   number is made of: `SQL_FLOAT`/`SQL_DOUBLE` is "24 (a sign, 15 digits, a

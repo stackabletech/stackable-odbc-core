@@ -1265,6 +1265,15 @@ pub(crate) unsafe fn write_output_params(
                 rec.data_ptr(),
                 rec.apd.octet_length,
                 rec.indicator_ptr(),
+                // From the APD rather than `UNSPECIFIED`: this writes an output
+                // parameter back into the buffer `SQLBindParameter` bound, and
+                // the APD record is where that binding's precision and scale
+                // live. An output parameter bound as `SQL_C_NUMERIC` declares
+                // them exactly as a bound column does.
+                crate::column_value::NumericTarget {
+                    precision: rec.apd.precision,
+                    scale: rec.apd.scale,
+                },
             )
         }?;
     }

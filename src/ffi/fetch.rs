@@ -33,7 +33,23 @@ use crate::types::{ColumnValue, FetchResult, SqlReturn, SqlState, fetch_orientat
 /// infallible pointer arithmetic and so carries no ordering constraint. Applying
 /// it here is what lets the write loop read this list directly, instead of
 /// mapping it into a second vector allocated on every row.
-type Binding = (u16, i16, *mut c_void, isize, *mut isize);
+/// A struct rather than the tuple this was, because it now carries seven
+/// fields and two of them are adjacent `i16`s. That is the shape
+/// `SQLForeignKeys`' argument list is a standing warning about: crossing
+/// `precision` with `scale` would compile silently and produce a
+/// `SQL_NUMERIC_STRUCT` describing a different number. Named fields cannot be
+/// crossed.
+#[derive(Clone, Copy)]
+struct Binding {
+    col: u16,
+    concise_type: i16,
+    target_ptr: *mut c_void,
+    buf_len: isize,
+    ind_ptr: *mut isize,
+    /// The ARD's `SQL_DESC_PRECISION` and `SQL_DESC_SCALE` for this column,
+    /// which `SQL_C_NUMERIC` reads and every other C type ignores.
+    numeric: crate::column_value::NumericTarget,
+}
 
 /// Every binding of an ARD that this fetch must serve, in no particular order.
 ///
@@ -70,23 +86,25 @@ fn collect_bindings(ard: &Descriptor, bind_offset: crate::descriptor::BindOffset
         .records
         .iter()
         .filter(|(_, record)| record.is_bound() || !record.indicator_ptr.is_null())
-        .map(|(&col, r)| {
-            (
-                col,
-                r.concise_type,
-                // A null pointer is left alone rather than shifted, which is
-                // `BindOffset::apply`'s business: a record may carry either
-                // pointer null — the indicator-only binding the spec allows —
-                // and offsetting `0` would turn that absence into a non-null
-                // address the `22002` check and `write_column_value` would then
-                // treat as real.
-                bind_offset.apply(r.data_ptr),
-                r.octet_length,
-                bind_offset.apply(r.indicator_ptr),
-            )
+        .map(|(&col, r)| Binding {
+            col,
+            concise_type: r.concise_type,
+            // A null pointer is left alone rather than shifted, which is
+            // `BindOffset::apply`'s business: a record may carry either
+            // pointer null — the indicator-only binding the spec allows —
+            // and offsetting `0` would turn that absence into a non-null
+            // address the `22002` check and `write_column_value` would then
+            // treat as real.
+            target_ptr: bind_offset.apply(r.data_ptr),
+            buf_len: r.octet_length,
+            ind_ptr: bind_offset.apply(r.indicator_ptr),
+            numeric: crate::column_value::NumericTarget {
+                precision: r.precision,
+                scale: r.scale,
+            },
         })
         .collect();
-    bindings.sort_unstable_by_key(|&(col, ..)| col);
+    bindings.sort_unstable_by_key(|b| b.col);
     bindings
 }
 
@@ -430,7 +448,15 @@ unsafe fn fetch_with_report<B: Backend>(
                     // `HY010` and `24000` checks, both of which are above.
                     let mut truncated = false;
                     if let Some(ref mut statement) = stmt.statement {
-                        for &(col, concise_type, target_ptr, buf_len, ind_ptr) in &bindings {
+                        for &Binding {
+                            col,
+                            concise_type,
+                            target_ptr,
+                            buf_len,
+                            ind_ptr,
+                            numeric,
+                        } in &bindings
+                        {
                             let c_type = c_type_of(concise_type)?;
                             // Under the same deadline as the `fetch` above: these
                             // reads are part of `SQLFetch`'s own execution, so
@@ -447,8 +473,9 @@ unsafe fn fetch_with_report<B: Backend>(
                                     SqlState::indicator_variable_required(),
                                 ));
                             }
-                            let written =
-                                write_column_value(&value, c_type, target_ptr, buf_len, ind_ptr)?;
+                            let written = write_column_value(
+                                &value, c_type, target_ptr, buf_len, ind_ptr, numeric,
+                            )?;
                             if written == SqlReturn::SUCCESS_WITH_INFO {
                                 truncated = true;
                             }
@@ -1050,6 +1077,28 @@ pub unsafe fn sql_get_data<B: Backend>(
                 .map(crate::handles::cancel_as::<B>)
                 .transpose()?;
 
+            // The ARD's precision and scale for this column, which only
+            // `SQL_C_NUMERIC` reads. Resolved here, before the mutable borrow
+            // below, for the same reason the cancel token is: `desc_of` needs
+            // the scope, and `stmt` is borrowed for the rest of the closure.
+            //
+            // A column with no ARD record yields `UNSPECIFIED`, which is the
+            // right answer rather than a fallback: `SQLGetData` names its own
+            // target type and need never have bound the column at all, and the
+            // spec's route for declaring these two is `SQLSetDescField` on the
+            // ARD. Saying nothing means the value describes itself.
+            let numeric = {
+                let ard = scope.desc_of::<B>(statement_handle, DescriptorRole::Ard)?;
+                ard.records.get(&col_or_param_num).map_or(
+                    crate::column_value::NumericTarget::UNSPECIFIED,
+                    |r| crate::column_value::NumericTarget {
+                        precision: r.precision,
+                        scale: r.scale,
+                    },
+                )
+            };
+            let stmt = scope.get::<StatementHandle<B>>(statement_handle)?;
+
             // `cursor_open` implies `statement.is_some()`; this arm keeps the
             // invariant honest rather than unwrapping.
             let Some(ref mut statement) = stmt.statement else {
@@ -1189,6 +1238,7 @@ pub unsafe fn sql_get_data<B: Backend>(
                             buffer_length,
                             str_len_or_ind_ptr,
                             cursor.delivered,
+                            numeric,
                         )?,
                     }
                 }

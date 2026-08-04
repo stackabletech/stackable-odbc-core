@@ -24,6 +24,7 @@ use crate::types::{CDataType, ColumnValue, SqlReturn, SqlState};
 /// - `target_ptr`: Pointer to the caller's buffer (may be null for length-only queries)
 /// - `buf_len`: Buffer size in bytes
 /// - `len_ind_ptr`: Output pointer for actual data length (bytes) or NULL_DATA (-1)
+/// - `numeric`: the ARD's precision and scale, read only by `SQL_C_NUMERIC`
 ///
 /// # Returns
 /// - `SqlReturn::SUCCESS` if the value was written completely
@@ -38,9 +39,56 @@ pub unsafe fn write_column_value(
     target_ptr: *mut c_void,
     buf_len: isize,
     len_ind_ptr: *mut isize,
+    numeric: NumericTarget,
 ) -> Result<SqlReturn, OdbcError> {
-    unsafe { write_column_value_at(value, target_type, target_ptr, buf_len, len_ind_ptr, 0) }
-        .map(|w| w.ret)
+    unsafe {
+        write_column_value_at(
+            value,
+            target_type,
+            target_ptr,
+            buf_len,
+            len_ind_ptr,
+            0,
+            numeric,
+        )
+    }
+    .map(|w| w.ret)
+}
+
+/// The ARD's `SQL_DESC_PRECISION` and `SQL_DESC_SCALE` for the column being
+/// written, which only `SQL_C_NUMERIC` reads.
+///
+/// The *SQL to C: Numeric* page is explicit that an application controls a
+/// `SQL_NUMERIC_STRUCT`'s precision and scale through the descriptor —
+/// "**SQLSetDescField** is required to perform manual binding with
+/// SQL_C_NUMERIC values" — so the conversion cannot be done from the
+/// [`ColumnValue`] alone.
+///
+/// A struct rather than two `i16` arguments, for the reason
+/// `SQLForeignKeys`' argument list is a standing warning about in AGENTS.md:
+/// two adjacent same-typed parameters can be crossed at a call site and still
+/// compile, and crossing these two produces a struct describing a different
+/// number.
+///
+/// [`NumericTarget::UNSPECIFIED`] is what every caller but the bound-column
+/// loop and `SQLGetData` passes, and what an ARD record that was never given
+/// these fields yields. Zero is not a legal `SQL_NUMERIC_STRUCT` precision, so
+/// it reads as "the application did not say" and the conversion derives both
+/// from the value itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct NumericTarget {
+    /// `SQL_DESC_PRECISION`. `0` means unspecified.
+    pub precision: i16,
+    /// `SQL_DESC_SCALE`.
+    pub scale: i16,
+}
+
+impl NumericTarget {
+    /// The application declared neither field; derive both from the value.
+    pub const UNSPECIFIED: Self = Self {
+        precision: 0,
+        scale: 0,
+    };
 }
 
 /// What one marshalling call delivered, for `SQLGetData`'s chunking loop.
@@ -109,8 +157,19 @@ pub unsafe fn write_column_value_at(
     buf_len: isize,
     len_ind_ptr: *mut isize,
     offset: usize,
+    numeric: NumericTarget,
 ) -> Result<ChunkWrite, OdbcError> {
-    unsafe { write_fixed_or_chunked(value, target_type, target_ptr, buf_len, len_ind_ptr, offset) }
+    unsafe {
+        write_fixed_or_chunked(
+            value,
+            target_type,
+            target_ptr,
+            buf_len,
+            len_ind_ptr,
+            offset,
+            numeric,
+        )
+    }
 }
 
 /// A chunkable value, converted once, for a `SQLGetData` read to drain in parts.
@@ -220,6 +279,7 @@ unsafe fn write_fixed_or_chunked(
     buf_len: isize,
     len_ind_ptr: *mut isize,
     offset: usize,
+    numeric: NumericTarget,
 ) -> Result<ChunkWrite, OdbcError> {
     // NULL handling
     if matches!(value, ColumnValue::Null) {
@@ -284,7 +344,15 @@ unsafe fn write_fixed_or_chunked(
         }
 
         return unsafe {
-            write_fixed_or_chunked(value, inferred, target_ptr, buf_len, len_ind_ptr, offset)
+            write_fixed_or_chunked(
+                value,
+                inferred,
+                target_ptr,
+                buf_len,
+                len_ind_ptr,
+                offset,
+                numeric,
+            )
         };
     }
 
@@ -336,6 +404,13 @@ unsafe fn write_fixed_or_chunked(
                 delivered,
                 chunkable: true,
             });
+        }
+        // `SQL_C_NUMERIC` sits here, beside the other targets that need the
+        // value's *text* rather than a numeric pivot, and ahead of the coercion
+        // match for the same reason they are: it reads the rendered decimal.
+        // Not chunkable — `SQL_NUMERIC_STRUCT` is fixed-width.
+        CDataType::Numeric => {
+            return unsafe { write_numeric(value, target_ptr, len_ind_ptr, numeric) }.map(whole);
         }
         _ => {}
     }
@@ -2102,7 +2177,11 @@ unsafe fn write_numeric_pivot(
 /// outcomes. Eight of the row's C types reach here, one per caller in
 /// [`write_numeric_pivot`]: `odbc-sys` models the deprecated `SQL_C_TINYINT`,
 /// `SQL_C_SHORT` and `SQL_C_LONG` only as commented-out entries, and
-/// `SQL_C_NUMERIC` has no arm in that function at all. The three outcomes:
+/// `SQL_C_NUMERIC` is answered before the pivot is built at all — it needs the
+/// value's *digits* rather than a pivot already narrowed to `i64`/`f64`, so it
+/// has its own writer, [`write_numeric`], reached from `write_fixed_or_chunked`
+/// beside the character targets. It shares this row's three outcomes, which is
+/// why they are stated once here. The three outcomes:
 ///
 /// - "Data converted without truncation" — `SQL_SUCCESS`.
 /// - "Data converted with truncation of fractional digits" — the truncated
@@ -2235,6 +2314,92 @@ unsafe fn write_exact_integer<T: Copy + TryFrom<i128>>(
 /// alone, so only the two infinities differ from `Display`.
 const fn infinity_text(negative: bool) -> &'static str {
     if negative { "-Infinity" } else { "Infinity" }
+}
+
+/// Write a value as a `SQL_NUMERIC_STRUCT` (`SQL_C_NUMERIC`).
+///
+/// Spec: <https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/sql-to-c-numeric>
+///
+/// `SQL_C_NUMERIC` shares the *SQL to C: Numeric* table's exact-integer row with
+/// `SQL_C_SLONG` and `SQL_C_SBIGINT`, so it has that row's three outcomes:
+///
+/// | Test | \**TargetValuePtr* | \**StrLen_or_IndPtr* | SQLSTATE |
+/// |---|---|---|---|
+/// | Data converted without truncation | Data | Size of the C data type | n/a |
+/// | Data converted with truncation of fractional digits | Truncated data | Size of the C data type | `01S07` |
+/// | Conversion would lose whole digits | Undefined | Undefined | `22003` |
+///
+/// Footnote [a] applies to all three: "The value of *BufferLength* is ignored
+/// for this conversion. The driver assumes that the size of \**TargetValuePtr*
+/// is the size of the C data type." So `buf_len` is not a parameter here.
+///
+/// This target had no arm at all and answered `07006` for every value, while
+/// the same C type worked as an *input* parameter through `numeric_convert`.
+/// The overview page is explicit that this is not optional: drivers "are
+/// required to support conversions to all ODBC C data types from the ODBC SQL
+/// data types that they support".
+///
+/// # Precision and scale
+///
+/// The struct's own `precision` and `scale` fields describe what is in `val`,
+/// and the application may dictate them: "**SQLSetDescField** is required to
+/// perform manual binding with SQL_C_NUMERIC values". So a non-zero
+/// [`NumericTarget::precision`] is honoured and the value is rescaled to it;
+/// [`NumericTarget::UNSPECIFIED`] means the application said nothing and both
+/// are taken from the value, which is the self-describing reading the struct's
+/// own fields invite. Zero is not a legal precision, which is what makes it
+/// usable as "unspecified".
+///
+/// # Sign
+///
+/// `odbc-sys` documents `sign` as "1 if positive, 0 if negative" — the opposite
+/// of a sign *bit*, and the field most likely to be inverted by habit.
+/// `a_negative_value_sets_the_numeric_sign_byte_to_zero` pins it.
+unsafe fn write_numeric(
+    value: &ColumnValue,
+    target_ptr: *mut c_void,
+    len_ind_ptr: *mut isize,
+    target: NumericTarget,
+) -> Result<SqlReturn, OdbcError> {
+    // The rendered decimal is the pivot, for the same reason the character
+    // targets above use it: it is exact for `Decimal`, which is the variant an
+    // application reading `SQL_C_NUMERIC` is overwhelmingly reading, and an
+    // `f64` round-trip would corrupt the digits the struct exists to preserve.
+    let rendered = match value {
+        ColumnValue::String(s) | ColumnValue::Decimal(s) => s.clone(),
+        ColumnValue::I8(_)
+        | ColumnValue::I16(_)
+        | ColumnValue::I32(_)
+        | ColumnValue::I64(_)
+        | ColumnValue::F32(_)
+        | ColumnValue::F64(_)
+        | ColumnValue::Bool(_) => column_value_to_string(value),
+        // Off both tables: the source is not numeric or character at all.
+        _ => {
+            return Err(OdbcError::general(
+                format!("Cannot convert {value:?} to SQL_C_NUMERIC"),
+                SqlState::restricted_data_type_attribute_violation(),
+            ));
+        }
+    };
+
+    let literal =
+        crate::param_convert::parse_numeric_literal(rendered.trim()).ok_or_else(|| {
+            OdbcError::general(
+                format!("Value is not a numeric literal: {rendered}"),
+                SqlState::invalid_character_value_for_cast(),
+            )
+        })?;
+
+    let (out, fraction_lost) = literal.to_numeric_struct(target)?;
+
+    let _ = unsafe { write_fixed(target_ptr, len_ind_ptr, out) }?;
+    if fraction_lost {
+        // The row's second outcome: truncated data *is* written, and 01S07 is a
+        // warning rather than a failure. `write_fixed` above has already run.
+        return Err(OdbcError::FractionalTruncation);
+    }
+    Ok(SqlReturn::SUCCESS)
 }
 
 /// The display size ODBC defines for `SQL_REAL`, in characters.
@@ -2561,6 +2726,7 @@ mod tests {
                 std::ptr::null_mut(),
                 0,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
@@ -2620,7 +2786,14 @@ mod tests {
         };
         let mut ind: isize = 0;
         with_guarded_buffer(4, |target| unsafe {
-            write_column_value(&value, CDataType::Default, target, 4, &mut ind)
+            write_column_value(
+                &value,
+                CDataType::Default,
+                target,
+                4,
+                &mut ind,
+                NumericTarget::UNSPECIFIED,
+            )
         });
     }
 
@@ -2634,6 +2807,7 @@ mod tests {
                 target,
                 4,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         });
     }
@@ -2649,6 +2823,7 @@ mod tests {
                 &mut buf as *mut i64 as *mut c_void,
                 8,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
@@ -2670,6 +2845,7 @@ mod tests {
                 &mut buf as *mut i64 as *mut c_void,
                 0,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
@@ -2687,6 +2863,7 @@ mod tests {
                 &mut buf as *mut i32 as *mut c_void,
                 4,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
@@ -2705,6 +2882,7 @@ mod tests {
                 &mut buf as *mut i64 as *mut c_void,
                 8,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
@@ -2723,6 +2901,7 @@ mod tests {
                 &mut buf as *mut i8 as *mut c_void,
                 1,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
@@ -2741,6 +2920,7 @@ mod tests {
                 &mut buf as *mut i16 as *mut c_void,
                 2,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
@@ -2759,6 +2939,7 @@ mod tests {
                 &mut buf as *mut f32 as *mut c_void,
                 4,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
@@ -2777,6 +2958,7 @@ mod tests {
                 &mut buf as *mut f64 as *mut c_void,
                 8,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
@@ -2795,6 +2977,7 @@ mod tests {
                 &mut buf as *mut u8 as *mut c_void,
                 1,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
@@ -2813,6 +2996,7 @@ mod tests {
                 &mut buf as *mut u8 as *mut c_void,
                 1,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
@@ -2831,6 +3015,7 @@ mod tests {
                 buf.as_mut_ptr() as *mut c_void,
                 40,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
@@ -2850,6 +3035,7 @@ mod tests {
                 buf.as_mut_ptr() as *mut c_void,
                 8, // 4 u16 slots = 8 bytes
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS_WITH_INFO);
@@ -2871,6 +3057,7 @@ mod tests {
                 buf.as_mut_ptr() as *mut c_void,
                 1, // only one byte is available
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS_WITH_INFO);
@@ -2896,6 +3083,7 @@ mod tests {
                 buf.as_mut_ptr() as *mut c_void,
                 0,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS_WITH_INFO);
@@ -2920,6 +3108,7 @@ mod tests {
                 std::ptr::null_mut(),
                 0,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
@@ -2938,6 +3127,7 @@ mod tests {
                 buf.as_mut_ptr() as *mut c_void,
                 0,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS_WITH_INFO);
@@ -2959,6 +3149,7 @@ mod tests {
                 buf.as_mut_ptr() as *mut c_void,
                 0,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS_WITH_INFO);
@@ -2979,6 +3170,7 @@ mod tests {
                 buf.as_mut_ptr() as *mut c_void,
                 2,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS_WITH_INFO);
@@ -2998,6 +3190,7 @@ mod tests {
                 &mut buf as *mut i32 as *mut c_void,
                 4,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
@@ -3015,6 +3208,7 @@ mod tests {
                 buf.as_mut_ptr() as *mut c_void,
                 20,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
@@ -3034,6 +3228,7 @@ mod tests {
                 buf.as_mut_ptr() as *mut c_void,
                 4,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS_WITH_INFO);
@@ -3053,6 +3248,7 @@ mod tests {
                 buf.as_mut_ptr() as *mut c_void,
                 10,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
@@ -3071,6 +3267,7 @@ mod tests {
                 buf.as_mut_ptr() as *mut c_void,
                 2,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS_WITH_INFO);
@@ -3093,6 +3290,7 @@ mod tests {
                 buf.as_mut_ptr() as *mut c_void,
                 std::mem::size_of::<Date>() as isize,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
@@ -3119,6 +3317,7 @@ mod tests {
                 buf.as_mut_ptr() as *mut c_void,
                 std::mem::size_of::<Time>() as isize,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
@@ -3146,6 +3345,7 @@ mod tests {
                 buf.as_mut_ptr() as *mut c_void,
                 std::mem::size_of::<Time>() as isize,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         }
         .expect_err("non-zero fraction dropped to SQL_TIME_STRUCT must report 01S07");
@@ -3170,6 +3370,7 @@ mod tests {
                 buf.as_mut_ptr() as *mut c_void,
                 std::mem::size_of::<Time>() as isize,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
@@ -3194,6 +3395,7 @@ mod tests {
                 buf.as_mut_ptr() as *mut c_void,
                 40,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
@@ -3221,6 +3423,7 @@ mod tests {
                 buf.as_mut_ptr() as *mut c_void,
                 std::mem::size_of::<Timestamp>() as isize,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
@@ -3256,6 +3459,7 @@ mod tests {
                 buf.as_mut_ptr() as *mut c_void,
                 std::mem::size_of::<Timestamp>() as isize,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
@@ -3294,6 +3498,7 @@ mod tests {
                 buf.as_mut_ptr() as *mut c_void,
                 std::mem::size_of::<Timestamp>() as isize,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         let err = ret.expect_err("a plain integer column has no datetime conversion");
@@ -3314,6 +3519,7 @@ mod tests {
                 buf.as_mut_ptr() as *mut c_void,
                 std::mem::size_of::<Date>() as isize,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         let err = ret.expect_err("a plain float column has no datetime conversion");
@@ -3334,6 +3540,7 @@ mod tests {
                 buf.as_mut_ptr() as *mut c_void,
                 40,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
@@ -3353,6 +3560,7 @@ mod tests {
                 buf.as_mut_ptr() as *mut c_void,
                 20,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
@@ -3371,6 +3579,7 @@ mod tests {
                 &mut buf as *mut f64 as *mut c_void,
                 8,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert!(ret.is_err());
@@ -3386,6 +3595,7 @@ mod tests {
                 std::ptr::null_mut(),
                 0,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
@@ -3403,6 +3613,7 @@ mod tests {
                 buf.as_mut_ptr() as *mut c_void,
                 40,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
@@ -3422,6 +3633,7 @@ mod tests {
                 &mut buf as *mut u8 as *mut c_void,
                 1,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
@@ -3447,6 +3659,7 @@ mod tests {
                 buf.as_mut_ptr() as *mut c_void,
                 20,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
@@ -3469,6 +3682,7 @@ mod tests {
                 &mut buf as *mut i8 as *mut c_void,
                 1,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
@@ -3486,6 +3700,7 @@ mod tests {
                 &mut buf as *mut i16 as *mut c_void,
                 2,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
@@ -3503,6 +3718,7 @@ mod tests {
                 &mut buf as *mut i64 as *mut c_void,
                 8,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
@@ -3520,6 +3736,7 @@ mod tests {
                 &mut buf as *mut f32 as *mut c_void,
                 4,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
@@ -3537,6 +3754,7 @@ mod tests {
                 &mut buf as *mut f64 as *mut c_void,
                 8,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
@@ -3558,6 +3776,7 @@ mod tests {
                 buf.as_mut_ptr() as *mut c_void,
                 std::mem::size_of::<Date>() as isize,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
@@ -3583,6 +3802,7 @@ mod tests {
                 buf.as_mut_ptr() as *mut c_void,
                 std::mem::size_of::<Time>() as isize,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
@@ -3611,6 +3831,7 @@ mod tests {
                 buf.as_mut_ptr() as *mut c_void,
                 std::mem::size_of::<Timestamp>() as isize,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
@@ -3629,6 +3850,7 @@ mod tests {
                 buf.as_mut_ptr() as *mut c_void,
                 10,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
@@ -3648,6 +3870,7 @@ mod tests {
                 buf.as_mut_ptr() as *mut c_void,
                 20,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
@@ -3670,6 +3893,7 @@ mod tests {
                 buf.as_mut_ptr() as *mut c_void,
                 20,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
@@ -3689,6 +3913,7 @@ mod tests {
                 buf.as_mut_ptr() as *mut c_void,
                 10,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
@@ -3707,6 +3932,7 @@ mod tests {
                 buf.as_mut_ptr() as *mut c_void,
                 60,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
@@ -3726,6 +3952,7 @@ mod tests {
                 buf.as_mut_ptr() as *mut c_void,
                 64,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
@@ -3812,6 +4039,7 @@ mod tests {
                 buf.as_mut_ptr() as *mut c_void,
                 40,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
@@ -3836,6 +4064,7 @@ mod tests {
                 buf.as_mut_ptr() as *mut c_void,
                 20,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
@@ -3861,6 +4090,7 @@ mod tests {
                 buf.as_mut_ptr() as *mut c_void,
                 80,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
@@ -3892,6 +4122,7 @@ mod tests {
                 buf.as_mut_ptr() as *mut c_void,
                 80,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
@@ -3911,6 +4142,7 @@ mod tests {
                 buf.as_mut_ptr() as *mut c_void,
                 40,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
@@ -3934,6 +4166,7 @@ mod tests {
                 buf.as_mut_ptr() as *mut c_void,
                 80,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
@@ -3957,6 +4190,7 @@ mod tests {
                 buf.as_mut_ptr() as *mut c_void,
                 40,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
@@ -3980,6 +4214,7 @@ mod tests {
                 &mut buf as *mut i32 as *mut c_void,
                 4,
                 std::ptr::null_mut(),
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
@@ -3996,6 +4231,7 @@ mod tests {
                 buf.as_mut_ptr() as *mut c_void,
                 40,
                 std::ptr::null_mut(),
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
@@ -4013,6 +4249,7 @@ mod tests {
                 buf.as_mut_ptr() as *mut c_void,
                 20,
                 std::ptr::null_mut(),
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
@@ -4029,6 +4266,7 @@ mod tests {
                 buf.as_mut_ptr() as *mut c_void,
                 10,
                 std::ptr::null_mut(),
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
@@ -4044,6 +4282,7 @@ mod tests {
                 std::ptr::null_mut(),
                 0,
                 std::ptr::null_mut(),
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
@@ -4195,6 +4434,7 @@ mod tests {
                 &mut buf as *mut i32 as *mut c_void,
                 4,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
@@ -4213,6 +4453,7 @@ mod tests {
                 &mut buf as *mut i8 as *mut c_void,
                 1,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
@@ -4231,6 +4472,7 @@ mod tests {
                 &mut buf as *mut f64 as *mut c_void,
                 8,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
@@ -4253,6 +4495,7 @@ mod tests {
                 &mut buf as *mut i32 as *mut c_void,
                 4,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
@@ -4271,6 +4514,7 @@ mod tests {
                 &mut buf as *mut f32 as *mut c_void,
                 4,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
@@ -4289,6 +4533,7 @@ mod tests {
                 &mut buf as *mut i32 as *mut c_void,
                 4,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
@@ -4313,8 +4558,7 @@ mod tests {
                         CDataType::Default,
                         buf.as_mut_ptr().cast(),
                         (buf.len() * 2) as isize,
-                        &mut ind,
-                    )
+                        &mut ind, NumericTarget::UNSPECIFIED)
                 };
                 let r = ret.unwrap();
                 assert!(
@@ -4334,8 +4578,7 @@ mod tests {
                         CDataType::Default,
                         (&mut out as *mut i32).cast(),
                         4,
-                        &mut ind,
-                    )
+                        &mut ind, NumericTarget::UNSPECIFIED)
                 };
                 assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
                 assert_eq!(out, v);
@@ -4352,8 +4595,7 @@ mod tests {
                         CDataType::Default,
                         (&mut out as *mut f64).cast(),
                         8,
-                        &mut ind,
-                    )
+                        &mut ind, NumericTarget::UNSPECIFIED)
                 };
                 assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
                 assert_eq!(out.to_bits(), v.to_bits());
@@ -4370,8 +4612,7 @@ mod tests {
                         CDataType::Default,
                         buf.as_mut_ptr().cast(),
                         (buf.len() * 2) as isize,
-                        &mut ind,
-                    )
+                        &mut ind, NumericTarget::UNSPECIFIED)
                 };
                 assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
                 let code_units = (ind as usize) / 2;
@@ -4399,6 +4640,7 @@ mod tests {
                 &mut buf as *mut i8 as *mut c_void,
                 1,
                 std::ptr::null_mut(),
+                NumericTarget::UNSPECIFIED,
             )
         };
         let err = ret.unwrap_err();
@@ -4415,6 +4657,7 @@ mod tests {
                 &mut buf as *mut i8 as *mut c_void,
                 1,
                 std::ptr::null_mut(),
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
@@ -4431,6 +4674,7 @@ mod tests {
                 &mut buf as *mut i16 as *mut c_void,
                 2,
                 std::ptr::null_mut(),
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(sqlstate_of_err(&ret.unwrap_err()), "22003");
@@ -4446,6 +4690,7 @@ mod tests {
                 &mut buf as *mut i32 as *mut c_void,
                 4,
                 std::ptr::null_mut(),
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(sqlstate_of_err(&ret.unwrap_err()), "22003");
@@ -4461,6 +4706,7 @@ mod tests {
                 &mut buf as *mut u8 as *mut c_void,
                 1,
                 std::ptr::null_mut(),
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(sqlstate_of_err(&ret.unwrap_err()), "22003");
@@ -4476,6 +4722,7 @@ mod tests {
                 &mut buf as *mut u8 as *mut c_void,
                 1,
                 std::ptr::null_mut(),
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(sqlstate_of_err(&ret.unwrap_err()), "22003");
@@ -4491,6 +4738,7 @@ mod tests {
                 &mut buf as *mut u64 as *mut c_void,
                 8,
                 std::ptr::null_mut(),
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(sqlstate_of_err(&ret.unwrap_err()), "22003");
@@ -4507,6 +4755,7 @@ mod tests {
                 &mut buf as *mut u8 as *mut c_void,
                 1,
                 std::ptr::null_mut(),
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
@@ -4521,6 +4770,7 @@ mod tests {
                 &mut buf16 as *mut u16 as *mut c_void,
                 2,
                 std::ptr::null_mut(),
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
@@ -4535,6 +4785,7 @@ mod tests {
                 &mut buf32 as *mut u32 as *mut c_void,
                 4,
                 std::ptr::null_mut(),
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
@@ -4549,6 +4800,7 @@ mod tests {
                 &mut buf64 as *mut u64 as *mut c_void,
                 8,
                 std::ptr::null_mut(),
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
@@ -4569,6 +4821,7 @@ mod tests {
                 &mut buf as *mut i8 as *mut c_void,
                 1,
                 std::ptr::null_mut(),
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(sqlstate_of_err(&ret.unwrap_err()), "22003");
@@ -4584,6 +4837,7 @@ mod tests {
                 &mut buf as *mut i32 as *mut c_void,
                 4,
                 std::ptr::null_mut(),
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(sqlstate_of_err(&ret.unwrap_err()), "22003");
@@ -4599,6 +4853,7 @@ mod tests {
                 &mut buf as *mut i64 as *mut c_void,
                 8,
                 std::ptr::null_mut(),
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(sqlstate_of_err(&ret.unwrap_err()), "22003");
@@ -4614,6 +4869,7 @@ mod tests {
                 &mut buf as *mut u8 as *mut c_void,
                 1,
                 std::ptr::null_mut(),
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(sqlstate_of_err(&ret.unwrap_err()), "22003");
@@ -4629,6 +4885,7 @@ mod tests {
                 &mut buf as *mut u8 as *mut c_void,
                 1,
                 std::ptr::null_mut(),
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
@@ -4658,6 +4915,7 @@ mod tests {
                 std::ptr::from_mut(&mut out).cast(),
                 size_of::<T>() as isize,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         }
         .expect_err("a dropped fraction is reported, not silent");
@@ -4685,6 +4943,7 @@ mod tests {
                 std::ptr::from_mut(&mut out).cast(),
                 size_of::<T>() as isize,
                 std::ptr::null_mut(),
+                NumericTarget::UNSPECIFIED,
             )
         }
         .expect_err("whole digits would be lost");
@@ -4776,6 +5035,7 @@ mod tests {
                 std::ptr::from_mut(&mut out).cast(),
                 size_of::<i64>() as isize,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         }
         .expect("2^63 - 1024 fits in i64");
@@ -4796,6 +5056,7 @@ mod tests {
                 std::ptr::from_mut(&mut out).cast(),
                 size_of::<u64>() as isize,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         }
         .expect("2^64 - 2048 fits in u64");
@@ -4841,6 +5102,7 @@ mod tests {
                 &mut buf as *mut u8 as *mut c_void,
                 1,
                 std::ptr::null_mut(),
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(
@@ -4861,6 +5123,7 @@ mod tests {
                 &mut buf as *mut u8 as *mut c_void,
                 1,
                 std::ptr::null_mut(),
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(
@@ -4881,6 +5144,7 @@ mod tests {
                 &mut buf as *mut u8 as *mut c_void,
                 1,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         let err = ret.unwrap_err();
@@ -4905,6 +5169,7 @@ mod tests {
                 &mut buf as *mut u8 as *mut c_void,
                 1,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         let err = ret.unwrap_err();
@@ -4927,6 +5192,7 @@ mod tests {
                 &mut buf as *mut u8 as *mut c_void,
                 1,
                 std::ptr::null_mut(),
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(sqlstate_of_err(&ret.unwrap_err()), "22003");
@@ -4942,6 +5208,7 @@ mod tests {
                 &mut buf as *mut u8 as *mut c_void,
                 1,
                 std::ptr::null_mut(),
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
@@ -4965,6 +5232,7 @@ mod tests {
                 &mut buf as *mut u8 as *mut c_void,
                 1,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
@@ -4985,6 +5253,7 @@ mod tests {
                 &mut buf as *mut u8 as *mut c_void,
                 1,
                 std::ptr::null_mut(),
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(
@@ -5016,6 +5285,7 @@ mod tests {
                 &mut buf as *mut f32 as *mut c_void,
                 4,
                 std::ptr::null_mut(),
+                NumericTarget::UNSPECIFIED,
             )
         }
         .expect("an in-range inexact narrowing is the row's first cell");
@@ -5034,6 +5304,7 @@ mod tests {
                 &mut buf as *mut f32 as *mut c_void,
                 4,
                 std::ptr::null_mut(),
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS);
@@ -5058,6 +5329,7 @@ mod tests {
                 std::ptr::from_mut(&mut out).cast(),
                 size_of::<i64>() as isize,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         }
         .expect_err("2^63 does not fit in i64");
@@ -5078,6 +5350,7 @@ mod tests {
                 std::ptr::from_mut(&mut out).cast(),
                 size_of::<u64>() as isize,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         }
         .expect_err("2^64 does not fit in u64");
@@ -5101,6 +5374,7 @@ mod tests {
                 std::ptr::from_mut(&mut out).cast(),
                 size_of::<f32>() as isize,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         }
         .expect("an inexact but in-range narrowing reports nothing");
@@ -5120,6 +5394,7 @@ mod tests {
                 std::ptr::from_mut(&mut out).cast(),
                 size_of::<f32>() as isize,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         }
         .expect("0.5 is exact in f32");
@@ -5145,6 +5420,7 @@ mod tests {
                     std::ptr::from_mut(&mut out).cast(),
                     size_of::<f32>() as isize,
                     &mut ind,
+                    NumericTarget::UNSPECIFIED,
                 )
             }
             .expect_err("a magnitude beyond f32::MAX is outside the range of SQL_C_FLOAT");
@@ -5176,6 +5452,7 @@ mod tests {
                     std::ptr::from_mut(&mut out).cast(),
                     size_of::<f32>() as isize,
                     &mut ind,
+                    NumericTarget::UNSPECIFIED,
                 )
             }
             .expect("an infinity the source held narrows to f32 exactly");
@@ -5202,6 +5479,7 @@ mod tests {
                 std::ptr::from_mut(&mut out).cast(),
                 size_of::<f32>() as isize,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         }
         .expect("a subnormal is within the range of SQL_C_FLOAT");
@@ -5225,6 +5503,7 @@ mod tests {
                 std::ptr::from_mut(&mut out).cast(),
                 size_of::<f32>() as isize,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         }
         .expect("underflow to zero is inside the range of SQL_C_FLOAT");
@@ -5250,6 +5529,7 @@ mod tests {
                 std::ptr::from_mut(&mut out).cast(),
                 size_of::<f32>() as isize,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         }
         .expect("a NaN is not outside the range of SQL_C_FLOAT");
@@ -5292,6 +5572,7 @@ mod tests {
                 out.cast::<c_void>(),
                 size_of::<i64>() as isize,
                 ind,
+                NumericTarget::UNSPECIFIED,
             )
         }
         .expect("a misaligned target is legal");
@@ -5319,6 +5600,7 @@ mod tests {
                 out.cast::<c_void>(),
                 size_of::<f64>() as isize,
                 std::ptr::null_mut(),
+                NumericTarget::UNSPECIFIED,
             )
         }
         .expect("a misaligned target is legal");
@@ -5353,6 +5635,7 @@ mod tests {
                 out.cast::<c_void>(),
                 size_of::<odbc_sys::Timestamp>() as isize,
                 std::ptr::null_mut(),
+                NumericTarget::UNSPECIFIED,
             )
         }
         .expect("a misaligned target is legal");
@@ -5361,6 +5644,34 @@ mod tests {
         let ts = unsafe { std::ptr::read_unaligned(out) };
         assert_eq!((ts.year, ts.month, ts.day), (2026, 8, 3));
         assert_eq!((ts.hour, ts.minute, ts.second), (10, 30, 15));
+    }
+
+    /// `SQL_NUMERIC_STRUCT` has **alignment 1**, so — alone among the fixed
+    /// targets — it needs no misalignment test, and one cannot be written: its
+    /// fields are `u8`, `i8`, `u8` and `[u8; 16]`, so every address is aligned
+    /// for it and `u8`'s exemption in AGENTS.md's alignment table covers it.
+    ///
+    /// This is the test that says so. An attempt at the usual
+    /// offset-one-byte-into-an-arena test (as
+    /// `timestamp_struct_target_may_be_misaligned` does) fails on its own
+    /// `assert!(!out.is_aligned())` premise, which reads like a broken test
+    /// rather than a type that cannot be misaligned. Asserting the alignment
+    /// directly records the reason, and fails if `odbc-sys` ever gives
+    /// `Numeric` a wider field — at which point a real misalignment test
+    /// becomes both necessary and possible.
+    #[test]
+    fn the_numeric_struct_cannot_be_misaligned() {
+        assert_eq!(
+            std::mem::align_of::<odbc_sys::Numeric>(),
+            1,
+            "SQL_NUMERIC_STRUCT is all bytes; a wider field would need a \
+             misalignment test for the SQL_C_NUMERIC write",
+        );
+        assert_eq!(
+            std::mem::size_of::<odbc_sys::Numeric>(),
+            3 + odbc_sys::MAX_NUMERIC_LEN,
+            "precision, scale, sign, then val",
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -5400,6 +5711,7 @@ mod tests {
                         std::ptr::from_mut(&mut f32_out).cast(),
                         size_of::<f32>() as isize,
                         &mut ind,
+                        NumericTarget::UNSPECIFIED,
                     )
                 }
                 .expect_err("a literal beyond f64 range is outside the range of SQL_C_FLOAT");
@@ -5422,6 +5734,7 @@ mod tests {
                         std::ptr::from_mut(&mut f64_out).cast(),
                         size_of::<f64>() as isize,
                         &mut ind,
+                        NumericTarget::UNSPECIFIED,
                     )
                 }
                 .expect_err("a literal beyond f64 range is outside the range of SQL_C_DOUBLE");
@@ -5453,6 +5766,7 @@ mod tests {
                 std::ptr::from_mut(&mut out).cast(),
                 size_of::<f64>() as isize,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         }
         .expect("an underflow to zero is inside the range of SQL_C_DOUBLE");
@@ -5478,6 +5792,7 @@ mod tests {
                 std::ptr::from_mut(&mut out).cast(),
                 size_of::<f32>() as isize,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         }
         .expect_err("text that is not a numeric literal is 22018");
@@ -5500,6 +5815,7 @@ mod tests {
                 std::ptr::from_mut(&mut out).cast(),
                 size_of::<f64>() as isize,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         }
         .expect("decimal should convert to SQL_C_DOUBLE");
@@ -5518,6 +5834,7 @@ mod tests {
                 std::ptr::from_mut(&mut out).cast(),
                 size_of::<i64>() as isize,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         }
         .expect("integral decimal should convert to SQL_C_SBIGINT");
@@ -5537,6 +5854,7 @@ mod tests {
                 std::ptr::from_mut(&mut out).cast(),
                 size_of::<i32>() as isize,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         }
         .expect("numeric string should convert to SQL_C_SLONG");
@@ -5554,6 +5872,7 @@ mod tests {
                 std::ptr::from_mut(&mut out).cast(),
                 size_of::<i32>() as isize,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         }
         .expect_err("non-numeric string must not convert");
@@ -5574,6 +5893,7 @@ mod tests {
                 std::ptr::from_mut(&mut out).cast(),
                 size_of::<i32>() as isize,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         }
         .expect_err("out-of-range value must not convert");
@@ -5602,6 +5922,7 @@ mod tests {
                 std::ptr::from_mut(&mut out).cast(),
                 size_of::<i64>() as isize,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         }
         .expect_err("a dropped fraction is 01S07, not success");
@@ -5625,6 +5946,7 @@ mod tests {
                 std::ptr::from_mut(&mut out).cast(),
                 size_of::<i32>() as isize,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         }
         .expect_err("a dropped fraction is 01S07, not success");
@@ -5646,6 +5968,7 @@ mod tests {
                 std::ptr::from_mut(&mut out).cast(),
                 size_of::<u64>() as isize,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         }
         .expect_err("a dropped fraction is 01S07, not success");
@@ -5669,6 +5992,7 @@ mod tests {
                 std::ptr::from_mut(&mut out).cast(),
                 size_of::<i32>() as isize,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         }
         .expect("a fraction of zeros loses nothing");
@@ -5687,6 +6011,7 @@ mod tests {
                 std::ptr::from_mut(&mut out).cast(),
                 size_of::<i32>() as isize,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         }
         .expect("an exponent that consumes the fraction loses nothing");
@@ -5711,6 +6036,7 @@ mod tests {
                     std::ptr::from_mut(&mut out).cast(),
                     size_of::<i32>() as isize,
                     &mut ind,
+                    NumericTarget::UNSPECIFIED,
                 )
             }
             .expect_err("a dropped fraction is 01S07, not success");
@@ -5737,6 +6063,7 @@ mod tests {
                 std::ptr::from_mut(&mut out).cast(),
                 size_of::<u8>() as isize,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         }
         .expect_err("a dropped fraction is 01S07, not success");
@@ -5758,6 +6085,7 @@ mod tests {
                 std::ptr::from_mut(&mut out).cast(),
                 size_of::<i32>() as isize,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         }
         .expect_err("losing whole digits must not convert");
@@ -5782,6 +6110,7 @@ mod tests {
                 std::ptr::from_mut(&mut out).cast(),
                 size_of::<i64>() as isize,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         }
         .expect_err("losing whole digits must not convert");
@@ -5815,6 +6144,7 @@ mod tests {
                 std::ptr::from_mut(&mut out).cast(),
                 size_of::<i64>() as isize,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         }
         .expect_err("an exponent no integer target can hold must not convert");
@@ -5840,6 +6170,7 @@ mod tests {
                 std::ptr::from_mut(&mut out).cast(),
                 size_of::<i64>() as isize,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         }
         .expect_err("a dropped fraction is 01S07, not success");
@@ -5867,6 +6198,7 @@ mod tests {
                 std::ptr::from_mut(&mut out).cast(),
                 size_of::<i64>() as isize,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         }
         .expect_err("an unexpandable exponent must not convert");
@@ -5890,6 +6222,7 @@ mod tests {
                 std::ptr::from_mut(&mut out).cast(),
                 size_of::<f64>() as isize,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         }
         .expect("a decimal within f64's range converts");
@@ -5912,6 +6245,7 @@ mod tests {
                 std::ptr::from_mut(&mut out).cast(),
                 size_of::<Timestamp>() as isize,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         }
         .expect("ISO timestamp text should convert");
@@ -5932,6 +6266,7 @@ mod tests {
                 std::ptr::from_mut(&mut out).cast(),
                 size_of::<Date>() as isize,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         }
         .expect("ISO date text should convert");
@@ -5949,6 +6284,7 @@ mod tests {
                 std::ptr::from_mut(&mut out).cast(),
                 size_of::<Time>() as isize,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         }
         .expect("ISO time text should convert");
@@ -5966,6 +6302,7 @@ mod tests {
                 std::ptr::from_mut(&mut out).cast(),
                 size_of::<Timestamp>() as isize,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         }
         .expect("T-separated timestamp should convert");
@@ -5984,6 +6321,7 @@ mod tests {
                 std::ptr::from_mut(&mut out).cast(),
                 size_of::<Timestamp>() as isize,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         }
         .expect("date-only text should convert to midnight");
@@ -6005,6 +6343,7 @@ mod tests {
                 std::ptr::from_mut(&mut out).cast(),
                 size_of::<Timestamp>() as isize,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         }
         .expect_err("malformed text must not convert");
@@ -6025,6 +6364,7 @@ mod tests {
                 std::ptr::from_mut(&mut out).cast(),
                 size_of::<Timestamp>() as isize,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         }
         .expect_err("month 13 must not convert");
@@ -6047,6 +6387,7 @@ mod tests {
                 std::ptr::from_mut(&mut out).cast(),
                 size_of::<Time>() as isize,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         }
         .expect_err("trailing dot with no fraction digits must not convert");
@@ -6067,6 +6408,7 @@ mod tests {
                 std::ptr::from_mut(&mut out).cast(),
                 size_of::<Timestamp>() as isize,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         }
         .expect_err("trailing dot with no fraction digits must not convert");
@@ -6089,6 +6431,7 @@ mod tests {
                 std::ptr::from_mut(&mut out).cast(),
                 size_of::<Date>() as isize,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         }
         .expect_err("year 99999 must not convert");
@@ -6111,6 +6454,7 @@ mod tests {
                 std::ptr::from_mut(&mut out).cast(),
                 size_of::<Time>() as isize,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         }
         .expect_err("hour 700000 must not convert");
@@ -6144,6 +6488,7 @@ mod tests {
                 std::ptr::from_mut(&mut out).cast(),
                 size_of::<T>() as isize,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         (out, ret)
@@ -6654,6 +6999,7 @@ mod tests {
                 buf.as_mut_ptr() as *mut c_void,
                 buf.len() as isize,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         (ret, buf, ind)
@@ -6977,6 +7323,7 @@ mod tests {
                 buf.as_mut_ptr().cast::<c_void>(),
                 buf_len,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(
@@ -7007,6 +7354,7 @@ mod tests {
                 buf.as_mut_ptr().cast::<c_void>(),
                 buf_len,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         let len = usize::try_from(buf_len.max(0)).expect("test buffer length");
@@ -7078,6 +7426,7 @@ mod tests {
                 buf.as_mut_ptr().cast::<c_void>(),
                 10,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS_WITH_INFO);
@@ -7191,6 +7540,139 @@ mod tests {
         );
     }
 
+    /// Convert to `SQL_C_NUMERIC` through the real marshalling entry point,
+    /// with a sentinel-filled struct so a partial write is visible.
+    fn numeric_write(
+        value: &ColumnValue,
+        target: NumericTarget,
+    ) -> Result<(SqlReturn, odbc_sys::Numeric, isize), OdbcError> {
+        let mut out = odbc_sys::Numeric::default();
+        let mut ind: isize = -999;
+        let ret = unsafe {
+            write_column_value(
+                value,
+                CDataType::Numeric,
+                (&raw mut out).cast::<c_void>(),
+                // Footnote [a]: "The value of BufferLength is ignored for this
+                // conversion." Zero proves it is genuinely ignored.
+                0,
+                &mut ind,
+                target,
+            )
+        }?;
+        Ok((ret, out, ind))
+    }
+
+    /// `SQL_C_NUMERIC` had no arm at all and answered `07006` for every value,
+    /// while the same C type worked as an *input* parameter. The overview page
+    /// is explicit that this is not optional: drivers "are required to support
+    /// conversions to all ODBC C data types from the ODBC SQL data types that
+    /// they support", and `SQL_C_NUMERIC` shares the *SQL to C: Numeric*
+    /// table's exact-integer row with `SQL_C_SLONG` and `SQL_C_SBIGINT`.
+    #[test]
+    fn a_decimal_column_converts_to_sql_c_numeric() {
+        let (ret, out, ind) = numeric_write(
+            &ColumnValue::Decimal("-123.45".to_string()),
+            NumericTarget {
+                precision: 5,
+                scale: 2,
+            },
+        )
+        .expect("the conversion is defined by the SQL to C: Numeric table");
+        assert_eq!(ret, SqlReturn::SUCCESS);
+        assert_eq!(out.precision, 5);
+        assert_eq!(out.scale, 2);
+        assert_eq!(out.sign, 0, "odbc-sys: 1 if positive, 0 if negative");
+        assert_eq!(u128::from_le_bytes(out.val), 12345);
+        assert_eq!(
+            ind,
+            std::mem::size_of::<odbc_sys::Numeric>() as isize,
+            "the row's indicator cell is \"Size of the C data type\"",
+        );
+    }
+
+    /// An integer column reaches `SQL_C_NUMERIC` too — the table's row lists
+    /// every exact numeric SQL type, not only `DECIMAL`.
+    #[test]
+    fn an_integer_column_converts_to_sql_c_numeric() {
+        let (ret, out, _) = numeric_write(&ColumnValue::I64(42), NumericTarget::UNSPECIFIED)
+            .expect("an integer is a numeric source");
+        assert_eq!(ret, SqlReturn::SUCCESS);
+        assert_eq!(u128::from_le_bytes(out.val), 42);
+        assert_eq!(out.scale, 0);
+        assert_eq!(out.sign, 1);
+    }
+
+    /// The row's second outcome: "Data converted with truncation of fractional
+    /// digits" → truncated data and `01S07`. The data *is* written, so this is
+    /// a warning; `OdbcError::FractionalTruncation` already carries `01S07` and
+    /// already classifies as `SUCCESS_WITH_INFO`.
+    #[test]
+    fn dropping_a_fraction_into_sql_c_numeric_is_01s07() {
+        let err = numeric_write(
+            &ColumnValue::Decimal("1.239".to_string()),
+            NumericTarget {
+                precision: 5,
+                scale: 2,
+            },
+        )
+        .expect_err("a dropped fractional digit is 01S07");
+        assert_eq!(
+            sqlstate_of_err(&err),
+            crate::types::sql_state::FRACTIONAL_TRUNCATION
+        );
+    }
+
+    /// The row's third outcome: "Conversion of data would result in loss of
+    /// whole (as opposed to fractional) digits" → `22003`.
+    #[test]
+    fn a_value_too_wide_for_sql_c_numeric_is_22003() {
+        let err = numeric_write(
+            &ColumnValue::Decimal("123456".to_string()),
+            NumericTarget {
+                precision: 3,
+                scale: 0,
+            },
+        )
+        .expect_err("six digits do not fit a declared precision of three");
+        assert_eq!(
+            sqlstate_of_err(&err),
+            crate::types::sql_state::NUMERIC_VALUE_OUT_OF_RANGE
+        );
+    }
+
+    /// The guard against over-reach: a source with no numeric reading at all is
+    /// still `07006`. Only the sources the *SQL to C: Numeric* and
+    /// *SQL to C: Character* tables govern gained this target.
+    #[test]
+    fn a_non_numeric_source_is_still_07006_for_sql_c_numeric() {
+        let err = numeric_write(
+            &ColumnValue::Bytes(vec![1, 2, 3]),
+            NumericTarget::UNSPECIFIED,
+        )
+        .expect_err("bytes have no numeric reading");
+        assert_eq!(
+            sqlstate_of_err(&err),
+            crate::types::sql_state::RESTRICTED_DATA_TYPE_ATTRIBUTE_VIOLATION
+        );
+    }
+
+    /// A character column that is not a numeric literal is `22018`, the
+    /// *SQL to C: Character* table's cell for it — not `07006`, which is about
+    /// the type pairing rather than the value.
+    #[test]
+    fn a_non_numeric_string_into_sql_c_numeric_is_22018() {
+        let err = numeric_write(
+            &ColumnValue::String("not a number".to_string()),
+            NumericTarget::UNSPECIFIED,
+        )
+        .expect_err("a non-literal is a value error");
+        assert_eq!(
+            sqlstate_of_err(&err),
+            crate::types::sql_state::INVALID_CHARACTER_VALUE_FOR_CAST
+        );
+    }
+
     #[test]
     fn a_character_column_truncating_is_still_ordinary_01004() {
         // The guard against over-reach: SQL to C: Character has no 22003 row
@@ -7286,6 +7768,7 @@ mod tests {
                 buf.as_mut_ptr().cast::<c_void>(),
                 0,
                 &mut ind,
+                NumericTarget::UNSPECIFIED,
             )
         };
         assert_eq!(ret.unwrap(), SqlReturn::SUCCESS_WITH_INFO);
@@ -7349,6 +7832,7 @@ mod tests {
                     std::ptr::null_mut(),
                     buf_len,
                     &mut ind,
+                    NumericTarget::UNSPECIFIED,
                 )
             };
             assert_eq!(
