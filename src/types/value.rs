@@ -76,6 +76,39 @@ impl From<Scope> for i16 {
 // FetchResult
 // ---------------------------------------------------------------------------
 
+/// A warning a backend raised while producing a value it returned
+/// *successfully*.
+///
+/// Returned from
+/// [`StatementBackend::take_value_warning`](crate::backend::StatementBackend::take_value_warning),
+/// which core drains immediately after every
+/// [`get_data`](crate::backend::StatementBackend::get_data).
+///
+/// # Why this exists
+///
+/// Core raises `01S07` when *it* drops precision — a non-zero
+/// [`ColumnValue::Time`] fraction written to `SQL_C_TYPE_TIME`, or a fraction
+/// lost converting to an exact-integer C type. But a backend that loses
+/// precision in its *own* type conversion does so before a [`ColumnValue`]
+/// exists, so core never sees it and the application got `SQL_SUCCESS` with no
+/// diagnostic at all. A driver reporting `decimal_digits = 12` for a
+/// `timestamp(12)` column and delivering nine had no way to say so.
+///
+/// This is the first mechanism by which a backend attaches a diagnostic to a
+/// value it produced *successfully*: everything else is either a hard error or
+/// a condition core detects itself. Returning a warning does not make the call
+/// fail — a condition that should fail belongs in the `Err` arm of `get_data`.
+///
+/// `#[non_exhaustive]`: `01S07` is the case today, and the mechanism
+/// generalises to any warning that belongs to a value rather than to a failure.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValueWarning {
+    /// The backend discarded fractional precision producing this value.
+    /// Reported to the application as `01S07` with `SQL_SUCCESS_WITH_INFO`.
+    FractionalTruncation,
+}
+
 /// The outcome of a single row advance in a backend's cursor, returned by
 /// [`crate::backend::StatementBackend`] and surfaced to the application as
 /// `SQL_SUCCESS` or `SQL_NO_DATA` from `SQLFetch`.

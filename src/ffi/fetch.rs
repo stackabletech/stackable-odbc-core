@@ -108,6 +108,24 @@ fn collect_bindings(ard: &Descriptor, bind_offset: crate::descriptor::BindOffset
     bindings
 }
 
+/// The `OdbcError` a backend's [`ValueWarning`](crate::types::ValueWarning)
+/// becomes.
+///
+/// One function so both drain sites — `SQLGetData` and `SQLFetch`'s
+/// bound-column loop — cannot disagree about which SQLSTATE a backend warning
+/// carries. `OdbcError::FractionalTruncation` already maps to `01S07` and
+/// already classifies as a warning rather than a failure (`errors.rs`), so this
+/// reuses that path rather than building a second one.
+fn value_warning_error(warning: crate::types::ValueWarning) -> OdbcError {
+    match warning {
+        // `ValueWarning` is `#[non_exhaustive]`, but it is non-exhaustive to
+        // *other crates*: within core this match is exhaustive, so adding a
+        // variant breaks the build here and has to choose its own SQLSTATE
+        // rather than inherit 01S07 silently. That is the point.
+        crate::types::ValueWarning::FractionalTruncation => OdbcError::FractionalTruncation,
+    }
+}
+
 /// `SQL_ROW_SUCCESS` — the row-status value for a row fetched without warning.
 const SQL_ROW_SUCCESS: u16 = 0;
 /// `SQL_ROW_SUCCESS_WITH_INFO` — fetched, but a diagnostic was raised for it.
@@ -447,6 +465,12 @@ unsafe fn fetch_with_report<B: Backend>(
                     // `HY003`, and the spec puts that failure after this call's
                     // `HY010` and `24000` checks, both of which are above.
                     let mut truncated = false;
+                    // Collected across the whole row rather than posted per
+                    // column, because the diagnostic queue lives on the handle
+                    // and `statement` borrows it for this loop. A row may lose
+                    // precision in more than one column, and each gets its own
+                    // record.
+                    let mut value_warnings: Vec<crate::types::ValueWarning> = Vec::new();
                     if let Some(ref mut statement) = stmt.statement {
                         for &Binding {
                             col,
@@ -479,6 +503,14 @@ unsafe fn fetch_with_report<B: Backend>(
                             if written == SqlReturn::SUCCESS_WITH_INFO {
                                 truncated = true;
                             }
+                            // Drop the borrow of `statement` that `value` holds
+                            // before draining, and collect rather than post:
+                            // the diagnostic queue lives on the handle, which
+                            // is borrowed for this whole loop.
+                            drop(value);
+                            if let Some(warning) = statement.take_value_warning() {
+                                value_warnings.push(warning);
+                            }
                         }
                     }
 
@@ -490,11 +522,19 @@ unsafe fn fetch_with_report<B: Backend>(
                     //
                     // Fractional truncation (01S07) arrives as an `Err` from
                     // write_column_value and is handled by panic_safe.
-                    if truncated {
+                    if truncated || !value_warnings.is_empty() {
                         // SAFETY: application-supplied pointers; see
                         // `report_rows_fetched`.
                         report_rows_fetched(stmt, report, 1, SQL_ROW_SUCCESS_WITH_INFO);
-                        stmt.diagnostics.push(&OdbcError::StringTruncated);
+                        if truncated {
+                            stmt.diagnostics.push(&OdbcError::StringTruncated);
+                        }
+                        // The backend's own warnings about this row's values —
+                        // precision it dropped in its own conversion, before a
+                        // `ColumnValue` existed for core to inspect.
+                        for warning in value_warnings {
+                            stmt.diagnostics.push(&value_warning_error(warning));
+                        }
                         return Ok(SqlReturn::SUCCESS_WITH_INFO);
                     }
 
@@ -1170,6 +1210,9 @@ pub unsafe fn sql_get_data<B: Backend>(
             // column requested; prior offsets become invalid."
             // Taken rather than copied: the cursor owns the cached conversion,
             // so it is moved out, used, and put back.
+            // Set on the arm that reads a fresh value from the backend; read
+            // after the borrows above have ended.
+            let mut value_warning: Option<crate::types::ValueWarning> = None;
             let mut cursor = match stmt.get_data_cursor.take() {
                 Some(c) if c.column == col_or_param_num => c,
                 _ => GetDataCursor {
@@ -1215,7 +1258,7 @@ pub unsafe fn sql_get_data<B: Backend>(
                     }
                     // Cache before writing, so the first part and every later
                     // one go through exactly the same writer.
-                    match crate::column_value::cacheable_chunk_source(&value, c_type) {
+                    let write = match crate::column_value::cacheable_chunk_source(&value, c_type) {
                         Some(source) => {
                             let write = crate::column_value::write_cached_chunk(
                                 &source,
@@ -1240,7 +1283,16 @@ pub unsafe fn sql_get_data<B: Backend>(
                             cursor.delivered,
                             numeric,
                         )?,
-                    }
+                    };
+                    // Drained here, after the last use of `value` — which
+                    // borrows `statement` — and before the diagnostic queue is
+                    // touched, which borrows the handle. Only on this arm: the
+                    // cached-chunk arm above delivers a later part of a value
+                    // an *earlier* call already read, and reporting the
+                    // backend's warning again on every chunk would post one
+                    // record per part.
+                    value_warning = statement.take_value_warning();
+                    write
                 }
             };
 
@@ -1255,6 +1307,15 @@ pub unsafe fn sql_get_data<B: Backend>(
             // Spec 01004: If data was truncated, push a diagnostic.
             if write.ret == SqlReturn::SUCCESS_WITH_INFO {
                 stmt.diagnostics.push(&OdbcError::StringTruncated);
+            }
+
+            // The backend's own warning about this value. It reports
+            // SUCCESS_WITH_INFO alongside whatever the write already said, so a
+            // value that both truncated into the buffer and lost precision at
+            // the source carries both records.
+            if let Some(warning) = value_warning {
+                stmt.diagnostics.push(&value_warning_error(warning));
+                return Ok(SqlReturn::SUCCESS_WITH_INFO);
             }
 
             Ok(write.ret)
@@ -1384,6 +1445,116 @@ mod tests {
                 },
             );
             cleanup_stmt_for::<MockCancelAwareBackend>(env, conn, stmt);
+        }
+    }
+
+    /// A backend that lost precision in its *own* type conversion can now say
+    /// so, and `SQLGetData` reports `01S07`.
+    ///
+    /// Core already raises `01S07` where *it* drops precision — a non-zero
+    /// `ColumnValue::Time` fraction written to `SQL_C_TYPE_TIME`, or a fraction
+    /// lost reaching an exact-integer C type. But a driver converting a
+    /// `timestamp(12)` to nine fractional digits does that before a
+    /// `ColumnValue` exists, so core never saw it and the application got
+    /// `SQL_SUCCESS` with no diagnostic at all.
+    #[test]
+    fn a_backend_value_warning_becomes_01s07_on_get_data() {
+        unsafe {
+            let (env, conn, stmt) = executed_stmt_for::<crate::test_utils::MockTruncatingBackend>();
+            assert_eq!(
+                sql_fetch::<crate::test_utils::MockTruncatingBackend>(stmt),
+                SqlReturn::SUCCESS
+            );
+
+            let mut buf: i64 = 0;
+            let mut ind: isize = 0;
+            let ret = sql_get_data::<crate::test_utils::MockTruncatingBackend>(
+                stmt,
+                1, // the mock loses precision on column 1 only
+                CDataType::SBigInt as i16,
+                std::ptr::from_mut(&mut buf).cast::<c_void>(),
+                8,
+                &mut ind,
+            );
+            assert_eq!(
+                ret,
+                SqlReturn::SUCCESS_WITH_INFO,
+                "a warning, not a failure"
+            );
+            assert_eq!(buf, 1, "the value is still delivered");
+            assert_eq!(
+                first_sqlstate::<crate::test_utils::MockTruncatingBackend>(stmt),
+                crate::types::sql_state::FRACTIONAL_TRUNCATION,
+            );
+
+            cleanup_stmt_for::<crate::test_utils::MockTruncatingBackend>(env, conn, stmt);
+        }
+    }
+
+    /// The bound-column loop is the other `get_data` call site and must drain
+    /// the warning too, or it is visible through `SQLGetData` only — which is
+    /// the path an application using `SQLBindCol` never takes.
+    #[test]
+    fn a_backend_value_warning_becomes_01s07_on_a_bound_fetch() {
+        unsafe {
+            let (env, conn, stmt) = executed_stmt_for::<crate::test_utils::MockTruncatingBackend>();
+
+            let mut buf: i64 = 0;
+            let mut ind: isize = 0;
+            assert_eq!(
+                crate::ffi::bind::sql_bind_col::<crate::test_utils::MockTruncatingBackend>(
+                    stmt,
+                    1,
+                    CDataType::SBigInt as i16,
+                    std::ptr::from_mut(&mut buf).cast::<c_void>(),
+                    8,
+                    &mut ind,
+                ),
+                SqlReturn::SUCCESS,
+            );
+
+            assert_eq!(
+                sql_fetch::<crate::test_utils::MockTruncatingBackend>(stmt),
+                SqlReturn::SUCCESS_WITH_INFO,
+            );
+            assert_eq!(buf, 1, "the value is still delivered");
+            assert_eq!(
+                first_sqlstate::<crate::test_utils::MockTruncatingBackend>(stmt),
+                crate::types::sql_state::FRACTIONAL_TRUNCATION,
+            );
+
+            cleanup_stmt_for::<crate::test_utils::MockTruncatingBackend>(env, conn, stmt);
+        }
+    }
+
+    /// The guard against over-reach: the defaulted `None` must not downgrade
+    /// every successful read to `SQL_SUCCESS_WITH_INFO`. The mock warns on
+    /// column 1 only, so column 2 proves the warning belongs to the value
+    /// rather than to the statement — and proves `take_value_warning` really
+    /// takes, since column 1 was read first and cleared it.
+    #[test]
+    fn a_value_with_no_backend_warning_is_plain_success() {
+        unsafe {
+            let (env, conn, stmt) = executed_stmt_for::<crate::test_utils::MockTruncatingBackend>();
+            assert_eq!(
+                sql_fetch::<crate::test_utils::MockTruncatingBackend>(stmt),
+                SqlReturn::SUCCESS
+            );
+
+            let mut buf: i64 = 0;
+            let mut ind: isize = 0;
+            let ret = sql_get_data::<crate::test_utils::MockTruncatingBackend>(
+                stmt,
+                2, // the mock raises no warning for this column
+                CDataType::SBigInt as i16,
+                std::ptr::from_mut(&mut buf).cast::<c_void>(),
+                8,
+                &mut ind,
+            );
+            assert_eq!(ret, SqlReturn::SUCCESS, "no warning, no downgrade");
+            assert_eq!(buf, 2);
+
+            cleanup_stmt_for::<crate::test_utils::MockTruncatingBackend>(env, conn, stmt);
         }
     }
 

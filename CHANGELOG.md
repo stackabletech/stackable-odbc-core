@@ -156,6 +156,27 @@ call `SQLCloseCursor` or `SQLFreeStmt(SQL_CLOSE)` first, as it already must for
 
 ### Added
 
+- **`StatementBackend::take_value_warning`, so a backend can raise `01S07` for
+  precision it dropped itself.** Core already raises `01S07` where *it* drops
+  precision — a non-zero `ColumnValue::Time` fraction written to
+  `SQL_C_TYPE_TIME`, or a fraction lost reaching an exact-integer C type — but a
+  driver that loses precision in its own type conversion does so before a
+  `ColumnValue` exists, so core never saw it. A driver reporting
+  `decimal_digits = 12` for a `timestamp(12)` column and delivering nine
+  returned `SQL_SUCCESS` with no diagnostic at all, and could not be fixed
+  driver-side.
+
+  The method is defaulted to `None`, so no existing driver changes. Core drains
+  it immediately after every `get_data`, on both paths that read a value:
+  `SQLGetData`, and `SQLFetch`'s bound-column loop. A returned
+  `ValueWarning::FractionalTruncation` is posted to the statement's diagnostic
+  queue and the call reports `SQL_SUCCESS_WITH_INFO`.
+
+  This is the first mechanism by which a backend attaches a diagnostic to a
+  value it produced *successfully*; everything else is either a hard error or a
+  condition core detects itself. It is not an error channel — returning a
+  warning does not make the call fail. `ValueWarning` is `#[non_exhaustive]`.
+
 - **`into_values` on the ten catalog row types**, beside the existing
   `to_values`. It consumes the row, so the strings move instead of being cloned:
   measured at **0.40×** the borrowing form for a 50 000-row result set (3.28 ms →

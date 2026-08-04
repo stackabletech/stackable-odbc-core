@@ -124,7 +124,7 @@ pub use conversions::*;
 mod value;
 pub use value::{
     ColumnDescriptor, ColumnValue, ExecuteOutcome, FetchResult, IdentifierType, Nullable,
-    OutputParam, ParamDescriptor, Scope, TypeInfoRow,
+    OutputParam, ParamDescriptor, Scope, TypeInfoRow, ValueWarning,
 };
 
 mod column_size;

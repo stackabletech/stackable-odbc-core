@@ -462,6 +462,18 @@ impl<B: Backend> StatementBackend for StatementData<B> {
         }
     }
 
+    /// Forwards to the backend's [`StatementBackend::take_value_warning`].
+    ///
+    /// A synthetic result set has none: core builds those rows itself, from
+    /// values it already holds, so there is no conversion in which precision
+    /// could have been lost before core saw them.
+    fn take_value_warning(&mut self) -> Option<crate::types::ValueWarning> {
+        match self {
+            StatementData::Backend(s) => s.take_value_warning(),
+            StatementData::Synthetic(_) => None,
+        }
+    }
+
     fn column_count(&self) -> i16 {
         match self {
             StatementData::Backend(s) => s.column_count(),
