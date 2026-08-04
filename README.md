@@ -31,11 +31,12 @@ into buffers the application supplied, and not crash when the application lies
 about how big those buffers are.
 
 `stackable-odbc-core` is that shared part, written once. What you supply is the
-part that really is about your database: how to connect and authenticate, how to
-run a query and read rows back, how your database's types map onto ODBC's, and
-how to answer its catalog questions. For a networked database that is a complete
-client in its own right, so it is a substantial piece of work — but none of it
-is ODBC. One macro then generates the C entry points the standard requires.
+part that really is about your database: how to connect and authenticate, how
+to run a query and read rows back, how your database's types map onto ODBC's,
+and how to answer the catalog questions. For a networked database that is a
+client library in its own right, and writing one is not trivial. It is just
+not ODBC work. One macro then generates the C entry points the standard
+requires.
 
 This is a library rather than a driver you can load on its own. A working driver
 is this crate plus a backend, and
@@ -139,12 +140,12 @@ In practice you do not look the list up. Write the four associated types, run
 `cargo check`, and the compiler names what is still missing.
 
 Two traits and one macro bound the surface, not the effort. A backend for a
-real database is a real client: authentication, sessions, type mapping, catalog
+real database is a real client. Authentication, sessions, type mapping, catalog
 queries and error mapping are all yours, and in both existing drivers that adds
-up to a substantial crate. What core takes off your hands is the ODBC half —
-the handle table, the UTF-16, the diagnostics format, the buffer copying and
-the conversion tables — the half that is identical for every database, and the
-half where a mistake is memory corruption rather than a wrong answer.
+up to a substantial crate. What core takes off your hands is the ODBC half: the
+handle table, the UTF-16, the diagnostics format, the buffer copying and the
+conversion tables. That half is identical for every database, and it is the
+half where a mistake corrupts memory rather than returning a wrong answer.
 
 [AGENTS.md](https://github.com/stackabletech/stackable-odbc-core/blob/main/AGENTS.md)
 has the full walkthrough: how a call flows through the layers, what each
@@ -161,10 +162,10 @@ describing a bound column or parameter, and one can be shared between queries on
 a connection.
 
 This is a Unicode driver: every function that takes or returns a string is
-exported only in its wide (`W`-suffixed) form, such as `SQLConnectW`, and the
-Driver Manager translates for ANSI applications, so those keep working without
-the driver carrying a second set of entry points. Functions with no strings in
-their signature, such as `SQLFetch`, have one spelling and are exported
+exported only in its wide (`W`-suffixed) form e.g. `SQLConnectW`. The
+Driver Manager translates for ANSI applications, so they keep working and the
+driver never carries a second set of entry points. Functions with no strings
+in their signature, such as `SQLFetch`, have one spelling and are exported
 unsuffixed.
 
 `CORE_EXPORTED_FUNCTIONS` in `src/function_id.rs` is the authoritative list of
@@ -192,11 +193,11 @@ ignored, so a tool can react instead of trusting a wrong answer.
 - **No async.** Every call runs to completion before returning:
   `SQL_ASYNC_MODE` is reported as `SQL_AM_NONE`, and turning on
   `SQL_ATTR_ASYNC_ENABLE` is refused rather than ignored. This is about the
-  calling thread, not the shape of the results — rows still arrive one
-  `SQLFetch` at a time, and the query timeout and `SQLCancel` still bound and
-  interrupt a slow query. `Backend` is likewise synchronous, so a driver built
-  on an async client library bridges to it internally, for example with a
-  current-thread tokio runtime and `block_on`.
+  calling thread, not the shape of the results. Rows still arrive one
+  `SQLFetch` at a time, the query timeout still bounds a slow query, and
+  `SQLCancel` still interrupts one. `Backend` is synchronous too, so a driver
+  built on an async client library bridges to it internally, for example with
+  a current-thread tokio runtime and `block_on`.
 
 ## Drivers built on this crate
 
