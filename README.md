@@ -161,6 +161,9 @@ Adding a new database backend requires three steps:
    pub struct XyzBackend;
    pub struct XyzConnection;
    pub struct XyzStatement;
+   // Everything needed to cancel work from a thread holding no lock on the
+   // connection. A backend that cannot cancel anything uses `()` instead.
+   pub struct XyzCancelToken;
 
    #[derive(Debug, snafu::Snafu)]
    pub enum XyzError { /* ... */ }
@@ -175,6 +178,7 @@ Adding a new database backend requires three steps:
        type Connection = XyzConnection;
        type Statement = XyzStatement;
        type Error = XyzError;
+       type CancelToken = XyzCancelToken;
 
        fn connect(params: &ConnectParams) -> Result<XyzConnection, XyzError> { todo!() }
        // ...and the rest of the required items: see below.
