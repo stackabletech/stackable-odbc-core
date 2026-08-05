@@ -19,95 +19,61 @@
 
 ## What is this?
 
-ODBC is the standard way desktop tools talk to a database. Excel, Tableau,
-Power BI and Python's pyodbc all speak it. Each database needs its own *driver*,
-a shared library the tool loads that translates those standard calls into
-whatever the database actually speaks.
+This is a reusable crate to help develop ODBC drivers in Rust.
 
-Writing one is a large job, and most of it has nothing to do with your database.
-The driver has to hand out and validate handles, convert every string to and
-from UTF-16, report errors in the exact format the standard demands, copy values
-into buffers the application supplied, and not crash when the application lies
-about how big those buffers are.
+If you don't know what ODBC is, then this repo/crate will probably not be of interest to you.
 
-`stackable-odbc-core` is that shared part, written once. What you supply is the
-part that really is about your database: how to connect and authenticate, how
-to run a query and read rows back, how your database's types map onto ODBC's,
-and how to answer the catalog questions. For a networked database that is a
-client library in its own right, and writing one is not trivial. It is just
-not ODBC work. One macro then generates the C entry points the standard
-requires.
+There are other libraries for ODBC in Rust like [odbc-sys](https://crates.io/crates/odbc-sys) but they all focus on ODBC clients.
+This library is exclusively meant to fill the gap to write actual _ODBC drivers_.
+Writing a driver is obviously very specific to your target datastore but there is a lot of common stuff that this library handles:
 
-This is a library rather than a driver you can load on its own. A working driver
-is this crate plus a backend, and
-[stackable-odbc-sqlite](https://github.com/stackabletech/stackable-odbc-sqlite)
-is the smallest complete example of one.
+- Hands out and validates handles
+- Converts every string to and from UTF-16
+- Reports errors in the exact format the standard demands
+- Copies values into buffers the application supplied (and handles errors gracefully)
+- ...and more
+
+`stackable-odbc-core` is that shared part.
+You just need to supply the part that is really about your database:
+
+- How to connect and authenticate
+- How to run a query, read rows back, map types onto ODBC's and so on...
+
+A macro then generates all the necessary C plumbing the standard requires.
+
+This is a library rather than a driver you can load on its own.
+A working driver is this crate plus a backend, and [stackable-odbc-sqlite](https://github.com/stackabletech/stackable-odbc-sqlite) is the smallest complete example of one.
 
 ## What you get
 
-- **A database backend is two traits and one macro.** Implement `Backend` and
-  `StatementBackend`, then call `forward_ffi!`. The compiler names everything
-  still missing, so there is no list to work through by hand. Core holds no
-  database-specific code, so a driver never forks or patches it.
+- **We handle (sic!) the Handles.**
+  If you don't know what a Handle is in ODBC-land you're lucky.
+  A driver gets handed various Handles (e.g. `SQLHANDLE`) which are basically just pointers to memory holding its state.
+  Ours is a slot number plus a counter looked up in our own table, so the pointer the application passed is never followed and a double free is a clean error instead of memory corruption.
 
-- **A handle is a ticket number, not a memory address.** ODBC hands the
-  application a `SQLHANDLE` that refers to a connection or a running query. The
-  obvious implementation is a raw pointer, and then an application that frees a
-  handle twice, or uses one after freeing it, corrupts the driver's memory.
-  That is undefined behaviour, so the program may crash, or may quietly return a
-  wrong answer.
+- **Two threads can share one connection safely.**
+  The standard requires it and many drivers leave it to the Driver Manager instead.
+  This crate handles it correctly by using one lock per connection, shared with its queries, so there is no lock ordering left to get wrong.
+  `SQLCancel` takes no lock at all, because cancelling a slow query must not wait for the query it is cancelling.
 
-  Here a handle is a slot number plus a counter. The driver looks it up in its
-  own table and never follows the pointer the application passed. Freeing bumps
-  that slot's counter, so every ticket still referring to it stops matching.
-  Use-after-free and double-free become a clean "invalid handle" error rather
-  than memory corruption.
+- **The query timeout covers waiting for rows, not just sending the query.**
+  A database can answer with the column names immediately and take much longer to produce the first row, so `SQL_ATTR_QUERY_TIMEOUT` runs during `SQLFetch` too.
 
-- **Two threads can share one connection safely.** The standard requires it,
-  because "drivers must therefore support safe, multithread access to this
-  information", and many drivers leave it to the Driver Manager instead. Each
-  connection here has one lock, shared with every query started on it, so a call
-  touching both a query and its connection takes a single lock. That leaves no
-  lock ordering to get wrong, which is the usual way a driver deadlocks.
-  `SQLCancel` takes no lock at all, because cancelling a slow query must not
-  wait for the query it is cancelling.
+- **Core builds the catalog answers.**
+  Return ordinary Rust structs with named fields and core puts the columns in the order the standard dictates, sorts the rows and normalises identifier case.
+  You cannot get the column order or count wrong.
 
-- **The query timeout covers waiting for rows, not just sending the query.** An
-  application sets `SQL_ATTR_QUERY_TIMEOUT` to say "give up after N seconds".
-  Most drivers run that clock only while the query is being submitted, but a
-  database can answer with the column names immediately and then take much
-  longer to produce the first row. A timer covering only submission bounds
-  nothing, so this one runs during `SQLFetch` as well.
+- **Value conversion is already done.**
+  All three of the standard's conversion tables are implemented: character, binary and numeric, down to the interval rows and the optional `01S07` warning for rounded-away fractional seconds.
 
-- **Core builds the catalog answers.** For "what tables exist?" and its
-  relatives, the standard dictates the exact columns, their order, and how the
-  rows are sorted. A backend returns ordinary Rust structs with named fields,
-  and core puts the columns in order, sorts the rows and normalises identifier
-  case. You cannot get the column order or count wrong because you never write
-  them, and a column added to one of those result sets is a change in core
-  alone.
+- **Windows is a first-class target.**
+  Its Driver Manager is stricter than unixODBC and it fails quietly.
+  Getting this correct is annoying.
+  The known traps are handled and [AGENTS.md](https://github.com/stackabletech/stackable-odbc-core/blob/main/AGENTS.md) has the checklist.
 
-- **Value conversion is already done.** When an application supplies a parameter
-  as text and asks for it to be treated as a number, the standard has three
-  large tables saying exactly what each conversion does, down to which warning
-  to raise when precision is lost. All three are implemented: character, binary
-  and numeric, including the interval rows and the optional `01S07` warning for
-  fractional seconds that were rounded away.
-
-- **Windows is a first-class target.** Its Driver Manager is stricter than
-  unixODBC and it fails quietly, so missing one requirement stops a feature
-  working with no error to explain why. The known traps are handled: answering
-  the version query it makes before connecting, reporting the complete function
-  list it uses to build its dispatch table, and not exporting the deprecated
-  ODBC 2.x functions, because exporting one replaces the Driver Manager's own
-  better implementation with yours.
-
-- **Checked by more than unit tests.** Three tools cover what ordinary tests
-  cannot. Miri runs the code in an interpreter that detects undefined behaviour
-  and leaked handles, loom re-runs the locking code under every thread
-  interleaving rather than the one that happened to occur, and cargo-fuzz throws
-  random input at the buffer-copying code under AddressSanitizer. All three run
-  on every pull request, alongside the unit tests on Linux and Windows.
+- **Checked by more than unit tests.**
+  Miri catches undefined behaviour and leaked handles, loom re-runs the locking code under every thread interleaving, and cargo-fuzz throws random input at the buffer copies under AddressSanitizer.
+  All three run on every pull request, alongside the unit tests on Linux and Windows.
 
 ## Writing a driver
 
@@ -116,124 +82,76 @@ cargo new --lib stackable-odbc-xyz
 cargo add stackable-odbc-core
 ```
 
-Implement `Backend` and `StatementBackend` for your database, then generate the
-C ABI in `lib.rs`:
+Implement `Backend` and `StatementBackend` for your database, then generate the C ABI in `lib.rs`:
 
 ```rust,ignore
 stackable_odbc_core::forward_ffi!(crate::backend::XyzBackend);
 ```
 
-That one line expands to every exported `SQL*` entry point, plus `ConfigDSNW` on
-Windows, each forwarding to the generic implementation in this crate.
+That one line expands to every exported `SQL*` entry point, plus `ConfigDSNW` on Windows.
 
-`Backend` has four associated types and a body of required methods, but most of
-them are one-line capability declarations such as `supports_catalogs`,
-`identifier_case` and `sql_conformance`, each answering a single question about
-your database. They are required rather than defaulted on purpose: any default
-core supplied would be a claim about your database that nobody ever checked, and
-a wrong one is invisible, because the driver would confidently tell applications
-something untrue and nothing would complain. `StatementBackend` is the opposite,
-with one associated type and no required methods, so you override only what your
-backend supports.
+Most of `Backend` is one-line capability declarations such as `supports_catalogs` and `identifier_case`.
+None of them are defaulted, because a default would be a claim about your database that nobody ever checked, and a wrong one is invisible.
+`StatementBackend` is the opposite and has no required methods, so you override only what your backend supports.
 
-In practice you do not look the list up. Write the four associated types, run
-`cargo check`, and the compiler names what is still missing.
+Don't look the list up.
+Write the four associated types, run `cargo check`, and the compiler names what is still missing.
 
-Two traits and one macro bound the surface, not the effort. A backend for a
-real database is a real client. Authentication, sessions, type mapping, catalog
-queries and error mapping are all yours, and in both existing drivers that adds
-up to a substantial crate. What core takes off your hands is the ODBC half: the
-handle table, the UTF-16, the diagnostics format, the buffer copying and the
-conversion tables. That half is identical for every database, and it is the
-half where a mistake corrupts memory rather than returning a wrong answer.
-
-[AGENTS.md](https://github.com/stackabletech/stackable-odbc-core/blob/main/AGENTS.md)
-has the full walkthrough: how a call flows through the layers, what each
-capability method means, the catalog and descriptor rules, and the Windows
-Driver Manager checklist.
+[AGENTS.md](https://github.com/stackabletech/stackable-odbc-core/blob/main/AGENTS.md) has the full walkthrough: how a call flows through the layers, what each capability method means, and the catalog, descriptor and Windows rules.
 
 ## Conformance
 
-This implements ODBC 3.80 at the `SQL_OIC_CORE` level, the base of the
-standard's three interface-conformance levels and the one an application may
-assume of any driver. All four handle types can be allocated and freed, and all
-five descriptor functions work. Descriptors are the standard's own way of
-describing a bound column or parameter, and one can be shared between queries on
-a connection.
+ODBC 3.80 at the `SQL_OIC_CORE` level, which is the base of the standard's three interface-conformance levels and the one an application may assume of any driver.
+All four handle types and all five descriptor functions work, and a descriptor can be shared between queries on a connection.
 
-This is a Unicode driver: every function that takes or returns a string is
-exported only in its wide (`W`-suffixed) form e.g. `SQLConnectW`. The
-Driver Manager translates for ANSI applications, so they keep working and the
-driver never carries a second set of entry points. Functions with no strings
-in their signature, such as `SQLFetch`, have one spelling and are exported
-unsuffixed.
+This is a Unicode driver, so anything taking or returning a string is exported only in its wide form (`SQLConnectW`) and the Driver Manager translates for ANSI applications.
+Functions with no strings in their signature, such as `SQLFetch`, have one spelling and are exported unsuffixed.
 
-`CORE_EXPORTED_FUNCTIONS` in `src/function_id.rs` is the authoritative list of
-what is exported, and a guard test pins every entry to a symbol that exists. The
-deprecated ODBC 2.x functions are left out, because the Driver Manager already
-emulates them on top of the modern ones and usually does it better than a driver
-would, so exporting your own version switches that off rather than adding
-anything. `SQLExtendedFetch` is the exception the Driver Manager does not map,
-so core exports it.
+`CORE_EXPORTED_FUNCTIONS` in `src/function_id.rs` is the authoritative list, pinned by a guard test.
+The deprecated ODBC 2.x functions are absent on purpose: the Driver Manager already emulates them on top of the modern ones.
+`SQLExtendedFetch` is the one the Driver Manager does not map, so core exports it.
 
 ## Limits
 
-Each of these is reported to the application as unsupported rather than quietly
-ignored, so a tool can react instead of trusting a wrong answer.
+Each of these limits is actually reported back to an application that tries to use one of these features so they can react to it.
 
-- **Results are read front to back only** (`SQL_SO_FORWARD_ONLY`), so there is
-  no jumping to a row and no going backwards. `SQLFetchScroll` accepts
-  `SQL_FETCH_NEXT` and rejects every other direction with `HY106`.
-- **One row at a time.** There are no block cursors, so
-  `SQL_ATTR_ROW_ARRAY_SIZE` is fixed at 1. Asking for more returns 1 with an
-  `01S02` warning, and `SQL_GD_BLOCK` is never reported.
-- **No bookmarks**, which are saved row positions an application can return to
-  later, and no automatic population of parameter metadata, so
-  `SQL_ATTR_AUTO_IPD` stays `SQL_FALSE`.
-- **No async.** Every call runs to completion before returning:
-  `SQL_ASYNC_MODE` is reported as `SQL_AM_NONE`, and turning on
-  `SQL_ATTR_ASYNC_ENABLE` is refused rather than ignored. This is about the
-  calling thread, not the shape of the results. Rows still arrive one
-  `SQLFetch` at a time, the query timeout still bounds a slow query, and
-  `SQLCancel` still interrupts one. `Backend` is synchronous too, so a driver
-  built on an async client library bridges to it internally, for example with
-  a current-thread tokio runtime and `block_on`.
+| Not supported | What the application sees |
+|---|---|
+| Scrollable cursors | `SQL_SO_FORWARD_ONLY`; `SQLFetchScroll` takes `SQL_FETCH_NEXT` and rejects the rest with `HY106` |
+| Block cursors | `SQL_ATTR_ROW_ARRAY_SIZE` fixed at 1, returning 1 with an `01S02` warning; `SQL_GD_BLOCK` never reported |
+| Bookmarks, automatic parameter metadata | `SQL_ATTR_AUTO_IPD` stays `SQL_FALSE` |
+| Async | `SQL_AM_NONE`; `SQL_ATTR_ASYNC_ENABLE` is refused, not ignored |
+
+Async here means the calling thread, not the shape of the results.
+Rows still arrive one `SQLFetch` at a time, the query timeout still bounds a slow query, and `SQLCancel` still interrupts one.
+`Backend` is synchronous too, so a driver built on an async client library bridges to it internally, for example with a current-thread tokio runtime and `block_on`.
 
 ## Drivers built on this crate
 
-Each driver is a separate crate supplying only its `Backend` and
-`StatementBackend` implementation.
+Each is a separate crate supplying only its `Backend` and `StatementBackend` implementation.
 
-- [stackable-odbc-trino](https://github.com/stackabletech/stackable-odbc-trino),
-  an ODBC driver for [Trino](https://trino.io/).
-- [stackable-odbc-sqlite](https://github.com/stackabletech/stackable-odbc-sqlite),
-  a SQLite driver, used as a worked example and as the test driver for the
-  framework itself.
+- [stackable-odbc-trino](https://github.com/stackabletech/stackable-odbc-trino), an ODBC driver for [Trino](https://trino.io/).
+- [stackable-odbc-sqlite](https://github.com/stackabletech/stackable-odbc-sqlite), a SQLite driver, used as a worked example and as the test driver for the framework itself.
 
 ## Resources
 
-- [ODBC API reference](https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/odbc-api-reference?view=sql-server-ver16),
-  the authoritative specification. It is the most detailed source and still not
-  an easy read.
-- [Header files](https://github.com/microsoft/ODBC-Specification/blob/master/Windows/inc/sql.h)
-  for the unreleased ODBC 4 standard, mostly valid for the older ones too.
-- [odbc-sys](https://github.com/pacman82/odbc-sys), the ODBC type definitions
-  this crate builds on.
+- [ODBC API reference](https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/odbc-api-reference?view=sql-server-ver16), the authoritative specification.
+  It is the most detailed source and still not an easy read.
+- [Header files](https://github.com/microsoft/ODBC-Specification/blob/master/Windows/inc/sql.h) for the unreleased ODBC 4 standard, mostly valid for the older ones too.
+- [odbc-sys](https://github.com/pacman82/odbc-sys), the ODBC type definitions this crate builds on. Thank you!
 
 ## Getting help
 
-- [GitHub Discussions](https://github.com/orgs/stackabletech/discussions) for
-  questions
+- [GitHub Discussions](https://github.com/orgs/stackabletech/discussions) for questions
 - [Discord](https://discord.gg/7kZ3BNnCAF) to talk to us
-- [Issues](https://github.com/stackabletech/stackable-odbc-core/issues) for
-  bugs, and [SECURITY.md](SECURITY.md) for anything security-related
+- [Issues](https://github.com/stackabletech/stackable-odbc-core/issues) for bugs, and [SECURITY.md](SECURITY.md) for anything security-related
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for building from source, running the
-tests, and how the repository is laid out. [CHANGELOG.md](CHANGELOG.md) records
-what changed in each release.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for building from source, running the tests, and how the repository is laid out.
+[CHANGELOG.md](CHANGELOG.md) records what changed in each release.
 
 ## License
 
-Apache-2.0. See [LICENSE](./LICENSE) and [NOTICE](./NOTICE).
+Apache-2.0.
+See [LICENSE](./LICENSE) and [NOTICE](./NOTICE).
