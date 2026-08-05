@@ -774,7 +774,88 @@ mod proptest_connect_params {
     use super::*;
     use proptest::prelude::*;
 
+    /// Values assembled from the characters that end a value, quote one, or
+    /// separate one pair from the next.
+    ///
+    /// A `.*` strategy reaches `{`, `}` and `;` only by accident, and reaches a
+    /// `}` immediately followed by another `}` almost never, which is the exact
+    /// shape the brace-doubling in [`ConnectParams::to_connection_string`]
+    /// exists to handle. Drawing from these tokens directly puts a doubling
+    /// regression in the first few dozen cases rather than none of them.
+    fn hostile_value() -> impl Strategy<Value = String> {
+        proptest::collection::vec(
+            prop_oneof![
+                Just("{".to_owned()),
+                Just("}".to_owned()),
+                Just("}}".to_owned()),
+                Just(";".to_owned()),
+                Just("=".to_owned()),
+                Just(" ".to_owned()),
+                Just("};".to_owned()),
+                Just("{fake=1;".to_owned()),
+                "[a-z]{0,4}",
+            ],
+            0..8,
+        )
+        .prop_map(|parts| parts.concat())
+    }
+
+    /// Lowercase so that two generated keywords can never collide under the
+    /// lowercasing [`ConnectParams::insert`] applies, which would silently drop
+    /// a pair and make the count assertion below ambiguous rather than wrong.
+    fn keyword() -> impl Strategy<Value = String> {
+        "[a-z][a-z0-9_]{0,7}"
+    }
+
     proptest! {
+        /// The whole string round-trips, not just one pair of it.
+        ///
+        /// `any_value_round_trips_through_to_connection_string` below renders a
+        /// single keyword, so nothing follows the value it is checking and a
+        /// value that ends its own quoting early has nothing to run into. The
+        /// defect that matters needs a neighbour: a `}` in one value closing
+        /// the brace run early, so the rest of that value is read as further
+        /// keywords and the pair that genuinely came next is swallowed.
+        ///
+        /// Hence two assertions. The value check is the one that fires under
+        /// every mutation tried against this, because a keyword can only be
+        /// injected by mangling the value that produced it, so the two go
+        /// wrong together and the value check reports it more precisely. The
+        /// count check is kept regardless: it states the property in the form
+        /// the security argument is made in, an injection into the
+        /// application's *next* connect that `SQLBrowseConnectW` would
+        /// otherwise hand out, and it is the only one that would catch a
+        /// keyword appearing while every inserted pair survives intact.
+        #[test]
+        fn every_pair_survives_the_round_trip_with_no_keyword_injected(
+            pairs in proptest::collection::hash_map(keyword(), hostile_value(), 1..6),
+        ) {
+            let mut params = ConnectParams::parse("").expect("the empty string parses");
+            for (key, value) in &pairs {
+                params.insert(key.clone(), value.clone());
+            }
+
+            let rendered = params.to_connection_string();
+            let reparsed = ConnectParams::parse(&rendered)
+                .expect("a string this crate generated must parse");
+
+            prop_assert_eq!(
+                reparsed.keys().count(),
+                pairs.len(),
+                "a keyword appeared that was never inserted, in {:?}",
+                rendered
+            );
+            for (key, value) in &pairs {
+                prop_assert_eq!(
+                    reparsed.get(key),
+                    Some(value.as_str()),
+                    "{} lost its value in {:?}",
+                    key,
+                    rendered
+                );
+            }
+        }
+
         /// ConnectParams::parse never panics on arbitrary input.
         #[test]
         fn parse_never_panics(s in ".*") {

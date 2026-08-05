@@ -1324,20 +1324,35 @@ let ptr = unsafe { arena.as_mut_ptr().cast::<u8>().add(1) }.cast::<u16>();
 ### Fuzzing
 
 `fuzz/` holds [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz) targets for
-the memory-marshalling hot paths, `write_column_value` and `utf16`. Each
-allocates its output buffer at exactly the caller-declared length, so
-AddressSanitizer catches any overrun that clippy cannot see. It is its own
-Cargo workspace, because libFuzzer needs nightly, so the root build ignores it.
-A short smoke run of both targets runs on every PR (the `fuzz` job in
-`build.yaml`).
+the raw-pointer paths: `write_column_value`, `utf16` and
+`ffi::setup::parse_attributes_w`. The first two allocate their output buffer at
+exactly the caller-declared length, so AddressSanitizer catches any overrun that
+clippy cannot see; the third walks a Driver-Manager pointer looking for a
+terminator. It is its own Cargo workspace, because libFuzzer needs nightly, so
+the root build ignores it. A short smoke run of every target runs on every PR
+(the `fuzz` job in `build.yaml`).
 
 ```bash
 cargo install cargo-fuzz
 cargo +nightly fuzz run utf16
 cargo +nightly fuzz run column_value
+cargo +nightly fuzz run parse_attributes
 ```
 
-See [`fuzz/README.md`](fuzz/README.md) for what is and is not worth fuzzing.
+**A fuzz target is for `unsafe` code.** Where the code is safe Rust the worst
+outcome is a panic or a wrong answer, and a `proptest` suite next to the code
+finds both on stable, in far less CPU time, on every `cargo test` rather than in
+a 30-second smoke run. `escape`, `types::connect_params`, `param_convert`,
+`numeric_convert` and `types::conversions` are covered that way, with an oracle
+rather than only a never-panics assertion wherever one exists.
+
+Reaching a `pub(crate)` item from `fuzz/`, which is a separate crate, goes
+through a wrapper gated on the default-off `test-support` feature.
+`parse_attributes_summary_w` is the example to copy.
+
+See [`fuzz/README.md`](fuzz/README.md) for what is and is not worth fuzzing, and
+for why a fuzz target must terminate the buffer it hands to a parser whose
+contract says it is terminated.
 
 ### Benchmarks
 

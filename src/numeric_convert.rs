@@ -1284,3 +1284,208 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod proptest_numeric_convert {
+    use super::*;
+    use proptest::prelude::*;
+
+    /// How a bound numeric parameter was supplied, before it is canonicalised.
+    ///
+    /// The strategies generate this rather than a [`NumericParam`] directly,
+    /// because proptest has to be able to print a failing case and
+    /// `NumericParam` carries no `Debug`. Deriving one on it would be the
+    /// smaller change here and the wrong one there: this type holds the *value*
+    /// of a bound parameter, and a `Debug` impl is how such a value ends up
+    /// interpolated into a log line by someone who was only trying to trace a
+    /// conversion.
+    #[derive(Debug, Clone)]
+    enum ParamSpec {
+        /// Every integer C type.
+        Integer(i128),
+        /// `SQL_C_NUMERIC`, which arrives as the text its struct renders to.
+        Text(String),
+        /// `SQL_C_FLOAT` when `single`, `SQL_C_DOUBLE` otherwise.
+        Approx { value: f64, single: bool },
+    }
+
+    impl ParamSpec {
+        /// `None` where the ODBC path would have raised a diagnostic instead of
+        /// producing a parameter, which is only the unparseable text case.
+        fn build(&self) -> Option<NumericParam> {
+            match self {
+                ParamSpec::Integer(value) => Some(NumericParam::exact_integer(*value)),
+                ParamSpec::Text(text) => NumericParam::exact_text(text),
+                ParamSpec::Approx { value, single } => Some(NumericParam::approx(*value, *single)),
+            }
+        }
+    }
+
+    /// Every shape a bound numeric parameter can arrive in.
+    ///
+    /// The float arm carries NaN and both infinities on purpose. They are the
+    /// values row 4 is explicitly allowed to accept and every other row has to
+    /// refuse, and they are also the values that compare false against every
+    /// bound, so a range test written as a pair of comparisons rather than an
+    /// `is_finite` check lets them through.
+    fn param_spec() -> impl Strategy<Value = ParamSpec> {
+        prop_oneof![
+            any::<i128>().prop_map(ParamSpec::Integer),
+            any::<i64>().prop_map(|v| ParamSpec::Integer(i128::from(v))),
+            "-?[0-9]{1,30}(\\.[0-9]{0,20})?([eE]-?[0-9]{1,5})?".prop_map(ParamSpec::Text),
+            (any::<f64>(), any::<bool>())
+                .prop_map(|(value, single)| ParamSpec::Approx { value, single }),
+            prop_oneof![
+                Just(f64::NAN),
+                Just(f64::INFINITY),
+                Just(f64::NEG_INFINITY),
+                Just(0.0_f64),
+                Just(-0.0_f64),
+                Just(f64::MIN_POSITIVE),
+                Just(f64::MAX),
+            ]
+            .prop_map(|value| ParamSpec::Approx {
+                value,
+                single: false
+            }),
+        ]
+    }
+
+    /// SQL type codes, biased onto the ranges this table branches on and left
+    /// open elsewhere, so the unsupported-target path is reached too.
+    fn sql_type() -> impl Strategy<Value = SqlDataType> {
+        prop_oneof![
+            (-12_i16..15).prop_map(SqlDataType),
+            (88_i16..116).prop_map(SqlDataType),
+            any::<i16>().prop_map(SqlDataType),
+        ]
+    }
+
+    proptest! {
+        /// The whole table is total: no combination of value, target type,
+        /// column size, scale and interval precision panics.
+        ///
+        /// All five arguments are the application's. `SQLBindParameter` takes
+        /// the last four straight from the caller and does not require them to
+        /// agree with each other or with the value, so a scale can be negative,
+        /// a column size can be `usize::MAX` and the type code need not be one
+        /// this table knows.
+        #[test]
+        fn numeric_to_sql_type_is_total(
+            spec in param_spec(),
+            sql_type in sql_type(),
+            col_size in prop_oneof![0_usize..40, Just(usize::MAX), any::<usize>()],
+            decimal_digits in any::<i16>(),
+            interval_precision in any::<i32>(),
+        ) {
+            let Some(value) = spec.build() else {
+                return Ok(());
+            };
+            let _ = numeric_to_sql_type(value, sql_type, col_size, decimal_digits, interval_precision);
+        }
+
+        /// An exact integer reaches its integer target when it fits, and is
+        /// refused as out of range when it does not.
+        ///
+        /// The bounds are written out rather than taken from `try_from`, which
+        /// is what the conversion itself uses: an oracle that calls the same
+        /// function agrees with it by construction. Nothing is truncated on
+        /// this path either, an integer having no fraction to lose, so a
+        /// warning here would be a warning the application cannot act on.
+        #[test]
+        fn an_exact_integer_reaches_its_target_or_is_refused_by_range(
+            value in prop_oneof![
+                any::<i128>(),
+                any::<i64>().prop_map(i128::from),
+                any::<i32>().prop_map(i128::from),
+                -300_i128..300,
+            ],
+            which in 0_usize..4,
+        ) {
+            let (sql_type, low, high) = match which {
+                0 => (SqlDataType::EXT_TINY_INT, i128::from(i8::MIN), i128::from(i8::MAX)),
+                1 => (SqlDataType::SMALLINT, i128::from(i16::MIN), i128::from(i16::MAX)),
+                2 => (SqlDataType::INTEGER, i128::from(i32::MIN), i128::from(i32::MAX)),
+                _ => (SqlDataType::EXT_BIG_INT, i128::from(i64::MIN), i128::from(i64::MAX)),
+            };
+
+            let converted = numeric_to_sql_type(
+                NumericParam::exact_integer(value),
+                sql_type,
+                0,
+                0,
+                0,
+            );
+
+            let fits = (low..=high).contains(&value);
+            prop_assert_eq!(
+                converted.is_ok(),
+                fits,
+                "{} against {:?}",
+                value,
+                sql_type
+            );
+
+            if let Ok(converted) = converted {
+                prop_assert!(
+                    converted.warning.is_none(),
+                    "an integer source has no fraction to truncate"
+                );
+                let expected = match which {
+                    0 => ColumnValue::I8(value as i8),
+                    1 => ColumnValue::I16(value as i16),
+                    2 => ColumnValue::I32(value as i32),
+                    _ => ColumnValue::I64(value as i64),
+                };
+                prop_assert_eq!(converted.value, expected);
+            }
+        }
+
+        /// A character target accepts exactly the values whose rendering fits
+        /// the declared column size, and hands over that same rendering.
+        ///
+        /// The length the table checks has to be the length of the text that is
+        /// sent, not of some canonical form of the number, which is why the
+        /// assertion reads the returned string rather than re-rendering the
+        /// value. A declared size of zero means the application declared none.
+        #[test]
+        fn a_character_target_accepts_exactly_what_fits(
+            spec in param_spec(),
+            col_size in 0_usize..48,
+        ) {
+            let Some(value) = spec.build() else {
+                return Ok(());
+            };
+            let rendered = value.render();
+            let converted = numeric_to_sql_type(value, SqlDataType::VARCHAR, col_size, 0, 0);
+
+            let fits = col_size == 0 || rendered.chars().count() <= col_size;
+            prop_assert_eq!(
+                converted.is_ok(),
+                fits,
+                "{:?} ({} characters) against a declared size of {}",
+                rendered,
+                rendered.chars().count(),
+                col_size
+            );
+
+            if let Ok(converted) = converted {
+                prop_assert_eq!(converted.value, ColumnValue::String(rendered));
+            }
+        }
+
+        /// `exact_text` accepts a string exactly when it is a *numeric-literal*.
+        ///
+        /// It is the entry point for `SQL_C_NUMERIC`, whose text core renders
+        /// itself, so the property that matters is that it is not stricter than
+        /// the parser it delegates to and does not panic on text that is not a
+        /// number at all.
+        #[test]
+        fn exact_text_accepts_what_the_parser_accepts(text in "[-+.eE0-9 ]{0,24}") {
+            prop_assert_eq!(
+                NumericParam::exact_text(&text).is_some(),
+                parse_numeric_literal(&text).is_some()
+            );
+        }
+    }
+}

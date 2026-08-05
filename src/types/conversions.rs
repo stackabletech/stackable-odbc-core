@@ -1223,4 +1223,155 @@ mod tests {
         assert_eq!(nullable_from_raw(2), Some(Nullable::SqlNullableUnknown));
         assert_eq!(nullable_from_raw(99), None);
     }
+
+    /// Every conversion in this module, swept across its whole input domain.
+    ///
+    /// The per-function tests above pin the values a reader would think to
+    /// check: the valid ones, a couple of invalid ones, the deprecated
+    /// spellings. This module checks the other 65,000, which is what catches a
+    /// match arm that names the wrong variant for a value nobody wrote a test
+    /// for. Two properties hold for all of them:
+    ///
+    /// - **Total.** No input panics. These run at the FFI boundary on an
+    ///   integer an application chose, so a panic here is a panic crossing
+    ///   `extern "system"`.
+    /// - **Round-tripping.** Whatever a conversion accepts converts back to the
+    ///   integer it came from. AGENTS.md makes this the condition for a
+    ///   conversion to exist at all: `odbc_sys::Operation` and `Lock` fail it,
+    ///   which is why they are named constants rather than `*_from_raw`
+    ///   functions.
+    ///
+    /// A 16-bit domain is 65,536 values, so these sweep it exhaustively rather
+    /// than sampling it. That is a few milliseconds per function and leaves no
+    /// gap for a property test's luck to fall into. The four `i32` conversions
+    /// are sampled with `proptest` instead, because 4.3 billion is not a few
+    /// milliseconds.
+    mod from_raw_sweep {
+        use super::*;
+        use proptest::prelude::*;
+
+        /// Sweep a 16-bit conversion across every value its ABI argument can
+        /// hold. `$back` is the inverse: the expression that writes the typed
+        /// value back out as the integer the Driver Manager passed in.
+        macro_rules! sweep16 {
+            ($name:ident, $f:ident, $int:ty, |$v:ident| $back:expr) => {
+                #[test]
+                fn $name() {
+                    for raw in <$int>::MIN..=<$int>::MAX {
+                        if let Some($v) = $f(raw) {
+                            assert_eq!(
+                                $back, raw,
+                                concat!(
+                                    stringify!($f),
+                                    " accepted a value that does not convert back to itself"
+                                )
+                            );
+                        }
+                    }
+                }
+            };
+        }
+
+        sweep16!(handle_type, handle_type_from_raw, i16, |v| v as i16);
+        sweep16!(desc, desc_from_raw, u16, |v| v as u16);
+        sweep16!(info_type, info_type_from_raw, u16, |v| v as u16);
+        sweep16!(interval, interval_from_raw, i16, |v| v as i16);
+        sweep16!(param_type, param_type_from_raw, i16, |v| v as i16);
+        sweep16!(free_stmt_option, free_stmt_option_from_raw, u16, |v| v
+            as u16);
+        sweep16!(
+            driver_connect_option,
+            driver_connect_option_from_raw,
+            u16,
+            |v| v as u16
+        );
+        sweep16!(completion_type, completion_type_from_raw, i16, |v| v as i16);
+        sweep16!(bulk_operation, bulk_operation_from_raw, i16, |v| v as i16);
+        sweep16!(fetch_orientation, fetch_orientation_from_raw, i16, |v| v
+            as i16);
+        sweep16!(scope, scope_from_raw, u16, |v| v as u16);
+        sweep16!(nullable, nullable_from_raw, u16, |v| v as u16);
+
+        // `IdentifierType` carries no `#[repr]` and no inverse, because nothing
+        // in the crate writes one back over the ABI: `SQLSpecialColumns` reads
+        // the argument and branches on it. The inverse is spelled out here
+        // rather than added to the type, so the sweep covers it without
+        // widening the public API for a test.
+        sweep16!(
+            identifier_type,
+            identifier_type_from_raw,
+            u16,
+            |v| match v {
+                IdentifierType::BestRowId => SQL_BEST_ROWID,
+                IdentifierType::RowVer => SQL_ROWVER,
+            }
+        );
+
+        proptest! {
+            #[test]
+            fn environment_attribute(raw in any::<i32>()) {
+                if let Some(v) = environment_attribute_from_raw(raw) {
+                    prop_assert_eq!(v as i32, raw);
+                }
+            }
+
+            #[test]
+            fn attr_odbc_version(raw in any::<i32>()) {
+                if let Some(v) = attr_odbc_version_from_raw(raw) {
+                    prop_assert_eq!(v as i32, raw);
+                }
+            }
+
+            #[test]
+            fn declared_odbc_version(raw in any::<i32>()) {
+                if let Some(v) = declared_odbc_version_from_raw(raw) {
+                    prop_assert_eq!(v.raw(), raw);
+                }
+            }
+
+            #[test]
+            fn statement_attribute(raw in any::<i32>()) {
+                if let Some(v) = statement_attribute_from_raw(raw) {
+                    prop_assert_eq!(v as i32, raw);
+                }
+            }
+        }
+
+        /// `c_data_type_from_raw` is the one conversion that must not round-trip.
+        ///
+        /// ODBC 2.x spelled the signed integer C types without the sign:
+        /// `SQL_C_LONG` (4), `SQL_C_SHORT` (5) and `SQL_C_TINYINT` (-6). ODBC 3.x
+        /// renamed them `SQL_C_SLONG` (-16), `SQL_C_SSHORT` (-15) and
+        /// `SQL_C_STINYINT` (-26), and the conversion normalises the old spelling
+        /// to the new variant, so those three inputs deliberately come back as a
+        /// different integer. Every other accepted value round-trips, and this
+        /// sweep pins that the exception is exactly three values wide and does not
+        /// silently grow.
+        #[test]
+        fn c_data_type_round_trips_except_the_three_deprecated_spellings() {
+            let deprecated = [
+                (4_i16, CDataType::SLong),
+                (5, CDataType::SShort),
+                (-6, CDataType::STinyInt),
+            ];
+
+            for raw in i16::MIN..=i16::MAX {
+                let Some(converted) = c_data_type_from_raw(raw) else {
+                    continue;
+                };
+                if let Some((_, expected)) = deprecated.iter().find(|(alias, _)| *alias == raw) {
+                    assert_eq!(
+                        converted, *expected,
+                        "the ODBC 2.x spelling {raw} must normalise to its 3.x variant"
+                    );
+                } else {
+                    assert_eq!(
+                        converted as i16, raw,
+                        "c_data_type_from_raw accepted {raw}, which is not one of the three \
+                         deprecated spellings, yet it does not convert back to itself"
+                    );
+                }
+            }
+        }
+    }
 }

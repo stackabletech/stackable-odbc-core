@@ -123,6 +123,60 @@ pub unsafe fn detach_connection<B: Backend>(
     }
 }
 
+/// [`crate::ffi::setup`]'s attribute-list parser, reachable from the fuzz crate.
+///
+/// That parser is the only raw-pointer walk in core a fuzz target does not
+/// already cover, and the only one where AddressSanitizer can report a genuine
+/// overrun rather than a caught panic: it steps a `*const u16` the Driver
+/// Manager supplied, looking for a terminator a caller may have got wrong.
+/// `fuzz/` is a separate crate, so it can only reach a `pub` item, and the
+/// parser is `pub(crate)`.
+///
+/// It lives here rather than beside the parser because a `pub unsafe fn` in
+/// `src/ffi/` means "an ODBC entry point" to the guard in
+/// [`crate::types`]'s `diagnostics_table`, which then requires a transcribed
+/// spec diagnostics table for it. This is a test hook, not an entry point, and
+/// weakening that guard to say so would cost more than moving one function.
+///
+/// A summary rather than the parser's own result type, for two reasons. It
+/// keeps that type, and the `HashMap` inside it, out of the public API,
+/// feature-gated or not. And it is a value the caller cannot discard: summing
+/// the segment lengths forces every string the walk produced to be built and
+/// read, so the reads ASAN is watching for cannot be optimised out of a target
+/// that ignores the result.
+///
+/// # Returns
+///
+/// The number of pairs read, the total length in bytes of every key and value,
+/// and whether a syntax error was reported.
+///
+/// # Safety
+///
+/// `ptr` must be null, or point to a valid double-null-terminated `u16`
+/// sequence. A caller that passes an unterminated buffer is reading past its
+/// own allocation, which is that caller's defect and not one the parser can be
+/// fuzzed for.
+///
+/// The sequence need **not** be `u16`-aligned. Every code unit is read with
+/// `read_unaligned`, because the Driver Manager pointer the parser ordinarily
+/// receives carries no alignment guarantee, so a fuzz target is free to offset
+/// its buffer by a byte.
+#[must_use]
+pub unsafe fn parse_attributes_summary_w(ptr: *const u16) -> (usize, usize, bool) {
+    // SAFETY: forwarded verbatim; this function's contract is the callee's.
+    let parsed = unsafe { crate::ffi::setup::parse_attributes_w(ptr) };
+    let bytes = parsed
+        .attributes
+        .iter()
+        .map(|(key, value)| key.len() + value.len())
+        .sum();
+    (
+        parsed.attributes.len(),
+        bytes,
+        parsed.syntax_error.is_some(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
