@@ -24,6 +24,19 @@ jobs:
           persist-credentials: false
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      # rustsec/audit-check looks for `cargo-audit` on PATH and falls back to a
+      # bare `cargo install cargo-audit` when it is missing. That fallback
+      # passes no `--locked`, so it resolves cargo-audit's dependencies fresh
+      # and pulls in whatever versions are current, several of which now
+      # require a newer rustc than the 1.95.0 that rust-toolchain.toml pins for
+      # this repository. Installing a prebuilt binary first satisfies the PATH
+      # lookup, so the action never compiles cargo-audit and the pin no longer
+      # constrains a tool that only ever reads Cargo.lock.
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@97a5807a604e12de3a13b52d868ebecaeeea757c # v2.75.4
+        with:
+          tool: cargo-audit
+
       - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
