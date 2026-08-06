@@ -1908,6 +1908,10 @@ mod tests {
     /// list this long and harmless to the subtraction itself, but it means the
     /// list was transcribed with an error. The next error may be a *missing*
     /// entry, which silently leaks an ODBC keyword into `SQL_KEYWORDS`.
+    #[cfg_attr(
+        miri,
+        ignore = "quadratic scan over the keyword list; no unsafe in this module for Miri to check"
+    )]
     #[test]
     fn odbc_reserved_keywords_are_unique() {
         let mut seen = std::collections::HashSet::new();

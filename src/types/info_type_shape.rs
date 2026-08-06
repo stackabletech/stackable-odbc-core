@@ -217,6 +217,10 @@ mod tests {
     /// were built from the same variant set: if `odbc-sys` ever adds a
     /// variant, the match itself already refuses to compile until this
     /// module is updated, this test documents *why* that invariant matters.
+    #[cfg_attr(
+        miri,
+        ignore = "65,536-value sweep; no unsafe in this module for Miri to check"
+    )]
     #[test]
     fn every_raw_info_type_has_a_declared_shape() {
         let mut count = 0;

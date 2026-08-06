@@ -2389,3 +2389,336 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod proptest_param_convert {
+    use super::*;
+    use crate::column_value::NumericTarget;
+    use proptest::prelude::*;
+
+    /// Text shaped like the *numeric-literal* grammar, and like the things that
+    /// are one token away from it.
+    ///
+    /// The tokens are chosen for where the arithmetic in this module is
+    /// delicate rather than for where the grammar is: `i32::MAX` and
+    /// `i32::MIN` as exponents, because [`parse_numeric_literal`] subtracts the
+    /// exponent from the fraction length and a wrapping subtraction there is a
+    /// scale nothing downstream can render; long runs of zeros, because a zero
+    /// mantissa at a huge exponent is the denial of service
+    /// [`DecimalLiteral::to_integer`] guards against by hand; and the sign,
+    /// point and `e` in isolation, because every one of them can appear twice
+    /// or without digits.
+    fn numeric_text() -> impl Strategy<Value = String> {
+        // Weighted towards the soup, because the extreme exponents render up to
+        // `MAX_DECIMAL_EXPANSION_DIGITS` characters each and there is no point
+        // paying for that on the cases that are only checking totality.
+        prop_oneof![4 => token_soup(), 1 => extreme_exponent_literal()]
+    }
+
+    /// Well-formed literals whose exponent sits on the boundaries the expansion
+    /// bound is drawn around.
+    ///
+    /// [`token_soup`] reaches `1e-1048576` only by assembling four particular
+    /// tokens in one particular order, which it essentially never does, so on
+    /// its own it would leave `rendering_never_expands_past_the_bound` asserting
+    /// a bound nothing had approached. These construct the interesting
+    /// exponents outright: either side of [`MAX_DECIMAL_EXPANSION_DIGITS`],
+    /// either side of the `i32` the parser's scale arithmetic has to survive,
+    /// and the small ones in between.
+    fn extreme_exponent_literal() -> impl Strategy<Value = String> {
+        (
+            "-?[0-9]{1,6}",
+            prop_oneof![
+                Just(i64::from(i32::MIN)),
+                Just(i64::from(i32::MIN) + 1),
+                Just(-1_048_577),
+                Just(-1_048_576),
+                Just(-1_048_575),
+                Just(-1_i64),
+                Just(0),
+                Just(1),
+                Just(1_048_575),
+                Just(1_048_576),
+                Just(1_048_577),
+                Just(i64::from(i32::MAX) - 1),
+                Just(i64::from(i32::MAX)),
+            ],
+        )
+            .prop_map(|(mantissa, exponent)| format!("{mantissa}e{exponent}"))
+    }
+
+    fn token_soup() -> impl Strategy<Value = String> {
+        proptest::collection::vec(
+            prop_oneof![
+                Just("-".to_owned()),
+                Just("+".to_owned()),
+                Just(".".to_owned()),
+                Just("e".to_owned()),
+                Just("E".to_owned()),
+                Just(" ".to_owned()),
+                Just("0".to_owned()),
+                Just("000000".to_owned()),
+                Just("2147483647".to_owned()),
+                Just("2147483648".to_owned()),
+                Just("1048576".to_owned()),
+                "[0-9]{1,20}",
+            ],
+            0..8,
+        )
+        .prop_map(|parts| parts.concat())
+    }
+
+    /// Plain integers, including ones a few digits wider than `i128` holds, so
+    /// the oracle below covers the rejection as well as the acceptance.
+    fn integer_text() -> impl Strategy<Value = String> {
+        prop_oneof![
+            "-?[0-9]{1,45}",
+            any::<i128>().prop_map(|v| v.to_string()),
+            any::<i64>().prop_map(|v| v.to_string()),
+        ]
+    }
+
+    /// One exact decimal value written one way, so two renderings of it can be
+    /// compared without a decimal library.
+    ///
+    /// Trailing fractional zeros carry no value and neither does a sign on
+    /// zero, which is the whole of the difference: `0.0` and `0` are the same
+    /// number, and a conversion is free to prefer either. Trailing zeros are
+    /// stripped only past a decimal point, because in `100` they are the value.
+    fn same_value(rendered: &str) -> String {
+        let trimmed = if rendered.contains('.') {
+            rendered.trim_end_matches('0').trim_end_matches('.')
+        } else {
+            rendered
+        };
+        if trimmed.trim_start_matches('-').bytes().all(|b| b == b'0') {
+            return "0".to_owned();
+        }
+        trimmed.to_owned()
+    }
+
+    /// SQL type codes, biased onto the ranges this module branches on: the
+    /// concise types around zero, the datetime types at 91 to 93 and the
+    /// interval types at 101 to 113. The unbiased arm keeps the codes that fall
+    /// through to the default arm in play.
+    fn sql_type() -> impl Strategy<Value = SqlDataType> {
+        prop_oneof![
+            (-12_i16..15).prop_map(SqlDataType),
+            (88_i16..116).prop_map(SqlDataType),
+            any::<i16>().prop_map(SqlDataType),
+        ]
+    }
+
+    proptest! {
+        /// Nothing in the [`DecimalLiteral`] family panics, whatever the text
+        /// parsed into it and whatever precision and scale it is asked for.
+        ///
+        /// This is not a formality. These run under `SQLBindParameter` and
+        /// `SQLPutData` on a buffer the application filled, so a panic here is
+        /// a panic unwinding through `extern "system"`, and the arithmetic is
+        /// `i128` and `i32` scale shifting where a subtraction can wrap and a
+        /// slice index can be built from a length that underflowed.
+        #[test]
+        fn every_decimal_literal_method_is_total(
+            text in numeric_text(),
+            truncate_to in 0_usize..80,
+            precision in any::<i16>(),
+            target_scale in any::<i16>(),
+        ) {
+            let Some(literal) = parse_numeric_literal(&text) else {
+                return Ok(());
+            };
+
+            let _ = literal.to_decimal_string();
+            let _ = literal.to_integer();
+            let _ = literal.required_scale();
+            let _ = literal.whole_digits();
+            let _ = literal.fraction_is_zero();
+            let _ = literal.significant();
+            let _ = literal.is_zero();
+            let _ = literal.expansion_is_bounded();
+            let _ = literal.truncated_to_scale(truncate_to);
+            let _ = literal.to_numeric_struct(NumericTarget {
+                precision,
+                scale: target_scale,
+                ..NumericTarget::default()
+            });
+        }
+
+        /// Rendering is bounded by the input plus
+        /// [`MAX_DECIMAL_EXPANSION_DIGITS`], never by the exponent.
+        ///
+        /// The bound is the whole point of that constant: `1e2147483647` must
+        /// not become a two-gigabyte `String` inside an FFI call. Asserting the
+        /// length rather than merely completing the call is what makes the
+        /// property visible, because an unbounded expansion that happens to fit
+        /// in memory still passes a never-panics test.
+        #[test]
+        fn rendering_never_expands_past_the_bound(text in numeric_text()) {
+            let Some(literal) = parse_numeric_literal(&text) else {
+                return Ok(());
+            };
+            let rendered = literal.to_decimal_string();
+            prop_assert!(
+                rendered.len() <= text.len() + MAX_DECIMAL_EXPANSION_DIGITS + 32,
+                "{:?} rendered {} characters",
+                text,
+                rendered.len()
+            );
+        }
+
+        /// A rendered literal parses back to a literal that renders the same.
+        ///
+        /// [`DecimalLiteral::to_decimal_string`] is what a backend interpolates
+        /// into SQL, so this says the exponent expansion is exact: no digit is
+        /// gained, lost or moved across the point on the way out.
+        ///
+        /// Restricted to literals whose expansion is bounded, because the
+        /// unbounded branch deliberately returns the exponent form instead, and
+        /// its exponent is an `i64` that need not fit the `i32` the parser
+        /// accepts. That branch is unreachable from `text_to_sql_type`, which
+        /// refuses such a value first.
+        #[test]
+        fn rendering_round_trips_through_the_parser(text in numeric_text()) {
+            let Some(literal) = parse_numeric_literal(&text) else {
+                return Ok(());
+            };
+            prop_assume!(literal.expansion_is_bounded());
+
+            let rendered = literal.to_decimal_string();
+            let reparsed = parse_numeric_literal(&rendered)
+                .expect("a rendering of a literal must itself be a numeric literal");
+            prop_assert_eq!(reparsed.to_decimal_string(), rendered);
+        }
+
+        /// `to_integer` agrees with the standard library on text that is
+        /// already an integer, including on the widths it must refuse.
+        ///
+        /// An independent oracle rather than a restatement: `i128::from_str`
+        /// shares no code with the digit walk here.
+        #[test]
+        fn to_integer_agrees_with_the_standard_library(text in integer_text()) {
+            let Some(literal) = parse_numeric_literal(&text) else {
+                return Ok(());
+            };
+            prop_assert_eq!(literal.to_integer(), text.parse::<i128>().ok());
+        }
+
+        /// Truncating in two steps lands where truncating in one step does.
+        ///
+        /// The scales are ordered so the second truncation is the tighter one.
+        /// Textual equality is the right assertion because the two paths reach
+        /// the same digit slice at the same scale, not merely the same value.
+        #[test]
+        fn truncation_composes(
+            text in numeric_text(),
+            wide in 0_usize..40,
+            narrow in 0_usize..40,
+        ) {
+            let Some(literal) = parse_numeric_literal(&text) else {
+                return Ok(());
+            };
+            let (wide, narrow) = (wide.max(narrow), wide.min(narrow));
+
+            let stepwise = literal.truncated_to_scale(wide).truncated_to_scale(narrow);
+            let direct = literal.truncated_to_scale(narrow);
+            prop_assert_eq!(stepwise.to_decimal_string(), direct.to_decimal_string());
+        }
+
+        /// Truncating to a scale the literal already sits at or below changes
+        /// nothing at all.
+        #[test]
+        fn truncating_to_a_wider_scale_is_a_no_op(text in numeric_text()) {
+            let Some(literal) = parse_numeric_literal(&text) else {
+                return Ok(());
+            };
+            let Ok(scale) = usize::try_from(literal.scale) else {
+                return Ok(());
+            };
+            prop_assert_eq!(
+                literal.truncated_to_scale(scale).to_decimal_string(),
+                literal.to_decimal_string()
+            );
+        }
+
+        /// A `SQL_NUMERIC_STRUCT` built from a literal reconstructs it exactly.
+        ///
+        /// The struct is the same value in another base: sign, an unsigned
+        /// little-endian `u128` magnitude and a scale. Reading it back and
+        /// rendering it must return the literal's own rendering, which is what
+        /// pins the base conversion, the scale shift and the digit counting all
+        /// at once.
+        ///
+        /// The target is left unspecified, so the conversion derives the scale
+        /// from the value rather than being handed one. That is the case with
+        /// nothing to truncate, so it must also report no truncation.
+        ///
+        /// Compared as values rather than as strings. A conversion that derives
+        /// its own scale is entitled to pick a different one for the same
+        /// number, and it does: zero reports a required scale of 0, so `0.0`
+        /// comes back as `0`.
+        ///
+        /// Restricted to literals that render in plain decimal, which is what
+        /// [`same_value`] can normalise. The excluded case is real rather than
+        /// hypothetical: `0e-2147483647` converts perfectly well, because zero
+        /// requires a scale of 0 however large its exponent, while its own
+        /// rendering takes the exponent branch and would be compared against
+        /// the struct's `0`.
+        #[test]
+        fn an_unspecified_numeric_struct_reconstructs_the_literal(text in numeric_text()) {
+            let Some(literal) = parse_numeric_literal(&text) else {
+                return Ok(());
+            };
+            prop_assume!(literal.expansion_is_bounded());
+            let Ok((numeric, fraction_lost)) =
+                literal.to_numeric_struct(NumericTarget::default())
+            else {
+                return Ok(());
+            };
+
+            prop_assert!(
+                !fraction_lost,
+                "a target that declared no scale cannot have truncated {text:?}"
+            );
+
+            let reconstructed = DecimalLiteral {
+                // odbc-sys: "1 if positive, 0 if negative".
+                negative: numeric.sign == 0,
+                digits: u128::from_le_bytes(numeric.val).to_string(),
+                scale: i32::from(numeric.scale),
+            };
+            prop_assert_eq!(
+                same_value(&reconstructed.to_decimal_string()),
+                same_value(&literal.to_decimal_string())
+            );
+        }
+
+        /// `text_to_sql_type` never panics, for any text, any declared type and
+        /// any column size or scale the application bound.
+        ///
+        /// All four arguments come straight from `SQLBindParameter`, so none of
+        /// them is trusted: the type code need not be one this driver knows,
+        /// and the size and scale need not describe the text.
+        #[test]
+        fn text_to_sql_type_is_total(
+            text in numeric_text(),
+            sql_type in sql_type(),
+            col_size in prop_oneof![0_usize..40, Just(usize::MAX), any::<usize>()],
+            decimal_digits in any::<i16>(),
+        ) {
+            let _ = text_to_sql_type(&text, sql_type, col_size, decimal_digits);
+        }
+
+        /// The same, over text that is not numeric at all, which is the
+        /// character-to-character and character-to-datetime half of the table.
+        #[test]
+        fn text_to_sql_type_is_total_for_arbitrary_text(
+            text in ".{0,64}",
+            sql_type in sql_type(),
+            col_size in 0_usize..40,
+            decimal_digits in any::<i16>(),
+        ) {
+            let _ = text_to_sql_type(&text, sql_type, col_size, decimal_digits);
+        }
+    }
+}

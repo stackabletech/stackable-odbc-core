@@ -826,6 +826,10 @@ mod tests {
         format!("{}x{}", "{fn UCASE(".repeat(depth), ")}".repeat(depth))
     }
 
+    #[cfg_attr(
+        miri,
+        ignore = "MAX_ESCAPE_DEPTH-deep input is slow under Miri; no unsafe here to check"
+    )]
     #[test]
     fn nesting_within_the_depth_limit_still_translates() {
         // Real SQL nests escapes a handful deep at most; the limit must not be
@@ -835,6 +839,10 @@ mod tests {
         assert!(out.contains('x'));
     }
 
+    #[cfg_attr(
+        miri,
+        ignore = "MAX_ESCAPE_DEPTH-deep input is slow under Miri; no unsafe here to check"
+    )]
     #[test]
     fn nesting_within_the_depth_limit_is_linear_through_the_fn_argument_path() {
         // Exactly `MAX_ESCAPE_DEPTH`, the deepest input the limit accepts, and
@@ -850,12 +858,20 @@ mod tests {
         assert_eq!(out.matches("upper(").count(), MAX_ESCAPE_DEPTH);
     }
 
+    #[cfg_attr(
+        miri,
+        ignore = "MAX_ESCAPE_DEPTH-deep input is slow under Miri; no unsafe here to check"
+    )]
     #[test]
     fn nesting_beyond_the_depth_limit_is_rejected_not_overflowed() {
         let err = translate_escapes(&nested_oj(MAX_ESCAPE_DEPTH + 1), &dialect()).unwrap_err();
         assert_eq!(err.sqlstate().as_str(), "42000");
     }
 
+    #[cfg_attr(
+        miri,
+        ignore = "MAX_ESCAPE_DEPTH-deep input is slow under Miri; no unsafe here to check"
+    )]
     #[test]
     fn nesting_beyond_the_depth_limit_is_rejected_through_the_fn_argument_path() {
         let err = translate_escapes(&nested_fn(MAX_ESCAPE_DEPTH + 1), &dialect()).unwrap_err();
@@ -1012,20 +1028,202 @@ mod proptests {
     use super::*;
     use proptest::prelude::*;
 
+    /// The dialects the sweep runs against, chosen by index.
+    ///
+    /// Pinning `ansi_default` would leave `remap_scalar_fn`, `rewrite_scalar_fn`
+    /// and the three renderers on their no-op or ANSI settings for every
+    /// generated input, so the `{fn}` rewrite path and the `{d}`/`{t}`/`{ts}`
+    /// renderers would never be reached with anything but the identity. These
+    /// four vary the identifier quoting, both scalar hooks and the renderers.
+    ///
+    /// They are core's own dialects, built through the public builders. The
+    /// composition of this parser with a *real* backend dialect belongs in that
+    /// driver's repository, which is the only place that knows what its rewrite
+    /// hooks are supposed to produce.
+    fn dialect_by_index(index: usize) -> EscapeDialect {
+        /// Rewrites to a longer name, so a rewrite that mismanaged its output
+        /// buffer cannot be masked by the replacement happening to fit.
+        fn remap(name: &str) -> Option<&'static str> {
+            match name.to_ascii_uppercase().as_str() {
+                "UCASE" => Some("upper_case_of"),
+                "LCASE" => Some("lower"),
+                _ => None,
+            }
+        }
+        fn rewrite(name: &str, args: &str) -> Option<String> {
+            match name.to_ascii_uppercase().as_str() {
+                // Re-emits the argument text twice, so an off-by-one in how
+                // `args` is delimited shows up doubled rather than not at all.
+                "CONCAT" => Some(format!("({args}) || ({args})")),
+                "CURDATE" => Some("current_date".to_owned()),
+                _ => None,
+            }
+        }
+        fn brace_date(x: &str) -> String {
+            // Deliberately re-introduces a brace into the output. Nothing
+            // rescans it, and this pins that.
+            format!("date{{{x}}}")
+        }
+        fn plain_time(x: &str) -> String {
+            format!("time {x}")
+        }
+        fn plain_timestamp(x: &str) -> String {
+            format!("ts {x}")
+        }
+
+        match index % 4 {
+            0 => EscapeDialect::ansi_default(),
+            1 => EscapeDialect::ansi_default().with_identifier_quotes(&[('`', '`')]),
+            2 => EscapeDialect::ansi_default()
+                .with_identifier_quotes(&[('[', ']'), ('"', '"')])
+                .with_remap_scalar_fn(remap),
+            _ => EscapeDialect::ansi_default()
+                .with_remap_scalar_fn(remap)
+                .with_rewrite_scalar_fn(rewrite)
+                .with_datetime_renderers(brace_date, plain_time, plain_timestamp),
+        }
+    }
+
+    /// Fragments that look like the things this scanner has to tell apart.
+    ///
+    /// A `.*` strategy is why the existing never-panics test is weaker than it
+    /// looks: it has to spell `{fn CONVERT(x, SQL_INTEGER)}` out of thin air to
+    /// reach the scalar-function path, and it essentially never does. Even a
+    /// balanced `{ts '...'}` is out of reach. Emitting whole tokens instead
+    /// puts every escape keyword, both comment forms and all three quote
+    /// characters into the input by construction, and lets them nest and
+    /// interleave in ways a hand-written test would not think to try.
+    fn escape_token() -> impl Strategy<Value = String> {
+        prop_oneof![
+            Just("{fn ".to_owned()),
+            Just("{fn CONVERT(".to_owned()),
+            Just("{fn UCASE(".to_owned()),
+            Just("{fn CONCAT(".to_owned()),
+            Just("{d ".to_owned()),
+            Just("{t ".to_owned()),
+            Just("{ts ".to_owned()),
+            Just("{oj ".to_owned()),
+            Just("{escape ".to_owned()),
+            Just("{call ".to_owned()),
+            Just("{?= call ".to_owned()),
+            Just("{".to_owned()),
+            Just("}".to_owned()),
+            Just("'".to_owned()),
+            Just("''".to_owned()),
+            Just("\"".to_owned()),
+            Just("`".to_owned()),
+            Just("[".to_owned()),
+            Just("]".to_owned()),
+            Just("--".to_owned()),
+            Just("/*".to_owned()),
+            Just("*/".to_owned()),
+            Just("\n".to_owned()),
+            Just("(".to_owned()),
+            Just(")".to_owned()),
+            Just(", ".to_owned()),
+            Just("SQL_INTEGER".to_owned()),
+            Just("'2020-01-01 12:00:00'".to_owned()),
+            "[a-zA-Z_][a-zA-Z0-9_]{0,5}",
+        ]
+    }
+
+    /// Text with no brace in it, so it cannot open an escape of its own. Still
+    /// carries the quote and comment characters, because the scanner has to
+    /// carry those across untouched.
+    fn brace_free_text() -> impl Strategy<Value = String> {
+        proptest::collection::vec(
+            prop_oneof![
+                Just("'".to_owned()),
+                Just("\"".to_owned()),
+                Just("`".to_owned()),
+                Just("--".to_owned()),
+                Just("/*".to_owned()),
+                Just("*/".to_owned()),
+                Just("\n".to_owned()),
+                Just(" ".to_owned()),
+                "[a-zA-Z0-9_(),.]{0,6}",
+            ],
+            0..8,
+        )
+        .prop_map(|parts| parts.concat())
+    }
+
     proptest! {
-        // The escape scanner must never panic on any input, however malformed
-        // the escapes, because a panic would cross the FFI boundary.
+        /// The escape scanner must never panic on any input, however malformed
+        /// the escapes, because a panic would cross the FFI boundary.
+        ///
+        /// Kept alongside the grammar below rather than replaced by it: the two
+        /// reach different things. This one produces the arbitrary characters,
+        /// multi-byte ones included, that a grammar of hand-picked tokens never
+        /// emits.
         #[test]
         fn translate_escapes_never_panics(s in ".*") {
             let _ = translate_escapes(&s, &EscapeDialect::ansi_default());
         }
 
-        // Plain text with no escape braces, quotes or comments is copied through
-        // unchanged.
+        /// The same never-panics property, but over inputs that actually reach
+        /// the escape machinery, against all four dialects.
+        ///
+        /// An `Err` is a perfectly good outcome here: `{call}` and `{?= call}`
+        /// are refused with 'HYC00', and nesting past `MAX_ESCAPE_DEPTH` is
+        /// refused too, which is reachable because the token count runs past
+        /// that depth.
+        #[test]
+        fn escape_grammar_never_panics(
+            tokens in proptest::collection::vec(escape_token(), 0..80),
+            dialect_index in 0..4usize,
+        ) {
+            let sql = tokens.concat();
+            let _ = translate_escapes(&sql, &dialect_by_index(dialect_index));
+        }
+
+        /// Plain text with no escape braces, quotes or comments is copied
+        /// through unchanged.
         #[test]
         fn plain_text_is_unchanged(s in "[a-zA-Z0-9 ]*") {
             let out = translate_escapes(&s, &EscapeDialect::ansi_default()).ok();
             prop_assert_eq!(out, Some(s));
+        }
+
+        /// An escape whose keyword is not one this driver knows is copied out
+        /// verbatim, and so is everything around it.
+        ///
+        /// This is the oracle `plain_text_is_unchanged` cannot be: an input
+        /// with no `{` in it returns on the early-out at the top of
+        /// [`translate_escapes`] without the scanner running at all, so that
+        /// test pins the fast path only. Putting one unrecognised escape in the
+        /// middle forces the full character walk, over text carrying the quote
+        /// and comment characters it has to step across, and the whole input
+        /// must still come back byte for byte.
+        ///
+        /// The body is the one part held to plain characters. A quote or a
+        /// comment opener inside it swallows the escape's own closing brace,
+        /// which makes the escape genuinely unterminated and an `Err` the
+        /// correct answer rather than a lost byte. The prefix and suffix keep
+        /// the full character set, because an unclosed quote out there puts the
+        /// `{` inside a literal, where it is not an escape at all and the copy
+        /// is verbatim either way.
+        #[test]
+        fn an_unknown_escape_and_its_surroundings_survive_verbatim(
+            prefix in brace_free_text(),
+            keyword in "[a-z]{4,8}",
+            body in "[a-zA-Z0-9_ ,.()]{0,12}",
+            suffix in brace_free_text(),
+            dialect_index in 0..4usize,
+        ) {
+            // Never one of the seven keywords the translator acts on, and
+            // never the `?=` form, so the escape has to take the pass-through
+            // arm. `prop_assume!` rather than a narrower regex: the excluded
+            // set is short enough to reject and long enough to be unreadable
+            // as a character class.
+            prop_assume!(!matches!(
+                keyword.as_str(),
+                "fn" | "d" | "t" | "ts" | "oj" | "escape" | "call"
+            ));
+
+            let sql = format!("{prefix}{{{keyword} {body}}}{suffix}");
+            let out = translate_escapes(&sql, &dialect_by_index(dialect_index));
+            prop_assert_eq!(out.ok(), Some(sql));
         }
     }
 }

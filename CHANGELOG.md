@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `test_support::parse_attributes_summary_w`, behind the default-off
+  `test-support` feature. It reports what the `ConfigDSNW` attribute-list parser
+  read from a raw `*const u16`, so the new `parse_attributes` fuzz target can
+  reach a `pub(crate)` parser from a separate crate. A driver has no reason to
+  call it, and a build without the feature does not export it.
+- A `parse_attributes` fuzz target, covering that parser over aligned,
+  deliberately misaligned and overlong-segment buffers. It joins the per-PR
+  ASAN smoke run.
+- Property tests for the paths that carry no `unsafe` and so are not worth a
+  fuzz target: the escape translator against a grammar of escape tokens and four
+  dialects, `ConnectParams` round-tripping a whole connection string rather than
+  one pair, the two parameter-conversion tables, and every `*_from_raw` swept
+  across its entire input domain.
+
 ## [0.1.0] — 2026-08-04
 
 First release, so this section describes what the crate offers rather than what

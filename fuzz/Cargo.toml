@@ -25,7 +25,16 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "parse_attributes"
+path = "fuzz_targets/parse_attributes.rs"
+test = false
+doc = false
+bench = false
+
 [dependencies]
 arbitrary = { version = "1", features = ["derive"] }
 libfuzzer-sys = "0.4"
-stackable-odbc-core = { path = ".." }
+# `test-support` is what makes `ffi::setup::parse_attributes_summary_w` visible.
+# The attribute parser itself is `pub(crate)`, and this is a separate crate.
+stackable-odbc-core = { path = "..", features = ["test-support"] }

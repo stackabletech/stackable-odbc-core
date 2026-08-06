@@ -39,6 +39,9 @@ exclude = [
     "rustfmt.toml",
     ".pre-commit-config.yaml",
     ".markdownlint.yaml",
+    # Saved `proptest` failure seeds. Test-only data, and the tests that read it
+    # are not compiled from the published tarball.
+    "proptest-regressions/",
 ]
 
 # docs.rs builds for a single target by default, which would leave `ConfigDSNW`
@@ -52,14 +55,18 @@ targets = ["x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu"]
 features = ["test-support"]
 
 [features]
-# Test support for driver crates: the `conformance` module, which drives
-# `SQLGetInfoW` through the real C ABI to check an info type's return shape.
+# Test support for driver crates and for `fuzz/`. Two things:
+#
+# - the `conformance` module, which drives `SQLGetInfoW` through the real C ABI
+#   to check an info type's return shape;
+# - `test_support::parse_attributes_summary_w`, which lets the `parse_attributes`
+#   fuzz target reach a `pub(crate)` raw-pointer parser from a separate crate.
 #
 # Default-off because it is test code. Compiled unconditionally it lands in
 # every driver's production binary, and it reaches an `unreachable!()` through a
 # public `unsafe fn` taking a caller-supplied `u16` — a panic path a shipped
 # driver has no reason to carry. Driver test suites enable it under
-# `[dev-dependencies]`.
+# `[dev-dependencies]`; `fuzz/Cargo.toml` enables it on its path dependency.
 test-support = []
 
 [dependencies]
