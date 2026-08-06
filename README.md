@@ -101,7 +101,7 @@ Write the four associated types, run `cargo check`, and the compiler names what 
 
 ## Conformance
 
-ODBC 3.80 at the `SQL_OIC_CORE` level, which is the base of the standard's three interface-conformance levels and the one an application may assume of any driver.
+ODBC 3.80 is implemented at the `SQL_OIC_CORE` level, which is the base of the standard's three interface-conformance levels and the one an application may assume of any driver.
 All four handle types and all five descriptor functions work, and a descriptor can be shared between queries on a connection.
 
 This is a Unicode driver, so anything taking or returning a string is exported only in its wide form (`SQLConnectW`) and the Driver Manager translates for ANSI applications.
