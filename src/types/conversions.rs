@@ -1246,6 +1246,19 @@ mod tests {
     /// gap for a property test's luck to fall into. The four `i32` conversions
     /// are sampled with `proptest` instead, because 4.3 billion is not a few
     /// milliseconds.
+    ///
+    /// # Every test here is `#[cfg_attr(miri, ignore)]`
+    ///
+    /// A few milliseconds native is four and a half minutes interpreted: this
+    /// module is 850,000 match evaluations, and the Miri job's `--skip proptest`
+    /// filter does not catch it, because these are not named proptests. There is
+    /// nothing here for Miri to find either. Not one of these conversions
+    /// contains `unsafe`, and the whole point of the module is breadth of input,
+    /// which is what the ordinary `cargo test` job already gives it.
+    ///
+    /// Skipping by attribute rather than by widening that filter, so a test
+    /// states its own cost. See the same attribute on
+    /// `types::diagnostics_table`'s two source-scanning guards.
     mod from_raw_sweep {
         use super::*;
         use proptest::prelude::*;
@@ -1255,6 +1268,7 @@ mod tests {
         /// value back out as the integer the Driver Manager passed in.
         macro_rules! sweep16 {
             ($name:ident, $f:ident, $int:ty, |$v:ident| $back:expr) => {
+                #[cfg_attr(miri, ignore = "65,536 interpreted iterations; no unsafe to check")]
                 #[test]
                 fn $name() {
                     for raw in <$int>::MIN..=<$int>::MAX {
@@ -1308,6 +1322,7 @@ mod tests {
         );
 
         proptest! {
+            #[cfg_attr(miri, ignore = "sampled input; no unsafe to check")]
             #[test]
             fn environment_attribute(raw in any::<i32>()) {
                 if let Some(v) = environment_attribute_from_raw(raw) {
@@ -1315,6 +1330,7 @@ mod tests {
                 }
             }
 
+            #[cfg_attr(miri, ignore = "sampled input; no unsafe to check")]
             #[test]
             fn attr_odbc_version(raw in any::<i32>()) {
                 if let Some(v) = attr_odbc_version_from_raw(raw) {
@@ -1322,6 +1338,7 @@ mod tests {
                 }
             }
 
+            #[cfg_attr(miri, ignore = "sampled input; no unsafe to check")]
             #[test]
             fn declared_odbc_version(raw in any::<i32>()) {
                 if let Some(v) = declared_odbc_version_from_raw(raw) {
@@ -1329,6 +1346,7 @@ mod tests {
                 }
             }
 
+            #[cfg_attr(miri, ignore = "sampled input; no unsafe to check")]
             #[test]
             fn statement_attribute(raw in any::<i32>()) {
                 if let Some(v) = statement_attribute_from_raw(raw) {
@@ -1347,6 +1365,7 @@ mod tests {
         /// different integer. Every other accepted value round-trips, and this
         /// sweep pins that the exception is exactly three values wide and does not
         /// silently grow.
+        #[cfg_attr(miri, ignore = "65,536 interpreted iterations; no unsafe to check")]
         #[test]
         fn c_data_type_round_trips_except_the_three_deprecated_spellings() {
             let deprecated = [

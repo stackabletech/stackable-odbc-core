@@ -826,6 +826,10 @@ mod tests {
         format!("{}x{}", "{fn UCASE(".repeat(depth), ")}".repeat(depth))
     }
 
+    #[cfg_attr(
+        miri,
+        ignore = "MAX_ESCAPE_DEPTH-deep input is slow under Miri; no unsafe here to check"
+    )]
     #[test]
     fn nesting_within_the_depth_limit_still_translates() {
         // Real SQL nests escapes a handful deep at most; the limit must not be
@@ -835,6 +839,10 @@ mod tests {
         assert!(out.contains('x'));
     }
 
+    #[cfg_attr(
+        miri,
+        ignore = "MAX_ESCAPE_DEPTH-deep input is slow under Miri; no unsafe here to check"
+    )]
     #[test]
     fn nesting_within_the_depth_limit_is_linear_through_the_fn_argument_path() {
         // Exactly `MAX_ESCAPE_DEPTH`, the deepest input the limit accepts, and
@@ -850,12 +858,20 @@ mod tests {
         assert_eq!(out.matches("upper(").count(), MAX_ESCAPE_DEPTH);
     }
 
+    #[cfg_attr(
+        miri,
+        ignore = "MAX_ESCAPE_DEPTH-deep input is slow under Miri; no unsafe here to check"
+    )]
     #[test]
     fn nesting_beyond_the_depth_limit_is_rejected_not_overflowed() {
         let err = translate_escapes(&nested_oj(MAX_ESCAPE_DEPTH + 1), &dialect()).unwrap_err();
         assert_eq!(err.sqlstate().as_str(), "42000");
     }
 
+    #[cfg_attr(
+        miri,
+        ignore = "MAX_ESCAPE_DEPTH-deep input is slow under Miri; no unsafe here to check"
+    )]
     #[test]
     fn nesting_beyond_the_depth_limit_is_rejected_through_the_fn_argument_path() {
         let err = translate_escapes(&nested_fn(MAX_ESCAPE_DEPTH + 1), &dialect()).unwrap_err();

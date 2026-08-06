@@ -2120,6 +2120,10 @@ FunctionDiagnostics {
 },
 ];
 
+#[cfg_attr(
+    miri,
+    ignore = "1.86 MB string scan; no unsafe in this module for Miri to check"
+)]
 #[test]
 fn the_transcription_is_well_formed() {
     let mut problems: Vec<String> = Vec::new();

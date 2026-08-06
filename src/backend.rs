@@ -3074,6 +3074,10 @@ mod tests {
     /// a test naming the info type rather than surviving review, which is how
     /// `SQL_GROUP_BY`, `SQL_CORRELATION_NAME` and `SQL_SUBQUERIES` come to be
     /// decided in the wrong place.
+    #[cfg_attr(
+        miri,
+        ignore = "two full SQLGetInfo sweeps; no unsafe in this module for Miri to check"
+    )]
     #[test]
     fn default_get_info_answers_are_backend_derived_or_declared_core_facts() {
         use crate::test_utils::MockAltBackend;
