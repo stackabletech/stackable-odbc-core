@@ -47,7 +47,7 @@ A working driver is this crate plus a backend, and [stackable-odbc-sqlite](https
 ## What you get
 
 - **We handle (sic!) the Handles.**
-  If you don't know what a Handle is in ODBC-land you're lucky.
+  If you don't know what a Handle is in ODBC-land, you're lucky.
   A driver gets handed various Handles (e.g. `SQLHANDLE`) which are basically just pointers to memory holding its state.
   Ours is a slot number plus a counter looked up in our own table, so the pointer the application passed is never followed and a double free is a clean error instead of memory corruption.
 
