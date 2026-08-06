@@ -113,7 +113,7 @@ The deprecated ODBC 2.x functions are absent on purpose: the Driver Manager alre
 
 ## Limits
 
-Each of these limits is actually reported back to an application that tries to use one of these features so they can react to it.
+Each of these limits is actually reported back to an application that tries to use one of these features so it can react to it.
 
 | Not supported | What the application sees |
 |---|---|
