@@ -91,7 +91,7 @@ stackable_odbc_core::forward_ffi!(crate::backend::XyzBackend);
 That one line expands to every exported `SQL*` entry point, plus `ConfigDSNW` on Windows.
 
 `Backend` consists mostly of one-line capability declarations such as `supports_catalogs` and `identifier_case`.
-None of them are defaulted, because a default would be a claim about your database that nobody ever checked, and a wrong one is invisible.
+None of them are defaulted, because a default would be a claim about your database that the backend author never made, and a wrong one is invisible.
 `StatementBackend` is the opposite and has no required methods, so you override only what your backend supports.
 
 Don't look the list up.
