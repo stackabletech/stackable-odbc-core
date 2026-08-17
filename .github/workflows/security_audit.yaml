@@ -33,7 +33,7 @@ jobs:
       # lookup, so the action never compiles cargo-audit and the pin no longer
       # constrains a tool that only ever reads Cargo.lock.
       - name: Install cargo-audit
-        uses: taiki-e/install-action@97a5807a604e12de3a13b52d868ebecaeeea757c # v2.75.4
+        uses: taiki-e/install-action@82cd3e7658a6f96c86c0234aeeda1748937cb0a1 # v2.85.13
         with:
           tool: cargo-audit
 
