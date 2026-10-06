@@ -22,6 +22,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dialects, `ConnectParams` round-tripping a whole connection string rather than
   one pair, the two parameter-conversion tables, and every `*_from_raw` swept
   across its entire input domain.
+- `TypeInfoRow::with_preferred` and `TypeInfoRow::preferred`, so a driver can
+  mark which of several `SQLGetTypeInfo` rows sharing a `DATA_TYPE` maps most
+  closely to it.
+- `conformance::type_info_preference_issues`, behind the `test-support`
+  feature, which reports every shared `DATA_TYPE` without exactly one preferred
+  row.
+
+### Changed
+
+- `SQLGetTypeInfo` orders the preferred row first among rows sharing a
+  `DATA_TYPE`, before falling back to `TYPE_NAME`, as the spec's "how closely
+  the data type maps" ordering requires. Previously the alphabetically first
+  row led, so an application taking the first row for a `DATA_TYPE` (Power
+  Query does, for `CAST` targets) could get an unrelated type. A driver that
+  marks nothing is unaffected.
 
 ## [0.1.0] — 2026-08-04
 

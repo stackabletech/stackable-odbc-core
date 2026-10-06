@@ -10,7 +10,7 @@ use crate::panic::panic_safe;
 use crate::synthetic::SyntheticStatement;
 use crate::types::{
     CREATE_PARAMS_LEN, CatalogResultColumnWidths, ColumnDescriptor, InfoValue, LITERAL_AFFIX_LEN,
-    Nullable, SqlDataType, SqlReturn, character, identifier, integer, smallint,
+    Nullable, SqlDataType, SqlReturn, TypeInfoRow, character, identifier, integer, smallint,
 };
 use crate::utf16::write_utf16;
 
@@ -517,6 +517,23 @@ pub(crate) fn type_info_columns(widths: &CatalogResultColumnWidths) -> Vec<Colum
     ]
 }
 
+/// The `SQLGetTypeInfo` result-set order: DATA_TYPE ascending (as the signed
+/// `i16` it is, so the negative extension types come first), then the
+/// backend's preferred row, then TYPE_NAME.
+///
+/// Spec: "ordered by DATA_TYPE and then by how closely the data type maps to
+/// the corresponding ODBC SQL data type". Closeness is the backend's to judge
+/// ([`TypeInfoRow::with_preferred`]). TYPE_NAME makes the order total and
+/// stable whatever the backend declared, which is also the spec's own
+/// generalisation ("DATA_TYPE first, followed by TYPE_NAME, both ascending").
+pub(crate) fn compare_type_info_rows(a: &TypeInfoRow, b: &TypeInfoRow) -> std::cmp::Ordering {
+    a.data_type
+        .0
+        .cmp(&b.data_type.0)
+        .then_with(|| b.preferred.cmp(&a.preferred))
+        .then_with(|| a.type_name.cmp(&b.type_name))
+}
+
 /// Generic implementation of SQLGetTypeInfo.
 ///
 /// Spec: <https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlgettypeinfo-function>
@@ -631,24 +648,29 @@ pub unsafe fn sql_get_type_info<B: Backend>(
                 })
                 .collect();
 
-            // Spec: "the result set is ordered by DATA_TYPE and then by how
-            // closely the data type maps to the corresponding ODBC SQL data
-            // type". Core cannot rank closeness of mapping, so it orders by
-            // TYPE_NAME within a DATA_TYPE, which is stable and total. Sorted
-            // here rather than left to the backend so that every driver's
+            // Ordered here rather than left to the backend, so every driver's
             // result set is ordered, and ordered the same way: an application
             // picking "the first row for this DATA_TYPE" as the preferred type
             // otherwise gets whatever order the backend happened to declare.
-            //
-            // `sort_by` is stable, so a backend that has deliberately put its
-            // preferred type first among several sharing a name keeps that
-            // order.
-            selected.sort_by(|a, b| {
-                a.data_type
-                    .0
-                    .cmp(&b.data_type.0)
-                    .then_with(|| a.type_name.cmp(&b.type_name))
-            });
+            // See `compare_type_info_rows` for the keys.
+            selected.sort_by(|a, b| compare_type_info_rows(a, b));
+
+            // Two preferred rows for one DATA_TYPE is a backend error the
+            // order above survives (TYPE_NAME breaks the tie) but cannot
+            // resolve: which one the application picks is then an accident.
+            // `conformance::type_info_preference_issues` catches it in the
+            // driver's tests; this catches a driver that never ran it.
+            for pair in selected.windows(2) {
+                if pair[0].data_type == pair[1].data_type && pair[0].preferred && pair[1].preferred
+                {
+                    tracing::warn!(
+                        data_type = pair[0].data_type.0,
+                        first = %pair[0].type_name,
+                        second = %pair[1].type_name,
+                        "SQLGetTypeInfo: several rows marked preferred for one DATA_TYPE"
+                    );
+                }
+            }
 
             let rows: Vec<_> = selected.iter().map(|t| t.to_column_values()).collect();
 
@@ -1089,16 +1111,14 @@ mod tests {
         }
     }
 
-    #[test]
-    fn get_type_info_orders_by_data_type_then_type_name() {
+    /// `(DATA_TYPE, TYPE_NAME)` of every row `SQLGetTypeInfo(data_type)`
+    /// returns through `MockTypeInfoBackend`, in result-set order.
+    fn mock_type_info_rows(data_type: SqlDataType) -> Vec<(i16, String)> {
         use crate::test_utils::MockTypeInfoBackend;
 
         unsafe {
             let (env, conn, stmt) = alloc_connected_env_conn_stmt::<MockTypeInfoBackend>();
-            let ret = sql_get_type_info::<MockTypeInfoBackend>(
-                stmt,
-                crate::types::SqlDataType::UNKNOWN_TYPE.0,
-            );
+            let ret = sql_get_type_info::<MockTypeInfoBackend>(stmt, data_type.0);
             assert_eq!(ret, SqlReturn::SUCCESS);
 
             use crate::backend::StatementBackend as _;
@@ -1132,20 +1152,40 @@ mod tests {
                 seen
             });
 
-            let mut expected = seen.clone();
-            expected.sort();
-            assert_eq!(
-                seen, expected,
-                "SQLGetTypeInfo must order by DATA_TYPE then TYPE_NAME, however \
-                 the backend declared its list"
-            );
-            assert!(
-                seen.len() >= 3,
-                "the mock must declare enough rows to order"
-            );
-
             cleanup_connected_env_conn_stmt::<MockTypeInfoBackend>(env, conn, stmt);
+            seen
         }
+    }
+
+    /// The mock declares its rows out of order on every key, so only the sort
+    /// can produce this sequence: `VARCHAR2` before `VARCHAR` because it is the
+    /// preferred row, although it sorts after it alphabetically.
+    #[test]
+    fn get_type_info_orders_by_data_type_then_preference_then_type_name() {
+        assert_eq!(
+            mock_type_info_rows(SqlDataType::UNKNOWN_TYPE),
+            vec![
+                (SqlDataType::EXT_BIG_INT.0, "BIGINT".to_string()),
+                (SqlDataType::INTEGER.0, "INTEGER".to_string()),
+                (SqlDataType::VARCHAR.0, "VARCHAR2".to_string()),
+                (SqlDataType::VARCHAR.0, "VARCHAR".to_string()),
+            ],
+            "SQLGetTypeInfo must order by DATA_TYPE, then the preferred row, then TYPE_NAME"
+        );
+    }
+
+    /// The order holds for a single-type call too, which is the call an
+    /// application makes when it looks up the type to use for one DATA_TYPE.
+    #[test]
+    fn get_type_info_filtered_puts_preferred_row_first() {
+        assert_eq!(
+            mock_type_info_rows(SqlDataType::VARCHAR),
+            vec![
+                (SqlDataType::VARCHAR.0, "VARCHAR2".to_string()),
+                (SqlDataType::VARCHAR.0, "VARCHAR".to_string()),
+            ],
+            "a filtered SQLGetTypeInfo must still put the preferred row first"
+        );
     }
 
     /// `SQLGetTypeInfo` shares one Appendix B transition table with the ten
@@ -1272,6 +1312,7 @@ mod tests {
             sql_datetime_sub: None,
             num_prec_radix: None,
             interval_precision: None,
+            preferred: false,
         };
 
         let widths = CatalogResultColumnWidths::default();
@@ -1870,6 +1911,53 @@ mod tests {
             assert_eq!(sql_keywords_of::<MockBackend>(), "MOCK_ATTACH,MOCK_PRAGMA");
             // And it moves with the backend.
             assert_eq!(sql_keywords_of::<MockAltBackend>(), "ALT_VACUUM");
+        }
+    }
+
+    /// The `SQLGetTypeInfo` order, on rows built directly rather than through a
+    /// mock backend, so each key's precedence is pinned on its own.
+    mod type_info_order {
+        use std::cmp::Ordering;
+
+        use super::super::compare_type_info_rows;
+        use crate::types::{SqlDataType, TypeInfoRow};
+
+        fn row(name: &'static str, dt: SqlDataType, preferred: bool) -> TypeInfoRow {
+            TypeInfoRow::new(name, dt).with_preferred(preferred)
+        }
+
+        #[test]
+        fn data_type_dominates_preference() {
+            let a = row("ZZZ", SqlDataType::EXT_W_VARCHAR, false); // -9
+            let b = row("AAA", SqlDataType::VARCHAR, true); // 12
+            assert_eq!(compare_type_info_rows(&a, &b), Ordering::Less);
+        }
+
+        #[test]
+        fn preferred_row_comes_first_within_a_data_type() {
+            let interval = row("INTERVAL DAY TO SECOND", SqlDataType::EXT_W_VARCHAR, false);
+            let varchar = row("VARCHAR", SqlDataType::EXT_W_VARCHAR, true);
+            assert_eq!(compare_type_info_rows(&varchar, &interval), Ordering::Less);
+            assert_eq!(
+                compare_type_info_rows(&interval, &varchar),
+                Ordering::Greater
+            );
+        }
+
+        #[test]
+        fn unmarked_rows_order_by_type_name() {
+            let a = row("JSON", SqlDataType::EXT_W_VARCHAR, false);
+            let b = row("UUID", SqlDataType::EXT_W_VARCHAR, false);
+            assert_eq!(compare_type_info_rows(&a, &b), Ordering::Less);
+        }
+
+        /// Two rows both marked preferred is a driver error, but the order must
+        /// still be total and deterministic: TYPE_NAME breaks the tie.
+        #[test]
+        fn two_preferred_rows_fall_back_to_type_name() {
+            let a = row("A", SqlDataType::TIME, true);
+            let b = row("B", SqlDataType::TIME, true);
+            assert_eq!(compare_type_info_rows(&a, &b), Ordering::Less);
         }
     }
 }
