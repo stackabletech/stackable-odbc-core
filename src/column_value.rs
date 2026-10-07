@@ -3053,7 +3053,8 @@ const fn interval_of_c_type(c_type: CDataType) -> Option<Interval> {
 /// (<https://github.com/postgresql-interfaces/psqlodbc/blob/main/convert.c>,
 /// checked 2026-10-07):
 ///
-/// - `[-]y-m` is year-month, accepted for a year-month target only;
+/// - `[-]y-m` is year-month, accepted for a year-month target only, with the
+///   month field 0-11 as the day-time fields below are bounded;
 /// - `[-]d hh:mm:ss[.f]` is day-time, accepted for any day-time target;
 /// - the sign, if any, leads the text and applies to every field.
 ///
@@ -3080,8 +3081,12 @@ fn parse_interval_text(s: &str, target: Interval) -> Result<ColumnValue, OdbcErr
         if !(year_month_target && digits(y) && digits(m)) {
             return Err(cast_error(s));
         }
-        let years: i32 = y.parse().map_err(|_| cast_error(s))?;
+        // Digits only, so a failed parse is a count too large to carry.
+        let years: i32 = y.parse().map_err(|_| leading_field_too_large(s))?;
         let months: i32 = m.parse().map_err(|_| cast_error(s))?;
+        if months > 11 {
+            return Err(cast_error(s));
+        }
         let sign = if negative { -1 } else { 1 };
         return Ok(ColumnValue::IntervalYearMonth {
             years: sign * years,
@@ -3104,7 +3109,8 @@ fn parse_interval_text(s: &str, target: Interval) -> Result<ColumnValue, OdbcErr
     if year_month_target || ![d, h, m, sec].iter().all(|f| digits(f)) {
         return Err(cast_error(s));
     }
-    let field = |f: &str| f.parse::<i128>().map_err(|_| cast_error(s));
+    // Digits only, so a failed parse is a count too large to carry.
+    let field = |f: &str| f.parse::<i128>().map_err(|_| leading_field_too_large(s));
     let (days, hours, minutes, seconds) = (field(d)?, field(h)?, field(m)?, field(sec)?);
     if hours > 23 || minutes > 59 || seconds > 59 {
         return Err(cast_error(s));
@@ -3115,15 +3121,29 @@ fn parse_interval_text(s: &str, target: Interval) -> Result<ColumnValue, OdbcErr
     let nanos: i128 = format!("{frac:0<9}")[..9]
         .parse()
         .map_err(|_| cast_error(s))?;
-    let total = days * NANOS_PER_DAY
-        + hours * NANOS_PER_HOUR
-        + minutes * NANOS_PER_MINUTE
-        + seconds * NANOS_PER_SECOND
-        + nanos;
+    // Checked: the day count is unbounded text, and an unchecked product wraps
+    // in a release build into a small count reported as success.
+    let total = days
+        .checked_mul(NANOS_PER_DAY)
+        .and_then(|t| t.checked_add(hours * NANOS_PER_HOUR))
+        .and_then(|t| t.checked_add(minutes * NANOS_PER_MINUTE))
+        .and_then(|t| t.checked_add(seconds * NANOS_PER_SECOND))
+        .and_then(|t| t.checked_add(nanos))
+        .ok_or_else(|| leading_field_too_large(s))?;
     Ok(ColumnValue::IntervalDayTime {
         total_nanoseconds: if negative { -total } else { total },
         precision: Interval::DayToSecond,
     })
+}
+
+/// The `22015` *SQL to C: Character* gives for interval text whose leading
+/// field is too large to carry at all: "Data is valid interval; leading field
+/// significant precision is lost".
+fn leading_field_too_large(s: &str) -> OdbcError {
+    OdbcError::general(
+        format!("the leading field of interval {s:?} is too large"),
+        SqlState::interval_field_overflow(),
+    )
 }
 
 /// The `22015` both interval tables give for a target that cannot hold the
@@ -5622,6 +5642,42 @@ mod tests {
         );
     }
 
+    /// A leading field too large for any interval the conversion can carry is
+    /// still a valid interval value whose "leading field significant precision
+    /// is lost": `22015`, never a wrapped count reported as success (in a
+    /// release build) or an arithmetic panic (in a debug one).
+    #[test]
+    fn a_leading_field_too_large_to_carry_is_22015() {
+        for (text, target) in [
+            (
+                "99999999999999999999999999999 00:00:00",
+                CDataType::IntervalDayToSecond,
+            ),
+            // 2^112 days: wraps to exactly one second in unchecked i128.
+            (
+                "5192296858534827628530496329220096 00:00:01",
+                CDataType::IntervalDayToSecond,
+            ),
+            // Too long to parse as an i128 at all.
+            (
+                "10000000000000000000000000000000000000000 00:00:00",
+                CDataType::IntervalDay,
+            ),
+            (
+                "-99999999999999999999999999999 00:00:00",
+                CDataType::IntervalDayToSecond,
+            ),
+            ("99999999999-0", CDataType::IntervalYearToMonth),
+            ("-99999999999-0", CDataType::IntervalYear),
+        ] {
+            assert_eq!(
+                get_interval(&ColumnValue::String(text.into()), target, 0).err(),
+                Some("22015".to_string()),
+                "{text:?} as {target:?}"
+            );
+        }
+    }
+
     /// "The data value is not a valid interval value" → `22018`. That includes
     /// text of the other family: year-month text for a day-time target and the
     /// reverse, where an interval *source* would get `07006` instead.
@@ -5636,6 +5692,10 @@ mod tests {
             ("1 25", CDataType::IntervalDayToSecond),
             ("1 00:00:00.", CDataType::IntervalDayToSecond),
             ("--1-0", CDataType::IntervalYearToMonth),
+            // A month field is 0-11, as the hour, minute and second fields are
+            // bounded: "1-15" is not fifteen months but no interval at all.
+            ("1-12", CDataType::IntervalYearToMonth),
+            ("0-99", CDataType::IntervalMonth),
         ] {
             assert_eq!(
                 get_interval(&ColumnValue::String(text.into()), target, 0).err(),
