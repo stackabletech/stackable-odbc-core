@@ -623,6 +623,13 @@ pub trait Backend: Sized + Send + Sync + 'static {
     /// type variants so that ODBC applications can match on `SQL_VARCHAR` as well as
     /// `SQL_WVARCHAR`.
     ///
+    /// Declaration order does not matter: core orders the result set by
+    /// DATA_TYPE, then the preferred row, then TYPE_NAME. Where several rows
+    /// share a DATA_TYPE, mark the one that maps most closely to it with
+    /// [`TypeInfoRow::with_preferred`], since applications take the first row
+    /// for a DATA_TYPE as the type to use; check the markers in the driver's
+    /// tests with `conformance::type_info_preference_issues`.
+    ///
     /// Takes a connection because the type list can genuinely differ by data
     /// source (a server-version probe gating a type's availability, say), so
     /// the answer is computed rather than a `'static` borrow, hence

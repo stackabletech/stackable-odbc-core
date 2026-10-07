@@ -378,7 +378,11 @@ pub unsafe fn info_group_inconsistencies<B: Backend>(
 }
 
 /// A `DATA_TYPE` whose `SQLGetTypeInfo` rows a driver has not ranked.
+///
+/// `#[non_exhaustive]` so a further check can add a variant without breaking
+/// a driver test suite that matches on this.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TypeInfoPreferenceIssue {
     /// Several rows share this `DATA_TYPE` and none is marked preferred, so
     /// core falls back to TYPE_NAME order and the first row is an accident of

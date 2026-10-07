@@ -93,8 +93,9 @@ pub(crate) mod cancel;
 pub(crate) mod catalog_ident;
 pub(crate) mod catalog_sort;
 pub mod column_value;
-/// `SQLGetInfoW` return-shape conformance checks, shared with driver test
-/// suites. Behind the default-off `test-support` feature: see `Cargo.toml`.
+/// `SQLGetInfoW` return-shape conformance checks and the `SQLGetTypeInfo`
+/// preference-marker check, shared with driver test suites. Behind the
+/// default-off `test-support` feature: see `Cargo.toml`.
 #[cfg(any(test, feature = "test-support"))]
 pub mod conformance;
 

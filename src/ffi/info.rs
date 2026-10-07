@@ -534,6 +534,28 @@ pub(crate) fn compare_type_info_rows(a: &TypeInfoRow, b: &TypeInfoRow) -> std::c
         .then_with(|| a.type_name.cmp(&b.type_name))
 }
 
+/// Logs a warning for each adjacent pair of `rows` (already ordered by
+/// [`compare_type_info_rows`]) that share a DATA_TYPE and are both marked
+/// preferred.
+///
+/// Two preferred rows for one DATA_TYPE is a backend error the order
+/// survives (TYPE_NAME breaks the tie) but cannot resolve: which one the
+/// application picks is then an accident.
+/// [`crate::conformance::type_info_preference_issues`] catches it in the
+/// driver's tests; this catches a driver that never ran it.
+pub(crate) fn warn_on_duplicate_preferred(rows: &[&TypeInfoRow]) {
+    for pair in rows.windows(2) {
+        if pair[0].data_type == pair[1].data_type && pair[0].preferred && pair[1].preferred {
+            tracing::warn!(
+                data_type = pair[0].data_type.0,
+                first = %pair[0].type_name,
+                second = %pair[1].type_name,
+                "SQLGetTypeInfo: several rows marked preferred for one DATA_TYPE"
+            );
+        }
+    }
+}
+
 /// Generic implementation of SQLGetTypeInfo.
 ///
 /// Spec: <https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlgettypeinfo-function>
@@ -655,22 +677,7 @@ pub unsafe fn sql_get_type_info<B: Backend>(
             // See `compare_type_info_rows` for the keys.
             selected.sort_by(|a, b| compare_type_info_rows(a, b));
 
-            // Two preferred rows for one DATA_TYPE is a backend error the
-            // order above survives (TYPE_NAME breaks the tie) but cannot
-            // resolve: which one the application picks is then an accident.
-            // `conformance::type_info_preference_issues` catches it in the
-            // driver's tests; this catches a driver that never ran it.
-            for pair in selected.windows(2) {
-                if pair[0].data_type == pair[1].data_type && pair[0].preferred && pair[1].preferred
-                {
-                    tracing::warn!(
-                        data_type = pair[0].data_type.0,
-                        first = %pair[0].type_name,
-                        second = %pair[1].type_name,
-                        "SQLGetTypeInfo: several rows marked preferred for one DATA_TYPE"
-                    );
-                }
-            }
+            warn_on_duplicate_preferred(&selected);
 
             let rows: Vec<_> = selected.iter().map(|t| t.to_column_values()).collect();
 
@@ -1958,6 +1965,72 @@ mod tests {
             let a = row("A", SqlDataType::TIME, true);
             let b = row("B", SqlDataType::TIME, true);
             assert_eq!(compare_type_info_rows(&a, &b), Ordering::Less);
+        }
+
+        /// The `warn!` messages `warn_on_duplicate_preferred` emits for
+        /// `rows`, captured by a subscriber scoped to this call.
+        fn duplicate_preferred_warnings(rows: &[&TypeInfoRow]) -> Vec<String> {
+            use crate::sync::{Arc, Mutex};
+            use tracing::field::{Field, Visit};
+            use tracing_subscriber::layer::{Context, Layer};
+            use tracing_subscriber::prelude::*;
+
+            struct WarnCollector(Arc<Mutex<Vec<String>>>);
+            struct MessageVisitor<'a>(&'a mut Option<String>);
+
+            impl Visit for MessageVisitor<'_> {
+                fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+                    if field.name() == "message" {
+                        *self.0 = Some(format!("{value:?}"));
+                    }
+                }
+            }
+
+            impl<S: tracing::Subscriber> Layer<S> for WarnCollector {
+                fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+                    if *event.metadata().level() != tracing::Level::WARN {
+                        return;
+                    }
+                    let mut message = None;
+                    event.record(&mut MessageVisitor(&mut message));
+                    if let Some(m) = message {
+                        self.0.lock().expect("collector mutex").push(m);
+                    }
+                }
+            }
+
+            let warnings: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+            let subscriber = tracing_subscriber::registry()
+                .with(tracing_subscriber::filter::LevelFilter::TRACE)
+                .with(WarnCollector(Arc::clone(&warnings)));
+            tracing::subscriber::with_default(subscriber, || {
+                super::super::warn_on_duplicate_preferred(rows);
+            });
+            warnings.lock().expect("collector mutex").clone()
+        }
+
+        #[test]
+        fn two_preferred_rows_for_one_data_type_warn() {
+            let a = row("TIME", SqlDataType::TIME, true);
+            let b = row("TIME WITH TIME ZONE", SqlDataType::TIME, true);
+            let warnings = duplicate_preferred_warnings(&[&a, &b]);
+            assert_eq!(warnings.len(), 1, "{warnings:?}");
+            assert!(
+                warnings[0].contains("several rows marked preferred"),
+                "{warnings:?}"
+            );
+        }
+
+        /// One preferred row per DATA_TYPE, and preferred rows in different
+        /// DATA_TYPEs that happen to sit next to each other, are both correct
+        /// and must stay silent.
+        #[test]
+        fn correctly_marked_rows_do_not_warn() {
+            let time = row("TIME", SqlDataType::TIME, true);
+            let time_tz = row("TIME WITH TIME ZONE", SqlDataType::TIME, false);
+            let timestamp = row("TIMESTAMP", SqlDataType::TIMESTAMP, true);
+            assert!(duplicate_preferred_warnings(&[&time, &time_tz, &timestamp]).is_empty());
+            assert!(duplicate_preferred_warnings(&[&time, &timestamp]).is_empty());
         }
     }
 }
