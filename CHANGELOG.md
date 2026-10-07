@@ -38,6 +38,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Query does, for `CAST` targets) could get an unrelated type. A driver that
   marks nothing is unaffected.
 
+### Fixed
+
+- Character data now converts to the `SQL_C_INTERVAL_*` C types, as the *SQL to
+  C: Character* table requires, instead of failing with `07006`. Text of the form
+  `[-]y-m` converts to the year-month C types and `[-]d hh:mm:ss[.f]` to the
+  day-time ones; anything else is `22018`, and lost trailing fields (`01S07`) or
+  an overflowing leading field (`22015`) behave as for an interval column. The
+  accepted shapes follow psqlODBC's `interval2istruct`, since the spec leaves
+  "valid interval value" open for a column value.
+
 ## [0.1.0] — 2026-08-04
 
 First release, so this section describes what the crate offers rather than what
