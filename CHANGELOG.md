@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] — 2026-10-09
+
 ### Added
 
 - `test_support::parse_attributes_summary_w`, behind the default-off
@@ -190,5 +192,6 @@ boundary is itself undefined behaviour.
 - Core ships no `Prompter` implementation, because any one it could offer needs
   a browser or a window system a database-independent crate cannot choose.
 
-[Unreleased]: https://github.com/stackabletech/stackable-odbc-core/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/stackabletech/stackable-odbc-core/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/stackabletech/stackable-odbc-core/releases/tag/v0.1.1
 [0.1.0]: https://github.com/stackabletech/stackable-odbc-core/releases/tag/v0.1.0
