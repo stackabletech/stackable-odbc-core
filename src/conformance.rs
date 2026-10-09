@@ -1,4 +1,5 @@
-//! Shared support for the `SQLGetInfoW` info-type conformance test.
+//! Shared support for the `SQLGetInfoW` info-type conformance test, and for
+//! checking a driver's `SQLGetTypeInfo` preference markers (item 4 below).
 //!
 //! Both `stackable-odbc-core`'s own tests (driving [`crate::backend::Backend`] via
 //! `MockBackend`) and each driver crate's own FFI integration tests (driving
@@ -21,6 +22,11 @@
 //!    runtime because that method is entitled to answer anything. Stating the
 //!    invariants here lets each driver's suite catch a group it overrode only
 //!    half of.
+//! 4. **`SQLGetTypeInfo` preference markers are complete.** See
+//!    [`crate::conformance::type_info_preference_issues`]: every `DATA_TYPE`
+//!    shared by several rows needs exactly one row marked
+//!    [`crate::types::TypeInfoRow::with_preferred`], or the first row an
+//!    application sees for it is whichever sorts first alphabetically.
 //!
 //! This module supplies the pieces every such test needs: the *derived* (not
 //! hand-copied) list of every `InfoType` the FFI boundary can produce, the list
@@ -371,6 +377,69 @@ pub unsafe fn info_group_inconsistencies<B: Backend>(
     violations
 }
 
+/// A `DATA_TYPE` whose `SQLGetTypeInfo` rows a driver has not ranked.
+///
+/// `#[non_exhaustive]` so a further check can add a variant without breaking
+/// a driver test suite that matches on this.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TypeInfoPreferenceIssue {
+    /// Several rows share this `DATA_TYPE` and none is marked preferred, so
+    /// core falls back to TYPE_NAME order and the first row is an accident of
+    /// the alphabet.
+    NoPreferredRow {
+        /// The shared `DATA_TYPE`.
+        data_type: crate::types::SqlDataType,
+        /// Every TYPE_NAME declared for it, sorted.
+        type_names: Vec<String>,
+    },
+    /// More than one row for this `DATA_TYPE` is marked preferred.
+    SeveralPreferredRows {
+        /// The shared `DATA_TYPE`.
+        data_type: crate::types::SqlDataType,
+        /// Every TYPE_NAME declared for it, sorted.
+        type_names: Vec<String>,
+    },
+}
+
+/// Every `DATA_TYPE` in `rows` that is shared by several rows but does not
+/// have exactly one row marked preferred, in DATA_TYPE order.
+///
+/// Core cannot judge which row maps most closely to an ODBC type, so it cannot
+/// enforce this at runtime; a driver's test suite calls this on its own
+/// [`crate::backend::Backend::get_type_info`] rows instead.
+#[must_use]
+pub fn type_info_preference_issues(
+    rows: &[crate::types::TypeInfoRow],
+) -> Vec<TypeInfoPreferenceIssue> {
+    let mut groups: std::collections::BTreeMap<i16, Vec<&crate::types::TypeInfoRow>> =
+        std::collections::BTreeMap::new();
+    for row in rows {
+        groups.entry(row.data_type().0).or_default().push(row);
+    }
+    groups
+        .into_iter()
+        .filter(|(_, group)| group.len() > 1)
+        .filter_map(|(dt, group)| {
+            let data_type = crate::types::SqlDataType(dt);
+            let mut type_names: Vec<String> =
+                group.iter().map(|r| r.type_name().to_string()).collect();
+            type_names.sort();
+            match group.iter().filter(|r| r.preferred()).count() {
+                1 => None,
+                0 => Some(TypeInfoPreferenceIssue::NoPreferredRow {
+                    data_type,
+                    type_names,
+                }),
+                _ => Some(TypeInfoPreferenceIssue::SeveralPreferredRows {
+                    data_type,
+                    type_names,
+                }),
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -588,6 +657,101 @@ mod tests {
             codes.len(),
             25,
             "expected 19 (53-71) + 5 (122-126) + 1 (173) = 25"
+        );
+    }
+}
+
+#[cfg(test)]
+mod type_info_preference_tests {
+    use super::{TypeInfoPreferenceIssue, type_info_preference_issues};
+    use crate::types::{SqlDataType, TypeInfoRow};
+
+    fn row(name: &'static str, dt: SqlDataType) -> TypeInfoRow {
+        TypeInfoRow::new(name, dt)
+    }
+
+    #[test]
+    fn empty_list_has_no_issues() {
+        assert!(type_info_preference_issues(&[]).is_empty());
+    }
+
+    #[test]
+    fn singleton_groups_need_no_marker() {
+        let rows = [
+            row("INTEGER", SqlDataType::INTEGER),
+            row("BIGINT", SqlDataType::EXT_BIG_INT),
+        ];
+        assert!(type_info_preference_issues(&rows).is_empty());
+    }
+
+    #[test]
+    fn a_marked_singleton_is_harmless() {
+        let rows = [row("INTEGER", SqlDataType::INTEGER).with_preferred(true)];
+        assert!(type_info_preference_issues(&rows).is_empty());
+    }
+
+    #[test]
+    fn one_preferred_row_per_shared_data_type_passes() {
+        let rows = [
+            row("INTERVAL DAY TO SECOND", SqlDataType::EXT_W_VARCHAR),
+            row("VARCHAR", SqlDataType::EXT_W_VARCHAR).with_preferred(true),
+            row("JSON", SqlDataType::EXT_W_VARCHAR),
+        ];
+        assert!(type_info_preference_issues(&rows).is_empty());
+    }
+
+    #[test]
+    fn shared_data_type_without_a_preferred_row_is_reported() {
+        let rows = [
+            row("VARCHAR", SqlDataType::EXT_W_VARCHAR),
+            row("JSON", SqlDataType::EXT_W_VARCHAR),
+        ];
+        assert_eq!(
+            type_info_preference_issues(&rows),
+            vec![TypeInfoPreferenceIssue::NoPreferredRow {
+                data_type: SqlDataType::EXT_W_VARCHAR,
+                type_names: vec!["JSON".into(), "VARCHAR".into()],
+            }]
+        );
+    }
+
+    #[test]
+    fn several_preferred_rows_are_reported() {
+        let rows = [
+            row("TIME", SqlDataType::TIME).with_preferred(true),
+            row("TIME WITH TIME ZONE", SqlDataType::TIME).with_preferred(true),
+        ];
+        assert_eq!(
+            type_info_preference_issues(&rows),
+            vec![TypeInfoPreferenceIssue::SeveralPreferredRows {
+                data_type: SqlDataType::TIME,
+                type_names: vec!["TIME".into(), "TIME WITH TIME ZONE".into()],
+            }]
+        );
+    }
+
+    /// One issue per offending group, in DATA_TYPE order, whatever order the
+    /// rows were declared in.
+    #[test]
+    fn issues_are_ordered_by_data_type() {
+        let rows = [
+            row("B", SqlDataType::VARCHAR),
+            row("A", SqlDataType::VARCHAR),
+            row("Y", SqlDataType::EXT_W_VARCHAR),
+            row("X", SqlDataType::EXT_W_VARCHAR),
+        ];
+        assert_eq!(
+            type_info_preference_issues(&rows),
+            vec![
+                TypeInfoPreferenceIssue::NoPreferredRow {
+                    data_type: SqlDataType::EXT_W_VARCHAR,
+                    type_names: vec!["X".into(), "Y".into()],
+                },
+                TypeInfoPreferenceIssue::NoPreferredRow {
+                    data_type: SqlDataType::VARCHAR,
+                    type_names: vec!["A".into(), "B".into()],
+                },
+            ]
         );
     }
 }

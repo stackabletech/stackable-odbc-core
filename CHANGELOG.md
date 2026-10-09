@@ -22,6 +22,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dialects, `ConnectParams` round-tripping a whole connection string rather than
   one pair, the two parameter-conversion tables, and every `*_from_raw` swept
   across its entire input domain.
+- `TypeInfoRow::with_preferred` and `TypeInfoRow::preferred`, so a driver can
+  mark which of several `SQLGetTypeInfo` rows sharing a `DATA_TYPE` maps most
+  closely to it.
+- `conformance::type_info_preference_issues`, behind the `test-support`
+  feature, which reports every shared `DATA_TYPE` without exactly one preferred
+  row.
+
+### Changed
+
+- `SQLGetTypeInfo` orders the preferred row first among rows sharing a
+  `DATA_TYPE`, before falling back to `TYPE_NAME`, as the spec's "how closely
+  the data type maps" ordering requires. Previously the alphabetically first
+  row led, so an application taking the first row for a `DATA_TYPE` (Power
+  Query does, for `CAST` targets) could get an unrelated type. A driver that
+  marks nothing is unaffected.
+
+### Fixed
+
+- Character data now converts to the `SQL_C_INTERVAL_*` C types, as the *SQL to
+  C: Character* table requires, instead of failing with `07006`. Text of the form
+  `[-]y-m` converts to the year-month C types and `[-]d hh:mm:ss[.f]` to the
+  day-time ones, with months 0-11 and hours, minutes and seconds in their usual
+  ranges; anything else is `22018`. Lost trailing fields (`01S07`) or an
+  overflowing leading field (`22015`) behave as for an interval column, and a
+  leading field too large to carry at all is `22015` too; a non-zero fraction
+  digit past the ninth is `01S07`. The
+  accepted shapes follow psqlODBC's `interval2istruct`, since the spec leaves
+  "valid interval value" open for a column value.
+- Exact numeric data (`SQL_TINYINT` to `SQL_BIGINT`, `SQL_DECIMAL`,
+  `SQL_NUMERIC`) now converts to the `SQL_C_INTERVAL_*` C types too, as the *SQL
+  to C: Numeric* table requires, instead of failing with `07006`. The number
+  counts the target's leading field (`5` read as `SQL_C_INTERVAL_DAY` is five
+  days), a dropped fraction is `01S07` and a value too large is `22015`. That
+  table defines only the failure case for multi-field targets, so the same rule
+  applies there: `1.5` read as `SQL_C_INTERVAL_DAY_TO_SECOND` is 1 day 12 hours.
+  Approximate numerics stay `07006`, as the table's footnote [c] requires.
 
 ## [0.1.0] — 2026-08-04
 

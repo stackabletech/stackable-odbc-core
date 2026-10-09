@@ -1942,10 +1942,11 @@ mock_txn_backend!(
 pub struct MockTypeInfoBackend;
 
 impl MockTypeInfoBackend {
-    /// Out of spec order on both keys: DATA_TYPE descends, and the two
-    /// `VARCHAR` rows are reverse-alphabetical by TYPE_NAME.
+    /// Out of spec order on every key: DATA_TYPE descends, and of the two
+    /// `VARCHAR`-family rows the alphabetically later one, `VARCHAR2`, is the
+    /// preferred one, so a correct result set puts it first.
     const TYPES: &'static [TypeInfoRow] = &[
-        type_info_row("VARCHAR2", crate::types::SqlDataType::VARCHAR),
+        type_info_row("VARCHAR2", crate::types::SqlDataType::VARCHAR).with_preferred(true),
         type_info_row("INTEGER", crate::types::SqlDataType::INTEGER),
         type_info_row("VARCHAR", crate::types::SqlDataType::VARCHAR),
         type_info_row("BIGINT", crate::types::SqlDataType::EXT_BIG_INT),
@@ -1978,6 +1979,7 @@ const fn type_info_row(
         sql_datetime_sub: None,
         num_prec_radix: None,
         interval_precision: None,
+        preferred: false,
     }
 }
 

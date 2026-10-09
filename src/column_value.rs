@@ -494,9 +494,10 @@ unsafe fn write_fixed_or_chunked(
         {
             return unsafe { write_numeric(value, target_ptr, len_ind_ptr, numeric) }.map(whole);
         }
-        // The interval C targets, both tables' first row. `SQL_C_INTERVAL_*`
-        // appears in no other conversion table, so a non-interval source asked
-        // for one falls through to the terminal `07006`.
+        // The interval C targets: both interval tables' first row, and the
+        // *SQL to C: Character* table's "All C interval types" row, whose text
+        // is parsed into the interval it spells first (`parse_interval_text`).
+        // Every other source asked for one falls through to the terminal `07006`.
         CDataType::IntervalYear
         | CDataType::IntervalMonth
         | CDataType::IntervalDay
@@ -511,8 +512,35 @@ unsafe fn write_fixed_or_chunked(
         | CDataType::IntervalHourToSecond
         | CDataType::IntervalMinuteToSecond => {
             if let Some(target) = interval_of_c_type(target_type) {
-                return unsafe { write_interval(value, target, target_ptr, len_ind_ptr, numeric) }
-                    .map(whole);
+                if let Some(converted) = interval_from_exact_number(value, target) {
+                    let (interval, dropped) = converted?;
+                    let ret = unsafe {
+                        write_interval(&interval, target, target_ptr, len_ind_ptr, numeric)
+                    }?;
+                    // Written; the row's "Fractional seconds portion truncated"
+                    // rides alongside, as `write_interval` reports its own.
+                    if dropped && ret == SqlReturn::SUCCESS {
+                        return Err(OdbcError::FractionalTruncation);
+                    }
+                    return Ok(whole(ret));
+                }
+                let parsed;
+                let mut dropped = false;
+                let value = match value {
+                    ColumnValue::String(s) => {
+                        (parsed, dropped) = parse_interval_text(s, target)?;
+                        &parsed
+                    }
+                    other => other,
+                };
+                let ret =
+                    unsafe { write_interval(value, target, target_ptr, len_ind_ptr, numeric) }?;
+                // A digit the text parse dropped below nanosecond resolution is
+                // the character row's trailing-field truncation, `01S07`.
+                if dropped && ret == SqlReturn::SUCCESS {
+                    return Err(OdbcError::FractionalTruncation);
+                }
+                return Ok(whole(ret));
             }
         }
         // The *SQL to C: GUID* table's own row, and the only row that table
@@ -3029,6 +3057,227 @@ const fn interval_of_c_type(c_type: CDataType) -> Option<Interval> {
     })
 }
 
+/// Parse character data into the interval value it spells, for the *SQL to C:
+/// Character* row "All C interval types": "Data value is a valid interval
+/// value" converts, "The data value is not a valid interval value" is `22018`
+/// (<https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/sql-to-c-character>).
+///
+/// The spec leaves "valid interval value" open for a column value: the
+/// interval-literal grammar's string is ambiguous without its qualifier (`'5'`
+/// is any single field, `'02:00'` hours or minutes) and puts the sign outside
+/// the quotes
+/// (<https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/interval-literal-syntax>).
+/// So the text describes itself by shape, as psqlODBC's `interval2istruct`
+/// does for the same conversion
+/// (<https://github.com/postgresql-interfaces/psqlodbc/blob/main/convert.c>,
+/// checked 2026-10-07):
+///
+/// - `[-]y-m` is year-month, accepted for a year-month target only, with the
+///   month field 0-11 as the day-time fields below are bounded;
+/// - `[-]d hh:mm:ss[.f]` is day-time, accepted for any day-time target;
+/// - the sign, if any, leads the text and applies to every field.
+///
+/// Unlike psqlODBC, whose caller ignores a parse failure and returns a zeroed
+/// struct with success, anything else is the table's `22018`, text of the other
+/// family included (an interval *source* of the other family is `07006`
+/// instead, in `write_interval`). Losing trailing fields (`01S07`) and a leading
+/// field too wide (`22015`) are then decided by `write_interval`, exactly as for
+/// an interval source. The one truncation the parse itself can see, a non-zero
+/// fraction digit past the ninth (below nanosecond resolution), is returned as
+/// the second element so the caller can report `01S07` for it too. Leading and
+/// trailing spaces are ignored, per the table's "Extra spaces" note.
+fn parse_interval_text(s: &str, target: Interval) -> Result<(ColumnValue, bool), OdbcError> {
+    let t = s.trim();
+    let (negative, body) = match t.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, t),
+    };
+    let digits = |f: &str| !f.is_empty() && f.bytes().all(|b| b.is_ascii_digit());
+    let year_month_target = matches!(
+        target,
+        Interval::Year | Interval::Month | Interval::YearToMonth
+    );
+
+    if let Some((y, m)) = body.split_once('-') {
+        if !(year_month_target && digits(y) && digits(m)) {
+            return Err(cast_error(s));
+        }
+        // Digits only, so a failed parse is a count too large to carry.
+        let years: i32 = y.parse().map_err(|_| leading_field_too_large(s))?;
+        let months: i32 = m.parse().map_err(|_| cast_error(s))?;
+        if months > 11 {
+            return Err(cast_error(s));
+        }
+        let sign = if negative { -1 } else { 1 };
+        return Ok((
+            ColumnValue::IntervalYearMonth {
+                years: sign * years,
+                months: sign * months,
+                precision: Interval::YearToMonth,
+            },
+            false,
+        ));
+    }
+
+    let (d, time) = body.split_once(' ').ok_or_else(|| cast_error(s))?;
+    let mut hms = time.splitn(3, ':');
+    let (h, m, sec) = match (hms.next(), hms.next(), hms.next()) {
+        (Some(h), Some(m), Some(sec)) => (h, m, sec),
+        _ => return Err(cast_error(s)),
+    };
+    let (sec, frac) = match sec.split_once('.') {
+        Some((sec, frac)) if digits(frac) => (sec, frac),
+        Some(_) => return Err(cast_error(s)),
+        None => (sec, ""),
+    };
+    if year_month_target || ![d, h, m, sec].iter().all(|f| digits(f)) {
+        return Err(cast_error(s));
+    }
+    // Digits only, so a failed parse is a count too large to carry.
+    let field = |f: &str| f.parse::<i128>().map_err(|_| leading_field_too_large(s));
+    let (days, hours, minutes, seconds) = (field(d)?, field(h)?, field(m)?, field(sec)?);
+    if hours > 23 || minutes > 59 || seconds > 59 {
+        return Err(cast_error(s));
+    }
+    // Nanoseconds: the fraction's digits padded right to nine, as the
+    // `ColumnValue::IntervalDayTime` count requires. A non-zero digit past the
+    // ninth is below that resolution, so dropping it truncates the seconds
+    // field: the row's "truncation of one or more trailing fields", `01S07`.
+    // Zeros there are not data.
+    let dropped = frac.len() > 9 && frac[9..].bytes().any(|b| b != b'0');
+    let nanos: i128 = format!("{frac:0<9}")[..9]
+        .parse()
+        .map_err(|_| cast_error(s))?;
+    // Checked: the day count is unbounded text, and an unchecked product wraps
+    // in a release build into a small count reported as success.
+    let total = days
+        .checked_mul(NANOS_PER_DAY)
+        .and_then(|t| t.checked_add(hours * NANOS_PER_HOUR))
+        .and_then(|t| t.checked_add(minutes * NANOS_PER_MINUTE))
+        .and_then(|t| t.checked_add(seconds * NANOS_PER_SECOND))
+        .and_then(|t| t.checked_add(nanos))
+        .ok_or_else(|| leading_field_too_large(s))?;
+    Ok((
+        ColumnValue::IntervalDayTime {
+            total_nanoseconds: if negative { -total } else { total },
+            precision: Interval::DayToSecond,
+        },
+        dropped,
+    ))
+}
+
+/// Read an exact number as the interval it counts, for the *SQL to C: Numeric*
+/// interval rows
+/// (<https://learn.microsoft.com/en-us/sql/odbc/reference/appendixes/sql-to-c-numeric>).
+///
+/// The number counts the target's leading field: `5` read as
+/// `SQL_C_INTERVAL_DAY` is five days, and read as `SQL_C_INTERVAL_DAY_TO_SECOND`
+/// it is also five days. The multi-field row defines only its failure case
+/// ("Whole part of number truncated", `22015`), so counting the leading field is
+/// the single-field row's rule applied to it. The result goes to
+/// `write_interval`, which applies the leading-precision `22015` and drops
+/// trailing fields below the target with `01S07`, exactly as for an interval
+/// column.
+///
+/// `None` for anything but an exact numeric: footnote [c] excludes the
+/// approximate types ("not supported for ... SQL_REAL, SQL_FLOAT, or
+/// SQL_DOUBLE"), which keep the overview page's `07006`.
+///
+/// The value is taken to nine decimal places of its unit, enough for a
+/// nanosecond of a second; digits beyond that are reported as dropped
+/// (`01S07`). The second element of the result says whether any were.
+fn interval_from_exact_number(
+    value: &ColumnValue,
+    target: Interval,
+) -> Option<Result<(ColumnValue, bool), OdbcError>> {
+    let text = match value {
+        ColumnValue::I8(n) => n.to_string(),
+        ColumnValue::I16(n) => n.to_string(),
+        ColumnValue::I32(n) => n.to_string(),
+        ColumnValue::I64(n) => n.to_string(),
+        ColumnValue::Decimal(s) => s.clone(),
+        _ => return None,
+    };
+    Some(exact_text_to_interval(&text, target))
+}
+
+/// [`interval_from_exact_number`]'s arithmetic, on the number's decimal text.
+fn exact_text_to_interval(text: &str, target: Interval) -> Result<(ColumnValue, bool), OdbcError> {
+    const SCALE: usize = 9;
+    const ONE: i128 = 1_000_000_000;
+    let literal = parse_numeric_literal(text).ok_or_else(|| cast_error(text))?;
+    let kept = literal.truncated_to_scale(SCALE);
+    let rendered = kept.to_decimal_string();
+    // By value, not by text: trailing zeros past the ninth place are not data,
+    // and dropping them is the n/a row, not `01S07`.
+    let mut dropped = literal.required_scale() > SCALE;
+
+    // `kept` as a whole count of 10^-9 of the unit, sign included. Digits only
+    // after the sign, so a failed parse is a count too large to carry.
+    let (negative, body) = match rendered.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, rendered.as_str()),
+    };
+    let (whole, fraction) = body.split_once('.').unwrap_or((body, ""));
+    let scaled: i128 = format!("{whole}{fraction:0<SCALE$}")
+        .parse()
+        .map_err(|_| leading_field_too_large(text))?;
+    let scaled = if negative { -scaled } else { scaled };
+
+    let (leading, _) = interval_fields(target);
+    let value = match leading {
+        IntervalField::Year | IntervalField::Month => {
+            let per_unit: i128 = if matches!(leading, IntervalField::Year) {
+                12
+            } else {
+                1
+            };
+            let months_scaled = scaled
+                .checked_mul(per_unit)
+                .ok_or_else(|| leading_field_too_large(text))?;
+            dropped |= months_scaled % ONE != 0;
+            let months =
+                i32::try_from(months_scaled / ONE).map_err(|_| leading_field_too_large(text))?;
+            ColumnValue::IntervalYearMonth {
+                years: months / 12,
+                months: months % 12,
+                precision: target,
+            }
+        }
+        IntervalField::Day
+        | IntervalField::Hour
+        | IntervalField::Minute
+        | IntervalField::Second => {
+            let seconds_per_unit: i128 = match leading {
+                IntervalField::Day => 86_400,
+                IntervalField::Hour => 3_600,
+                IntervalField::Minute => 60,
+                _ => 1,
+            };
+            // `scaled` counts 10^-9 of the unit, so times its seconds it counts
+            // nanoseconds exactly.
+            let nanos = scaled
+                .checked_mul(seconds_per_unit)
+                .ok_or_else(|| leading_field_too_large(text))?;
+            ColumnValue::IntervalDayTime {
+                total_nanoseconds: nanos,
+                precision: target,
+            }
+        }
+    };
+    Ok((value, dropped))
+}
+
+/// The `22015` *SQL to C: Character* gives for interval text whose leading
+/// field is too large to carry at all: "Data is valid interval; leading field
+/// significant precision is lost".
+fn leading_field_too_large(s: &str) -> OdbcError {
+    OdbcError::general(
+        format!("the leading field of interval {s:?} is too large"),
+        SqlState::interval_field_overflow(),
+    )
+}
+
 /// The `22015` both interval tables give for a target that cannot hold the
 /// source: "Leading precision of target is not big enough to hold data from
 /// source".
@@ -5175,7 +5424,7 @@ mod tests {
     /// A written `SQL_INTERVAL_STRUCT`, flattened so it can be compared and
     /// printed. The struct itself holds a union, so it is neither `Debug` nor
     /// `PartialEq`, and reading the arm the target did not write is undefined.
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq)]
     struct WrittenInterval {
         interval_type: i32,
         interval_sign: i16,
@@ -5447,6 +5696,348 @@ mod tests {
         );
     }
 
+    /// Character data converts to "All C interval types" when the "Data value
+    /// is a valid interval value" (*SQL to C: Character*). Text must land in the
+    /// struct exactly as the interval value it spells would: each case pairs a
+    /// text with the structured value a driver parsing the same text produces.
+    #[test]
+    fn interval_text_converts_like_the_interval_it_spells() {
+        let ym = |years, months| ColumnValue::IntervalYearMonth {
+            years,
+            months,
+            precision: Interval::YearToMonth,
+        };
+        let ds = |nanos| ColumnValue::IntervalDayTime {
+            total_nanoseconds: nanos,
+            precision: Interval::DayToSecond,
+        };
+        let cases = [
+            ("1-0", ym(1, 0), CDataType::IntervalYearToMonth),
+            ("0-3", ym(0, 3), CDataType::IntervalYearToMonth),
+            ("-1-6", ym(-1, -6), CDataType::IntervalYearToMonth),
+            ("2-6", ym(2, 6), CDataType::IntervalMonth),
+            (
+                "1 00:00:00.000",
+                ds(day_time(1, 0, 0, 0, 0)),
+                CDataType::IntervalDayToSecond,
+            ),
+            (
+                "0 00:00:00.500",
+                ds(day_time(0, 0, 0, 0, 500_000_000)),
+                CDataType::IntervalDayToSecond,
+            ),
+            (
+                "-1 02:03:04.5",
+                ds(-day_time(1, 2, 3, 4, 500_000_000)),
+                CDataType::IntervalDayToSecond,
+            ),
+            (
+                "1 02:00:00",
+                ds(day_time(1, 2, 0, 0, 0)),
+                CDataType::IntervalHour,
+            ),
+            // "Leading and trailing spaces are ignored when SQL character data is
+            // converted to … interval C data."
+            ("  1-0  ", ym(1, 0), CDataType::IntervalYearToMonth),
+        ];
+        for (text, structured, target) in cases {
+            let from_text = get_interval(&ColumnValue::String(text.into()), target, 0);
+            let from_value = get_interval(&structured, target, 0);
+            let (t, v) = (
+                from_text.unwrap_or_else(|s| panic!("{text:?} as {target:?}: {s}")),
+                from_value.expect("the structured value converts"),
+            );
+            assert_eq!(
+                (t.interval_type, t.interval_sign, t.ret, t.indicator),
+                (v.interval_type, v.interval_sign, v.ret, v.indicator),
+                "{text:?} as {target:?}"
+            );
+            assert_eq!(t.day_second, v.day_second, "{text:?} as {target:?}");
+            assert_eq!(t.year_month, v.year_month, "{text:?} as {target:?}");
+        }
+    }
+
+    /// The table's other rows apply to text as to any interval source: trailing
+    /// fields lost is `01S07`, a leading field too wide is `22015`.
+    #[test]
+    fn interval_text_losing_fields_or_precision_takes_the_tables_states() {
+        let text = |s: &str| ColumnValue::String(s.into());
+        assert_eq!(
+            get_interval(&text("1 02:03:04.000"), CDataType::IntervalDayToMinute, 0).err(),
+            Some("01S07".to_string()),
+            "four seconds cannot be carried by DAY TO MINUTE"
+        );
+        assert_eq!(
+            get_interval(&text("100 00:00:00.000"), CDataType::IntervalDayToSecond, 2).err(),
+            Some("22015".to_string()),
+            "100 days do not fit a 2-digit leading day field"
+        );
+    }
+
+    /// *SQL to C: Numeric*, row "SQL_C_INTERVAL_<single field>": an exact number
+    /// is the count of the target's field, written as that interval would be.
+    #[test]
+    fn an_exact_number_converts_to_a_single_field_interval() {
+        let ym = |years, months, precision| ColumnValue::IntervalYearMonth {
+            years,
+            months,
+            precision,
+        };
+        let ds = |nanos, precision| ColumnValue::IntervalDayTime {
+            total_nanoseconds: nanos,
+            precision,
+        };
+        let cases = [
+            (
+                ColumnValue::I64(5),
+                CDataType::IntervalDay,
+                ds(day_time(5, 0, 0, 0, 0), Interval::Day),
+            ),
+            (
+                ColumnValue::I32(-3),
+                CDataType::IntervalHour,
+                ds(-day_time(0, 3, 0, 0, 0), Interval::Hour),
+            ),
+            (
+                ColumnValue::Decimal("90".into()),
+                CDataType::IntervalMinute,
+                ds(day_time(0, 0, 90, 0, 0), Interval::Minute),
+            ),
+            (
+                ColumnValue::Decimal("1.5".into()),
+                CDataType::IntervalSecond,
+                ds(day_time(0, 0, 0, 1, 500_000_000), Interval::Second),
+            ),
+            (
+                ColumnValue::I16(2),
+                CDataType::IntervalYear,
+                ym(2, 0, Interval::Year),
+            ),
+            (
+                ColumnValue::I8(14),
+                CDataType::IntervalMonth,
+                ym(0, 14, Interval::Month),
+            ),
+            (
+                ColumnValue::Decimal("-0.0".into()),
+                CDataType::IntervalDay,
+                ds(0, Interval::Day),
+            ),
+        ];
+        for (number, target, interval) in cases {
+            assert_eq!(
+                get_interval(&number, target, 0),
+                get_interval(&interval, target, 0),
+                "{number:?} as {target:?}"
+            );
+        }
+    }
+
+    /// "Fractional seconds portion truncated" → `01S07`. A fraction of a coarser
+    /// unit is that row too: 1.5 days as DAY is 1 day plus the warning. Core
+    /// carries the warning as `Err(FractionalTruncation)` after the write, which
+    /// `get_interval` reports as `Err("01S07")`.
+    #[test]
+    fn an_exact_number_with_a_dropped_fraction_is_01s07() {
+        for (number, target) in [
+            (ColumnValue::Decimal("1.5".into()), CDataType::IntervalDay),
+            (ColumnValue::Decimal("2.25".into()), CDataType::IntervalYear),
+            // A fraction of a month: only the conversion itself can see it,
+            // since the written interval holds whole months.
+            (ColumnValue::Decimal("1.5".into()), CDataType::IntervalMonth),
+            (
+                ColumnValue::Decimal("0.0000000001".into()),
+                CDataType::IntervalSecond,
+            ),
+        ] {
+            assert_eq!(
+                get_interval(&number, target, 0).err(),
+                Some("01S07".to_string()),
+                "{number:?} as {target:?}"
+            );
+        }
+    }
+
+    /// Zeros beyond the ninth decimal place are not data, so dropping them is
+    /// the n/a row ("Data converted without truncation"), not `01S07`. A
+    /// `DECIMAL` with a large scale arrives with them.
+    #[test]
+    fn trailing_zeros_beyond_the_ninth_place_are_not_truncation() {
+        for (number, plain, target) in [
+            (
+                "1.000000000000000000",
+                ColumnValue::I64(1),
+                CDataType::IntervalSecond,
+            ),
+            ("5.0000000000", ColumnValue::I64(5), CDataType::IntervalDay),
+            ("2.0000000000", ColumnValue::I64(2), CDataType::IntervalYear),
+        ] {
+            assert_eq!(
+                get_interval(&ColumnValue::Decimal(number.into()), target, 0),
+                get_interval(&plain, target, 0),
+                "{number} as {target:?}"
+            );
+        }
+    }
+
+    /// "Whole part of number truncated" → `22015`: too large for the field, or
+    /// for the application's declared leading precision.
+    #[test]
+    fn an_exact_number_too_large_for_the_interval_is_22015() {
+        for (number, target, precision) in [
+            (ColumnValue::I64(i64::MAX), CDataType::IntervalYear, 0),
+            (
+                ColumnValue::Decimal("1e40".into()),
+                CDataType::IntervalDay,
+                0,
+            ),
+            (ColumnValue::I64(100), CDataType::IntervalDay, 2),
+        ] {
+            assert_eq!(
+                get_interval(&number, target, precision).err(),
+                Some("22015".to_string()),
+                "{number:?} as {target:?} at leading precision {precision}"
+            );
+        }
+    }
+
+    /// The multi-field row lists only its failure case, so the number counts the
+    /// target's leading field, as the single-field row does: 1.5 read as
+    /// DAY TO SECOND is 1 day 12:00:00, and too many days is `22015`.
+    #[test]
+    fn an_exact_number_counts_the_leading_field_of_a_multi_field_interval() {
+        let ds = |nanos| ColumnValue::IntervalDayTime {
+            total_nanoseconds: nanos,
+            precision: Interval::DayToSecond,
+        };
+        assert_eq!(
+            get_interval(
+                &ColumnValue::Decimal("1.5".into()),
+                CDataType::IntervalDayToSecond,
+                0
+            ),
+            get_interval(
+                &ds(day_time(1, 12, 0, 0, 0)),
+                CDataType::IntervalDayToSecond,
+                0
+            ),
+        );
+        assert_eq!(
+            get_interval(&ColumnValue::I64(1000), CDataType::IntervalDayToSecond, 2).err(),
+            Some("22015".to_string())
+        );
+    }
+
+    /// Footnote [c]: approximate numerics have no interval conversion, and a
+    /// boolean is not a number in this table at all.
+    #[test]
+    fn an_approximate_number_read_as_an_interval_is_07006() {
+        for value in [
+            ColumnValue::F64(5.0),
+            ColumnValue::F32(5.0),
+            ColumnValue::Bool(true),
+        ] {
+            assert_eq!(
+                get_interval(&value, CDataType::IntervalDay, 0).unwrap_err(),
+                crate::types::sql_state::RESTRICTED_DATA_TYPE_ATTRIBUTE_VIOLATION,
+                "{value:?}"
+            );
+        }
+    }
+
+    /// A leading field too large for any interval the conversion can carry is
+    /// still a valid interval value whose "leading field significant precision
+    /// is lost": `22015`, never a wrapped count reported as success (in a
+    /// release build) or an arithmetic panic (in a debug one).
+    #[test]
+    fn a_leading_field_too_large_to_carry_is_22015() {
+        for (text, target) in [
+            (
+                "99999999999999999999999999999 00:00:00",
+                CDataType::IntervalDayToSecond,
+            ),
+            // 2^112 days: wraps to exactly one second in unchecked i128.
+            (
+                "5192296858534827628530496329220096 00:00:01",
+                CDataType::IntervalDayToSecond,
+            ),
+            // Too long to parse as an i128 at all.
+            (
+                "10000000000000000000000000000000000000000 00:00:00",
+                CDataType::IntervalDay,
+            ),
+            (
+                "-99999999999999999999999999999 00:00:00",
+                CDataType::IntervalDayToSecond,
+            ),
+            ("99999999999-0", CDataType::IntervalYearToMonth),
+            ("-99999999999-0", CDataType::IntervalYear),
+        ] {
+            assert_eq!(
+                get_interval(&ColumnValue::String(text.into()), target, 0).err(),
+                Some("22015".to_string()),
+                "{text:?} as {target:?}"
+            );
+        }
+    }
+
+    /// A non-zero digit past the ninth fractional place is below the
+    /// nanosecond resolution, so dropping it truncates the seconds field:
+    /// "truncation of one or more trailing fields", `01S07`. Zeros there are
+    /// not data and drop silently.
+    #[test]
+    fn interval_text_losing_a_digit_past_the_ninth_place_is_01s07() {
+        let half_second = ColumnValue::IntervalDayTime {
+            total_nanoseconds: day_time(0, 0, 0, 1, 500_000_000),
+            precision: Interval::DayToSecond,
+        };
+        let text = |s: &str| ColumnValue::String(s.into());
+        assert_eq!(
+            get_interval(
+                &text("0 00:00:01.5000000001"),
+                CDataType::IntervalDayToSecond,
+                0
+            )
+            .err(),
+            Some("01S07".to_string())
+        );
+        assert_eq!(
+            get_interval(
+                &text("0 00:00:01.5000000000"),
+                CDataType::IntervalDayToSecond,
+                0
+            ),
+            get_interval(&half_second, CDataType::IntervalDayToSecond, 0),
+        );
+    }
+
+    /// "The data value is not a valid interval value" → `22018`. That includes
+    /// text of the other family: year-month text for a day-time target and the
+    /// reverse, where an interval *source* would get `07006` instead.
+    #[test]
+    fn text_that_is_not_an_interval_of_the_targets_family_is_22018() {
+        for (text, target) in [
+            ("hello", CDataType::IntervalDayToSecond),
+            ("", CDataType::IntervalYearToMonth),
+            ("1-0", CDataType::IntervalDayToSecond),
+            ("1 00:00:00.000", CDataType::IntervalYearToMonth),
+            ("1-", CDataType::IntervalYearToMonth),
+            ("1 25", CDataType::IntervalDayToSecond),
+            ("1 00:00:00.", CDataType::IntervalDayToSecond),
+            ("--1-0", CDataType::IntervalYearToMonth),
+            // A month field is 0-11, as the hour, minute and second fields are
+            // bounded: "1-15" is not fifteen months but no interval at all.
+            ("1-12", CDataType::IntervalYearToMonth),
+            ("0-99", CDataType::IntervalMonth),
+        ] {
+            assert_eq!(
+                get_interval(&ColumnValue::String(text.into()), target, 0).err(),
+                Some("22018".to_string()),
+                "{text:?} as {target:?}"
+            );
+        }
+    }
+
     /// Footnote [b]: an exact numeric target is defined only when "the interval
     /// precision is a single field", and the value is that field's own count.
     #[test]
@@ -5574,16 +6165,18 @@ mod tests {
         }
     }
 
-    /// A non-interval source asked for a C interval target is `07006`.
+    /// A source no table converts to a C interval type is `07006`, the overview
+    /// page's rule.
     ///
-    /// `SQL_C_INTERVAL_*` appears in no conversion table but the two interval
-    /// pages, whose only source types are intervals, so this is the overview
-    /// page's rule rather than anything either table says.
+    /// Character data is *not* such a source: *SQL to C: Character* converts it
+    /// to "All C interval types" (see `interval_text_converts_like_the_interval_it_spells`).
+    /// Neither is an exact numeric (*SQL to C: Numeric*, see
+    /// `an_exact_number_converts_to_a_single_field_interval`); an approximate
+    /// one is, by that table's footnote [c], hence the `F64` case.
     #[test]
     fn a_non_interval_source_read_as_a_c_interval_type_is_07006() {
         for value in [
-            ColumnValue::I64(5),
-            ColumnValue::String("1 02:03:04".to_string()),
+            ColumnValue::F64(5.0),
             ColumnValue::Timestamp {
                 year: 2026,
                 month: 8,

@@ -392,6 +392,10 @@ pub struct TypeInfoRow {
     pub(crate) sql_datetime_sub: Option<i16>,
     pub(crate) num_prec_radix: Option<i32>,
     pub(crate) interval_precision: Option<i16>,
+    /// Not a result-set column: whether this row is the data source's closest
+    /// match for its `DATA_TYPE`, which [`crate::ffi::info::sql_get_type_info`]
+    /// orders first among the rows sharing that `DATA_TYPE`.
+    pub(crate) preferred: bool,
 }
 
 /// Field accessors for [`TypeInfoRow`].
@@ -554,6 +558,14 @@ impl TypeInfoRow {
     pub fn interval_precision(&self) -> Option<i16> {
         self.interval_precision
     }
+
+    /// Whether this row is the closest match for its `DATA_TYPE`.
+    ///
+    /// Not a result-set column; see [`TypeInfoRow::with_preferred`].
+    #[must_use]
+    pub fn preferred(&self) -> bool {
+        self.preferred
+    }
 }
 
 impl TypeInfoRow {
@@ -597,6 +609,7 @@ impl TypeInfoRow {
             sql_datetime_sub: None,
             num_prec_radix: None,
             interval_precision: None,
+            preferred: false,
         }
     }
 
@@ -717,6 +730,24 @@ impl TypeInfoRow {
     #[must_use]
     pub const fn with_interval_precision(mut self, interval_precision: Option<i16>) -> Self {
         self.interval_precision = interval_precision;
+        self
+    }
+
+    /// Marks this row as the data source's closest match for its `DATA_TYPE`.
+    ///
+    /// Spec (`SQLGetTypeInfo`): the result set is "ordered by DATA_TYPE and
+    /// then by how closely the data type maps to the corresponding ODBC SQL
+    /// data type". Only the driver knows which of several rows sharing a
+    /// `DATA_TYPE` maps most closely, so it says so here, and core orders that
+    /// row first. Applications such as Power Query take the first row for a
+    /// `DATA_TYPE` as the type to name in a `CAST`, so an unmarked group falls
+    /// back to TYPE_NAME order and can lead with an unrelated type.
+    ///
+    /// Mark at most one row per `DATA_TYPE`;
+    /// [`crate::conformance::type_info_preference_issues`] checks that.
+    #[must_use]
+    pub const fn with_preferred(mut self, preferred: bool) -> Self {
+        self.preferred = preferred;
         self
     }
 
@@ -1142,6 +1173,27 @@ mod tests {
         assert_eq!(row.nullable, Nullable::SqlNoNulls);
     }
 
+    #[test]
+    fn type_info_row_is_not_preferred_by_default() {
+        assert!(!TypeInfoRow::new("VARCHAR", SqlDataType::VARCHAR).preferred());
+    }
+
+    #[test]
+    fn with_preferred_sets_and_clears_the_flag() {
+        let row = TypeInfoRow::new("VARCHAR", SqlDataType::VARCHAR).with_preferred(true);
+        assert!(row.preferred());
+        assert!(!row.with_preferred(false).preferred());
+    }
+
+    /// `preferred` steers ordering only; it is not one of the 19 result-set
+    /// columns, so it must not change what a row renders.
+    #[test]
+    fn preferred_does_not_change_the_rendered_columns() {
+        let plain = TypeInfoRow::new("VARCHAR", SqlDataType::VARCHAR);
+        let marked = plain.clone().with_preferred(true);
+        assert_eq!(plain.to_column_values(), marked.to_column_values());
+    }
+
     /// Every value a builder sets comes back out of the matching accessor.
     ///
     /// The fields are crate-private, so a driver reaches them only this way; an
@@ -1163,7 +1215,8 @@ mod tests {
             .with_local_type_name(Some("decimal"))
             .with_scale_range(Some(2), Some(9))
             .with_num_prec_radix(Some(10))
-            .with_interval_precision(Some(7));
+            .with_interval_precision(Some(7))
+            .with_preferred(true);
 
         assert_eq!(row.type_name(), "DECIMAL");
         assert_eq!(row.data_type(), SqlDataType::DECIMAL);
@@ -1182,6 +1235,7 @@ mod tests {
         assert_eq!(row.maximum_scale(), Some(9));
         assert_eq!(row.num_prec_radix(), Some(10));
         assert_eq!(row.interval_precision(), Some(7));
+        assert!(row.preferred());
     }
 
     /// The same round trip for [`ColumnDescriptor`]; see the `TypeInfoRow`

@@ -758,6 +758,12 @@ a driver to work on Windows, because omitting any one can cause silent crashes,
   (-8) are returned, pyodbc cannot perform type conversions and `SQLGetData`
   fails for numeric types.
 
+- **`get_type_info`, several rows per `DATA_TYPE`**: mark the closest match
+  with `TypeInfoRow::with_preferred(true)`, and assert
+  `conformance::type_info_preference_issues` is empty in the driver's tests.
+  Core orders the preferred row first. Unmarked, the alphabetically first row
+  leads, and Power Query uses that row's TYPE_NAME as a `CAST` target.
+
 - **`SQL_GETDATA_EXTENSIONS`**: Report exactly what the shared
   `stackable-odbc-core` fetch/bind implementation supports; do not reflexively
   return `0x0F`. `SQL_GD_ANY_COLUMN | SQL_GD_ANY_ORDER | SQL_GD_BOUND` (`0x0B`)
